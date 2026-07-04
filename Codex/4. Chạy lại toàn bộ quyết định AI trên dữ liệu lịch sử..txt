@@ -1,0 +1,167 @@
+Hãy tạo Replay Engine cho hệ thống AI Trading.
+
+Mục tiêu:
+
+Replay toàn bộ quyết định AI.
+
+Không gửi lệnh lên OKX.
+
+Không dùng dữ liệu realtime.
+
+Chỉ replay bằng Snapshot đã lưu.
+
+Tech stack
+
+ASP.NET Core
+
+MongoDB
+
+==================================================
+
+Replay
+
+==================================================
+
+Input:
+
+TradeExecution
+
+MarketSnapshot
+
+PromptVersion
+
+StrategyVersion
+
+ModelVersion
+
+==================================================
+
+Replay phải:
+
+Load Snapshot
+
+↓
+
+Build Prompt
+
+↓
+
+Gọi GPT
+
+↓
+
+So sánh Decision cũ
+
+và
+
+Decision mới
+
+==================================================
+
+Collection
+
+ReplayHistory
+
+==================================================
+
+Lưu:
+
+ReplayId
+
+TradeExecutionId
+
+PromptVersion
+
+StrategyVersion
+
+ModelVersion
+
+OldDecision
+
+NewDecision
+
+OldConfidence
+
+NewConfidence
+
+Latency
+
+ReplayAt
+
+==================================================
+
+Replay Result
+
+==================================================
+
+DecisionChanged
+
+ConfidenceChanged
+
+ReasonChanged
+
+==================================================
+
+API
+
+==================================================
+
+POST
+
+/api/replay/run
+
+Input
+
+TradeExecutionId
+
+Output
+
+ReplayResult
+
+==================================================
+
+POST
+
+/api/replay/batch
+
+Replay toàn bộ
+
+100
+
+500
+
+1000
+
+trade
+
+==================================================
+
+Thống kê
+
+==================================================
+
+Replay WinRate
+
+Replay ProfitFactor
+
+Replay Drawdown
+
+Decision Changed %
+
+==================================================
+
+Code
+
+==================================================
+
+Repository
+
+Service
+
+DTO
+
+Controller
+
+Dependency Injection
+
+Clean Architecture

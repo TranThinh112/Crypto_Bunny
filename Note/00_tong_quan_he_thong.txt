@@ -1,0 +1,67 @@
+TỔNG QUAN HỆ THỐNG
+
+1. Hệ thống này là gì
+- Đây là một bot phân tích và hỗ trợ giao dịch crypto futures trên OKX.
+- Hệ thống được viết bằng Python.
+- API và dashboard chạy bằng FastAPI.
+- Dữ liệu trạng thái, lịch sử quyết định, giao dịch mô phỏng và các module bổ sung được lưu bằng SQLite.
+
+2. Luồng chạy chính
+- `market.py`: lấy dữ liệu thị trường, OHLCV, ticker, khung xác nhận.
+- `candles.py`: nhận diện mô hình nến.
+- `strategy.py`: chấm điểm LONG/SHORT, ghép xu hướng, volume, RSI, EMA, nến, tin tức.
+- `sizing.py`: tính margin và recovery sizing.
+- `risk.py`: kiểm tra điều kiện vào lệnh.
+- `ai_coordinator.py`: điều phối AI, build prompt, gọi mini hoặc model approve cuối.
+- `engine.py`: điều phối toàn bộ một vòng scan.
+- `executor.py`: gửi lệnh hoặc ghi nhận execution.
+- `ui.py`: mở API và dashboard.
+
+3. Tư duy thiết kế hiện tại
+- Code chịu trách nhiệm phân tích chiến thuật ở các khung nhỏ hơn như `1m`, `5m`, `15m`, `1h`.
+- Mini AI ưu tiên đọc bối cảnh `4h`, sau đó kết hợp với kết quả phân tích do code đã chuẩn bị.
+- Các lần scan liên tiếp không đứng riêng lẻ nữa; hệ thống đã bắt đầu lưu và tái sử dụng dữ liệu scan trước đó để hỗ trợ suy luận.
+
+4. Các nhóm chức năng đã có
+- Scan top volume futures trên OKX.
+- Tính EMA, RSI, ATR, volume ratio, support/resistance.
+- Nhận diện mô hình nến phổ biến và gắn ngữ nghĩa cho tín hiệu đảo chiều/tiếp diễn.
+- GPT mini scan nội bộ để chọn setup tốt.
+- GPT approve cuối trước khi đưa lệnh vào flow execution.
+- Pending queue, recovery sizing, market guard, paper trading, Telegram/UI.
+- AI decision analytics, replay, market regime, strategy versioning, prompt versioning, experiments, health monitor.
+
+5. Điểm mạnh của hệ thống
+- Flow tương đối rõ ràng, có thể đọc được từ scan đến execution.
+- Có nhiều tầng phòng thủ hơn là chỉ dựa vào AI:
+  risk gate,
+  recovery,
+  health monitor,
+  pending review,
+  market guard,
+  validator cuối.
+- Đã có khả năng lưu decision và version metadata, thuận lợi cho việc audit và replay.
+- Đã có hướng dùng AI hợp lý hơn:
+  code làm phần tính toán ổn định,
+  AI làm phần tổng hợp/suy luận.
+
+6. Điểm yếu hiện tại
+- Logic ngày càng nhiều, đã có dấu hiệu tập trung vào vài file lớn như `engine.py`, `ui.py`, `codex_features.py`.
+- Scan memory đã có nhưng chưa phải một “state machine” hoàn chỉnh cho từng symbol theo từng timeframe.
+- Replay hiện đã dùng được nhưng vẫn chưa phải bản sao tuyệt đối của môi trường cũ.
+- Prompt metrics hiện vẫn dùng ước lượng token, chưa phải tokenizer chuẩn.
+- Chưa có UI riêng để nhìn trực tiếp lịch sử scan memory theo từng khung thời gian.
+
+7. Đánh giá kỹ thuật của tôi
+- Hệ thống đang đi đúng hướng.
+- Kiến trúc không còn là một bot MVP quá mỏng; nó đã có nền để tiến lên dạng “trading decision platform”.
+- Phần mạnh nhất hiện nay là lớp kiểm soát rủi ro nhiều tầng.
+- Phần cần nâng cấp tiếp theo không phải thêm nhiều AI hơn, mà là:
+  làm rõ state theo timeframe,
+  tách service gọn hơn,
+  làm dashboard cho analytics và scan memory,
+  chuẩn hóa replay.
+
+8. Kết luận ngắn
+- Nếu dùng để nghiên cứu, demo và tối ưu chiến lược: hệ thống đã khá tốt.
+- Nếu dùng làm bot production nghiêm túc: cần thêm observability, data lineage, replay chuẩn hơn và tách module rõ hơn nữa.

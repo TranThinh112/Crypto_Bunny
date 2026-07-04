@@ -1,0 +1,96 @@
+
+
+Bạn là senior backend developer. Hãy code chức năng theo dõi bias LONG/SHORT của GPT trong hệ thống AI trading crypto.
+
+Yêu cầu:
+1. Tạo database schema/table tên AiTradeDecisions.
+2. Lưu mọi quyết định của GPT-5.5, kể cả ENTER_LONG, ENTER_SHORT và NO_TRADE.
+3. Các field cần có:
+   - Id
+   - CreatedAt
+   - Symbol
+   - Timeframe
+   - Decision: ENTER_LONG / ENTER_SHORT / NO_TRADE
+   - Confidence
+   - RuleScore
+   - Side: LONG / SHORT / NONE
+   - EntryPrice
+   - StopLoss
+   - TakeProfit1
+   - TakeProfit2
+   - RiskReward
+   - FundingRate
+   - OpenInterestChange
+   - Rsi
+   - MacdSignal
+   - Trend
+   - VolumeChange
+   - NewsScore
+   - ReasonJson
+   - RawPrompt
+   - RawResponse
+   - OrderId
+   - TradeStatus: PENDING / WIN / LOSS / BREAKEVEN / EXPIRED / REJECTED
+   - Pnl
+   - ClosedAt
+
+4. Tạo API endpoint:
+   POST /api/ai-decisions
+   để lưu decision mới.
+
+5. Tạo API endpoint:
+   GET /api/ai-decisions/stats
+   trả thống kê:
+   - Tổng số decision
+   - Số LONG
+   - Số SHORT
+   - Số NO_TRADE
+   - Tỷ lệ LONG %
+   - Tỷ lệ SHORT %
+   - Winrate LONG
+   - Winrate SHORT
+   - Avg confidence LONG
+   - Avg confidence SHORT
+   - Profit factor LONG
+   - Profit factor SHORT
+   - Bias warning nếu LONG hoặc SHORT chiếm hơn 70%
+
+6. Tạo service AiDecisionAnalyticsService để tính toán thống kê.
+
+7. Code sạch, có DTO rõ ràng, validation cơ bản, async/await đầy đủ.
+
+8. Tech stack:
+   ASP.NET Core Web API
+   MongoDB
+   C#
+
+9. Trả về đầy đủ:
+   - Model class
+   - DTOs
+   - Repository
+   - Service
+   - Controller
+   - MongoDB configuration trong appsettings.json
+   - Program.cs registration
+
+
+Tạo thêm endpoint GET /api/ai-decisions/recent?limit=50 để lấy 50 decision gần nhất, phục vụ dashboard theo dõi bias LONG/SHORT.
+
+Thêm Recovery Mode cho hệ thống AI trading.
+
+Yêu cầu:
+- Nếu có 2 lệnh LOSS liên tiếp, bật Recovery Mode.
+- Recovery Mode KHÔNG bắt buộc vào lệnh.
+- Trong Recovery Mode, chỉ cho phép trade khi:
+  score >= 90
+  gptConfidence >= 92
+  riskReward >= 2.5
+  fundingRate nằm trong ngưỡng an toàn
+  spread <= maxSpread
+  volumeConfirmed = true
+  noHighImpactNewsWithin60m = true
+  entryDistanceFromCurrentPrice <= maxEntryDistance
+- Nếu không đạt đủ điều kiện, trả decision = NO_TRADE.
+- Risk mỗi lệnh trong Recovery Mode giảm còn 0.5%.
+- Nếu loss streak >= 4, pause trading 24 giờ.
+- Lưu trạng thái Recovery Mode vào database.

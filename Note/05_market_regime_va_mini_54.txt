@@ -1,0 +1,43 @@
+MODULE 5 - MARKET REGIME + MINI 5.4
+
+Trạng thái: Đã triển khai.
+
+Market Regime
+- Đã thêm detector độc lập, không dùng GPT.
+- Có các regime:
+  BULL,
+  BEAR,
+  SIDEWAY,
+  HIGH_VOLATILITY,
+  LOW_VOLATILITY,
+  UNKNOWN.
+- Đã lưu lịch sử vào bảng `market_regime_history`.
+- Đã mở API:
+  `GET /api/market-regime/current`
+  `GET /api/market-regime/history`
+
+Tích hợp
+- `engine.run_once()` sẽ detect regime mỗi vòng scan.
+- Regime và confidence được gắn vào candidate và decision analytics.
+- `trade_executions` cũng có chỗ lưu `market_regime` và `regime_confidence`.
+
+Mini 5.4
+- Prompt scan nội bộ cho `gpt-5.4-mini` nay đi qua Prompt Engine mới.
+- Prompt được đọc từ file `Prompts/mini-analysis.txt`.
+- Prompt metadata được gắn vào kết quả AI nội bộ để phục vụ analytics và replay sau này.
+- Đã tăng độ sâu context mô hình nến cho mini:
+  detector nay trả thêm `pattern_details`, `signal_summary`, `learning_note`.
+- Đã thêm các mẫu nến phổ biến hơn cho tín hiệu đảo chiều:
+  `dragonfly_doji`,
+  `gravestone_doji`,
+  `bullish_pin_bar`,
+  `bearish_pin_bar`,
+  cùng các mẫu đã có như
+  `hammer`,
+  `hanging_man`,
+  `inverted_hammer`,
+  `shooting_star`,
+  `morning_star`,
+  `evening_star`.
+- Candidate summary gửi cho mini nay có thêm `candlestick_by_timeframe` để mini đọc riêng từng khung.
+- Mặc định hệ thống nay ưu tiên áp dụng mô hình nến trên khung rộng `15m` và `1h`.

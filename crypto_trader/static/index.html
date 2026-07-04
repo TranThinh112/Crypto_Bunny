@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Crypto Signal Bot</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>Crypto Signal Bot</h1>
+          <p id="statusLine">Đang chờ dữ liệu thị trường</p>
+        </div>
+        <div class="actions">
+          <label class="toggle">
+            <input id="autoRun" type="checkbox" />
+            <span>Tự động</span>
+          </label>
+          <input id="intervalInput" class="interval" type="number" value="60" min="30" step="30" aria-label="Auto interval seconds" />
+          <label class="config-control margin-control">
+            <span>USDT/lệnh</span>
+            <input id="orderMarginInput" class="margin-input" type="number" value="2" min="1" max="20" step="0.1" inputmode="decimal" aria-label="USDT margin cho lệnh mới" />
+            <button id="saveOrderMarginBtn" class="button secondary" type="button">Lưu</button>
+            <small id="orderMarginStatus">Áp dụng cho lệnh mới</small>
+          </label>
+          <label class="config-control leverage-control">
+            <span>Đòn bẩy</span>
+            <input id="leverageInput" class="leverage-input" type="number" value="15" min="5" max="25" step="1" inputmode="numeric" pattern="[0-9]*" aria-label="Đòn bẩy cho lệnh mới" />
+            <button id="saveLeverageBtn" class="button secondary" type="button">Lưu</button>
+            <small id="leverageStatus">Áp dụng cho lệnh mới</small>
+          </label>
+          <button id="refreshBtn" class="button secondary" type="button">Làm mới</button>
+          <button id="analyzeBtn" class="button primary" type="button">Phân tích</button>
+        </div>
+      </header>
+
+      <section class="summary-grid">
+        <article class="metric">
+          <span class="label">Hành động</span>
+          <strong id="actionValue">-</strong>
+          <small id="modeValue">-</small>
+        </article>
+        <article class="metric">
+          <span id="selectedLabel" class="label">Lệnh được chọn</span>
+          <strong id="selectedValue">-</strong>
+          <small id="sideValue">-</small>
+        </article>
+        <article class="metric">
+          <span class="label">Độ tin cậy</span>
+          <strong id="confidenceValue">-</strong>
+          <div class="meter"><span id="confidenceBar"></span></div>
+        </article>
+        <article class="metric">
+          <span class="label">Tỉ lệ thắng ước tính</span>
+          <strong id="winRateValue">-</strong>
+          <small id="winRateDetail">-</small>
+        </article>
+        <article class="metric">
+          <span class="label">Kiểm tra rủi ro</span>
+          <strong id="riskValue">-</strong>
+          <small id="riskDetail">-</small>
+        </article>
+      </section>
+
+      <section class="panel pulse-panel">
+        <div class="panel-header">
+          <h2>Cập nhật giá mỗi 1 phút</h2>
+          <span id="pulseUpdated" class="muted">-</span>
+        </div>
+        <div class="pulse-grid">
+          <div class="pulse-focus">
+            <span class="label">Cặp đang theo dõi</span>
+            <strong id="pulseSymbol">-</strong>
+            <small id="pulseMove">Đang chờ giá đầu tiên</small>
+          </div>
+          <div class="pulse-feed" id="pulseFeed"></div>
+        </div>
+      </section>
+
+      <section class="panel positions-panel">
+        <div class="panel-header">
+          <h2>Vị thế OKX demo đang mở</h2>
+          <span id="positionsStatus" class="muted">-</span>
+        </div>
+        <div class="auto-strip">
+          <span id="demoStatus" class="status-pill warn">OKX demo: chưa kết nối</span>
+          <span id="paperStatus" class="muted">Auto server: -</span>
+          <span id="paperNextScan" class="muted">-</span>
+        </div>
+        <div class="table-wrap positions-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Cặp</th>
+                <th>Hướng</th>
+                <th>Khối lượng</th>
+                <th>Giá vào</th>
+                <th>Mark</th>
+                <th>Đòn bẩy</th>
+                <th>PnL chưa chốt</th>
+                <th>Margin</th>
+              </tr>
+            </thead>
+            <tbody id="positionRows"></tbody>
+          </table>
+        </div>
+        <div class="panel-header sub-header">
+          <h2>Lệnh chờ OKX</h2>
+          <span id="ordersStatus" class="muted">-</span>
+        </div>
+        <div class="table-wrap positions-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Cặp</th>
+                <th>Hướng</th>
+                <th>Loại</th>
+                <th>Giá</th>
+                <th>KL</th>
+                <th>Đã khớp</th>
+                <th>Còn lại</th>
+                <th>Trạng thái</th>
+              </tr>
+            </thead>
+            <tbody id="orderRows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="layout">
+        <article class="panel plan-panel">
+          <div class="panel-header">
+            <h2>Kế hoạch giao dịch</h2>
+            <span id="planTag" class="tag">Chưa có tín hiệu</span>
+          </div>
+          <canvas id="planCanvas" width="760" height="240"></canvas>
+          <div class="price-grid">
+            <div><span>Giá vào</span><strong id="entryValue">-</strong></div>
+            <div><span>Giá hiện tại</span><strong id="currentValue">-</strong></div>
+            <div><span>Stop</span><strong id="stopValue">-</strong></div>
+            <div><span>Mục tiêu</span><strong id="targetValue">-</strong></div>
+            <div><span>R:R</span><strong id="rrValue">-</strong></div>
+            <div><span>Khối lượng</span><strong id="qtyValue">-</strong></div>
+            <div><span>Spread</span><strong id="spreadValue">-</strong></div>
+            <div><span>TP %</span><strong id="tpPctValue">-</strong></div>
+            <div><span>SL %</span><strong id="slPctValue">-</strong></div>
+          </div>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Các cặp được đánh giá</h2>
+          <span id="candidateCount" class="muted">-</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Cặp</th>
+                <th>Hướng</th>
+                <th>Độ tin cậy</th>
+                <th>Thắng ước tính</th>
+                <th>Giá vào</th>
+                <th>SL</th>
+                <th>TP</th>
+                <th>TP/SL %</th>
+                <th>Tin tức</th>
+                <th>Ký quỹ</th>
+                <th>Gỡ lỗ</th>
+                <th>Nguồn</th>
+                <th>Delta win</th>
+                <th>Spread</th>
+              </tr>
+            </thead>
+            <tbody id="candidateRows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Tin tức</h2>
+          <span id="newsCount" class="muted">-</span>
+        </div>
+        <div id="newsList" class="news-list"></div>
+      </section>
+    </main>
+
+    <script src="/static/app.js?v=margin-leverage-5-25-pending-orders"></script>
+  </body>
+</html>

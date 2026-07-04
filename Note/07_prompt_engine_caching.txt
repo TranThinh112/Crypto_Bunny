@@ -1,0 +1,43 @@
+MODULE 7 - PROMPT ENGINE / CACHING / VERSIONING
+
+Trạng thái: Đã triển khai.
+
+Đã làm
+- Tạo thư mục `Prompts/` với các file:
+  `system.txt`
+  `mini-analysis.txt`
+  `final-decision.txt`
+  `recovery-mode.txt`
+  `health-warning.txt`
+  `output-format.txt`
+- Tạo Prompt Engine đọc prompt từ file, cache trong memory, hỗ trợ reload.
+- Tạo bảng:
+  `prompt_versions`
+  `ai_model_versions`
+  `ai_experiments`
+  `prompt_metrics`
+- Prompt hash dùng SHA256 trên phần prompt tĩnh.
+- Market JSON luôn được đẩy xuống cuối prompt build.
+
+API
+- `GET /api/prompt/status`
+- `POST /api/prompt/reload`
+- `POST /api/prompt/build`
+- `GET /api/prompt/history`
+- `GET /api/ai-experiments`
+- `POST /api/ai-experiments`
+
+Tích hợp thật
+- `gpt-5.4-mini` scan nội bộ dùng Prompt Engine.
+- `gpt-5.5` approve trước khi vào OKX dùng Prompt Engine.
+- Sau mỗi lần gọi OpenAI, hệ thống cập nhật:
+  prompt version,
+  prompt hash,
+  model version,
+  prompt tokens,
+  completion tokens,
+  latency,
+  ước lượng cache hit.
+
+Giới hạn hiện tại
+- Token estimate đang là ước lượng theo độ dài chuỗi, chưa phải tokenizer chuẩn của OpenAI.

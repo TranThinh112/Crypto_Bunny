@@ -1,0 +1,251 @@
+Hãy tạo module Market Regime Detector cho hệ thống AI Trading.
+
+Mục tiêu:
+
+Tự động nhận biết trạng thái thị trường.
+
+Module này KHÔNG sử dụng GPT.
+
+Chỉ dùng dữ liệu từ scanner.
+
+Tech stack
+
+ASP.NET Core Web API
+
+MongoDB
+
+C#
+
+=================================================
+
+Market Regime
+
+=================================================
+
+Regime gồm:
+
+BULL
+
+BEAR
+
+SIDEWAY
+
+HIGH_VOLATILITY
+
+LOW_VOLATILITY
+
+UNKNOWN
+
+=================================================
+
+Input
+
+=================================================
+
+Market Snapshot
+
+Bao gồm:
+
+BTC Dominance
+
+Fear & Greed
+
+ATR
+
+Volume
+
+Funding
+
+Open Interest
+
+EMA20
+
+EMA50
+
+EMA200
+
+ADX
+
+RSI
+
+MACD
+
+VWAP
+
+News Score
+
+Volatility
+
+=================================================
+
+Output
+
+=================================================
+
+CurrentRegime
+
+Confidence
+
+Reason
+
+=================================================
+
+Tạo collection:
+
+MarketRegimeHistory
+
+Id
+
+CreatedAt
+
+Regime
+
+Confidence
+
+Indicators
+
+Reason
+
+=================================================
+
+Tạo:
+
+MarketRegimeService
+
+Methods:
+
+DetectAsync()
+
+GetCurrentAsync()
+
+GetHistoryAsync()
+
+=================================================
+
+Rule Engine
+
+=================================================
+
+Ví dụ:
+
+EMA20 > EMA50 > EMA200
+
+ADX > 25
+
+Funding Neutral
+
+Volume Increase
+
+↓
+
+Bull
+
+--------------------------------
+
+EMA20 < EMA50 < EMA200
+
+↓
+
+Bear
+
+--------------------------------
+
+ADX < 20
+
+ATR thấp
+
+↓
+
+Sideway
+
+--------------------------------
+
+ATR rất cao
+
+↓
+
+High Volatility
+
+=================================================
+
+Trading Rule
+
+=================================================
+
+Nếu:
+
+Bull
+
+↓
+
+Ưu tiên LONG
+
+Bear
+
+↓
+
+Ưu tiên SHORT
+
+Sideway
+
+↓
+
+Không breakout
+
+High Volatility
+
+↓
+
+Giảm risk
+
+Low Volatility
+
+↓
+
+Không trade scalp
+
+=================================================
+
+API
+
+=================================================
+
+GET
+
+/api/market-regime/current
+
+GET
+
+/api/market-regime/history
+
+=================================================
+
+TradeExecution
+
+=================================================
+
+Lưu thêm
+
+MarketRegime
+
+RegimeConfidence
+
+=================================================
+
+Code
+
+=================================================
+
+Clean Architecture
+
+Repository
+
+Service
+
+DTO
+
+Dependency Injection
+
+async/await
+
+SOLID

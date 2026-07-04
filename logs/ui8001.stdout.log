@@ -1,0 +1,9 @@
+UI: http://127.0.0.1:8001
+INFO:     127.0.0.1:14289 - "GET /api/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:14288 - "GET /healthz HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60318 - "GET /healthz HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60319 - "GET /api/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61772 - "GET /api/status HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:20708 - "GET /api/automation-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:20709 - "GET /api/market-guard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:20707 - "GET /api/okx-positions HTTP/1.1" 200 OK

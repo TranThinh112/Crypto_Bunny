@@ -1,0 +1,13 @@
+Review the selected trade setup for execution approval.
+Approve only when the setup is aligned with risk, market context, and active safeguards.
+Reject when any blocking condition exists.
+
+Candlestick validation rules:
+- Use 4h candlestick context as the higher-level bias for mini reasoning.
+- Treat 5m, 15m, and 1h as precomputed code analysis layers.
+- Use rolling scan memory to check whether lower-timeframe evidence is improving or weakening across consecutive scans.
+- Treat 1m candlestick information as a local trigger only.
+- Bullish reversal patterns should support LONG only when 4h context is not strongly bearish.
+- Bearish reversal patterns should support SHORT only when 4h context is not strongly bullish.
+- If candlestick context is mixed or indecisive, do not upgrade confidence.
+- If 4h context directly conflicts with the proposed side, reject or sharply reduce confidence.

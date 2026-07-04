@@ -1,0 +1,92 @@
+BÁO CÁO THỰC HIỆN
+
+1. Mục tiêu đợt chỉnh sửa
+- Đọc toàn bộ tài liệu trong thư mục `Codex`.
+- Triển khai lại ý chính bằng Python trên codebase hiện có.
+- Làm cho hệ thống dễ phân tích hơn, có thể theo dõi trạng thái tốt hơn.
+- Viết lại note và tài liệu tổng quan bằng tiếng Việt có dấu, rõ ràng hơn.
+
+2. Những gì đã được bổ sung
+- AI decision analytics:
+  lưu toàn bộ quyết định AI,
+  thống kê bias LONG/SHORT,
+  xem recent decisions.
+- Trading risk state:
+  global loss streak,
+  recovery mode,
+  pause trading,
+  slot-based validation.
+- Bunny Health Monitor:
+  theo dõi win rate, profit factor, drawdown, risk multiplier.
+- Replay Engine:
+  replay lại quyết định trên snapshot đã lưu.
+- Market Regime:
+  phát hiện regime và lưu history.
+- Strategy Versioning:
+  tạo, activate, theo dõi version chiến lược.
+- Prompt Engine:
+  version, hash, metrics, experiments, reload prompt.
+- Scan memory:
+  tái sử dụng dữ liệu scan cũ + mới theo từng timeframe để mini suy luận liên tục hơn.
+
+3. Trách nhiệm giữa code và mini AI
+- Code:
+  phân tích `1m`, `5m`, `15m`, `1h`,
+  tính score,
+  phát hiện pattern,
+  tính risk,
+  kiểm tra điều kiện vào lệnh.
+- Mini:
+  ưu tiên `4h`,
+  dùng `4h` làm bias cao nhất,
+  kết hợp với dữ liệu phân tích sẵn của các khung nhỏ,
+  đọc thêm scan memory của các vòng trước để suy luận độ mạnh/yếu của setup theo thời gian.
+
+4. Đánh giá hệ thống theo ý kiến của tôi
+- Đây là một hệ thống có nền tốt hơn nhiều so với mức “bot scan rồi vào lệnh”.
+- Điểm đúng nhất của hệ thống hiện tại là không đặt niềm tin tuyệt đối vào AI.
+- AI đang được đặt vào đúng chỗ hơn:
+  tổng hợp,
+  ưu tiên,
+  đánh giá bối cảnh,
+  không thay thế toàn bộ logic định lượng.
+
+- Tôi đánh giá hệ thống mạnh ở 4 điểm:
+  1. Có nhiều tầng bảo vệ trước khi vào lệnh.
+  2. Có khả năng audit tốt hơn nhờ lưu decision, execution, version metadata.
+  3. Đã có hướng replay và versioning, rất quan trọng nếu muốn tối ưu thật.
+  4. Đã bắt đầu có “bộ nhớ theo thời gian” thay vì chỉ nhìn snapshot đơn lẻ.
+
+- Tôi đánh giá hệ thống còn yếu ở 4 điểm:
+  1. Một số file đang trở nên quá lớn.
+  2. Replay chưa đủ sâu để coi là backtest AI chính xác hoàn toàn.
+  3. Chưa có màn hình quan sát đầy đủ cho scan memory và analytics nâng cao.
+  4. Một số metric vẫn là heuristic, chưa phải chuẩn production-grade.
+
+5. Tôi sẽ ưu tiên gì nếu phát triển tiếp
+- Tách `codex_features.py` thành nhiều service nhỏ hơn.
+- Làm scan-memory viewer theo symbol và timeframe.
+- Lưu full market JSON cho từng decision quan trọng để replay tốt hơn.
+- Tạo dashboard cho:
+  bias AI,
+  recovery,
+  health,
+  replay result,
+  prompt/version performance.
+- Chuẩn hóa token metrics và chi phí AI thực tế.
+
+6. Kết quả kiểm thử
+- Đã chạy:
+  `python -m compileall crypto_trader tests`
+  `python -m unittest discover -s tests -v`
+- Kết quả cuối cùng tại thời điểm cập nhật:
+  `49 tests, OK`
+
+7. Kết luận ngắn
+- Hệ thống hiện tại đã vượt qua mức MVP đơn giản.
+- Nó phù hợp để tiếp tục phát triển thành một nền tảng phân tích và điều phối quyết định giao dịch.
+- Nếu mục tiêu là production nghiêm túc, bước tiếp theo nên tập trung vào:
+  kiến trúc rõ hơn,
+  quan sát hệ thống tốt hơn,
+  replay chuẩn hơn,
+  dashboard mạnh hơn.

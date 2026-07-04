@@ -1,0 +1,529 @@
+Hãy thiết kế lại toàn bộ Prompt Engine của hệ thống AI Trading để tối ưu Prompt Caching của OpenAI.
+
+Mục tiêu:
+
+- Tận dụng Prompt Caching tối đa.
+- Giảm chi phí API.
+- Giảm latency.
+- Dễ bảo trì.
+- Dễ mở rộng.
+- Không làm thay đổi logic trading hiện tại.
+- Hỗ trợ GPT-5.4-mini và GPT-5.5.
+- Hỗ trợ Prompt Versioning.
+- Hỗ trợ Model Versioning.
+- Hỗ trợ AI Decision Versioning.
+- Hỗ trợ A/B Testing Prompt.
+
+Tech stack
+
+- ASP.NET Core Web API
+- C#
+- MongoDB
+
+======================================================
+THƯ MỤC
+======================================================
+
+/Prompts
+
+system.txt
+
+mini-analysis.txt
+
+final-decision.txt
+
+recovery-mode.txt
+
+health-warning.txt
+
+output-format.txt
+
+======================================================
+Prompt Architecture
+======================================================
+
+Prompt được chia thành:
+
+1.
+
+System Prompt
+
+2.
+
+Instruction Prompt
+
+3.
+
+Recovery Prompt
+
+4.
+
+Health Prompt
+
+5.
+
+Output Prompt
+
+6.
+
+Market JSON
+
+Market JSON luôn nằm cuối.
+
+======================================================
+Prompt Builder
+======================================================
+
+Tạo PromptBuilder.
+
+Không được nối string thủ công.
+
+PromptBuilder build theo thứ tự:
+
+System
+
+↓
+
+Instruction
+
+↓
+
+Recovery
+
+↓
+
+Health
+
+↓
+
+Output
+
+↓
+
+Market JSON
+
+======================================================
+Prompt Template Service
+======================================================
+
+Đọc prompt từ file.
+
+Cache trong Memory.
+
+Có khả năng Reload.
+
+Không hard-code prompt.
+
+======================================================
+Prompt Versioning
+======================================================
+
+Tạo collection:
+
+PromptVersions
+
+Model
+
+Id
+
+Version
+
+Hash
+
+Description
+
+CreatedAt
+
+IsActive
+
+Files
+
+system.txt
+
+mini-analysis.txt
+
+final-decision.txt
+
+recovery-mode.txt
+
+health-warning.txt
+
+output-format.txt
+
+PromptHash
+
+======================================================
+Prompt Hash
+======================================================
+
+Sinh SHA256 từ toàn bộ prompt tĩnh.
+
+Hash bao gồm:
+
+System
+
+Instruction
+
+Recovery
+
+Health
+
+Output
+
+Không bao gồm Market JSON.
+
+======================================================
+Model Versioning
+======================================================
+
+Tạo collection:
+
+AiModelVersions
+
+Model
+
+Id
+
+ModelName
+
+ModelVersion
+
+PromptVersion
+
+PromptHash
+
+CreatedAt
+
+Ví dụ:
+
+GPT-5.4-mini
+
+Prompt v1.2
+
+GPT-5.5
+
+Prompt v3.1
+
+======================================================
+Decision Versioning
+======================================================
+
+TradeExecution phải lưu:
+
+PromptVersion
+
+PromptHash
+
+ModelName
+
+ModelVersion
+
+SystemVersion
+
+DecisionEngineVersion
+
+BunnyVersion
+
+HealthMonitorVersion
+
+SlotRefillVersion
+
+ValidatorVersion
+
+======================================================
+AI Experiment
+======================================================
+
+Tạo collection:
+
+AiExperiments
+
+Model
+
+Id
+
+Name
+
+Description
+
+PromptVersion
+
+TrafficPercent
+
+Enabled
+
+CreatedAt
+
+Ví dụ:
+
+Experiment A
+
+Prompt V2
+
+50%
+
+Experiment B
+
+Prompt V3
+
+50%
+
+Có thể chạy song song.
+
+======================================================
+TradeExecution
+======================================================
+
+Thêm các field:
+
+PromptVersion
+
+PromptHash
+
+ModelName
+
+ModelVersion
+
+ExperimentName
+
+DecisionEngineVersion
+
+ValidatorVersion
+
+RecoveryVersion
+
+HealthVersion
+
+PromptTokens
+
+CompletionTokens
+
+LatencyMs
+
+======================================================
+Prompt Metrics
+======================================================
+
+Collection:
+
+PromptMetrics
+
+Lưu:
+
+PromptVersion
+
+PromptHash
+
+TotalRequests
+
+AveragePromptTokens
+
+AverageCompletionTokens
+
+AverageLatency
+
+EstimatedCachedTokens
+
+EstimatedDynamicTokens
+
+======================================================
+Prompt Cache Estimator
+======================================================
+
+Service:
+
+PromptCacheEstimatorService
+
+Ước lượng:
+
+StaticTokens
+
+DynamicTokens
+
+CacheHitPercent
+
+======================================================
+Market DTO
+======================================================
+
+MarketPromptDto
+
+Bao gồm:
+
+ScanTime
+
+MarketSnapshot
+
+Candidates
+
+TradingSystemState
+
+TradingHealthState
+
+OpenPositions
+
+RecentTrades
+
+======================================================
+JSON
+======================================================
+
+Market JSON:
+
+- camelCase
+
+- Field order cố định
+
+- Không serialize random
+
+- Không đổi tên field
+
+======================================================
+Prompt Cache
+======================================================
+
+Static Prompt luôn đứng đầu.
+
+Market JSON luôn đứng cuối.
+
+Không được chèn dữ liệu market vào giữa prompt.
+
+======================================================
+Prompt Reload
+======================================================
+
+Cho phép Reload prompt từ file.
+
+Không cần restart server.
+
+======================================================
+Prompt Status
+======================================================
+
+GET
+
+/api/prompt/status
+
+Trả:
+
+PromptVersion
+
+PromptHash
+
+EstimatedStaticTokens
+
+EstimatedDynamicTokens
+
+EstimatedCacheHit
+
+======================================================
+Prompt Reload
+======================================================
+
+POST
+
+/api/prompt/reload
+
+======================================================
+Prompt Build
+======================================================
+
+POST
+
+/api/prompt/build
+
+Input:
+
+MarketPromptDto
+
+Output:
+
+PromptBuildResult
+
+======================================================
+Prompt History
+======================================================
+
+GET
+
+/api/prompt/history
+
+Trả:
+
+PromptVersion
+
+CreatedAt
+
+Description
+
+Hash
+
+======================================================
+Experiment
+======================================================
+
+GET
+
+/api/ai-experiments
+
+POST
+
+/api/ai-experiments
+
+======================================================
+Code
+======================================================
+
+Yêu cầu:
+
+- Clean Architecture
+
+- Repository Pattern
+
+- Service Pattern
+
+- DTO
+
+- Dependency Injection
+
+- async/await
+
+- SOLID
+
+- Không hard-code prompt
+
+- Không build prompt bằng string nối trực tiếp
+
+- Dễ mở rộng
+
+======================================================
+MỤC TIÊU
+
+Đảm bảo:
+
+- GPT-5.4-mini và GPT-5.5 dùng chung Prompt Engine.
+
+- Chỉ Market JSON thay đổi giữa các request.
+
+- Tận dụng Prompt Caching tối đa.
+
+- Có thể rollback Prompt Version bất kỳ.
+
+- Có thể chạy A/B Testing Prompt.
+
+- Theo dõi Prompt Version nào cho:
+  + Winrate cao nhất
+  + Profit Factor cao nhất
+  + Drawdown thấp nhất
+  + RR tốt nhất
+  + Latency thấp nhất
+  + Chi phí API thấp nhất
+
+- Sau mỗi TradeExecution phải lưu đầy đủ:
+  + PromptVersion
+  + PromptHash
+  + ModelName
+  + ModelVersion
+  + ExperimentName
+
+để có thể thống kê chính xác hiệu quả của từng Prompt Version trong tương lai.

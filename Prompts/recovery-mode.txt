@@ -1,0 +1,3 @@
+Recovery Mode is active.
+Require stricter quality and avoid marginal setups.
+If the setup is not exceptional, return a rejection.

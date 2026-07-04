@@ -1,0 +1,38 @@
+MODULE 3 - BUNNY HEALTH MONITOR
+
+Trạng thái: Đã triển khai.
+
+Đã làm
+- Thêm bảng `trading_health_state`.
+- Health được tính từ các `trade_executions` đã đóng gần nhất.
+- Có các trạng thái:
+  healthy,
+  warning,
+  critical.
+- Có tính:
+  win rate,
+  gross profit,
+  gross loss,
+  profit factor,
+  total PnL,
+  max drawdown %.
+- Có risk multiplier, score adjustment, confidence adjustment.
+
+Tích hợp
+- `risk.evaluate_candidate()` sẽ đọc health state mới nhất.
+- Nếu `warning`:
+  tăng threshold rule score,
+  tăng threshold confidence,
+  giảm risk %.
+- Nếu `critical`:
+  reject entry,
+  pause theo số giờ cấu hình.
+
+API
+- `GET /api/bunny-health/state`
+- `POST /api/bunny-health/refresh`
+
+Ghi chú
+- Health monitor này tách riêng với `market_guard`.
+- `market_guard` theo dõi trạng thái thị trường.
+- `bunny_health_monitor` theo dõi chất lượng giao dịch của chính bot.

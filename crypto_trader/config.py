@@ -1,0 +1,350 @@
+from __future__ import annotations
+
+from copy import deepcopy
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+DEFAULT_CONFIG: dict[str, Any] = {
+    "mode": "dry_run",
+    "report_path": "reports/latest_decision.json",
+    "ledger_path": "data/trades.jsonl",
+    "state_db_path": "data/bot_state.sqlite",
+    "runtime": {
+        "interval_seconds": 60,
+    },
+    "automation": {
+        "enabled": True,
+        "scan_interval_seconds": 60,
+        "execute_demo": True,
+        "execute_live": False,
+        "initial_delay_seconds": 5,
+    },
+    "news": {
+        "lookback_hours": 24,
+        "max_items_per_feed": 40,
+        "require_symbol_news": True,
+        "feeds": [
+            "https://www.coindesk.com/arc/outboundfeeds/rss/",
+            "https://cointelegraph.com/rss",
+            "https://decrypt.co/feed",
+        ],
+    },
+    "exchange": {
+        "name": "okx",
+        "account_type": "swap",
+        "td_mode": "isolated",
+        "leverage": 10,
+        "api_key_env": "OKX_API_KEY",
+        "secret_env": "OKX_SECRET",
+        "passphrase_env": "OKX_PASSPHRASE",
+        "default_settle": "USDT",
+        "position_side_mode": "net",
+        "leverage_presets": [5, 10, 15, 20, 25],
+    },
+    "strategy": {
+        "timeframe": "1m",
+        "ohlcv_limit": 180,
+        "min_confidence": 75,
+        "min_win_probability_pct": 0.0,
+        "min_risk_reward": 1.5,
+        "target": {
+            "mode": "roi_percent",
+            "take_profit_pct": 75,
+            "stop_loss_pct": 50,
+        },
+        "confirmation_timeframes": {
+            "enabled": True,
+            "frames": ["5m", "15m", "1h", "4h"],
+            "ohlcv_limit": 180,
+            "weights": {
+                "5m": 3,
+                "15m": 6,
+                "1h": 9,
+                "4h": 11,
+            },
+        },
+        "candlestick_patterns": {
+            "enabled": True,
+            "weights": {
+                "1m": 3,
+                "5m": 4,
+                "15m": 6,
+                "1h": 9,
+                "4h": 11,
+            },
+        },
+        "universe": {
+            "enabled": True,
+            "mode": "top_volume_24h",
+            "quote": "USDT",
+            "max_symbols": 50,
+            "asset_class": "crypto",
+            "exclude_bases": [],
+            "exclude_keywords": [],
+        },
+        "long_short_bias": {
+            "enabled": True,
+            "target_long_ratio": 0.6,
+            "strength": 10,
+        },
+        "symbols": [
+            "BTC/USDT:USDT",
+            "ETH/USDT:USDT",
+            "SOL/USDT:USDT",
+            "BNB/USDT:USDT",
+            "XRP/USDT:USDT",
+            "DOGE/USDT:USDT",
+            "ADA/USDT:USDT",
+            "LINK/USDT:USDT",
+            "AVAX/USDT:USDT",
+            "LTC/USDT:USDT",
+        ],
+    },
+    "risk": {
+        "order_usdt": 20,
+        "max_active_trades": 1,
+        "max_daily_orders": 3,
+        "max_daily_planned_risk_usdt": 10,
+        "cooldown_minutes": 60,
+        "max_spread_pct": 0.15,
+        "min_stop_distance_pct": 0.35,
+        "max_stop_distance_pct": 6.0,
+        "news_conflict_threshold": 2.0,
+    },
+    "trading_risk": {
+        "mechanism_name": "Bunny minimize losses",
+        "max_concurrent_positions": 1,
+        "global_loss_streak_threshold": 2,
+        "symbol_loss_streak_threshold": 2,
+        "normal_risk_percent": 1.0,
+        "recovery_mode_risk_percent": 0.5,
+        "normal_min_rule_score": 75,
+        "normal_min_gpt_confidence": 75,
+        "normal_min_risk_reward": 1.5,
+        "strong_setup_rule_score": 85,
+        "strong_setup_gpt_confidence": 88,
+        "strong_setup_min_risk_reward": 2.0,
+        "recovery_min_rule_score": 90,
+        "recovery_min_gpt_confidence": 92,
+        "recovery_min_risk_reward": 2.5,
+        "enable_adaptive_threshold": True,
+        "weekly_target_min_trades": 3,
+        "weekly_target_max_trades": 7,
+        "adaptive_score_step": 3,
+        "adaptive_confidence_step": 3,
+        "absolute_min_rule_score": 75,
+        "absolute_min_gpt_confidence": 80,
+        "absolute_min_risk_reward": 1.5,
+        "pause_trading_loss_streak": 4,
+        "pause_trading_hours": 24,
+        "max_safe_funding_rate_abs": 0.03,
+        "max_entry_distance_pct": 0.6,
+    },
+    "execution": {
+        "order_type": "market",
+        "attach_tp_sl": True,
+        "live_confirm_file": ".allow-live-trading",
+        "enable_live": False,
+    },
+    "ai": {
+        "enabled": True,
+        "api_key_env": "OPENAI_API_KEY",
+        "internal": {
+            "provider": "openai",
+            "model": "gpt-5.4-mini",
+            "api_key_env": "OPENAI_API_KEY_INTERNAL",
+            "market_scan_enabled": True,
+            "market_scan_interval_seconds": 14400,
+            "market_scan_source_symbols": 50,
+            "market_scan_max_symbols": 3,
+            "market_scan_min_win_probability_pct": 80,
+            "market_scan_use_ai": True,
+            "market_scan_use_shortlist": True,
+            "market_scan_to_pending": True,
+            "market_scan_pending_limit": 3,
+            "market_scan_require_ai_for_pending": True,
+            "timeout_seconds": 15,
+        },
+        "okx": {
+            "provider": "openai",
+            "model": "gpt-5.5",
+            "api_key_env": "OPENAI_API_KEY_OKX",
+            "approval_enabled": True,
+            "ask_internal_before_entry": True,
+            "require_external_approval": False,
+            "timeout_seconds": 20,
+        },
+    },
+    "pending_orders": {
+        "enabled": True,
+        "max_age_days": 3,
+        "local_max_age_hours": 6,
+        "exchange_max_age_days": 1.5,
+        "order_type": "limit",
+        "review": {
+            "enabled": True,
+            "min_confidence": 70,
+            "min_win_probability_pct": 50,
+            "max_confidence_drop": 12,
+            "max_win_probability_drop_pct": 8,
+            "min_risk_reward": 1.5,
+            "max_entry_drift_pct": 1.2,
+            "use_market_guard_memory": True,
+            "cancel_on_guard_avoid": True,
+            "cancel_on_opposite_guard_direction": True,
+            "opposite_guard_min_risk_score": 4.0,
+        },
+    },
+    "market_guard": {
+        "enabled": True,
+        "interval_seconds": 60,
+        "notify_interval_seconds": 600,
+        "timeframe": "1m",
+        "ohlcv_limit": 40,
+        "lookback_candles": 5,
+        "price_move_5m_pct": 0.8,
+        "critical_price_move_5m_pct": 1.4,
+        "candle_range_pct": 0.9,
+        "critical_candle_range_pct": 1.8,
+        "wick_pct": 0.45,
+        "wick_body_ratio": 2.5,
+        "volume_ratio": 2.5,
+        "pause_new_entries_seconds": 900,
+        "max_symbols": 50,
+        "layer_5m_samples": 5,
+        "layer_20m_samples": 20,
+        "memory_keep_hours": 24,
+        "use_memory_in_strategy": True,
+    },
+    "market_regime": {
+        "enabled": True,
+        "history_limit": 200,
+        "high_volatility_atr_pct": 4.0,
+        "low_volatility_atr_pct": 1.2,
+        "sideway_adx_max": 20,
+        "trend_adx_min": 25,
+    },
+    "bunny_health_monitor": {
+        "enabled": True,
+        "lookback_trades": 20,
+        "min_win_rate": 50.0,
+        "min_profit_factor": 1.2,
+        "max_drawdown_percent": 10.0,
+        "risk_reduction_percent": 40.0,
+        "score_increase_step": 4.0,
+        "confidence_increase_step": 4.0,
+        "critical_win_rate": 35.0,
+        "critical_profit_factor": 0.8,
+        "critical_drawdown_percent": 15.0,
+        "critical_pause_hours": 12,
+    },
+    "slot_refill": {
+        "enable_auto_refill": True,
+        "refill_delay_seconds": 10,
+        "max_refill_attempts_per_slot": 3,
+        "candidate_lookback_minutes": 240,
+        "min_candidate_rule_score": 78,
+        "allow_refill_in_recovery_mode": True,
+    },
+    "prompt_engine": {
+        "enabled": True,
+        "directory": "Prompts",
+        "default_prompt_version": "prompt-v1",
+        "system_version": "system-v1",
+        "decision_engine_version": "decision-engine-v1",
+        "validator_version": "validator-v1",
+        "recovery_version": "recovery-v1",
+        "health_version": "health-v1",
+        "slot_refill_version": "slot-refill-v1",
+        "bunny_version": "bunny-v1",
+    },
+    "strategy_versioning": {
+        "enabled": True,
+        "default_version": "strategy-v1",
+        "rule_engine_version": "rule-engine-v1",
+        "validator_version": "validator-v1",
+        "recovery_version": "recovery-v1",
+        "health_version": "health-v1",
+        "allow_ab_testing": True,
+    },
+    "replay_engine": {
+        "enabled": True,
+        "default_batch_limit": 100,
+    },
+    "notifications": {
+        "telegram": {
+            "enabled": True,
+            "notify_scans": True,
+            "timeout_seconds": 8,
+            "retry_count": 2,
+            "buttons_enabled": True,
+            "replace_previous_message": True,
+            "polling_enabled": True,
+            "poll_timeout_seconds": 1,
+            "button_cache_ttl_seconds": 15,
+            "account_report_interval_seconds": 18000,
+            "daily_summary_enabled": True,
+            "trade_memory_limit": 100,
+        },
+    },
+    "position_sizing": {
+        "enabled": True,
+        "base_margin_usdt": 2.0,
+        "target_profit_usdt": 0.30,
+        "tp_roi": 0.75,
+        "sl_roi": 0.50,
+        "open_fee": 0.0005,
+        "close_fee": 0.0005,
+        "safety_buffer": 0.02,
+        "max_recovery_step": 4,
+        "max_margin_usdt": 50,
+        "max_cycle_loss_usdt": 50,
+        "min_recovery_confidence": 88,
+        "min_recovery_win_probability_pct": 58,
+        "block_recovery_on_market_guard": True,
+        "block_recovery_same_symbol_side": True,
+        "max_recovery_4h_rsi_long": 76,
+        "min_recovery_4h_rsi_short": 24,
+        "base_margin_presets_usdt": [2, 3, 5, 10, 15, 20, 30, 50],
+        "history_limit": 100,
+        "bootstrap_existing_history": False,
+    },
+    "paper_trading": {
+        "enabled": True,
+        "auto_scan_enabled": True,
+        "scan_interval_seconds": 60,
+        "max_active_trades": 1,
+    },
+}
+
+
+def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def load_config(path: str | Path | None) -> dict[str, Any]:
+    if path is None:
+        return deepcopy(DEFAULT_CONFIG)
+
+    config_path = Path(path)
+    with config_path.open("r", encoding="utf-8") as handle:
+        user_config = yaml.safe_load(handle) or {}
+    config = deep_merge(DEFAULT_CONFIG, user_config)
+    config["_config_dir"] = str(config_path.resolve().parent)
+    return config
+
+
+def project_path(config: dict[str, Any], value: str) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return Path(config.get("_config_dir") or ".").resolve() / path

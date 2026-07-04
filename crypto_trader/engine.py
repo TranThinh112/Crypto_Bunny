@@ -1,0 +1,659 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from .ai_coordinator import (
+    internal_lc_memory,
+    internal_market_shortlist,
+    okx_ai_approval,
+    run_internal_market_scan_if_due,
+    should_defer_new_vt_to_internal_lc,
+)
+from .config import project_path
+from .codex_features import (
+    detect_market_regime,
+    record_ai_trade_decision,
+    record_trade_candidates,
+    select_runtime_config,
+)
+from .executor import execute_candidate
+from .market import fetch_market_snapshots, fetch_top_volume_symbols
+from .market_guard import market_guard_symbol_layers, market_guard_top_risk
+from .models import Decision, ExecutionResult, RiskCheck, to_jsonable
+from .news import collect_news
+from .pending import maintain_pending_orders
+from .risk import active_trades_summary, evaluate_candidate
+from .sizing import apply_position_sizing
+from .storage import (
+    latest_decision_payload,
+    next_global_counter,
+    open_pending_symbols,
+    save_decision,
+    save_market_scan_observations,
+    save_pending_order,
+)
+from .strategy import build_candidates, enrich_quantities
+
+
+def _ordered_unique(symbols: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for symbol in symbols:
+        clean = str(symbol or "").strip()
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        unique.append(clean)
+    return unique
+
+
+def _resolve_strategy_symbols(config: dict[str, Any]) -> tuple[list[str], dict[str, Any], list[str]]:
+    strategy_config = config.get("strategy", {})
+    configured_symbols = _ordered_unique(strategy_config.get("symbols", []))
+    shortlist_symbols, shortlist_state = internal_market_shortlist(config)
+    internal_config = config.get("ai", {}).get("internal", {})
+    use_shortlist_as_universe = not bool(internal_config.get("market_scan_to_pending", True))
+    if use_shortlist_as_universe and shortlist_state and not shortlist_state.get("stale"):
+        return (
+            _ordered_unique(shortlist_symbols),
+            {
+                "enabled": True,
+                "mode": "ai_internal_market_scan",
+                "source": "gpt-mini-4h-shortlist",
+                "max_symbols": len(shortlist_symbols),
+                "symbols": _ordered_unique(shortlist_symbols),
+                "scan_created_at": shortlist_state.get("created_at"),
+                "model": shortlist_state.get("model"),
+                "provider": shortlist_state.get("provider"),
+                "candidate_count": shortlist_state.get("candidate_count"),
+            },
+            [],
+        )
+    universe = strategy_config.get("universe", {})
+    mode = str(universe.get("mode", "configured") or "configured")
+    enabled = bool(universe.get("enabled", mode == "top_volume_24h"))
+    if not enabled or mode != "top_volume_24h":
+        return configured_symbols, {"enabled": False, "mode": "configured", "symbols": configured_symbols}, []
+
+    max_symbols = max(1, min(50, int(universe.get("max_symbols", 50) or 50)))
+    volume_symbols, warnings = fetch_top_volume_symbols(config)
+    if volume_symbols:
+        selected = _ordered_unique(volume_symbols)[:max_symbols]
+        return (
+            selected,
+            {
+                "enabled": True,
+                "mode": "top_volume_24h",
+                "source": "okx_24h_volume",
+                "max_symbols": max_symbols,
+                "quote": str(universe.get("quote", "USDT") or "USDT"),
+                "symbols": selected,
+            },
+            warnings,
+        )
+
+    return (
+        configured_symbols,
+        {
+            "enabled": True,
+            "mode": "top_volume_24h",
+            "source": "configured_fallback",
+            "max_symbols": max_symbols,
+            "quote": str(universe.get("quote", "USDT") or "USDT"),
+            "symbols": configured_symbols,
+            "warnings": warnings,
+        },
+        warnings,
+    )
+
+
+def _previous_candidates(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not payload:
+        return []
+    candidates = payload.get("candidates")
+    return candidates if isinstance(candidates, list) else []
+
+
+def _previous_symbols(payload: dict[str, Any] | None) -> list[str]:
+    return _ordered_unique(
+        [
+            str(candidate.get("symbol", ""))
+            for candidate in _previous_candidates(payload)
+            if isinstance(candidate, dict)
+        ]
+    )[:5]
+
+
+def _candidate_sort_key(candidate: Any) -> tuple[float, float]:
+    return (float(candidate.win_probability_pct or 0), float(candidate.confidence or 0))
+
+
+def _annotate_scan_context(
+    candidate: Any,
+    previous_by_symbol: dict[str, dict[str, Any]],
+    source: str,
+) -> None:
+    previous = previous_by_symbol.get(candidate.symbol)
+    candidate.scan_source = source
+    if not previous:
+        candidate.previous_win_probability_pct = None
+        candidate.win_delta_pct = None
+        return
+    previous_win = previous.get("win_probability_pct")
+    if previous_win is None:
+        candidate.previous_win_probability_pct = None
+        candidate.win_delta_pct = None
+        return
+    candidate.previous_win_probability_pct = round(float(previous_win), 2)
+    if candidate.win_probability_pct is not None:
+        candidate.win_delta_pct = round(float(candidate.win_probability_pct) - float(previous_win), 2)
+
+
+def _merge_cycle_candidates(
+    new_top: list[Any],
+    refreshed_previous: list[Any],
+    previous_payload: dict[str, Any] | None,
+) -> tuple[list[Any], dict[str, Any]]:
+    previous_by_symbol = {
+        str(candidate.get("symbol")): candidate
+        for candidate in _previous_candidates(previous_payload)
+        if isinstance(candidate, dict) and candidate.get("symbol")
+    }
+    by_symbol: dict[str, Any] = {}
+    sources: dict[str, set[str]] = {}
+
+    def add(candidate: Any, source: str) -> None:
+        sources.setdefault(candidate.symbol, set()).add(source)
+        existing = by_symbol.get(candidate.symbol)
+        if existing is None or _candidate_sort_key(candidate) > _candidate_sort_key(existing):
+            by_symbol[candidate.symbol] = candidate
+
+    for candidate in new_top:
+        add(candidate, "new_scan")
+    for candidate in refreshed_previous:
+        add(candidate, "old_rescan")
+
+    for symbol, candidate in by_symbol.items():
+        source_set = sources.get(symbol, set())
+        if source_set == {"new_scan", "old_rescan"}:
+            source = "new_and_old_rescan"
+        elif "old_rescan" in source_set:
+            source = "old_rescan"
+        else:
+            source = "new_scan"
+        _annotate_scan_context(candidate, previous_by_symbol, source)
+
+    ranked = sorted(by_symbol.values(), key=_candidate_sort_key, reverse=True)
+    kept = ranked[:5]
+    dropped = ranked[5:]
+    return kept, {
+        "enabled": True,
+        "logic": "new top 5 plus refreshed previous top 5, then keep highest current win-rate",
+        "previous_symbols": list(previous_by_symbol.keys())[:5],
+        "new_top_symbols": [candidate.symbol for candidate in new_top],
+        "refreshed_previous_symbols": [candidate.symbol for candidate in refreshed_previous],
+        "kept_symbols": [candidate.symbol for candidate in kept],
+        "dropped_symbols": [candidate.symbol for candidate in dropped],
+    }
+
+
+def _internal_scan_to_pending_enabled(config: dict[str, Any]) -> bool:
+    internal_config = config.get("ai", {}).get("internal", {})
+    return bool(internal_config.get("market_scan_to_pending", True))
+
+
+def _internal_scan_allows_pending(config: dict[str, Any], scan: dict[str, Any] | None) -> tuple[bool, str]:
+    if not scan:
+        return False, "No internal mini scan is available"
+    internal_config = config.get("ai", {}).get("internal", {})
+    if not bool(internal_config.get("market_scan_to_pending", True)):
+        return False, "Mini scan pending queue is disabled"
+    approved_symbols = [str(symbol) for symbol in scan.get("approved_symbols") or [] if str(symbol)]
+    if not approved_symbols:
+        return False, "Mini scan has no approved symbols"
+    if bool(internal_config.get("market_scan_require_ai_for_pending", True)):
+        if scan.get("fallback") or scan.get("ai_review_error"):
+            return False, "Mini scan did not finish with external AI approval"
+        if str(scan.get("provider") or "") == "openai" and not scan.get("ai_review"):
+            return False, "Mini scan has not returned an OpenAI review yet"
+    return True, "Mini scan can create pending setups"
+
+
+def _create_pending_from_internal_scan(
+    config: dict[str, Any],
+    candidates: list[Any],
+    internal_scan: dict[str, Any] | None,
+    active_summary: Any,
+    pending_symbols: set[str],
+) -> dict[str, Any]:
+    allowed, reason = _internal_scan_allows_pending(config, internal_scan)
+    internal_config = config.get("ai", {}).get("internal", {})
+    pending_limit = max(1, min(3, int(internal_config.get("market_scan_pending_limit", 3) or 3)))
+    result: dict[str, Any] = {
+        "enabled": _internal_scan_to_pending_enabled(config),
+        "allowed": allowed,
+        "reason": reason,
+        "limit": pending_limit,
+        "created": 0,
+        "created_orders": [],
+        "skipped": [],
+    }
+    if not result["enabled"] or not allowed:
+        return result
+
+    approved = [str(symbol) for symbol in (internal_scan or {}).get("approved_symbols") or [] if str(symbol)]
+    approved_set = set(approved)
+    created_symbols = set(pending_symbols)
+    for candidate in candidates:
+        if result["created"] >= pending_limit:
+            break
+        if candidate.symbol not in approved_set:
+            continue
+        if candidate.symbol in created_symbols:
+            result["skipped"].append({"symbol": candidate.symbol, "reason": "already pending or active in LC memory"})
+            continue
+        check = evaluate_candidate(
+            config,
+            candidate,
+            active_summary=active_summary,
+            enforce_active_limit=False,
+            extra_active_symbols=created_symbols,
+        )
+        if not check.passed:
+            result["skipped"].append(
+                {
+                    "symbol": candidate.symbol,
+                    "side": candidate.side,
+                    "reason": "; ".join(check.reasons[:3]) or "risk check failed",
+                }
+            )
+            continue
+        journal_id = next_global_counter(config, "LC") if config.get("mode") != "dry_run" else None
+        record = save_pending_order(
+            config,
+            candidate,
+            None,
+            max_age_hours=float(config.get("pending_orders", {}).get("local_max_age_hours", 6) or 6),
+            journal_id=journal_id,
+        )
+        result["created"] += 1
+        created_symbols.add(candidate.symbol)
+        result["created_orders"].append(
+            {
+                "id": record.get("id"),
+                "lc_id": journal_id or record.get("id"),
+                "symbol": candidate.symbol,
+                "side": candidate.side,
+                "win_probability_pct": candidate.win_probability_pct,
+                "confidence": candidate.confidence,
+            }
+        )
+    return result
+
+
+def write_report(config: dict[str, Any], decision: Decision) -> Path:
+    path = project_path(config, config.get("report_path", "reports/latest_decision.json"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(to_jsonable(decision), handle, ensure_ascii=False, indent=2)
+    return path
+
+
+def run_once(config: dict[str, Any], execute: bool) -> Decision:
+    config = select_runtime_config(config)
+    previous_payload = latest_decision_payload(config)
+    internal_market_scan = run_internal_market_scan_if_due(config)
+    strategy_symbols, universe_context, universe_warnings = _resolve_strategy_symbols(config)
+    if internal_market_scan:
+        universe_context["internal_market_scan"] = {
+            "created_at": internal_market_scan.get("created_at"),
+            "provider": internal_market_scan.get("provider"),
+            "model": internal_market_scan.get("model"),
+            "approved_symbols": internal_market_scan.get("approved_symbols"),
+            "candidate_count": internal_market_scan.get("candidate_count"),
+            "fallback": internal_market_scan.get("fallback"),
+            "ai_review_error": internal_market_scan.get("ai_review_error"),
+        }
+    old_symbols = _previous_symbols(previous_payload)
+    pending_symbols_before_scan = _ordered_unique(list(open_pending_symbols(config)))
+    fetch_symbols = _ordered_unique(strategy_symbols + old_symbols + pending_symbols_before_scan)
+
+    digest = collect_news(config)
+    snapshots, market_warnings = fetch_market_snapshots(config, fetch_symbols)
+    market_warnings = universe_warnings + market_warnings
+    snapshots_by_symbol = {snapshot.symbol: snapshot for snapshot in snapshots}
+    market_layers: dict[str, dict[str, Any]] = {}
+    market_layer_warnings: list[str] = []
+    if config.get("market_guard", {}).get("use_memory_in_strategy", True):
+        try:
+            market_layers = market_guard_symbol_layers(config, fetch_symbols)
+        except Exception as exc:
+            market_layer_warnings.append(f"Market guard memory unavailable: {exc}")
+    new_scan_symbols = _ordered_unique(strategy_symbols + pending_symbols_before_scan)
+    new_scan_snapshots = [
+        snapshots_by_symbol[symbol] for symbol in new_scan_symbols if symbol in snapshots_by_symbol
+    ]
+    old_scan_snapshots = [
+        snapshots_by_symbol[symbol] for symbol in old_symbols if symbol in snapshots_by_symbol
+    ]
+
+    all_new_candidates = build_candidates(
+        config,
+        new_scan_snapshots,
+        digest,
+        limit=None,
+        market_layers=market_layers,
+    )
+    market_regime = detect_market_regime(config, new_scan_snapshots or snapshots)
+    for candidate in all_new_candidates:
+        candidate.market_regime = market_regime.get("regime")
+        candidate.regime_confidence = market_regime.get("confidence")
+    record_trade_candidates(config, all_new_candidates)
+    market_scan_storage = {
+        "saved_rows": save_market_scan_observations(
+            config,
+            all_new_candidates,
+            source="continuous_1m_5m_1h_scan",
+            limit=100,
+        ),
+        "timeframes": [
+            str(config.get("strategy", {}).get("timeframe", "1m")),
+            *[
+                str(frame)
+                for frame in config.get("strategy", {}).get("confirmation_timeframes", {}).get("frames", [])
+            ],
+        ],
+    }
+    new_top = all_new_candidates[:5]
+    refreshed_previous = (
+        build_candidates(
+            config,
+            old_scan_snapshots,
+            digest,
+            limit=None,
+            market_layers=market_layers,
+        )
+        if old_symbols
+        else []
+    )
+    candidates, scan_comparison = _merge_cycle_candidates(new_top, refreshed_previous, previous_payload)
+    scan_comparison["market_scan_storage"] = market_scan_storage
+    scan_comparison["universe"] = universe_context
+    scan_comparison["market_regime"] = market_regime
+    if internal_market_scan:
+        scan_comparison["internal_market_scan"] = internal_market_scan
+    if market_layers:
+        selected_symbols = _ordered_unique([candidate.symbol for candidate in candidates] + pending_symbols_before_scan)
+        scan_comparison["market_guard_layers"] = {
+            "enabled": True,
+            "top_risk": market_guard_top_risk(market_layers, limit=5),
+            "symbols": {
+                symbol: market_layers.get(symbol)
+                for symbol in selected_symbols
+                if symbol in market_layers
+            },
+        }
+    elif market_layer_warnings:
+        scan_comparison["market_guard_layers"] = {
+            "enabled": False,
+            "warnings": market_layer_warnings,
+        }
+    scan_comparison["position_sizing"] = apply_position_sizing(config, candidates)
+
+    quantity_warnings = enrich_quantities(config, candidates)
+    if candidates and (market_warnings or quantity_warnings or market_layer_warnings):
+        candidates[0].warnings.extend(market_warnings + quantity_warnings + market_layer_warnings)
+
+    ai_internal_before_pending = internal_lc_memory(config)
+    scan_comparison["ai_internal_before_pending"] = ai_internal_before_pending
+    review_candidates_by_key = {
+        (candidate.symbol, candidate.side): candidate
+        for candidate in [*all_new_candidates, *refreshed_previous, *candidates]
+    }
+    pending_review = maintain_pending_orders(
+        config,
+        list(review_candidates_by_key.values()),
+        allow_release=execute,
+        market_layers=market_layers,
+    )
+    ai_internal_after_pending = internal_lc_memory(config)
+    scan_comparison["ai_internal_after_pending"] = ai_internal_after_pending
+    defer_new_vt_to_internal_lc = execute and should_defer_new_vt_to_internal_lc(config, ai_internal_before_pending)
+    scan_comparison["ai_router"] = {
+        "enabled": True,
+        "defer_new_vt_to_internal_lc": defer_new_vt_to_internal_lc,
+        "priority": ["LC_OKX", "OPEN", "new_scan_candidate"],
+    }
+    pending_symbols = open_pending_symbols(config)
+    active_summary = active_trades_summary(config)
+    active_count, _active_symbols, active_warnings = active_summary
+    max_active = int(config.get("risk", {}).get("max_active_trades", 1))
+    mini_pending_queue = None
+    if (
+        execute
+        and _internal_scan_to_pending_enabled(config)
+        and not defer_new_vt_to_internal_lc
+        and config.get("pending_orders", {}).get("enabled", True)
+    ):
+        mini_pending_queue = _create_pending_from_internal_scan(
+            config,
+            candidates,
+            internal_market_scan,
+            active_summary,
+            pending_symbols,
+        )
+        scan_comparison["mini_pending_queue"] = mini_pending_queue
+
+    selected = None
+    risk_check = RiskCheck(False, ["No candidate passed risk checks"], market_warnings + quantity_warnings)
+    if defer_new_vt_to_internal_lc:
+        preferred = ai_internal_before_pending.get("preferred") or {}
+        risk_check = RiskCheck(
+            False,
+            [
+                "OKX AI deferred new VT because internal LC memory has priority: "
+                f"{preferred.get('status') or 'LC'} #{preferred.get('lc_id') or '-'}"
+            ],
+            market_warnings + quantity_warnings,
+        )
+    else:
+        for candidate in candidates:
+            current_check = evaluate_candidate(
+                config,
+                candidate,
+                active_summary=active_summary,
+                extra_active_symbols=pending_symbols,
+            )
+            if current_check.passed:
+                selected = candidate
+                risk_check = current_check
+                break
+            if selected is None and candidate is candidates[0]:
+                risk_check = current_check
+
+    queued_from_mini = bool((mini_pending_queue or {}).get("created"))
+    if queued_from_mini:
+        first_created = (mini_pending_queue or {}).get("created_orders", [{}])[0]
+        selected = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate.symbol == first_created.get("symbol") and candidate.side == first_created.get("side")
+            ),
+            selected,
+        )
+        risk_check = RiskCheck(True, [], market_warnings + quantity_warnings)
+
+    execution_result: ExecutionResult | None = None
+    action = "hold"
+    if queued_from_mini and selected:
+        action = f"pending_{selected.side}_{selected.symbol}"
+        execution_result = ExecutionResult(
+            mode=config.get("mode", "dry_run"),
+            submitted=True,
+            order_id=None,
+            message=(
+                f"{int((mini_pending_queue or {}).get('created') or 0)} GPT mini setup(s) saved as local LC; "
+                "GPT 5.5 will be called only when a setup is about to enter OKX"
+            ),
+            raw={"local_pending": True, "mini_pending_queue": mini_pending_queue},
+            journal_type="LC",
+            journal_id=first_created.get("lc_id"),
+        )
+    elif selected and risk_check.passed:
+        action = f"{selected.side}_{selected.symbol}"
+        if execute and _internal_scan_to_pending_enabled(config):
+            action = "hold"
+            reason = (
+                ((mini_pending_queue or {}).get("reason") if mini_pending_queue else None)
+                or "Mini pending queue did not create a setup"
+            )
+            risk_check = RiskCheck(False, [str(reason)], market_warnings + quantity_warnings)
+            execution_result = ExecutionResult(
+                mode=config.get("mode", "dry_run"),
+                submitted=False,
+                order_id=None,
+                message="new VT blocked because entries must come from mini pending queue: " + str(reason),
+                raw={"mini_pending_queue": mini_pending_queue},
+            )
+        elif execute:
+            pre_entry_check = evaluate_candidate(
+                config,
+                selected,
+                active_summary=active_trades_summary(config),
+                extra_active_symbols=open_pending_symbols(config),
+            )
+            scan_comparison["pre_entry_check"] = {
+                "enabled": True,
+                "passed": pre_entry_check.passed,
+                "reasons": pre_entry_check.reasons,
+                "warnings": pre_entry_check.warnings,
+            }
+            if pre_entry_check.passed:
+                ai_decision = okx_ai_approval(
+                    config,
+                    selected,
+                    pre_entry_check,
+                    context={"route": "new_vt", "source": "scan_top_win_rate"},
+                    pending_memory=internal_lc_memory(config),
+                )
+                scan_comparison["ai_okx_approval"] = ai_decision
+                if ai_decision.get("approved"):
+                    final_validator = evaluate_candidate(
+                        config,
+                        selected,
+                        active_summary=active_trades_summary(config),
+                        extra_active_symbols=open_pending_symbols(config),
+                    )
+                    scan_comparison["final_validator"] = {
+                        "enabled": True,
+                        "passed": final_validator.passed,
+                        "reasons": final_validator.reasons,
+                        "warnings": final_validator.warnings,
+                    }
+                    if not final_validator.passed:
+                        action = "hold"
+                        risk_check = final_validator
+                        execution_result = ExecutionResult(
+                            mode=config.get("mode", "dry_run"),
+                            submitted=False,
+                            order_id=None,
+                            message="final validator blocked after OKX AI approval: "
+                            + "; ".join(final_validator.reasons[:3]),
+                        )
+                    else:
+                        journal_id = next_global_counter(config, "VT") if config.get("mode") != "dry_run" else None
+                        execution_result = execute_candidate(
+                            config,
+                            selected,
+                            journal_type="VT",
+                            journal_id=journal_id,
+                        )
+                else:
+                    action = "hold"
+                    risk_check = RiskCheck(False, [str(ai_decision.get("reason") or ai_decision.get("decision"))])
+                    execution_result = ExecutionResult(
+                        mode=config.get("mode", "dry_run"),
+                        submitted=False,
+                        order_id=None,
+                        message="OKX AI approval blocked new VT: "
+                        + str(ai_decision.get("reason") or ai_decision.get("decision")),
+                    )
+            else:
+                action = "hold"
+                risk_check = pre_entry_check
+                execution_result = ExecutionResult(
+                    mode=config.get("mode", "dry_run"),
+                    submitted=False,
+                    order_id=None,
+                    message="pre-entry check blocked: " + "; ".join(pre_entry_check.reasons[:3]),
+                )
+        else:
+            execution_result = ExecutionResult(
+                mode=config.get("mode", "dry_run"),
+                submitted=False,
+                order_id=None,
+                message="analysis only: order was not submitted",
+            )
+    elif (
+        execute
+        and not defer_new_vt_to_internal_lc
+        and not _internal_scan_to_pending_enabled(config)
+        and config.get("pending_orders", {}).get("enabled", True)
+        and active_count is not None
+        and active_count >= max_active
+    ):
+        for candidate in candidates:
+            current_check = evaluate_candidate(
+                config,
+                candidate,
+                active_summary=active_summary,
+                enforce_active_limit=False,
+                extra_active_symbols=pending_symbols,
+            )
+            if not current_check.passed:
+                if candidate is candidates[0]:
+                    risk_check = current_check
+                continue
+            selected = candidate
+            risk_check = current_check
+            action = f"pending_{selected.side}_{selected.symbol}"
+            journal_id = next_global_counter(config, "LC") if config.get("mode") != "dry_run" else None
+            save_pending_order(
+                config,
+                selected,
+                None,
+                max_age_hours=float(config.get("pending_orders", {}).get("local_max_age_hours", 6) or 6),
+                journal_id=journal_id,
+            )
+            execution_result = ExecutionResult(
+                mode=config.get("mode", "dry_run"),
+                submitted=True,
+                order_id=None,
+                message="local pending order created; it will be submitted only when an active slot is available",
+                raw={"local_pending": True, "max_active_trades": max_active, "active_count": active_count},
+                journal_type="LC",
+                journal_id=journal_id,
+            )
+            break
+    elif active_count is None and active_warnings:
+        risk_check.warnings.extend(active_warnings)
+
+    decision = Decision(
+        created_at=datetime.now(timezone.utc),
+        mode=config.get("mode", "dry_run"),
+        action=action,
+        selected=selected,
+        candidates=candidates,
+        risk_check=risk_check,
+        execution=execution_result,
+        news_items=digest.items,
+        scan_comparison={**scan_comparison, "pending_orders": pending_review},
+    )
+    write_report(config, decision)
+    save_decision(config, decision)
+    record_ai_trade_decision(config, decision)
+    return decision

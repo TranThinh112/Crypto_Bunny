@@ -1,0 +1,30 @@
+MODULE 6 - STRATEGY VERSIONING
+
+Trạng thái: Đã triển khai.
+
+Đã làm
+- Thêm bảng `strategy_versions`.
+- Hệ thống tự tạo một strategy version mặc định từ config hiện hành nếu chưa có dữ liệu.
+- Có thể:
+  xem bản active,
+  xem lịch sử,
+  tạo version mới,
+  activate version.
+- `engine.run_once()` sẽ chọn strategy version active rồi merge override vào config runtime trước khi scan.
+
+API
+- `GET /api/strategy/current`
+- `GET /api/strategy/history`
+- `POST /api/strategy/create`
+- `POST /api/strategy/activate`
+
+A/B testing
+- Đã có trường `traffic_percent`.
+- Khi có nhiều strategy version active, hệ thống có thể chọn theo tỷ trọng traffic.
+
+Metadata đã lưu theo giao dịch/quyết định
+- strategy version,
+- rule engine version,
+- validator version,
+- recovery version,
+- health version.

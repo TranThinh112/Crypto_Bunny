@@ -1,0 +1,41 @@
+MODULE 1 - AI DECISIONS / BIAS / RECOVERY
+
+Trạng thái: Đã triển khai.
+
+Đã làm
+- Thêm bảng `ai_trade_decisions` lưu:
+  decision,
+  side,
+  confidence,
+  rule_score,
+  entry/SL/TP,
+  prompt version/hash,
+  model/version,
+  strategy/recovery/health version,
+  raw prompt/response,
+  market regime,
+  snapshot JSON.
+- Mỗi lần `engine.run_once()` xong sẽ tự ghi một dòng decision analytics.
+- Đã mở API:
+  `POST /api/ai-decisions`
+  `GET /api/ai-decisions/stats`
+  `GET /api/ai-decisions/recent`
+- Có thống kê bias LONG/SHORT, winrate theo side, average confidence, profit factor, bias warning > 70%.
+
+Recovery Mode
+- Đã có global loss streak trên `trade_executions`.
+- Khi chuỗi thua chạm ngưỡng thì bật Recovery Mode.
+- Khi chuỗi thua chạm ngưỡng pause thì pause trading theo số giờ cấu hình.
+- Validate entry trong Recovery Mode sẽ siết:
+  rule score,
+  GPT confidence,
+  risk/reward,
+  funding rate,
+  spread,
+  volume confirm,
+  high-impact news,
+  entry distance.
+
+Ghi chú
+- Recovery trong Python đang gắn trực tiếp vào `risk.evaluate_candidate()` qua lớp validate hệ thống mới.
+- Ngưỡng mặc định được để tương thích với bot cũ, nhưng toàn bộ đều đã đưa vào config.

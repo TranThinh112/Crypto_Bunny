@@ -1,0 +1,4 @@
+UI: http://127.0.0.1:8001
+INFO:     127.0.0.1:41911 - "GET /healthz HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47514 - "GET /healthz HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47515 - "GET /api/config HTTP/1.1" 200 OK

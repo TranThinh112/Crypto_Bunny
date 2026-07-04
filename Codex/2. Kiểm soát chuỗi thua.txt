@@ -1,0 +1,292 @@
+Hãy thêm cơ chế quản lý chuỗi thua toàn hệ thống cho bot AI trading crypto.
+
+Tên cơ chế: Bunny minimize losses.
+
+Mục tiêu:
+- Không cố định số lượng vị thế là 3.
+- Số lượng vị thế chạy song song phải cấu hình được.
+- Loss streak tính trên toàn bộ hệ thống, không chỉ từng symbol.
+- Khi loss streak toàn hệ thống đạt ngưỡng cấu hình, bật Recovery Mode.
+- Hệ thống vẫn có khả năng lọc lệnh tốt nhưng không quá gắt trong Normal Mode.
+- Recovery Mode mới là chế độ lọc cực chặt.
+
+Tech stack:
+- ASP.NET Core Web API
+- C#
+- MongoDB
+
+Cấu hình appsettings.json:
+
+{
+  "TradingRisk": {
+    "MaxConcurrentPositions": 3,
+
+    "GlobalLossStreakThreshold": 2,
+    "SymbolLossStreakThreshold": 2,
+
+    "NormalRiskPercent": 1.0,
+    "RecoveryModeRiskPercent": 0.5,
+
+    "NormalMinRuleScore": 78,
+    "NormalMinGptConfidence": 82,
+    "NormalMinRiskReward": 1.8,
+
+    "StrongSetupRuleScore": 85,
+    "StrongSetupGptConfidence": 88,
+    "StrongSetupMinRiskReward": 2.0,
+
+    "RecoveryMinRuleScore": 90,
+    "RecoveryMinGptConfidence": 92,
+    "RecoveryMinRiskReward": 2.5,
+
+    "EnableAdaptiveThreshold": true,
+    "WeeklyTargetMinTrades": 3,
+    "WeeklyTargetMaxTrades": 7,
+    "AdaptiveScoreStep": 3,
+    "AdaptiveConfidenceStep": 3,
+
+    "AbsoluteMinRuleScore": 75,
+    "AbsoluteMinGptConfidence": 80,
+    "AbsoluteMinRiskReward": 1.5,
+
+    "PauseTradingLossStreak": 4,
+    "PauseTradingHours": 24
+  }
+}
+
+Yêu cầu chức năng:
+
+1. Tạo class TradingRiskOptions bind từ appsettings.json.
+
+2. Tạo collection TradeExecutions lưu:
+   - Id
+   - CreatedAt
+   - Symbol
+   - PositionSlot
+   - ParentPositionId
+   - Side: LONG / SHORT
+   - EntryPrice
+   - StopLoss
+   - TakeProfit
+   - RiskReward
+   - RiskPercent
+   - RuleScore
+   - GptConfidence
+   - Status: OPEN / WIN / LOSS / BREAKEVEN / CLOSED / REJECTED
+   - Pnl
+   - RejectReason
+   - ClosedAt
+
+3. Không dùng A, B, C cố định.
+   Dùng PositionSlot dạng số.
+   Số lượng slot tối đa lấy từ TradingRisk:MaxConcurrentPositions.
+
+4. Tạo PositionSlotService:
+   - Kiểm tra số vị thế đang OPEN.
+   - Nếu OPEN >= MaxConcurrentPositions thì không cho mở thêm.
+   - Nếu còn slot trống thì cấp slot nhỏ nhất đang trống.
+
+5. Tạo LossStreakService:
+   - GetGlobalLossStreakAsync()
+     Tính số lệnh LOSS liên tiếp gần nhất trên toàn hệ thống, sắp xếp ClosedAt giảm dần.
+     Dừng đếm khi gặp WIN hoặc BREAKEVEN.
+   - GetSymbolLossStreakAsync(symbol)
+     Tính LOSS liên tiếp theo symbol.
+   - IsRecoveryModeAsync()
+     true nếu globalLossStreak >= GlobalLossStreakThreshold.
+   - ShouldPauseTradingAsync()
+     true nếu globalLossStreak >= PauseTradingLossStreak.
+
+6. Tạo TradingSystemState:
+   - Id
+   - MechanismName = "Bunny minimize losses"
+   - IsRecoveryMode
+   - GlobalLossStreak
+   - IsPaused
+   - PausedUntil
+   - CurrentNormalMinRuleScore
+   - CurrentNormalMinGptConfidence
+   - UpdatedAt
+
+7. Tạo TradingSystemStateService:
+   - RefreshStateAsync()
+   - GetCurrentStateAsync()
+   - PauseTradingAsync(hours)
+   - DisableRecoveryModeAsync() khi có WIN hoặc lossStreak reset.
+   - ApplyAdaptiveThresholdAsync()
+
+8. Adaptive Threshold:
+   - Đếm số lệnh đã đóng trong 7 ngày gần nhất.
+   - Nếu EnableAdaptiveThreshold = true:
+     + Nếu số lệnh < WeeklyTargetMinTrades:
+       giảm NormalMinRuleScore và NormalMinGptConfidence theo AdaptiveScoreStep / AdaptiveConfidenceStep.
+     + Nếu số lệnh > WeeklyTargetMaxTrades:
+       tăng NormalMinRuleScore và NormalMinGptConfidence.
+   - Không bao giờ thấp hơn:
+     + AbsoluteMinRuleScore
+     + AbsoluteMinGptConfidence
+     + AbsoluteMinRiskReward
+   - Recovery Mode không bị adaptive làm giảm ngưỡng.
+
+9. Khi chuẩn bị mở lệnh mới:
+   - Kiểm tra IsPaused.
+   - Kiểm tra OPEN < MaxConcurrentPositions.
+   - Kiểm tra globalLossStreak.
+   - Nếu Recovery Mode:
+     chỉ cho trade khi:
+       ruleScore >= RecoveryMinRuleScore
+       gptConfidence >= RecoveryMinGptConfidence
+       riskReward >= RecoveryMinRiskReward
+     riskPercent = RecoveryModeRiskPercent
+   - Nếu Normal Mode:
+     cho trade khi:
+       ruleScore >= CurrentNormalMinRuleScore
+       gptConfidence >= CurrentNormalMinGptConfidence
+       riskReward >= NormalMinRiskReward
+     riskPercent = NormalRiskPercent
+   - Nếu không đạt thì reject với reason rõ ràng.
+
+10. Strong Setup:
+   - Nếu ruleScore >= StrongSetupRuleScore
+     và gptConfidence >= StrongSetupGptConfidence
+     và riskReward >= StrongSetupMinRiskReward
+   - Gắn nhãn setupQuality = STRONG.
+   - Nếu chỉ đạt Normal threshold thì setupQuality = NORMAL.
+   - Nếu không đạt thì REJECTED.
+
+11. Khi một lệnh đóng:
+   - Cập nhật TradeExecution.Status = WIN / LOSS / BREAKEVEN.
+   - Cập nhật Pnl và ClosedAt.
+   - Refresh TradingSystemState.
+   - Nếu globalLossStreak >= GlobalLossStreakThreshold thì bật Recovery Mode.
+   - Nếu globalLossStreak >= PauseTradingLossStreak thì pause trading trong PauseTradingHours.
+   - Nếu có WIN hoặc BREAKEVEN làm reset chuỗi thua thì tắt Recovery Mode.
+
+12. Endpoint:
+   GET /api/trading-risk/state
+
+   Trả:
+   - mechanismName
+   - isRecoveryMode
+   - globalLossStreak
+   - isPaused
+   - pausedUntil
+   - maxConcurrentPositions
+   - openPositionsCount
+   - currentNormalMinRuleScore
+   - currentNormalMinGptConfidence
+   - normalMinRiskReward
+   - recoveryMinRuleScore
+   - recoveryMinGptConfidence
+   - recoveryMinRiskReward
+
+13. Endpoint:
+   POST /api/trading-risk/validate-entry
+
+   Input:
+   - symbol
+   - side
+   - ruleScore
+   - gptConfidence
+   - riskReward
+
+   Output:
+   - allowed: true/false
+   - reason
+   - assignedPositionSlot
+   - riskPercent
+   - isRecoveryMode
+   - setupQuality: NORMAL / STRONG / RECOVERY / REJECTED
+
+14. Endpoint:
+   POST /api/trade-executions/close
+
+   Input:
+   - tradeExecutionId
+   - status: WIN / LOSS / BREAKEVEN
+   - pnl
+
+   Sau khi close phải refresh TradingSystemState.
+
+15. Code sạch:
+   - async/await đầy đủ
+   - repository rõ ràng
+   - DTO rõ ràng
+   - validation cơ bản
+   - không hard-code số lượng vị thế
+   - không hard-code tên A/B/C
+   - tất cả threshold lấy từ appsettings.json
+
+16. Trả về đầy đủ:
+   - Models
+   - DTOs
+   - Options
+   - Repositories
+   - Services
+   - Controllers
+   - appsettings.json
+   - Program.cs registrations
+
+17. Thêm cơ chế Slot Refill:
+
+- Khi một TradeExecution đóng WIN / LOSS / BREAKEVEN, PositionSlot đó được giải phóng.
+- Nếu EnableAutoRefill = true và hệ thống chưa bị pause, tự gọi SlotRefillService.TryRefillAsync(positionSlot).
+- SlotRefillService phải tìm candidate setup tốt nhất trong dữ liệu scan gần nhất.
+- Candidate phải chưa từng được mở lệnh.
+- Candidate phải đi qua validate-entry.
+- Nếu pass thì tạo TradeExecution mới vào đúng slot vừa trống.
+- Nếu fail thì thử candidate tiếp theo.
+- Không được mở lệnh chỉ vì slot trống.
+- Nếu không có setup đủ tốt thì giữ slot trống.
+
+Cấu hình thêm:
+
+"SlotRefill": {
+  "EnableAutoRefill": true,
+  "RefillDelaySeconds": 10,
+  "MaxRefillAttemptsPerSlot": 3,
+  "CandidateLookbackMinutes": 240,
+  "MinCandidateRuleScore": 78,
+  "AllowRefillInRecoveryMode": true
+}
+
+18. Tạo class SlotRefillOptions bind từ appsettings.json.
+
+19. Tạo hoặc giả định collection TradeCandidates lưu setup từ hệ thống scan:
+   - Id
+   - CreatedAt
+   - Symbol
+   - Side
+   - RuleScore
+   - GptConfidence
+   - RiskReward
+   - EntryPrice
+   - StopLoss
+   - TakeProfit
+   - IsUsed
+   - UsedAt
+
+20. SlotRefillService phải:
+   - Lấy candidate theo CreatedAt trong CandidateLookbackMinutes.
+   - Chỉ lấy IsUsed = false.
+   - Chỉ lấy RuleScore >= MinCandidateRuleScore.
+   - Sort theo RuleScore desc, GptConfidence desc, RiskReward desc.
+   - Khi candidate được dùng, set IsUsed = true.
+   - Dùng validate-entry trước khi tạo TradeExecution.
+
+21. Chống mở trùng slot:
+   - Trước khi tạo lệnh refill, kiểm tra lại slot còn trống.
+   - Kiểm tra OPEN < MaxConcurrentPositions.
+   - Nếu có lệnh khác đã chiếm slot thì hủy refill.
+   - Repository update phải dùng atomic update hoặc transaction nếu có thể.
+
+22. Nếu AllowRefillInRecoveryMode = false và hệ thống đang Recovery Mode:
+   - Không refill.
+   - Trả reason = "Refill disabled in Recovery Mode".
+
+23. Slot Refill không được bypass:
+   - Recovery Mode
+   - Pause Trading
+   - MaxConcurrentPositions
+   - validate-entry
+   - RiskPercent

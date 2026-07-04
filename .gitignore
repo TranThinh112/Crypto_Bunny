@@ -1,0 +1,8 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+reports/
+data/
+config.yaml
+.allow-live-trading

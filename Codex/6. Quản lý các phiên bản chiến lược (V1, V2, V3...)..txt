@@ -1,0 +1,163 @@
+Hãy tạo Strategy Versioning cho hệ thống AI Trading.
+
+Mục tiêu:
+
+Theo dõi mọi phiên bản chiến lược.
+
+Có thể rollback.
+
+Có thể A/B Testing.
+
+====================================================
+
+Collection
+
+StrategyVersions
+
+====================================================
+
+Id
+
+Version
+
+Name
+
+Description
+
+CreatedAt
+
+IsActive
+
+Indicators
+
+Rules
+
+RiskConfig
+
+====================================================
+
+TradeExecution
+
+====================================================
+
+Lưu:
+
+StrategyVersion
+
+RuleEngineVersion
+
+ValidatorVersion
+
+RecoveryVersion
+
+HealthVersion
+
+====================================================
+
+API
+
+====================================================
+
+GET
+
+/api/strategy/current
+
+GET
+
+/api/strategy/history
+
+POST
+
+/api/strategy/create
+
+POST
+
+/api/strategy/activate
+
+====================================================
+
+Rollback
+
+====================================================
+
+Cho phép
+
+Rollback
+
+Strategy
+
+v1
+
+↓
+
+v2
+
+↓
+
+v3
+
+====================================================
+
+A/B Testing
+
+====================================================
+
+50%
+
+Strategy V1
+
+50%
+
+Strategy V2
+
+====================================================
+
+Thống kê
+
+====================================================
+
+WinRate
+
+ProfitFactor
+
+Drawdown
+
+Average RR
+
+Average Hold Time
+
+Average Confidence
+
+====================================================
+
+Dashboard
+
+====================================================
+
+So sánh
+
+Strategy V1
+
+Strategy V2
+
+Strategy V3
+
+====================================================
+
+Code
+
+====================================================
+
+Repository
+
+Service
+
+DTO
+
+Controller
+
+Dependency Injection
+
+Clean Architecture
+
+SOLID

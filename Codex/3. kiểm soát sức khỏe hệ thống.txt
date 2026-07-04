@@ -1,0 +1,168 @@
+Hãy tạo module Bunny Health Monitor cho bot AI trading crypto.
+
+Mục tiêu:
+- Theo dõi sức khỏe toàn hệ thống giao dịch.
+- Không chỉ dựa vào chuỗi thua liên tiếp.
+- Phát hiện khi bot đang giao dịch kém dù WIN/LOSS xen kẽ.
+- Nếu hệ thống yếu thì siết lọc và giảm risk.
+- Nếu hệ thống critical thì tạm dừng giao dịch.
+- Module này KHÔNG được tự sửa rule trading.
+
+Tech stack:
+- ASP.NET Core Web API
+- C#
+- MongoDB
+
+Cấu hình appsettings.json:
+
+{
+  "BunnyHealthMonitor": {
+    "Enabled": true,
+    "LookbackTrades": 20,
+
+    "MinWinRate": 50,
+    "MinProfitFactor": 1.2,
+    "MaxDrawdownPercent": 10,
+
+    "RiskReductionPercent": 40,
+    "ScoreIncreaseStep": 4,
+    "ConfidenceIncreaseStep": 4,
+
+    "CriticalWinRate": 35,
+    "CriticalProfitFactor": 0.8,
+    "CriticalDrawdownPercent": 15,
+    "CriticalPauseHours": 12
+  }
+}
+
+Yêu cầu chức năng:
+
+1. Tạo BunnyHealthMonitorOptions bind từ appsettings.json.
+
+2. Tạo collection TradingHealthState:
+   - Id
+   - MechanismName = "Bunny Health Monitor"
+   - IsHealthy
+   - IsWarning
+   - IsCritical
+   - TotalTrades
+   - WinCount
+   - LossCount
+   - BreakevenCount
+   - WinRate
+   - GrossProfit
+   - GrossLoss
+   - ProfitFactor
+   - TotalPnl
+   - MaxDrawdownPercent
+   - RiskMultiplier
+   - ScoreAdjustment
+   - ConfidenceAdjustment
+   - IsPaused
+   - PausedUntil
+   - Reason
+   - UpdatedAt
+
+3. Tạo BunnyHealthMonitorService:
+   - RefreshAsync()
+   - GetCurrentStateAsync()
+   - CalculateHealthAsync()
+   - IsPausedAsync()
+   - GetRiskMultiplierAsync()
+   - GetScoreAdjustmentAsync()
+   - GetConfidenceAdjustmentAsync()
+
+4. Tính trên N lệnh đã đóng gần nhất từ TradeExecutions:
+   - Chỉ lấy status: WIN / LOSS / BREAKEVEN.
+   - Sắp xếp ClosedAt giảm dần.
+   - Giới hạn theo LookbackTrades.
+
+5. Công thức:
+   - winRate = winCount / (winCount + lossCount) * 100
+   - grossProfit = tổng pnl > 0
+   - grossLoss = abs(tổng pnl < 0)
+   - profitFactor = grossProfit / grossLoss
+   - nếu grossLoss = 0 thì profitFactor = 999
+   - totalPnl = tổng pnl
+   - maxDrawdownPercent tính từ đường equity curve của N lệnh gần nhất
+
+6. Logic trạng thái:
+   - Nếu không đủ dữ liệu thì IsHealthy = true, Reason = "Not enough trades".
+   - Nếu winRate < MinWinRate hoặc profitFactor < MinProfitFactor hoặc maxDrawdownPercent > MaxDrawdownPercent:
+     + IsWarning = true
+     + RiskMultiplier = 1 - RiskReductionPercent / 100
+     + ScoreAdjustment = ScoreIncreaseStep
+     + ConfidenceAdjustment = ConfidenceIncreaseStep
+
+   - Nếu winRate < CriticalWinRate hoặc profitFactor < CriticalProfitFactor hoặc maxDrawdownPercent > CriticalDrawdownPercent:
+     + IsCritical = true
+     + IsPaused = true
+     + PausedUntil = now + CriticalPauseHours
+     + RiskMultiplier = 0
+     + Reason rõ ràng
+
+   - Nếu không vi phạm:
+     + IsHealthy = true
+     + RiskMultiplier = 1
+     + ScoreAdjustment = 0
+     + ConfidenceAdjustment = 0
+
+7. Tích hợp vào validate-entry:
+   - Nếu Bunny Health Monitor đang paused thì reject entry.
+   - Nếu Warning:
+     + tăng minRuleScore thêm ScoreAdjustment
+     + tăng minGptConfidence thêm ConfidenceAdjustment
+     + riskPercent = riskPercent * RiskMultiplier
+   - Nếu cùng lúc Recovery Mode và Health Warning bật:
+     + dùng threshold cao nhất
+     + dùng risk thấp nhất
+   - Bunny Health Monitor không được tự sửa rule gốc.
+
+8. Khi TradeExecution đóng WIN / LOSS / BREAKEVEN:
+   - Gọi BunnyHealthMonitorService.RefreshAsync()
+   - Cập nhật TradingHealthState.
+   - Validate-entry lần sau phải sử dụng health state mới nhất.
+
+9. Tạo endpoint:
+   GET /api/bunny-health/state
+
+   Response:
+   - isHealthy
+   - isWarning
+   - isCritical
+   - totalTrades
+   - winRate
+   - profitFactor
+   - totalPnl
+   - maxDrawdownPercent
+   - riskMultiplier
+   - scoreAdjustment
+   - confidenceAdjustment
+   - isPaused
+   - pausedUntil
+   - reason
+
+10. Tạo endpoint:
+   POST /api/bunny-health/refresh
+
+   Chạy lại health monitor và cập nhật TradingHealthState.
+
+11. Code sạch:
+   - async/await đầy đủ
+   - Repository Pattern
+   - Service Pattern
+   - DTO rõ ràng
+   - Validation cơ bản
+   - Dependency Injection
+   - Không hard-code threshold
+   - Tất cả lấy từ appsettings.json
+
+12. Trả về đầy đủ:
+   - Models
+   - DTOs
+   - Options
+   - Repositories
+   - Services
+   - Controllers
+   - appsettings.json
+   - Program.cs registrations

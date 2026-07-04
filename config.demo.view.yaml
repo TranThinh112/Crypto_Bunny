@@ -1,0 +1,177 @@
+mode: demo
+report_path: reports/latest_decision.json
+ledger_path: data/trades.jsonl
+state_db_path: data/bot_state.sqlite
+exchange:
+  leverage: 25
+  leverage_presets:
+  - 5
+  - 10
+  - 15
+  - 20
+  - 25
+automation:
+  enabled: true
+  scan_interval_seconds: 300
+  execute_demo: true
+  execute_live: false
+  initial_delay_seconds: 300
+risk:
+  order_usdt: 50
+  max_active_trades: 5
+  max_daily_orders: 20
+  max_daily_planned_risk_usdt: 150
+  cooldown_minutes: 0
+  max_spread_pct: 0.15
+  min_stop_distance_pct: 0.35
+  max_stop_distance_pct: 6.0
+  news_conflict_threshold: 2.0
+paper_trading:
+  enabled: true
+  auto_scan_enabled: false
+  scan_interval_seconds: 300
+  max_active_trades: 5
+pending_orders:
+  enabled: true
+  max_age_days: 3
+  local_max_age_hours: 6
+  exchange_max_age_days: 1.5
+  order_type: limit
+  review:
+    enabled: true
+    min_confidence: 70
+    min_win_probability_pct: 50
+    max_confidence_drop: 12
+    max_win_probability_drop_pct: 8
+    min_risk_reward: 1.5
+    max_entry_drift_pct: 1.2
+    use_market_guard_memory: true
+    cancel_on_guard_avoid: true
+    cancel_on_opposite_guard_direction: true
+    opposite_guard_min_risk_score: 4.0
+ai:
+  enabled: true
+  api_key_env: OPENAI_API_KEY
+  internal:
+    provider: openai
+    model: gpt-5.4-mini
+    api_key_env: OPENAI_API_KEY_INTERNAL
+    market_scan_enabled: true
+    market_scan_interval_seconds: 14400
+    market_scan_source_symbols: 50
+    market_scan_max_symbols: 3
+    market_scan_min_win_probability_pct: 80
+    market_scan_use_ai: true
+    market_scan_use_shortlist: true
+    market_scan_to_pending: true
+    market_scan_pending_limit: 3
+    market_scan_require_ai_for_pending: true
+    timeout_seconds: 15
+  okx:
+    provider: openai
+    model: gpt-5.5
+    api_key_env: OPENAI_API_KEY_OKX
+    approval_enabled: true
+    ask_internal_before_entry: true
+    require_external_approval: false
+    timeout_seconds: 20
+market_guard:
+  enabled: true
+  interval_seconds: 60
+  notify_interval_seconds: 600
+  timeframe: 1m
+  ohlcv_limit: 40
+  lookback_candles: 5
+  price_move_5m_pct: 0.8
+  critical_price_move_5m_pct: 1.4
+  candle_range_pct: 0.9
+  critical_candle_range_pct: 1.8
+  wick_pct: 0.45
+  wick_body_ratio: 2.5
+  volume_ratio: 2.5
+  pause_new_entries_seconds: 900
+  max_symbols: 50
+  layer_5m_samples: 5
+  layer_20m_samples: 20
+  memory_keep_hours: 24
+  use_memory_in_strategy: true
+strategy:
+  timeframe: 1m
+  ohlcv_limit: 180
+  min_win_probability_pct: 80
+  target:
+    mode: roi_percent
+    take_profit_pct: 75
+    stop_loss_pct: 50
+  confirmation_timeframes:
+    enabled: true
+    frames:
+    - 5m
+    - 1h
+    ohlcv_limit: 180
+    weights:
+      5m: 5
+      1h: 8
+  candlestick_patterns:
+    enabled: true
+    weights:
+      1m: 3
+      5m: 5
+      1h: 8
+  universe:
+    enabled: true
+    mode: top_volume_24h
+    quote: USDT
+    max_symbols: 50
+    asset_class: crypto
+  long_short_bias:
+    enabled: true
+    target_long_ratio: 0.6
+    strength: 10
+position_sizing:
+  enabled: true
+  base_margin_usdt: 2.0
+  target_profit_usdt: 0.30
+  tp_roi: 0.75
+  sl_roi: 0.50
+  open_fee: 0.0005
+  close_fee: 0.0005
+  safety_buffer: 0.02
+  max_recovery_step: 4
+  max_margin_usdt: 50
+  max_cycle_loss_usdt: 50
+  min_recovery_confidence: 88
+  min_recovery_win_probability_pct: 58
+  block_recovery_on_market_guard: true
+  block_recovery_same_symbol_side: true
+  max_recovery_4h_rsi_long: 76
+  min_recovery_4h_rsi_short: 24
+  base_margin_presets_usdt:
+  - 2
+  - 3
+  - 5
+  - 10
+  - 15
+  - 20
+  - 30
+  - 50
+  history_limit: 100
+  bootstrap_existing_history: false
+notifications:
+  telegram:
+    enabled: true
+    notify_scans: true
+    timeout_seconds: 8
+    retry_count: 2
+    buttons_enabled: true
+    replace_previous_message: true
+    polling_enabled: true
+    poll_timeout_seconds: 1
+    button_cache_ttl_seconds: 15
+    account_report_interval_seconds: 18000
+    daily_summary_enabled: true
+    trade_memory_limit: 100
+execution:
+  order_type: market
+  attach_tp_sl: true
+  enable_live: false

@@ -1,0 +1,34 @@
+MODULE 4 - REPLAY ENGINE
+
+Trạng thái: Đã triển khai bản khả dụng.
+
+Đã làm
+- Thêm bảng `replay_history`.
+- Replay lấy `trade_execution` làm đầu vào.
+- Snapshot dùng cho replay được lấy từ `snapshot_json` đã lưu trong `trade_executions`.
+- Replay sẽ:
+  build lại prompt,
+  gọi OpenAI nếu có key,
+  hoặc dùng heuristic fallback nếu không có key,
+  so sánh quyết định cũ và mới,
+  lưu kết quả vào `replay_history`.
+
+API
+- `POST /api/replay/run`
+- `POST /api/replay/batch`
+
+Đã lưu
+- prompt version,
+- strategy version,
+- model version,
+- old/new decision,
+- old/new confidence,
+- latency,
+- cờ decision changed / confidence changed / reason changed.
+
+Giới hạn hiện tại
+- Replay đang bám trên snapshot đã lưu ở thời điểm mở lệnh hoặc candidate payload gần nhất, chưa phải full market tape.
+- Nếu muốn replay “1:1” tuyệt đối với môi trường cũ thì cần lưu thêm nhiều ngữ cảnh hơn nữa như:
+  full market JSON,
+  pending memory,
+  trạng thái guard chi tiết từng lớp.

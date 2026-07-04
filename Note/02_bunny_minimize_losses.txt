@@ -1,0 +1,42 @@
+MODULE 2 - BUNNY MINIMIZE LOSSES
+
+Trạng thái: Đã triển khai bản Python hoá.
+
+Đã làm
+- Thêm bảng `trade_executions`.
+- Thêm bảng `trading_system_state`.
+- Không còn ý tưởng slot A/B/C cố định; dùng `position_slot` dạng số.
+- Slot nhỏ nhất đang trống sẽ được gán khi validate entry pass.
+- `GET /api/trading-risk/state` trả:
+  recovery mode,
+  global loss streak,
+  paused until,
+  slot tối đa,
+  số slot đang mở,
+  threshold hiện hành.
+- `POST /api/trading-risk/validate-entry` trả:
+  allowed,
+  reason,
+  assignedPositionSlot,
+  riskPercent,
+  setupQuality.
+
+Adaptive threshold
+- Đếm số lệnh đã đóng trong 7 ngày gần nhất.
+- Nếu ít lệnh hơn mục tiêu tuần thì hạ threshold normal.
+- Nếu nhiều lệnh hơn mục tiêu tuần thì nâng threshold normal.
+- Recovery threshold không bị adaptive hạ xuống.
+
+Slot refill
+- Đã thêm bảng `trade_candidates`.
+- Mỗi vòng scan đều lưu candidate.
+- Khi đóng `trade_execution`, hệ thống có thể thử refill đúng slot vừa trống.
+- Refill không được bypass:
+  pause trading,
+  recovery rules,
+  health state,
+  max concurrent positions,
+  validate-entry.
+
+Giới hạn hiện tại
+- Refill hiện tạo `trade_execution` mới ở tầng hệ thống; nếu muốn tự bắn order thật ngay lúc refill thì cần nối sâu thêm với execution policy vận hành thực tế.

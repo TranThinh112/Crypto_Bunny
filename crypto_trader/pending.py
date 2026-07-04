@@ -1,0 +1,832 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any
+
+from .ai_coordinator import okx_ai_approval, prioritize_pending_records
+from .executor import execute_candidate
+from .ledger import append_event
+from .market import create_exchange
+from .models import RiskCheck, TradeCandidate
+from .risk import evaluate_candidate
+from .storage import (
+    close_pending_order,
+    list_pending_orders,
+    next_global_counter,
+    refresh_pending_order,
+    set_pending_order_exchange_order,
+)
+
+
+def _parse_time(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _order_id(order: dict[str, Any]) -> str:
+    return str(order.get("id") or order.get("clientOrderId") or order.get("info", {}).get("ordId") or "")
+
+
+def _float(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _position_symbol(position: dict[str, Any]) -> str:
+    return str(position.get("symbol") or position.get("info", {}).get("instId") or "")
+
+
+def _open_position_symbols(positions: list[dict[str, Any]]) -> set[str]:
+    symbols: set[str] = set()
+    for position in positions:
+        size = position.get("contracts")
+        if size is None:
+            size = position.get("info", {}).get("pos")
+        if abs(_float(size)) > 0:
+            symbol = _position_symbol(position)
+            if symbol:
+                symbols.add(symbol)
+    return symbols
+
+
+def _open_position_count(positions: list[dict[str, Any]]) -> int:
+    count = 0
+    for position in positions:
+        size = position.get("contracts")
+        if size is None:
+            size = position.get("info", {}).get("pos")
+        if abs(_float(size)) > 0:
+            count += 1
+    return count
+
+
+def _active_order_symbols(orders: list[dict[str, Any]]) -> set[str]:
+    symbols: set[str] = set()
+    for order in orders:
+        symbol = str(order.get("symbol") or order.get("info", {}).get("instId") or "")
+        if symbol:
+            symbols.add(symbol)
+    return symbols
+
+
+def _candidate_key(candidate: TradeCandidate) -> tuple[str, str]:
+    return candidate.symbol, candidate.side
+
+
+def _record_key(record: dict[str, Any]) -> tuple[str, str]:
+    return str(record.get("symbol") or ""), str(record.get("side") or "")
+
+
+def _fill_missing_quantity(candidate: TradeCandidate, record: dict[str, Any]) -> None:
+    if candidate.quantity and candidate.quantity > 0:
+        return
+    quantity = _float(record.get("quantity"))
+    if quantity > 0:
+        candidate.quantity = quantity
+
+
+def _record_age_hours(record: dict[str, Any], now: datetime) -> float:
+    created_at = _parse_time(str(record.get("created_at") or ""))
+    if not created_at:
+        return 0.0
+    return max(0.0, (now - created_at).total_seconds() / 3600)
+
+
+def _lifecycle_config(config: dict[str, Any]) -> dict[str, Any]:
+    pending_config = config.get("pending_orders", {})
+    return {
+        "local_max_age_hours": float(pending_config.get("local_max_age_hours", 6) or 6),
+        "exchange_max_age_days": float(pending_config.get("exchange_max_age_days", 1.5) or 1.5),
+        "order_type": str(pending_config.get("order_type", "limit") or "limit"),
+    }
+
+
+def _review_config(config: dict[str, Any]) -> dict[str, Any]:
+    pending_config = config.get("pending_orders", {})
+    review = pending_config.get("review", {})
+    strategy_config = config.get("strategy", {})
+    return {
+        "enabled": bool(review.get("enabled", True)),
+        "min_confidence": float(
+            review.get("min_confidence", max(0.0, float(strategy_config.get("min_confidence", 75)) - 5.0))
+        ),
+        "min_win_probability_pct": float(review.get("min_win_probability_pct", 0.0)),
+        "max_confidence_drop": float(review.get("max_confidence_drop", 12.0)),
+        "max_win_probability_drop_pct": float(review.get("max_win_probability_drop_pct", 8.0)),
+        "min_risk_reward": float(review.get("min_risk_reward", strategy_config.get("min_risk_reward", 1.5))),
+        "max_entry_drift_pct": float(review.get("max_entry_drift_pct", 1.2)),
+        "use_market_guard_memory": bool(review.get("use_market_guard_memory", True)),
+        "cancel_on_guard_avoid": bool(review.get("cancel_on_guard_avoid", True)),
+        "cancel_on_opposite_guard_direction": bool(review.get("cancel_on_opposite_guard_direction", True)),
+        "opposite_guard_min_risk_score": float(review.get("opposite_guard_min_risk_score", 4.0)),
+    }
+
+
+def _direction_opposes_side(direction: str, side: str) -> bool:
+    clean_direction = direction.lower()
+    clean_side = side.lower()
+    return (clean_side == "long" and clean_direction == "down") or (
+        clean_side == "short" and clean_direction == "up"
+    )
+
+
+def _guard_review_reasons(
+    layers: dict[str, Any],
+    side: str,
+    review: dict[str, Any],
+) -> list[str]:
+    if not review["use_market_guard_memory"] or not layers:
+        return []
+    reasons: list[str] = []
+    for label, key in (("5p", "layer_5m"), ("20p", "layer_20m")):
+        layer = layers.get(key) or {}
+        if not isinstance(layer, dict) or int(layer.get("sample_count") or 0) <= 0:
+            continue
+        action = str(layer.get("action") or "normal")
+        risk_score = float(layer.get("risk_score") or 0)
+        direction = str(layer.get("direction") or "")
+        if review["cancel_on_guard_avoid"] and action == "avoid_new_entry":
+            reasons.append(f"Market Guard {label} báo tránh vào lệnh mới (risk {risk_score:.2f})")
+            continue
+        if (
+            review["cancel_on_opposite_guard_direction"]
+            and action == "wait_confirmation"
+            and risk_score >= review["opposite_guard_min_risk_score"]
+            and _direction_opposes_side(direction, side)
+        ):
+            reasons.append(
+                f"Market Guard {label} đang ngược hướng {side.upper()} "
+                f"(hướng {direction}, risk {risk_score:.2f})"
+            )
+    return reasons
+
+
+def _pending_review_reasons(
+    config: dict[str, Any],
+    record: dict[str, Any],
+    candidate: TradeCandidate | None,
+    check: RiskCheck | None,
+    market_layers: dict[str, dict[str, Any]] | None,
+) -> list[str]:
+    review = _review_config(config)
+    if not review["enabled"]:
+        return list(check.reasons) if check and not check.passed else []
+
+    if candidate is None:
+        return ["LC không còn được xác nhận bởi lần scan mới"]
+
+    reasons: list[str] = []
+    if check and not check.passed:
+        reasons.extend(check.reasons)
+
+    confidence = float(candidate.confidence or 0)
+    if confidence < review["min_confidence"]:
+        reasons.append(f"Confidence {confidence:.2f} thấp hơn ngưỡng giữ LC {review['min_confidence']:.2f}")
+    original_confidence = _optional_float(record.get("confidence"))
+    if original_confidence is not None and original_confidence - confidence > review["max_confidence_drop"]:
+        reasons.append(
+            f"Confidence giảm {original_confidence - confidence:.2f} điểm so với lúc tạo LC"
+        )
+
+    win_probability = _optional_float(candidate.win_probability_pct)
+    if win_probability is not None and win_probability < review["min_win_probability_pct"]:
+        reasons.append(
+            f"Tỉ lệ thắng {win_probability:.2f}% thấp hơn ngưỡng giữ LC "
+            f"{review['min_win_probability_pct']:.2f}%"
+        )
+    original_win = _optional_float(record.get("win_probability_pct"))
+    if (
+        original_win is not None
+        and win_probability is not None
+        and original_win - win_probability > review["max_win_probability_drop_pct"]
+    ):
+        reasons.append(
+            f"Tỉ lệ thắng giảm {original_win - win_probability:.2f}% so với lúc tạo LC"
+        )
+
+    risk_reward = float(candidate.risk_reward or 0)
+    if risk_reward < review["min_risk_reward"]:
+        reasons.append(f"RR {risk_reward:.2f} thấp hơn ngưỡng giữ LC {review['min_risk_reward']:.2f}")
+
+    old_entry = _optional_float(record.get("entry"))
+    if old_entry and old_entry > 0:
+        entry_drift_pct = abs(float(candidate.entry or 0) - old_entry) / old_entry * 100
+        if entry_drift_pct > review["max_entry_drift_pct"]:
+            reasons.append(
+                f"Giá entry mới lệch {entry_drift_pct:.2f}% so với LC cũ "
+                f"(ngưỡng {review['max_entry_drift_pct']:.2f}%)"
+            )
+
+    symbol_layers = (market_layers or {}).get(candidate.symbol) or {}
+    reasons.extend(_guard_review_reasons(symbol_layers, candidate.side, review))
+    return reasons
+
+
+def _missing_candidate_reason(record: dict[str, Any], candidates_by_symbol: dict[str, TradeCandidate]) -> str:
+    symbol = str(record.get("symbol") or "")
+    side = str(record.get("side") or "").upper()
+    replacement = candidates_by_symbol.get(symbol)
+    if replacement:
+        return (
+            f"Scan mới không còn ủng hộ LC {side}; "
+            f"tín hiệu hiện tại nghiêng về {replacement.side.upper()}"
+        )
+    return "LC không còn nằm trong danh sách setup tốt của lần scan mới"
+
+
+def maintain_pending_orders(
+    config: dict[str, Any],
+    candidates: list[TradeCandidate],
+    *,
+    allow_release: bool = True,
+    market_layers: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    pending_config = config.get("pending_orders", {})
+    if not pending_config.get("enabled", True):
+        return {
+            "enabled": False,
+            "reviewed": 0,
+            "kept": 0,
+            "canceled": 0,
+            "closed": 0,
+            "converted": 0,
+            "submitted": 0,
+            "events": [],
+            "warnings": [],
+        }
+
+    open_records = prioritize_pending_records(list_pending_orders(config, status="OPEN", limit=200))
+    if not open_records:
+        return {
+            "enabled": True,
+            "reviewed": 0,
+            "kept": 0,
+            "canceled": 0,
+            "closed": 0,
+            "converted": 0,
+            "submitted": 0,
+            "events": [],
+            "warnings": [],
+        }
+
+    warnings: list[str] = []
+    events: list[dict[str, Any]] = []
+    open_exchange_order_ids: set[str] | None = None
+    open_position_symbols: set[str] = set()
+    active_symbols: set[str] = set()
+    active_count: int | None = None
+    position_count: int | None = None
+    exchange = None
+    if config.get("mode") != "dry_run":
+        try:
+            exchange = create_exchange(config, authenticated=True)
+            exchange.load_markets()
+            open_orders = exchange.fetch_open_orders()
+            open_exchange_order_ids = {order_id for order_id in (_order_id(order) for order in open_orders) if order_id}
+            positions = exchange.fetch_positions()
+            open_position_symbols = _open_position_symbols(positions)
+            active_symbols = set(open_position_symbols) | _active_order_symbols(open_orders)
+            position_count = _open_position_count(positions)
+            active_count = position_count + len(open_orders)
+        except Exception as exc:
+            warnings.append(f"Pending order sync skipped: {exc}")
+
+    now = datetime.now(timezone.utc)
+    lifecycle = _lifecycle_config(config)
+    max_active = int(config.get("risk", {}).get("max_active_trades", 1))
+    candidates_by_key = {_candidate_key(candidate): candidate for candidate in candidates}
+    candidates_by_symbol = {candidate.symbol: candidate for candidate in candidates}
+    reviewed = 0
+    kept = 0
+    canceled = 0
+    closed = 0
+    converted = 0
+    submitted = 0
+
+    for record in open_records:
+        reviewed += 1
+        local_id = int(record["id"])
+        lc_id = int(record.get("journal_id") or local_id)
+        exchange_order_id = str(record.get("exchange_order_id") or "")
+        symbol = str(record.get("symbol") or "")
+        if open_exchange_order_ids is not None and exchange_order_id and exchange_order_id not in open_exchange_order_ids:
+            side = str(record.get("side") or "")
+            if symbol in open_position_symbols:
+                vt_id = next_global_counter(config, "VT")
+                reason = f"LC #{lc_id} filled and converted to VT #{vt_id}"
+                close_pending_order(config, local_id, "FILLED", reason)
+                append_event(
+                    config,
+                    {
+                        "mode": config.get("mode", "dry_run"),
+                        "submitted": True,
+                        "order_id": exchange_order_id,
+                        "entry_type": "pending_filled",
+                        "order_type": "limit",
+                        "journal_type": "VT",
+                        "journal_id": vt_id,
+                        "linked_journal_id": lc_id,
+                        "symbol": symbol,
+                        "side": side,
+                        "entry": record.get("entry"),
+                        "stop_loss": record.get("stop_loss"),
+                        "take_profit": record.get("take_profit"),
+                        "quantity": record.get("quantity"),
+                        "notional_usdt": record.get("order_usdt"),
+                        "leverage": config.get("exchange", {}).get("leverage", 1),
+                    },
+                )
+                events.append(
+                    {
+                        "type": "pending_converted",
+                        "source": "lc_okx_filled",
+                        "from_status": str(record.get("status") or "LC_OKX"),
+                        "lc_id": lc_id,
+                        "vt_id": vt_id,
+                        "symbol": symbol,
+                        "side": side,
+                        "exchange_order_id": exchange_order_id,
+                    }
+                )
+                converted += 1
+            else:
+                reason = "Exchange order is no longer open"
+                close_pending_order(config, local_id, "CANCELED", reason)
+                events.append(
+                    {
+                        "type": "pending_canceled",
+                        "lc_id": lc_id,
+                        "symbol": symbol,
+                        "side": str(record.get("side") or ""),
+                        "reason": reason,
+                    }
+                )
+                canceled += 1
+            continue
+
+        expires_at = _parse_time(str(record.get("expires_at") or ""))
+        candidate = candidates_by_key.get(_record_key(record))
+        check = (
+            evaluate_candidate(
+                config,
+                candidate,
+                check_active_trades=False,
+                check_order_limits=False,
+            )
+            if candidate
+            else None
+        )
+        review_reasons = _pending_review_reasons(config, record, candidate, check, market_layers)
+        if candidate and not review_reasons:
+            _fill_missing_quantity(candidate, record)
+            local_age_hours = _record_age_hours(record, now)
+
+            if exchange_order_id:
+                if expires_at and expires_at <= now:
+                    if exchange is None:
+                        warnings.append(f"{symbol}: expired OKX pending order was not canceled because OKX sync is unavailable")
+                        kept += 1
+                        continue
+                    reason = f"LC OKX expired after {lifecycle['exchange_max_age_days']:.1f} day(s)"
+                    try:
+                        exchange.cancel_order(exchange_order_id, symbol)
+                    except Exception as exc:
+                        warnings.append(f"{symbol}: expired pending cancel failed: {exc}")
+                        kept += 1
+                        continue
+                    close_pending_order(config, local_id, "CANCELED", reason)
+                    events.append(
+                        {
+                            "type": "pending_canceled",
+                            "lc_id": lc_id,
+                            "symbol": symbol,
+                            "side": str(record.get("side") or ""),
+                            "reason": reason,
+                        }
+                    )
+                    canceled += 1
+                    continue
+
+                if symbol in open_position_symbols:
+                    if exchange is None:
+                        warnings.append(f"{symbol}: OKX pending order kept because OKX sync is unavailable")
+                        kept += 1
+                        continue
+                    reason = f"Active OKX position already exists for {symbol}"
+                    try:
+                        exchange.cancel_order(exchange_order_id, symbol)
+                    except Exception as exc:
+                        warnings.append(f"{symbol}: pending cancel failed: {exc}")
+                        kept += 1
+                        continue
+                    close_pending_order(config, local_id, "CANCELED", reason)
+                    events.append(
+                        {
+                            "type": "pending_canceled",
+                            "lc_id": lc_id,
+                            "symbol": symbol,
+                            "side": str(record.get("side") or ""),
+                            "reason": reason,
+                        }
+                    )
+                    canceled += 1
+                    continue
+
+                if position_count is not None and position_count > max_active and exchange is not None:
+                    reason = f"Open position limit exceeded: {position_count}/{max_active}"
+                    try:
+                        exchange.cancel_order(exchange_order_id, symbol)
+                    except Exception as exc:
+                        warnings.append(f"{symbol}: pending cancel failed: {exc}")
+                        kept += 1
+                        continue
+                    close_pending_order(config, local_id, "CANCELED", reason)
+                    events.append(
+                        {
+                            "type": "pending_canceled",
+                            "lc_id": lc_id,
+                            "symbol": symbol,
+                            "side": str(record.get("side") or ""),
+                            "reason": reason,
+                        }
+                    )
+                    canceled += 1
+                    continue
+
+                if (
+                    allow_release
+                    and config.get("mode") != "dry_run"
+                    and exchange is not None
+                    and position_count is not None
+                    and position_count < max_active
+                ):
+                    release_check = evaluate_candidate(
+                        config,
+                        candidate,
+                        check_active_trades=False,
+                        check_order_limits=True,
+                    )
+                    if not release_check.passed:
+                        warnings.append(
+                            f"{symbol}: OKX pending order kept because direct release risk check failed: "
+                            + "; ".join(release_check.reasons[:3])
+                        )
+                        kept += 1
+                        continue
+                    ai_decision = okx_ai_approval(
+                        config,
+                        candidate,
+                        release_check,
+                        context={"route": "lc_okx_release", "lc_id": lc_id, "from_status": "LC_OKX"},
+                    )
+                    if not ai_decision.get("approved"):
+                        warnings.append(
+                            f"{symbol}: OKX AI kept LC_OKX before VT: {ai_decision.get('reason') or ai_decision.get('decision')}"
+                        )
+                        events.append(
+                            {
+                                "type": "pending_ai_deferred",
+                                "source": "lc_okx_release",
+                                "lc_id": lc_id,
+                                "symbol": symbol,
+                                "side": str(record.get("side") or ""),
+                                "reason": ai_decision.get("reason") or ai_decision.get("decision"),
+                            }
+                        )
+                        kept += 1
+                        continue
+                    final_check = evaluate_candidate(
+                        config,
+                        candidate,
+                        check_active_trades=False,
+                        check_order_limits=True,
+                    )
+                    if not final_check.passed:
+                        warnings.append(
+                            f"{symbol}: final validator kept LC_OKX after OKX AI approval: "
+                            + "; ".join(final_check.reasons[:3])
+                        )
+                        kept += 1
+                        continue
+                    try:
+                        exchange.cancel_order(exchange_order_id, symbol)
+                    except Exception as exc:
+                        warnings.append(f"{symbol}: OKX pending cancel before direct release failed: {exc}")
+                        kept += 1
+                        continue
+
+                    vt_id = next_global_counter(config, "VT")
+                    execution = execute_candidate(
+                        config,
+                        candidate,
+                        order_type_override="market",
+                        entry_type="pending_released",
+                        journal_type="VT",
+                        journal_id=vt_id,
+                        linked_journal_id=lc_id,
+                    )
+                    if not execution.submitted:
+                        reason = f"OKX LC was canceled for direct entry, but market entry failed: {execution.message}"
+                        close_pending_order(config, local_id, "CANCELED", reason)
+                        events.append(
+                            {
+                                "type": "pending_canceled",
+                                "lc_id": lc_id,
+                                "symbol": symbol,
+                                "side": str(record.get("side") or ""),
+                                "reason": reason,
+                            }
+                        )
+                        canceled += 1
+                        continue
+
+                    reason = f"LC #{lc_id} canceled on OKX and converted to VT #{vt_id}"
+                    close_pending_order(config, local_id, "FILLED", reason)
+                    events.append(
+                        {
+                            "type": "pending_converted",
+                            "source": "lc_okx_released",
+                            "from_status": str(record.get("status") or "LC_OKX"),
+                            "lc_id": lc_id,
+                            "vt_id": vt_id,
+                            "symbol": symbol,
+                            "side": str(record.get("side") or ""),
+                            "exchange_order_id": execution.order_id,
+                        }
+                    )
+                    converted += 1
+                    if active_count is not None:
+                        active_count += 1
+                    if position_count is not None:
+                        position_count += 1
+                    active_symbols.add(symbol)
+                    continue
+
+                if not expires_at:
+                    refresh_pending_order(
+                        config,
+                        local_id,
+                        candidate,
+                        max_age_days=float(lifecycle["exchange_max_age_days"]),
+                    )
+                kept += 1
+                continue
+
+            if not allow_release:
+                kept += 1
+                continue
+            if config.get("mode") == "dry_run":
+                kept += 1
+                continue
+            if exchange is None or position_count is None:
+                warnings.append(f"{symbol}: local pending order kept because OKX sync is unavailable")
+                kept += 1
+                continue
+            if symbol in active_symbols:
+                reason = f"Active OKX position/order already exists for {symbol}"
+                close_pending_order(config, local_id, "CANCELED", reason)
+                events.append(
+                    {
+                        "type": "pending_canceled",
+                        "lc_id": lc_id,
+                        "symbol": symbol,
+                        "side": str(record.get("side") or ""),
+                        "reason": reason,
+                    }
+                )
+                canceled += 1
+                continue
+
+            if position_count >= max_active:
+                if local_age_hours >= float(lifecycle["local_max_age_hours"]):
+                    submit_check = evaluate_candidate(
+                        config,
+                        candidate,
+                        check_active_trades=False,
+                        check_order_limits=True,
+                    )
+                    if not submit_check.passed:
+                        warnings.append(
+                            f"{symbol}: local pending order kept because OKX submit risk check failed: "
+                            + "; ".join(submit_check.reasons[:3])
+                        )
+                        kept += 1
+                        continue
+                    ai_decision = okx_ai_approval(
+                        config,
+                        candidate,
+                        submit_check,
+                        context={"route": "local_lc_submit_okx", "lc_id": lc_id, "from_status": "OPEN"},
+                    )
+                    if not ai_decision.get("approved"):
+                        warnings.append(
+                            f"{symbol}: OKX AI kept local LC before OKX submit: {ai_decision.get('reason') or ai_decision.get('decision')}"
+                        )
+                        events.append(
+                            {
+                                "type": "pending_ai_deferred",
+                                "source": "local_lc_submit_okx",
+                                "lc_id": lc_id,
+                                "symbol": symbol,
+                                "side": str(record.get("side") or ""),
+                                "reason": ai_decision.get("reason") or ai_decision.get("decision"),
+                            }
+                        )
+                        kept += 1
+                        continue
+                    final_check = evaluate_candidate(
+                        config,
+                        candidate,
+                        check_active_trades=False,
+                        check_order_limits=True,
+                    )
+                    if not final_check.passed:
+                        warnings.append(
+                            f"{symbol}: final validator kept local LC before OKX submit: "
+                            + "; ".join(final_check.reasons[:3])
+                        )
+                        kept += 1
+                        continue
+                    execution = execute_candidate(
+                        config,
+                        candidate,
+                        order_type_override=str(lifecycle["order_type"]),
+                        entry_type="pending_okx",
+                        journal_type="LC",
+                        journal_id=lc_id,
+                    )
+                    if not execution.submitted or not execution.order_id:
+                        warnings.append(f"{symbol}: local pending submit to OKX failed: {execution.message}")
+                        kept += 1
+                        continue
+                    set_pending_order_exchange_order(
+                        config,
+                        local_id,
+                        candidate,
+                        execution.order_id,
+                        max_age_days=float(lifecycle["exchange_max_age_days"]),
+                    )
+                    events.append(
+                        {
+                            "type": "pending_submitted",
+                            "status": "LC_OKX",
+                            "lc_id": lc_id,
+                            "symbol": symbol,
+                            "side": str(record.get("side") or ""),
+                            "exchange_order_id": execution.order_id,
+                            "local_age_hours": round(local_age_hours, 2),
+                            "expires_in_days": float(lifecycle["exchange_max_age_days"]),
+                        }
+                    )
+                    submitted += 1
+                    kept += 1
+                    continue
+                if not expires_at or expires_at <= now:
+                    refresh_pending_order(
+                        config,
+                        local_id,
+                        candidate,
+                        max_age_hours=float(lifecycle["local_max_age_hours"]),
+                    )
+                kept += 1
+                continue
+
+            if position_count < max_active:
+                release_check = evaluate_candidate(
+                    config,
+                    candidate,
+                    check_active_trades=False,
+                    check_order_limits=True,
+                )
+                if not release_check.passed:
+                    warnings.append(
+                        f"{symbol}: local pending order kept because release risk check failed: "
+                        + "; ".join(release_check.reasons[:3])
+                    )
+                    kept += 1
+                    continue
+                ai_decision = okx_ai_approval(
+                    config,
+                    candidate,
+                    release_check,
+                    context={"route": "local_lc_release", "lc_id": lc_id, "from_status": "OPEN"},
+                )
+                if not ai_decision.get("approved"):
+                    warnings.append(
+                        f"{symbol}: OKX AI kept local LC before VT: {ai_decision.get('reason') or ai_decision.get('decision')}"
+                    )
+                    events.append(
+                        {
+                            "type": "pending_ai_deferred",
+                            "source": "local_lc_release",
+                            "lc_id": lc_id,
+                            "symbol": symbol,
+                            "side": str(record.get("side") or ""),
+                            "reason": ai_decision.get("reason") or ai_decision.get("decision"),
+                        }
+                    )
+                    kept += 1
+                    continue
+                final_check = evaluate_candidate(
+                    config,
+                    candidate,
+                    check_active_trades=False,
+                    check_order_limits=True,
+                )
+                if not final_check.passed:
+                    warnings.append(
+                        f"{symbol}: final validator kept local LC before VT: "
+                        + "; ".join(final_check.reasons[:3])
+                    )
+                    kept += 1
+                    continue
+
+                vt_id = next_global_counter(config, "VT")
+                execution = execute_candidate(
+                    config,
+                    candidate,
+                    order_type_override="market",
+                    entry_type="pending_released",
+                    journal_type="VT",
+                    journal_id=vt_id,
+                    linked_journal_id=lc_id,
+                )
+                if not execution.submitted:
+                    warnings.append(f"{symbol}: local pending release failed: {execution.message}")
+                    kept += 1
+                    continue
+
+                reason = f"LC #{lc_id} released and converted to VT #{vt_id}"
+                close_pending_order(config, local_id, "FILLED", reason)
+                events.append(
+                    {
+                        "type": "pending_converted",
+                        "source": "local_released",
+                        "from_status": str(record.get("status") or "OPEN"),
+                        "lc_id": lc_id,
+                        "vt_id": vt_id,
+                        "symbol": symbol,
+                        "side": str(record.get("side") or ""),
+                        "exchange_order_id": execution.order_id,
+                    }
+                )
+                converted += 1
+                if active_count is not None:
+                    active_count += 1
+                if position_count is not None:
+                    position_count += 1
+                active_symbols.add(symbol)
+                continue
+
+        reason = "; ".join(review_reasons[:3]) if review_reasons else "Pending setup no longer passes scan"
+        if candidate is None:
+            reason = _missing_candidate_reason(record, candidates_by_symbol)
+        if exchange is None and config.get("mode") != "dry_run" and exchange_order_id:
+            warnings.append(f"{symbol}: pending order was not canceled because OKX sync is unavailable")
+            kept += 1
+            continue
+        if exchange is not None and exchange_order_id:
+            try:
+                exchange.cancel_order(exchange_order_id, symbol)
+            except Exception as exc:
+                warnings.append(f"{symbol}: pending cancel failed: {exc}")
+                kept += 1
+                continue
+        close_pending_order(config, local_id, "CANCELED", reason)
+        events.append(
+            {
+                "type": "pending_canceled",
+                "lc_id": lc_id,
+                "symbol": symbol,
+                "side": str(record.get("side") or ""),
+                "reason": reason,
+            }
+        )
+        canceled += 1
+
+    return {
+        "enabled": True,
+        "reviewed": reviewed,
+        "kept": kept,
+        "canceled": canceled,
+        "closed": closed,
+        "converted": converted,
+        "submitted": submitted,
+        "events": events,
+        "warnings": warnings,
+    }

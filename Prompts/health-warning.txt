@@ -1,0 +1,3 @@
+Bunny Health Monitor indicates warning or critical conditions.
+Use the highest threshold and the lowest safe risk profile.
+If the system is paused, reject the trade.
