@@ -9,10 +9,58 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from crypto_trader.config import load_config
+from crypto_trader.codex_features import close_trade_execution, record_trade_candidates, record_trade_execution, try_slot_refill
+from crypto_trader.models import TradeCandidate
+from crypto_trader.storage import connect_state_db, save_market_scan_observations
 from crypto_trader.ui import _telegram_action_response, create_app
 
 
 class UiTest(TestCase):
+    def _candidate(self) -> TradeCandidate:
+        candidate = TradeCandidate(
+            symbol="BTC/USDT:USDT",
+            base="BTC",
+            side="long",
+            confidence=82.0,
+            win_probability_pct=84.5,
+            entry=100.0,
+            stop_loss=97.5,
+            take_profit=103.75,
+            risk_reward=1.5,
+            order_usdt=20.0,
+            quantity=1.0,
+            spread_pct=0.01,
+            news_score=0.0,
+            news_count=1,
+            take_profit_pct=75,
+            stop_loss_pct=50,
+        )
+        candidate.indicator_summary = {
+            "timeframe": "1m",
+            "trend": "up",
+            "candlestick_patterns": {"patterns": ["bullish_marubozu"], "bullish_score": 1.4},
+        }
+        candidate.higher_timeframes = {
+            "4h": {"trend": "up", "candlestick_patterns": {"patterns": ["morning_star"], "bullish_score": 3.5}},
+        }
+        return candidate
+
+    def _feature_config(self, tmpdir: str, *, max_positions: int = 2) -> tuple[Path, dict]:
+        config_path = Path(tmpdir) / "config.yaml"
+        config_path.write_text(
+            "mode: dry_run\n"
+            f"state_db_path: {Path(tmpdir, 'state.sqlite').as_posix()}\n"
+            "ai:\n"
+            "  okx:\n"
+            "    provider: local_policy\n"
+            "trading_risk:\n"
+            f"  max_concurrent_positions: {max_positions}\n"
+            "  normal_min_rule_score: 80\n"
+            "  normal_min_gpt_confidence: 80\n",
+            encoding="utf-8",
+        )
+        return config_path, load_config(config_path)
+
     def test_config_endpoint_returns_strategy_summary(self) -> None:
         client = TestClient(create_app("config.example.yaml"))
 
@@ -229,3 +277,94 @@ class UiTest(TestCase):
         ]
         self.assertIn("scan_now", callbacks)
         self.assertIn("view_guard", callbacks)
+        self.assertIn("view_memory", callbacks)
+
+    def test_market_scan_memory_endpoint_returns_recent_observations(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text(
+                "mode: dry_run\n"
+                f"state_db_path: {Path(tmpdir, 'state.sqlite').as_posix()}\n",
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            save_market_scan_observations(config, [self._candidate()], source="test-scan", limit=10)
+            client = TestClient(create_app(config_path))
+
+            response = client.get("/api/market-scan-memory?symbol=BTC/USDT:USDT&timeframe=1m,4h")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("BTC/USDT:USDT", payload["symbols"])
+        self.assertIn("1m", payload["memory"]["BTC/USDT:USDT"])
+        self.assertIn("4h", payload["memory"]["BTC/USDT:USDT"])
+
+    def test_telegram_memory_action_formats_recent_scan_memory(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text(
+                "mode: dry_run\n"
+                f"state_db_path: {Path(tmpdir, 'state.sqlite').as_posix()}\n",
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            save_market_scan_observations(config, [self._candidate()], source="test-scan", limit=10)
+
+            _, message, keyboard = _telegram_action_response(config, "view_memory", config_path)
+
+        self.assertIn("Scan memory", message)
+        self.assertIn("BTC/USDT:USDT", message)
+        self.assertIsNone(keyboard)
+
+    def test_rejected_trade_execution_is_persisted(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            _config_path, config = self._feature_config(tmpdir)
+            candidate = self._candidate()
+            candidate.confidence = 60
+            candidate.rule_score = 60
+
+            record = record_trade_execution(config, candidate)
+
+            with connect_state_db(config) as connection:
+                rows = connection.execute("SELECT * FROM trade_executions").fetchall()
+
+        self.assertEqual(record["status"], "REJECTED")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "REJECTED")
+        self.assertTrue(rows[0]["reject_reason"])
+
+    def test_slot_refill_uses_requested_free_slot(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            _config_path, config = self._feature_config(tmpdir, max_positions=2)
+            candidate = self._candidate()
+            candidate.confidence = 95
+            candidate.rule_score = 95
+            candidate.risk_reward = 3.0
+            record_trade_candidates(config, [candidate])
+
+            result = try_slot_refill(config, 2)
+
+        self.assertTrue(result["refilled"])
+        self.assertEqual(result["tradeExecution"]["position_slot"], 2)
+
+    def test_replay_stats_endpoint_reports_performance_metrics(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path, config = self._feature_config(tmpdir)
+            candidate = self._candidate()
+            candidate.confidence = 95
+            candidate.rule_score = 95
+            candidate.risk_reward = 3.0
+            execution = record_trade_execution(config, candidate)
+            close_trade_execution(config, int(execution["id"]), "WIN", 12.5)
+            client = TestClient(create_app(config_path))
+
+            replay_response = client.post("/api/replay/run", json={"tradeExecutionId": execution["id"]})
+            stats_response = client.get("/api/replay/stats")
+
+        self.assertEqual(replay_response.status_code, 200)
+        self.assertEqual(stats_response.status_code, 200)
+        stats = stats_response.json()
+        self.assertEqual(stats["replayCount"], 1)
+        self.assertIn("replayWinRate", stats)
+        self.assertIn("replayProfitFactor", stats)
+        self.assertIn("replayDrawdown", stats)

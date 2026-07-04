@@ -13,6 +13,7 @@ from .storage import (
     list_pending_orders,
     list_trade_memory,
     next_daily_counter,
+    recent_market_scan_memory,
     save_trade_memory,
     set_journal_state,
 )
@@ -851,6 +852,42 @@ def format_pending_orders_view(config: dict[str, Any]) -> str:
             lines.append("   🟡 Trạng thái: nội bộ, chưa gửi OKX")
         else:
             lines.append(f"   📤 Trạng thái: đã gửi OKX | ID: {row.get('exchange_order_id')}")
+    return "\n".join(lines)
+
+
+def _format_memory_signal(entry: dict[str, Any]) -> str:
+    indicator = entry.get("indicator") if isinstance(entry.get("indicator"), dict) else {}
+    patterns = indicator.get("candlestick_patterns") if isinstance(indicator.get("candlestick_patterns"), dict) else {}
+    pattern_names = patterns.get("patterns") if isinstance(patterns.get("patterns"), list) else []
+    strongest = ", ".join(str(item) for item in pattern_names[:2]) if pattern_names else "-"
+    trend = indicator.get("trend") or indicator.get("trend_context") or "-"
+    side = str(entry.get("side") or "-").upper()
+    win = _fmt_number(entry.get("win_probability_pct"), 1)
+    score = _fmt_number(entry.get("score"), 2)
+    observed_at = date_time_label(_parse_time(entry.get("created_at")))
+    return f"{observed_at} | {side} | win {win}% | score {score} | trend {trend} | nến {strongest}"
+
+
+def format_market_scan_memory_view(config: dict[str, Any]) -> str:
+    memory = recent_market_scan_memory(
+        config,
+        timeframes=["1m", "5m", "15m", "1h", "4h"],
+        lookback_hours=24,
+        per_symbol_timeframe_limit=2,
+        total_limit=500,
+    )
+    lines = [f"🧠 Scan memory {date_time_label()}", f"📊 Symbol có dữ liệu: {len(memory)}"]
+    if not memory:
+        lines.append("⚪ Chưa có scan memory trong 24 giờ gần nhất")
+        return "\n".join(lines)
+    for symbol, frames in list(memory.items())[:8]:
+        lines.append(f"\n{_coin_icon(symbol)} {symbol}")
+        for timeframe in ["4h", "1h", "15m", "5m", "1m"]:
+            entries = frames.get(timeframe) or []
+            if not entries:
+                continue
+            latest = entries[0]
+            lines.append(f"  {timeframe}: {_format_memory_signal(latest)}")
     return "\n".join(lines)
 
 

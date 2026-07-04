@@ -59,6 +59,7 @@ def telegram_control_keyboard() -> dict[str, Any]:
             [
                 {"text": "📊 PNL/SD", "callback_data": "view_pnl_sd"},
                 {"text": "🛡 Guard", "callback_data": "view_guard"},
+                {"text": "🧠 Memory", "callback_data": "view_memory"},
             ],
             [
                 {"text": "💰 Set USDT", "callback_data": "set_order_usdt"},

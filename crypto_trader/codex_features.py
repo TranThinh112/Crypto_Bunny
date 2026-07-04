@@ -686,7 +686,9 @@ def create_strategy_version(config: dict[str, Any], payload: dict[str, Any]) -> 
         )
         connection.commit()
         row = connection.execute("SELECT * FROM strategy_versions WHERE version = ?", (version,)).fetchone()
-    return dict(row) if row else record
+    result = dict(row) if row else record
+    result["performance"] = _strategy_performance_stats(config, version)
+    return result
 
 
 def activate_strategy_version(config: dict[str, Any], version: str) -> dict[str, Any]:
@@ -698,7 +700,9 @@ def activate_strategy_version(config: dict[str, Any], version: str) -> dict[str,
         row = connection.execute("SELECT * FROM strategy_versions WHERE version = ?", (version,)).fetchone()
     if row is None:
         raise ValueError(f"Strategy version not found: {version}")
-    return dict(row)
+    result = dict(row)
+    result["performance"] = _strategy_performance_stats(config, version)
+    return result
 
 
 def strategy_history(config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -707,7 +711,10 @@ def strategy_history(config: dict[str, Any]) -> list[dict[str, Any]]:
         rows = connection.execute(
             "SELECT * FROM strategy_versions ORDER BY created_at DESC, id DESC"
         ).fetchall()
-    return [dict(row) for row in rows]
+    items = [dict(row) for row in rows]
+    for item in items:
+        item["performance"] = _strategy_performance_stats(config, str(item.get("version") or ""))
+    return items
 
 
 def current_strategy_state(config: dict[str, Any]) -> dict[str, Any]:
@@ -717,6 +724,8 @@ def current_strategy_state(config: dict[str, Any]) -> dict[str, Any]:
             "SELECT * FROM strategy_versions WHERE is_active = 1 ORDER BY id ASC"
         ).fetchall()
     active = [dict(row) for row in rows]
+    for item in active:
+        item["performance"] = _strategy_performance_stats(config, str(item.get("version") or ""))
     return {
         "active": active,
         "count": len(active),
@@ -1144,6 +1153,58 @@ def _closed_trade_executions(config: dict[str, Any], *, limit: int = 5000) -> li
     return [dict(row) for row in rows]
 
 
+def _trade_performance_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    closed = [row for row in rows if str(row.get("status") or "") in {"WIN", "LOSS", "BREAKEVEN", "CLOSED"}]
+    win_count = sum(1 for row in closed if str(row.get("status") or "") == "WIN")
+    loss_count = sum(1 for row in closed if str(row.get("status") or "") == "LOSS")
+    breakeven_count = sum(1 for row in closed if str(row.get("status") or "") == "BREAKEVEN")
+    pnl_values = [_safe_float(row.get("pnl")) for row in reversed(closed)]
+    gross_profit = sum(pnl for pnl in pnl_values if pnl > 0)
+    gross_loss = abs(sum(pnl for pnl in pnl_values if pnl < 0))
+    equity = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
+    for pnl in pnl_values:
+        equity += pnl
+        peak = max(peak, equity)
+        if peak > 0:
+            max_drawdown = max(max_drawdown, (peak - equity) / peak * 100)
+    hold_times: list[float] = []
+    for row in closed:
+        opened_at = _parse_time(row.get("created_at"))
+        closed_at = _parse_time(row.get("closed_at"))
+        if opened_at and closed_at:
+            hold_times.append(max(0.0, (closed_at - opened_at).total_seconds() / 60.0))
+    settled = win_count + loss_count
+    return {
+        "totalTrades": len(closed),
+        "winCount": win_count,
+        "lossCount": loss_count,
+        "breakevenCount": breakeven_count,
+        "winRate": round(win_count / settled * 100, 2) if settled else 0.0,
+        "profitFactor": 999.0 if gross_loss == 0 and gross_profit > 0 else round(gross_profit / gross_loss, 4) if gross_loss else 0.0,
+        "drawdown": round(max_drawdown, 4),
+        "totalPnl": round(sum(pnl_values), 6),
+        "averageRiskReward": round(_avg(_safe_float(row.get("risk_reward")) for row in closed), 4) if closed else 0.0,
+        "averageHoldMinutes": round(_avg(hold_times), 2) if hold_times else 0.0,
+        "averageConfidence": round(_avg(_safe_float(row.get("gpt_confidence")) for row in closed), 2) if closed else 0.0,
+    }
+
+
+def _strategy_performance_stats(config: dict[str, Any], version: str) -> dict[str, Any]:
+    with connect_state_db(config) as connection:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM trade_executions
+            WHERE strategy_version = ? AND status IN ('WIN', 'LOSS', 'BREAKEVEN', 'CLOSED')
+            ORDER BY COALESCE(closed_at, updated_at, created_at) DESC, id DESC
+            """,
+            (version,),
+        ).fetchall()
+    return _trade_performance_stats([dict(row) for row in rows])
+
+
 def _trading_risk_settings(config: dict[str, Any]) -> dict[str, Any]:
     settings = deepcopy(config.get("trading_risk", {}))
     settings["max_concurrent_positions"] = max(
@@ -1487,6 +1548,9 @@ def validate_entry(config: dict[str, Any], payload: dict[str, Any]) -> dict[str,
         reasons.append(f"He thong dang pause den {state.get('pausedUntil')}")
     if health["isPaused"]:
         reasons.append(f"Bunny Health Monitor dang pause den {health.get('pausedUntil')}")
+    preferred_slot = _safe_int(payload.get("preferredPositionSlot", payload.get("preferred_position_slot")), 0)
+    if preferred_slot and preferred_slot not in free_slots:
+        reasons.append(f"Slot {preferred_slot} khong con trong")
     if open_count >= _safe_int(settings.get("max_concurrent_positions"), 3):
         reasons.append(f"Da het slot: {open_count}/{settings.get('max_concurrent_positions')}")
     current_rule_threshold = float(state["currentNormalMinRuleScore"])
@@ -1537,7 +1601,7 @@ def validate_entry(config: dict[str, Any], payload: dict[str, Any]) -> dict[str,
     )
     if health["isWarning"] or health["isCritical"]:
         risk_percent *= _safe_float(health["riskMultiplier"], 1.0)
-    assigned_slot = free_slots[0] if free_slots else None
+    assigned_slot = preferred_slot if preferred_slot in free_slots else free_slots[0] if free_slots else None
     return {
         "allowed": not reasons,
         "reason": "; ".join(reasons) if reasons else "PASS",
@@ -1597,6 +1661,7 @@ def record_trade_execution(
             "riskReward": candidate.risk_reward,
             "entryPrice": candidate.entry,
             "currentPrice": candidate.entry,
+            "preferredPositionSlot": candidate.position_slot,
             "spread_pct": candidate.spread_pct,
             "volumeConfirmed": _safe_float(candidate.indicator_summary.get("volume_ratio"), 1.0) >= 1.0,
             "noHighImpactNewsWithin60m": abs(candidate.news_score) < 4.0,
@@ -1606,11 +1671,12 @@ def record_trade_execution(
     metadata = candidate.decision_metadata or {}
     created_at = _iso_now()
     payload = _candidate_payload(candidate)
+    allowed = bool(validation.get("allowed"))
     row = {
         "created_at": created_at,
         "updated_at": created_at,
         "symbol": candidate.symbol,
-        "position_slot": validation.get("assignedPositionSlot"),
+        "position_slot": validation.get("assignedPositionSlot") if allowed else None,
         "parent_position_id": None,
         "side": candidate.side.upper(),
         "entry_price": candidate.entry,
@@ -1620,10 +1686,10 @@ def record_trade_execution(
         "risk_percent": validation.get("riskPercent") or candidate.risk_percent or 0,
         "rule_score": _candidate_rule_score(candidate),
         "gpt_confidence": candidate.confidence,
-        "status": "OPEN",
+        "status": "OPEN" if allowed else "REJECTED",
         "pnl": None,
-        "reject_reason": None,
-        "closed_at": None,
+        "reject_reason": None if allowed else validation.get("reason"),
+        "closed_at": None if allowed else created_at,
         "payload_json": json.dumps(payload, ensure_ascii=False),
         "market_regime": candidate.market_regime,
         "regime_confidence": candidate.regime_confidence,
@@ -1665,6 +1731,7 @@ def record_trade_execution(
         )
         connection.commit()
         row["id"] = int(cursor.lastrowid)
+    row["validation"] = validation
     refresh_trading_system_state(config)
     refresh_bunny_health_state(config)
     return row
@@ -1696,6 +1763,16 @@ def _mark_trade_candidate_used(config: dict[str, Any], candidate_id: int) -> Non
             (_iso_now(), candidate_id),
         )
         connection.commit()
+
+
+def _claim_trade_candidate(config: dict[str, Any], candidate_id: int) -> bool:
+    with connect_state_db(config) as connection:
+        cursor = connection.execute(
+            "UPDATE trade_candidates SET is_used = 1, used_at = ? WHERE id = ? AND is_used = 0",
+            (_iso_now(), candidate_id),
+        )
+        connection.commit()
+    return cursor.rowcount == 1
 
 
 def _slot_refill_settings(config: dict[str, Any]) -> dict[str, Any]:
@@ -1730,7 +1807,7 @@ def try_slot_refill(config: dict[str, Any], position_slot: int) -> dict[str, Any
             (
                 cutoff,
                 _safe_float(settings.get("min_candidate_rule_score"), 78),
-                max(1, _safe_int(settings.get("max_refill_attempts_per_slot"), 3) * 10),
+                max(1, _safe_int(settings.get("max_refill_attempts_per_slot"), 3)),
             ),
         ).fetchall()
     for row in rows:
@@ -1746,6 +1823,7 @@ def try_slot_refill(config: dict[str, Any], position_slot: int) -> dict[str, Any
                 "riskReward": candidate.risk_reward,
                 "entryPrice": candidate.entry,
                 "currentPrice": candidate.entry,
+                "preferredPositionSlot": position_slot,
                 "spread_pct": candidate.spread_pct,
                 "volumeConfirmed": _safe_float(candidate.indicator_summary.get("volume_ratio"), 1.0) >= 1.0,
                 "noHighImpactNewsWithin60m": abs(candidate.news_score) < 4.0,
@@ -1756,11 +1834,14 @@ def try_slot_refill(config: dict[str, Any], position_slot: int) -> dict[str, Any
             continue
         if validation.get("assignedPositionSlot") != position_slot:
             continue
+        if not _claim_trade_candidate(config, _safe_int(row["id"])):
+            continue
         candidate.position_slot = position_slot
         candidate.risk_percent = validation.get("riskPercent")
         candidate.setup_quality = "RECOVERY" if validation.get("isRecoveryMode") else "NORMAL"
         row_payload = record_trade_execution(config, candidate, execution={"source": "slot_refill"})
-        _mark_trade_candidate_used(config, _safe_int(row["id"]))
+        if str(row_payload.get("status") or "") == "REJECTED":
+            return {"refilled": False, "reason": row_payload.get("reject_reason") or "Refill validation rejected"}
         return {"refilled": True, "reason": "Refill created trade execution", "tradeExecution": row_payload}
     return {"refilled": False, "reason": "No candidate passed refill validation"}
 
@@ -1955,15 +2036,39 @@ def replay_batch(config: dict[str, Any], limit: int) -> dict[str, Any]:
 def replay_stats(config: dict[str, Any]) -> dict[str, Any]:
     with connect_state_db(config) as connection:
         rows = connection.execute(
-            "SELECT * FROM replay_history ORDER BY replay_at DESC, id DESC"
+            """
+            SELECT r.*, e.status AS trade_status, e.pnl AS trade_pnl, e.risk_reward, e.gpt_confidence,
+                   e.created_at AS trade_created_at, e.closed_at AS trade_closed_at
+            FROM replay_history r
+            LEFT JOIN trade_executions e ON e.id = r.trade_execution_id
+            ORDER BY r.replay_at DESC, r.id DESC
+            """
         ).fetchall()
     payloads = [dict(row) for row in rows]
     total = len(payloads)
     changed = sum(1 for row in payloads if _safe_int(row.get("decision_changed")) == 1)
+    confidence_changed = sum(1 for row in payloads if _safe_int(row.get("confidence_changed")) == 1)
+    replayed_trades = [
+        {
+            "status": row.get("trade_status"),
+            "pnl": row.get("trade_pnl"),
+            "risk_reward": row.get("risk_reward"),
+            "gpt_confidence": row.get("new_confidence"),
+            "created_at": row.get("trade_created_at"),
+            "closed_at": row.get("trade_closed_at"),
+        }
+        for row in payloads
+        if str(row.get("new_decision") or "").upper() not in {"NO_TRADE", "NONE", "REJECTED"}
+    ]
+    performance = _trade_performance_stats(replayed_trades)
     return {
         "replayCount": total,
         "decisionChangedPercent": round(changed / total * 100, 2) if total else 0.0,
+        "confidenceChangedPercent": round(confidence_changed / total * 100, 2) if total else 0.0,
         "averageLatency": round(_avg(_safe_float(row.get("latency")) for row in payloads), 2) if payloads else 0.0,
+        "replayWinRate": performance["winRate"],
+        "replayProfitFactor": performance["profitFactor"],
+        "replayDrawdown": performance["drawdown"],
+        "performance": performance,
         "recent": payloads[:20],
     }
-

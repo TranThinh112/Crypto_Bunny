@@ -37,6 +37,7 @@ from .codex_features import (
     recent_ai_trade_decisions,
     refresh_bunny_health_state,
     replay_batch,
+    replay_stats,
     replay_trade_execution,
     strategy_history,
     validate_entry,
@@ -69,6 +70,7 @@ from .reporting import (
     format_execution_messages,
     format_balance_view,
     format_market_guard_message,
+    format_market_scan_memory_view,
     format_pending_orders_view,
     format_pending_event_messages,
     format_pnl_sd_view,
@@ -76,7 +78,14 @@ from .reporting import (
     format_scan_message,
     format_telegram_menu,
 )
-from .storage import count_pending_orders, get_journal_state, latest_decision_payload, list_paper_trades, set_journal_state
+from .storage import (
+    count_pending_orders,
+    get_journal_state,
+    latest_decision_payload,
+    list_paper_trades,
+    recent_market_scan_memory,
+    set_journal_state,
+)
 from .sizing import STATE_KEY as SIZING_STATE_KEY
 
 
@@ -654,6 +663,8 @@ def _telegram_action_response(
         return config, format_balance_view(config), None
     if action == "view_lc":
         return config, format_pending_orders_view(config), None
+    if action == "view_memory":
+        return config, format_market_scan_memory_view(config), None
     if action == "view_pnl_sd":
         return config, format_pnl_sd_view(config), None
     if action == "set_order_usdt":
@@ -759,6 +770,7 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
         "/vt": "view_vt",
         "/sd": "view_sd",
         "/lc": "view_lc",
+        "/memory": "view_memory",
         "/pnl": "view_pnl_sd",
         "/lev": "set_leverage",
         "/leverage": "set_leverage",
@@ -1117,6 +1129,30 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
             "block": market_guard_block_status(config),
         }
 
+    @app.get("/api/market-scan-memory")
+    def market_scan_memory(
+        symbol: str | None = None,
+        timeframe: str | None = None,
+        lookback_hours: int = 24,
+        per_symbol_timeframe_limit: int = 3,
+    ) -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        symbols = [item.strip() for item in (symbol or "").split(",") if item.strip()] or None
+        timeframes = [item.strip() for item in (timeframe or "").split(",") if item.strip()] or None
+        memory = recent_market_scan_memory(
+            config,
+            symbols=symbols,
+            timeframes=timeframes,
+            lookback_hours=max(1, min(168, int(lookback_hours or 24))),
+            per_symbol_timeframe_limit=max(1, min(20, int(per_symbol_timeframe_limit or 3))),
+            total_limit=1000,
+        )
+        return {
+            "lookback_hours": max(1, min(168, int(lookback_hours or 24))),
+            "symbols": sorted(memory.keys()),
+            "memory": memory,
+        }
+
     @app.get("/api/okx-positions")
     def okx_positions() -> dict[str, Any]:
         config = load_config(app.state.config_path)
@@ -1301,6 +1337,11 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
             100,
         )
         return replay_batch(config, max(1, min(limit, 1000)))
+
+    @app.get("/api/replay/stats")
+    def replay_stats_endpoint() -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        return replay_stats(config)
 
     @app.get("/api/market-regime/current")
     def market_regime_current_endpoint() -> dict[str, Any]:
