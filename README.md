@@ -228,3 +228,4 @@ ai:
 
 Bot scan top 50 cap crypto USDT swap bang khung 1m/5m/1h, luu indicator, mo hinh nen va score vao SQLite. `gpt-5.4-mini` chay moi 4 tieng de tong hop thi truong va chon 1-3 setup tot nhat thanh LC noi bo. `gpt-5.5` chi duoc goi khi mot LC sap duoc dua len OKX hoac chuyen thanh VT. Sau khi 5.5 approve, code van chay validator cuoi cung truoc khi gui OKX. Bo nho LC sap xep bang policy cung: `LC_OKX -> LC noi bo -> setup mini moi`.
 "# Crypto_Bunny" 
+"# Crypto_Bunny" 
