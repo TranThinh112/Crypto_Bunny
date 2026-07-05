@@ -74,6 +74,8 @@ const refs = {
   systemModuleDetail: el("systemModuleDetail"),
   storageSummary: el("storageSummary"),
   scanMemorySummary: el("scanMemorySummary"),
+  lcPipelineSummary: el("lcPipelineSummary"),
+  lcPipelineRows: el("lcPipelineRows"),
   storageMaintenanceBtn: el("storageMaintenanceBtn"),
   planTag: el("planTag"),
   planCanvas: el("planCanvas"),
@@ -1781,7 +1783,7 @@ function renderSystemModules(modules) {
           <strong>${escapeHtml(module.name || "-")}</strong>
           <small>${escapeHtml(module.purpose || "-")}</small>
           <span class="module-update-note"><b>Thời gian cập nhật:</b> <span class="module-update-value">${escapeHtml(runtimeUpdatedLabel || "-")}</span><em class="module-update-badge">mỗi ${escapeHtml(updateIntervalLabel)}/1 lần</em></span>
-          <span class="module-file"><b>File cấu hình:</b> <span title="${escapeHtml(configFileLabel)}">${escapeHtml(configFileLabel)}</span></span>
+          <span class="module-file"><b>File cấu hình:</b> <span class="module-file-value" title="${escapeHtml(configFileLabel)}">${escapeHtml(configFileLabel)}</span></span>
           <span class="module-row-attention ${attentionRows.length || module.status === "warn" ? "warn" : "ok"}">${escapeHtml(attentionLabel)}</span>
         </div>
       `;
@@ -1853,6 +1855,46 @@ function renderSystemChecklist(payload) {
       ? rows.map((row) => `<div><strong>${escapeHtml(row.timeframe || "-")}</strong>: ${fmt(row.rows, 0)} dòng / ${fmt(row.symbols, 0)} cặp, mới nhất ${timeLabel(row.latest_at)}</div>`).join("")
       : "Chưa có scan memory.";
   }
+}
+
+function sideBadgeClass(side) {
+  const value = String(side || "").toLowerCase();
+  if (value === "long") return "long";
+  if (value === "short") return "short";
+  return "";
+}
+
+function renderLcPipeline(payload) {
+  const data = payload || {};
+  const counts = data.counts || {};
+  const settings = data.settings || {};
+  if (refs.lcPipelineSummary) {
+    refs.lcPipelineSummary.innerHTML = `
+      <div>Chưa Duyệt: <strong>${fmt(counts.undecided, 0)}</strong></div>
+      <div>Cắt lọc: bỏ ${fmt(settings.undecided_prune_drop, 0)} win rate thấp nhất khi vượt ${fmt(settings.undecided_prune_floor, 0)}</div>
+      <div>LC nội bộ: <strong>${fmt(counts.internal_lc, 0)}</strong> / tối đa ${fmt(settings.internal_lc_max, 0)}</div>
+      <div>Tổng hợp 2h hôm nay: <strong>${fmt(data.daily_two_hour_counter, 0)}</strong></div>
+      <div>Recheck: mỗi <strong>${fmt(settings.recheck_interval_minutes, 0)} phút</strong> · Promote sau <strong>${fmt(settings.promote_after_hours, 1)}h</strong></div>
+      <div>Lần 2h gần nhất: ${timeLabel(data.last_two_hour_slot)}</div>
+    `;
+  }
+  if (!refs.lcPipelineRows) return;
+  const undecided = Array.isArray(data.undecided) ? data.undecided : [];
+  const internalLc = Array.isArray(data.internal_lc) ? data.internal_lc : [];
+  const section = (title, rows) => `
+    <div class="lc-pipeline-section">
+      <div class="lc-pipeline-title">${escapeHtml(title)} <span>${fmt(rows.length, 0)}</span></div>
+      ${rows.length ? rows.slice(0, 6).map((row, index) => `
+        <div class="lc-pipeline-row">
+          <strong>${index + 1}. ${escapeHtml(row.symbol || "-")}</strong>
+          <span class="side ${sideBadgeClass(row.side)}">${escapeHtml(String(row.side || "-").toUpperCase())}</span>
+          <small>${timeLabel(row.last_seen_at || row.first_seen_at)} · sống ${escapeHtml(row.age_label || "-")}</small>
+        </div>
+      `).join("") : '<div class="lc-pipeline-empty">Chưa có dữ liệu.</div>'}
+    </div>
+  `;
+  refs.lcPipelineRows.innerHTML = section("Chưa Duyệt", undecided) + section("LC nội bộ", internalLc);
+  normalizeVietnameseUi(refs.lcPipelineRows);
 }
 
 function renderSystemSummaryChart(payload) {
@@ -2059,6 +2101,13 @@ async function loadSystemChecklist(date = "") {
   state.lastSystemChecklistPayload = payload;
   renderSystemChecklist(payload);
   if (refs.systemChecklistDate && payload.date) refs.systemChecklistDate.value = payload.date;
+  loadLcPipeline().catch((err) => setStatus(`Lỗi LC pipeline: ${err.message}`));
+}
+
+async function loadLcPipeline() {
+  const res = await fetch("/api/lc-pipeline");
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  renderLcPipeline(await res.json());
 }
 
 async function loadSystemSummary(period) {

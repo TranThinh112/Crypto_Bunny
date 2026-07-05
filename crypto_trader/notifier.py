@@ -57,6 +57,9 @@ def telegram_control_keyboard() -> dict[str, Any]:
                 {"text": "\U0001f7e1 LC", "callback_data": "view_lc"},
             ],
             [
+                {"text": "\U0001f4cb Chưa Duyệt", "callback_data": "view_undecided_lc"},
+            ],
+            [
                 {"text": "\U0001f6e1 Guard", "callback_data": "view_guard"},
                 {"text": "\U0001f9e0 Memory", "callback_data": "view_memory"},
                 {"text": "\U0001f916 AI", "callback_data": "view_ai"},

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import TestCase
@@ -11,7 +12,7 @@ from fastapi.testclient import TestClient
 from crypto_trader.config import load_config
 from crypto_trader.codex_features import close_trade_execution, record_trade_candidates, record_trade_execution, try_slot_refill
 from crypto_trader.models import TradeCandidate
-from crypto_trader.storage import connect_state_db, save_market_scan_observations
+from crypto_trader.storage import connect_state_db, save_market_scan_observations, set_journal_state
 from crypto_trader.ui import _telegram_action_response, create_app
 
 
@@ -278,6 +279,83 @@ class UiTest(TestCase):
         self.assertIn("scan_now", callbacks)
         self.assertIn("view_guard", callbacks)
         self.assertIn("view_memory", callbacks)
+        self.assertIn("view_undecided_lc", callbacks)
+
+    def test_telegram_undecided_lc_action_formats_pipeline_state(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text(
+                "mode: dry_run\n"
+                f"state_db_path: {Path(tmpdir, 'state.sqlite').as_posix()}\n",
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            set_journal_state(
+                config,
+                "lc_internal_pipeline_state",
+                json.dumps(
+                    {
+                        "undecided": [
+                            {
+                                "symbol": "LIT/USDT:USDT",
+                                "side": "long",
+                                "first_seen_at": "2026-07-06T00:00:00+00:00",
+                                "last_seen_at": "2026-07-06T03:00:00+00:00",
+                                "state": "CHUA_DUYET",
+                                "source_slot": "2h",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+
+            _, message, keyboard = _telegram_action_response(config, "view_undecided_lc", config_path)
+
+        self.assertIn("Chưa Duyệt", message)
+        self.assertIn("1. LIT/USDT:USDT | LONG", message)
+        self.assertIn("2h", message)
+        self.assertIn("sống", message)
+        self.assertIsNone(keyboard)
+
+    def test_lc_pipeline_endpoint_returns_dashboard_state(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text(
+                "mode: dry_run\n"
+                f"state_db_path: {Path(tmpdir, 'state.sqlite').as_posix()}\n",
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            set_journal_state(
+                config,
+                "lc_internal_pipeline_state",
+                json.dumps(
+                    {
+                        "day_key": "2026-07-06",
+                        "undecided": [
+                            {
+                                "symbol": "LIT/USDT:USDT",
+                                "side": "long",
+                                "first_seen_at": "2026-07-06T00:00:00+00:00",
+                                "last_seen_at": "2026-07-06T03:00:00+00:00",
+                                "state": "CHUA_DUYET",
+                            }
+                        ],
+                        "internal_lc": [],
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            client = TestClient(create_app(config_path))
+
+            response = client.get("/api/lc-pipeline")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["counts"]["undecided"], 1)
+        self.assertEqual(payload["undecided"][0]["symbol"], "LIT/USDT:USDT")
+        self.assertIn("age_label", payload["undecided"][0])
 
     def test_market_scan_memory_endpoint_returns_recent_observations(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:

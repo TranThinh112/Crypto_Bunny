@@ -921,6 +921,58 @@ def format_pending_orders_view(config: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _lc_pending_source_label(row: dict[str, Any]) -> str:
+    state = str(row.get("state") or "").upper()
+    if state == "CHUA_DUYET":
+        source = row.get("source_slot") or row.get("source") or row.get("slot")
+    else:
+        source = row.get("source") or row.get("slot")
+    source_text = str(source or "").lower()
+    if "two" in source_text or "2h" in source_text:
+        return "2h"
+    if "hour" in source_text or "1h" in source_text:
+        return "1h"
+    if state == "CHUA_DUYET":
+        return "2h"
+    return "-"
+
+
+def _duration_label(started_at: datetime | None, *, now: datetime | None = None) -> str:
+    if not started_at:
+        return "-"
+    now = now or datetime.now(timezone.utc)
+    seconds = max(0, int((now - started_at).total_seconds()))
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    return f"{minutes}m"
+
+
+def format_undecided_lc_view(config: dict[str, Any]) -> str:
+    raw = get_journal_state(config, "lc_internal_pipeline_state")
+    state: dict[str, Any] = {}
+    if raw:
+        try:
+            state = json.loads(raw)
+        except json.JSONDecodeError:
+            state = {}
+    rows = state.get("undecided") if isinstance(state.get("undecided"), list) else []
+    lines = [f"📋 Chưa Duyệt {date_time_label()}", f"📊 Tổng: {len(rows)}"]
+    if not rows:
+        lines.append("⚪ Chưa có cặp Chưa Duyệt")
+        return "\n".join(lines)
+    for index, row in enumerate(rows[:10], 1):
+        symbol = row.get("symbol") or "-"
+        side = str(row.get("side") or "-").upper()
+        scan_at = _parse_time(row.get("last_seen_at") or row.get("first_seen_at"))
+        first_seen_at = _parse_time(row.get("first_seen_at"))
+        source = _lc_pending_source_label(row)
+        alive = _duration_label(first_seen_at)
+        lines.append(f"{index}. {symbol} | {side} | {date_time_label(scan_at) if scan_at else '-'} | {source} | sống {alive}")
+    return "\n".join(lines)
+
+
 def _format_memory_signal(entry: dict[str, Any]) -> str:
     indicator = entry.get("indicator") if isinstance(entry.get("indicator"), dict) else {}
     patterns = indicator.get("candlestick_patterns") if isinstance(indicator.get("candlestick_patterns"), dict) else {}

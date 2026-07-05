@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Crypto Signal Bot</title>
-    <link rel="stylesheet" href="/static/styles.css?v=bar-axis-percent-20260705-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=lc-flow-corrected-20260706-1" />
   </head>
   <body>
     <main class="shell">
@@ -76,6 +76,11 @@
             <small id="pulseMove">Đang chờ giá đầu tiên</small>
           </div>
           <div class="pulse-feed" id="pulseFeed"></div>
+          <article class="health-card lc-pipeline-card pulse-lc-card">
+            <h3>LC Pipeline / Chưa Duyệt</h3>
+            <div id="lcPipelineSummary" class="health-lines">-</div>
+            <div id="lcPipelineRows" class="lc-pipeline-rows"></div>
+          </article>
         </div>
       </section>
 
@@ -244,6 +249,6 @@
       </div>
     </main>
 
-    <script src="/static/app.js?v=bar-axis-percent-20260705-1"></script>
+    <script src="/static/app.js?v=lc-flow-corrected-20260706-1"></script>
   </body>
 </html>

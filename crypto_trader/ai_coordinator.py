@@ -12,6 +12,7 @@ from .codex_features import (
     get_bunny_health_state,
     get_trading_system_state,
 )
+from .lc_pipeline import lc_pipeline_mini_pool, lc_pipeline_pool_rows, notify_mini_pool_summary
 from .market import fetch_market_snapshots, fetch_top_volume_symbols
 from .market_guard import market_guard_symbol_layers
 from .models import RiskCheck, TradeCandidate
@@ -486,7 +487,7 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
             "skipped": True,
             "skip_reason": f"mini scan already ran for slot {slot_id}",
         }
-    max_source_symbols = max(1, min(50, int(internal_config.get("market_scan_source_symbols", 50) or 50)))
+    max_source_symbols = max(1, min(40, int(internal_config.get("market_scan_source_symbols", 40) or 40)))
     max_symbols = max(1, min(3, int(internal_config.get("market_scan_max_symbols", 3) or 3)))
     compact_payload = bool(internal_config.get("compact_ai_payload", True))
     source_symbols, source_warnings = fetch_top_volume_symbols(config)
@@ -517,16 +518,34 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
         lookback_hours=12,
         per_symbol_timeframe_limit=1 if compact_payload else 3,
     )
-    ranked_candidates = sorted(
-        candidates,
-        key=lambda item: (float(item.win_probability_pct or 0), float(item.confidence or 0)),
-        reverse=True,
-    )
+    ranked_candidates = lc_pipeline_mini_pool(config, candidates, limit=max_symbols)
     candidate_summaries = [
         _candidate_market_summary(candidate, scan_memory_by_symbol=scan_memory, compact=compact_payload)
         for candidate in ranked_candidates[:max_symbols]
     ]
+    mini_candidate_symbols = [str(item.get("symbol")) for item in candidate_summaries if item.get("symbol")]
+    notify_mini_pool_summary(
+        config,
+        lc_pipeline_pool_rows(config, mini_candidate_symbols),
+        slot_id=slot_id,
+    )
     local_result = _local_market_scan_result(config, candidates, warnings)
+    has_full_mini_pool = len(mini_candidate_symbols) >= max_symbols
+    if mini_candidate_symbols:
+        local_result = {
+            **local_result,
+            "approved_symbols": mini_candidate_symbols,
+            "approved_count": len(mini_candidate_symbols),
+            "selection_source": "lc_internal_pipeline",
+        }
+    if not has_full_mini_pool:
+        local_result = {
+            **local_result,
+            "approved_symbols": [],
+            "approved_count": 0,
+            "selection_source": "lc_internal_pipeline_waiting",
+            "skip_reason": f"waiting for {max_symbols} internal LC candidates, current={len(mini_candidate_symbols)}",
+        }
 
     result = {
         "enabled": True,
@@ -550,9 +569,9 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
     }
     set_journal_state(config, INTERNAL_MARKET_SCAN_STATE_KEY, json.dumps(result, ensure_ascii=False))
 
-    if result["provider"] == "openai" and bool(internal_config.get("market_scan_use_ai", True)):
+    if has_full_mini_pool and result["provider"] == "openai" and bool(internal_config.get("market_scan_use_ai", True)):
         try:
-            allowed = set(local_result.get("approved_symbols") or [])
+            allowed = set(mini_candidate_symbols or local_result.get("approved_symbols") or [])
             ai_review = _openai_internal_market_scan(
                 config,
                 candidate_summaries[:max_symbols],
@@ -562,7 +581,7 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
             result["approved_symbols"] = _validated_ai_symbols(
                 ai_review,
                 allowed,
-                list(local_result.get("approved_symbols") or []),
+                list(mini_candidate_symbols or local_result.get("approved_symbols") or []),
                 max(1, min(max_symbols, int(internal_config.get("market_scan_pending_limit", 1) or 1))),
             )
             scores = ai_review.get("setup_scores")
@@ -576,7 +595,7 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
             result["ai_review_error"] = str(exc)
             result["fallback"] = "local_policy"
 
-    result["status"] = "done"
+    result["status"] = "done" if has_full_mini_pool else "waiting_lc"
     set_journal_state(config, INTERNAL_MARKET_SCAN_STATE_KEY, json.dumps(result, ensure_ascii=False))
     return result
 

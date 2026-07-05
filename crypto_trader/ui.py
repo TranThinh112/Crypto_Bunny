@@ -59,6 +59,7 @@ from .dashboard_services import (
     timeframe_state_dashboard,
 )
 from .engine import run_once
+from .lc_pipeline import lc_pipeline_dashboard_payload
 from .market import create_exchange
 from .market_guard import (
     latest_market_guard_status,
@@ -93,6 +94,7 @@ from .reporting import (
     format_positions_account_view,
     format_scan_message,
     format_telegram_menu,
+    format_undecided_lc_view,
 )
 from .storage import (
     count_pending_orders,
@@ -883,6 +885,8 @@ def _telegram_action_response(
         return config, format_balance_view(config), None
     if action == "view_lc":
         return config, format_pending_orders_view(config), None
+    if action == "view_undecided_lc":
+        return config, format_undecided_lc_view(config), None
     if action == "view_memory":
         return config, format_market_scan_memory_view(config), None
     if action == "view_ai":
@@ -1027,6 +1031,7 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
         "/vt": "view_positions_account",
         "/sd": "view_sd",
         "/lc": "view_lc",
+        "/chuaduyet": "view_undecided_lc",
         "/memory": "view_memory",
         "/ai": "view_ai",
         "/pnl": "view_positions_account",
@@ -1476,6 +1481,11 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
             "symbols": sorted(memory.keys()),
             "memory": memory,
         }
+
+    @app.get("/api/lc-pipeline")
+    def lc_pipeline_endpoint() -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        return lc_pipeline_dashboard_payload(config)
 
     @app.post("/api/market-scan-memory/prune")
     def market_scan_memory_prune() -> dict[str, Any]:

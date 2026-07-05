@@ -21,6 +21,7 @@ from .codex_features import (
     select_runtime_config,
 )
 from .executor import execute_candidate
+from .lc_pipeline import update_lc_internal_pipeline
 from .market import fetch_market_snapshots, fetch_top_volume_symbols
 from .market_guard import market_guard_symbol_layers, market_guard_top_risk
 from .models import Decision, ExecutionResult, RiskCheck, to_jsonable
@@ -405,6 +406,7 @@ def run_once(config: dict[str, Any], execute: bool) -> Decision:
         candidate.market_regime = market_regime.get("regime")
         candidate.regime_confidence = market_regime.get("confidence")
     record_trade_candidates(config, all_new_candidates)
+    lc_pipeline_state = update_lc_internal_pipeline(config, all_new_candidates)
     market_scan_storage = {
         "saved_rows": save_market_scan_observations(
             config,
@@ -434,6 +436,7 @@ def run_once(config: dict[str, Any], execute: bool) -> Decision:
     )
     candidates, scan_comparison = _merge_cycle_candidates(new_top, refreshed_previous, previous_payload)
     scan_comparison["market_scan_storage"] = market_scan_storage
+    scan_comparison["lc_internal_pipeline"] = lc_pipeline_state
     scan_comparison["universe"] = universe_context
     scan_comparison["market_regime"] = market_regime
     if internal_market_scan:

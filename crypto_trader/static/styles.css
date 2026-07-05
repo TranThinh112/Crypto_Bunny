@@ -312,8 +312,9 @@ h2 {
 
 .pulse-grid {
   display: grid;
-  grid-template-columns: minmax(260px, 0.35fr) minmax(0, 0.65fr);
-  gap: 14px;
+  grid-template-columns: minmax(220px, 0.28fr) minmax(320px, 1fr) minmax(280px, 0.36fr);
+  gap: 12px;
+  align-items: stretch;
 }
 
 .pair-cell {
@@ -535,15 +536,15 @@ tr.selected-row td {
 }
 
 .pulse-focus {
-  min-height: 112px;
-  padding: 14px;
+  min-height: 86px;
+  padding: 11px 12px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
 }
 
 .pulse-focus strong {
-  font-size: 24px;
+  font-size: 21px;
   line-height: 1.1;
   overflow-wrap: anywhere;
 }
@@ -570,8 +571,8 @@ tr.selected-row td {
 
 .pulse-feed {
   display: grid;
-  gap: 8px;
-  max-height: 180px;
+  gap: 6px;
+  max-height: 112px;
   overflow-y: auto;
 }
 
@@ -580,9 +581,9 @@ tr.selected-row td {
   grid-template-columns: 92px minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
-  min-height: 44px;
-  padding: 9px 11px;
-  font-size: 13px;
+  min-height: 36px;
+  padding: 7px 10px;
+  font-size: 12px;
 }
 
 .pulse-feed-item span {
@@ -950,7 +951,7 @@ tr:last-child td {
 
 .health-split {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
   padding: 0 16px 16px;
 }
@@ -962,6 +963,109 @@ tr:last-child td {
 
 .health-card .button {
   margin-top: 10px;
+}
+
+.lc-pipeline-card {
+  min-height: 120px;
+}
+
+.pulse-lc-card {
+  padding: 10px;
+  max-height: 148px;
+  overflow: auto;
+}
+
+.pulse-lc-card h3 {
+  margin-bottom: 6px;
+}
+
+.pulse-lc-card .health-lines {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px 8px;
+  font-size: 11px;
+}
+
+.pulse-lc-card .health-lines div:nth-child(n + 4) {
+  display: none;
+}
+
+.pulse-lc-card .lc-pipeline-rows {
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.pulse-lc-card .lc-pipeline-section:last-child {
+  display: none;
+}
+
+.pulse-lc-card .lc-pipeline-row {
+  padding: 6px 7px;
+}
+
+.pulse-lc-card .lc-pipeline-row:nth-of-type(n + 5) {
+  display: none;
+}
+
+.lc-pipeline-rows {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.lc-pipeline-section {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.lc-pipeline-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-weight: 900;
+  font-size: 12px;
+  color: var(--ink);
+}
+
+.lc-pipeline-title span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  min-height: 24px;
+  border-radius: 999px;
+  background: #edf4f5;
+  color: var(--teal);
+}
+
+.lc-pipeline-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 8px;
+  align-items: center;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.lc-pipeline-row strong {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.lc-pipeline-row small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.lc-pipeline-empty {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .module-grid {
@@ -2030,7 +2134,7 @@ tr:last-child td {
 
 .module-card .module-item-main {
   display: grid;
-  gap: 8px;
+  gap: 10px;
   min-width: 0;
   overflow: visible !important;
 }
@@ -2053,28 +2157,42 @@ tr:last-child td {
   text-overflow: clip;
 }
 
+.module-card .module-item-main small {
+  display: block;
+  max-height: none;
+  margin-bottom: 2px;
+}
+
 .module-card .module-update-note,
 .module-card .module-file {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 4px 6px;
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: start;
+  gap: 4px 7px;
+}
+
+.module-card .module-update-note {
+  grid-template-columns: max-content minmax(0, 1fr);
+}
+
+.module-card .module-update-badge {
+  grid-column: 1 / -1;
+  justify-self: start;
 }
 
 .module-card .module-update-note b,
 .module-card .module-file b {
   color: var(--ink);
-  flex: 0 0 auto;
+  min-width: max-content;
 }
 
 .module-update-value {
-  flex: 0 1 auto;
   min-width: 0;
   overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .module-file-value {
-  flex: 1 1 160px;
   min-width: 0;
   color: var(--muted);
   font-weight: 800;
