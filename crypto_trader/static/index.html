@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="en">
+<html lang="vi">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Crypto Signal Bot</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=bar-axis-percent-20260705-1" />
   </head>
   <body>
     <main class="shell">
@@ -18,7 +18,7 @@
             <input id="autoRun" type="checkbox" />
             <span>Tự động</span>
           </label>
-          <input id="intervalInput" class="interval" type="number" value="60" min="30" step="30" aria-label="Auto interval seconds" />
+          <input id="intervalInput" class="interval" type="number" value="60" min="30" step="30" aria-label="Chu kỳ tự động theo giây" />
           <label class="config-control margin-control">
             <span>USDT/lệnh</span>
             <input id="orderMarginInput" class="margin-input" type="number" value="2" min="1" max="20" step="0.1" inputmode="decimal" aria-label="USDT margin cho lệnh mới" />
@@ -53,7 +53,7 @@
           <div class="meter"><span id="confidenceBar"></span></div>
         </article>
         <article class="metric">
-          <span class="label">Tỉ lệ thắng ước tính</span>
+          <span class="label">Tỷ lệ thắng ước tính</span>
           <strong id="winRateValue">-</strong>
           <small id="winRateDetail">-</small>
         </article>
@@ -99,6 +99,9 @@
                 <th>Giá vào</th>
                 <th>Mark</th>
                 <th>Đòn bẩy</th>
+                <th>SL</th>
+                <th>TP</th>
+                <th>Bảo vệ</th>
                 <th>PnL chưa chốt</th>
                 <th>Margin</th>
               </tr>
@@ -126,6 +129,51 @@
             </thead>
             <tbody id="orderRows"></tbody>
           </table>
+        </div>
+      </section>
+
+      <section class="panel health-panel">
+        <div class="panel-header health-panel-header">
+          <div>
+            <h2>Bảng kiểm sức khỏe hệ thống</h2>
+            <p class="muted">Gom 9 tiêu chí vào một trung tâm theo dõi; click từng tiêu chí để xem dẫn chứng trong ngày.</p>
+          </div>
+          <div class="health-panel-actions">
+            <span id="systemChecklistStatus" class="muted">-</span>
+            <button id="systemChecklistToggle" class="button secondary" type="button">Mở chi tiết</button>
+          </div>
+        </div>
+        <div id="systemChecklistBody" class="health-body" hidden>
+          <div class="health-controls">
+            <input id="systemChecklistDate" type="date" aria-label="Chọn ngày dữ liệu hệ thống" />
+            <button id="systemChecklistHistoryBtn" class="button secondary" type="button">Xem ngày cũ</button>
+            <button id="systemChecklistTodayBtn" class="button secondary" type="button">Hôm nay</button>
+            <button id="systemSummaryWeekBtn" class="button secondary" type="button">Tổng hợp tuần</button>
+            <button id="systemSummaryMonthBtn" class="button secondary" type="button">Tổng hợp tháng</button>
+            <button id="systemSummaryYearBtn" class="button secondary" type="button">Tổng hợp năm</button>
+          </div>
+          <div id="systemSummaryChart" class="system-summary-chart" hidden></div>
+          <div class="health-section-head">
+            <h3>Tiêu chí đánh giá sức khỏe</h3>
+            <span class="muted">Runtime, chính sách AI, kill switch, nhật ký, dry-run/paper</span>
+          </div>
+          <div id="systemChecklistGrid" class="health-grid"></div>
+          <div class="health-section-head">
+            <h3>Module dùng cho hệ thống</h3>
+            <span id="systemModuleStatus" class="muted">-</span>
+          </div>
+          <div id="systemModuleGrid" class="module-grid"></div>
+          <div class="health-split">
+            <article class="health-card">
+              <h3>Storage / SQLite</h3>
+              <div id="storageSummary" class="health-lines">-</div>
+              <button id="storageMaintenanceBtn" class="button secondary" type="button">Bảo trì storage</button>
+            </article>
+            <article class="health-card">
+              <h3>Scan Memory theo timeframe</h3>
+              <div id="scanMemorySummary" class="health-lines">-</div>
+            </article>
+          </div>
         </div>
       </section>
 
@@ -187,8 +235,15 @@
         </div>
         <div id="newsList" class="news-list"></div>
       </section>
+
+      <div id="systemModuleOverlay" class="module-overlay" hidden>
+        <button id="systemModuleBackdrop" class="module-backdrop" type="button" aria-label="Đóng chi tiết module"></button>
+        <article id="systemModuleDetail" class="module-detail" role="dialog" aria-modal="true" aria-labelledby="systemModuleTitle">
+          <button id="systemModuleClose" class="module-close" type="button" aria-label="Đóng">X</button>
+        </article>
+      </div>
     </main>
 
-    <script src="/static/app.js?v=margin-leverage-5-25-pending-orders"></script>
+    <script src="/static/app.js?v=bar-axis-percent-20260705-1"></script>
   </body>
 </html>

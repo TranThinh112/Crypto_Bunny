@@ -1,7 +1,1 @@
-Return valid JSON with these keys when applicable:
-- approved: boolean
-- decision: string
-- reason: string
-- approved_symbols: string[]
-- setup_scores: object
-- confidence: number
+JSON only. Keep reason short. Use numbers for confidence/scores.

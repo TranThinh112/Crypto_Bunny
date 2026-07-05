@@ -152,20 +152,32 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "ai": {
         "enabled": True,
         "api_key_env": "OPENAI_API_KEY",
+        "manual_only": False,
+        "allow_api_calls": True,
+        "replay": {
+            "allow_api_calls": False,
+        },
+        "debug": {
+            "allow_api_calls": False,
+        },
         "internal": {
             "provider": "openai",
             "model": "gpt-5.4-mini",
             "api_key_env": "OPENAI_API_KEY_INTERNAL",
             "market_scan_enabled": True,
             "market_scan_interval_seconds": 14400,
+            "market_scan_fixed_schedule": True,
+            "market_scan_timezone": "Asia/Ho_Chi_Minh",
             "market_scan_source_symbols": 50,
             "market_scan_max_symbols": 3,
+            "market_scan_min_approved_symbols": 1,
             "market_scan_min_win_probability_pct": 80,
             "market_scan_use_ai": True,
             "market_scan_use_shortlist": True,
             "market_scan_to_pending": True,
-            "market_scan_pending_limit": 3,
+            "market_scan_pending_limit": 1,
             "market_scan_require_ai_for_pending": True,
+            "compact_ai_payload": True,
             "timeout_seconds": 15,
         },
         "okx": {
@@ -218,6 +230,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "layer_20m_samples": 20,
         "memory_keep_hours": 24,
         "use_memory_in_strategy": True,
+    },
+    "market_scan_memory": {
+        "keep_hours": 72,
+        "max_rows_per_symbol_timeframe": 200,
+        "max_json_bytes": 8000,
+        "max_saved_candidates_per_scan": 20,
+        "compact_batch_limit": 5000,
+        "emergency_keep_hours": 24,
+        "emergency_max_rows_per_symbol_timeframe": 50,
+    },
+    "decision_history": {
+        "keep_hours": 24,
+        "max_rows": 120,
+        "emergency_keep_hours": 6,
+        "emergency_max_rows": 30,
     },
     "market_regime": {
         "enabled": True,
@@ -278,6 +305,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "telegram": {
             "enabled": True,
             "notify_scans": True,
+            "notify_ai_api_calls": True,
             "timeout_seconds": 8,
             "retry_count": 2,
             "buttons_enabled": True,

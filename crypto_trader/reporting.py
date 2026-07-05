@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import threading
 from datetime import datetime, timedelta, timezone
@@ -538,8 +539,61 @@ def _position_targets(
     return targets.get((symbol, side.lower()), {"stop_loss": None, "take_profit": None})
 
 
+def _target_from_payload(payload: dict[str, Any]) -> dict[str, float | None]:
+    info = payload.get("info", {}) if isinstance(payload.get("info"), dict) else {}
+    source = {**info, **payload}
+    stop_loss = None
+    take_profit = None
+    for key in ("slTriggerPx", "slOrdPx", "stopLossPrice", "stopLoss", "stop_loss"):
+        stop_loss = _float(source.get(key))
+        if stop_loss is not None:
+            break
+    for key in ("tpTriggerPx", "tpOrdPx", "takeProfitPrice", "takeProfit", "take_profit"):
+        take_profit = _float(source.get(key))
+        if take_profit is not None:
+            break
+    attach_orders = source.get("attachAlgoOrds")
+    if isinstance(attach_orders, str):
+        try:
+            attach_orders = json.loads(attach_orders)
+        except json.JSONDecodeError:
+            attach_orders = []
+    if isinstance(attach_orders, list):
+        for item in attach_orders:
+            if not isinstance(item, dict):
+                continue
+            if stop_loss is None:
+                stop_loss = _float(item.get("slTriggerPx") or item.get("slOrdPx"))
+            if take_profit is None:
+                take_profit = _float(item.get("tpTriggerPx") or item.get("tpOrdPx"))
+    return {"stop_loss": stop_loss, "take_profit": take_profit}
+
+
+def _targets_from_open_orders(exchange: Any) -> dict[tuple[str, str], dict[str, float | None]]:
+    targets: dict[tuple[str, str], dict[str, float | None]] = {}
+    try:
+        orders = exchange.fetch_open_orders()
+    except Exception:
+        return targets
+    for order in orders:
+        if not isinstance(order, dict):
+            continue
+        info = order.get("info", {}) if isinstance(order.get("info"), dict) else {}
+        symbol = str(order.get("symbol") or info.get("instId") or "")
+        raw_side = str(order.get("side") or info.get("side") or "").lower()
+        if not symbol:
+            continue
+        close_side = "long" if raw_side == "sell" else "short" if raw_side == "buy" else raw_side
+        target = _target_from_payload(order)
+        existing = targets.setdefault((symbol, close_side), {"stop_loss": None, "take_profit": None})
+        existing["stop_loss"] = existing.get("stop_loss") or target.get("stop_loss")
+        existing["take_profit"] = existing.get("take_profit") or target.get("take_profit")
+    return targets
+
+
 def _position_rows(config: dict[str, Any], exchange: Any) -> list[dict[str, Any]]:
     targets = _latest_targets_by_position(config)
+    order_targets = _targets_from_open_orders(exchange)
     positions: list[dict[str, Any]] = []
     for item in exchange.fetch_positions():
         info = item.get("info", {}) if isinstance(item.get("info"), dict) else {}
@@ -550,6 +604,10 @@ def _position_rows(config: dict[str, Any], exchange: Any) -> list[dict[str, Any]
         side = _position_side(item)
         pnl_usdt = _float(item.get("unrealizedPnl") or info.get("upl"))
         target = _position_targets(targets, symbol, side)
+        order_target = _position_targets(order_targets, symbol, side)
+        direct_target = _target_from_payload(item)
+        stop_loss = direct_target.get("stop_loss") or order_target.get("stop_loss") or target.get("stop_loss")
+        take_profit = direct_target.get("take_profit") or order_target.get("take_profit") or target.get("take_profit")
         positions.append(
             {
                 "symbol": symbol,
@@ -559,8 +617,9 @@ def _position_rows(config: dict[str, Any], exchange: Any) -> list[dict[str, Any]
                 "mark_price": _float(item.get("markPrice") or info.get("markPx")),
                 "pnl_usdt": pnl_usdt,
                 "pnl_pct": _position_pnl_pct(item, pnl_usdt),
-                "stop_loss": _float(info.get("slTriggerPx")) or target.get("stop_loss"),
-                "take_profit": _float(info.get("tpTriggerPx")) or target.get("take_profit"),
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "tp_sl_status": "ok" if stop_loss is not None and take_profit is not None else "missing",
             }
         )
     return positions
@@ -768,6 +827,11 @@ def format_account_report(snapshot: dict[str, Any], memory_sync: dict[str, Any])
     return "\n".join(lines)
 
 
+def _fmt_position_target(position: dict[str, Any], key: str) -> str:
+    value = position.get(key)
+    return _fmt_number(value, 6) if value is not None else "MISSING"
+
+
 def format_positions_view(config: dict[str, Any]) -> str:
     try:
         snapshot = fetch_positions_snapshot(config, use_cache=True)
@@ -794,8 +858,10 @@ def format_positions_view(config: dict[str, Any]) -> str:
             f"   🎯 Vào: {_fmt_number(position.get('entry_price'), 6)} | Mark: {_fmt_number(position.get('mark_price'), 6)}"
         )
         lines.append(
-            f"   🛑 SL: {_fmt_number(position.get('stop_loss'), 6)} | ✅ TP: {_fmt_number(position.get('take_profit'), 6)}"
+            f"   🛑 SL: {_fmt_position_target(position, 'stop_loss')} | ✅ TP: {_fmt_position_target(position, 'take_profit')}"
         )
+        if position.get("tp_sl_status") == "missing":
+            lines.append("   ⚠️ TP/SL MISSING: OKX/open order/journal không có giá bảo vệ.")
     return "\n".join(lines)
 
 
@@ -904,6 +970,42 @@ def format_pnl_sd_view(config: dict[str, Any]) -> str:
         }
     memory_sync = sync_trade_memory_from_exchange(config)
     return format_account_report(snapshot, memory_sync)
+
+
+def format_positions_account_view(config: dict[str, Any]) -> str:
+    try:
+        snapshot = fetch_account_snapshot(config, use_cache=True)
+    except Exception as exc:
+        return f"📊 VT/PNL/SD {date_time_label()}\n🚨 Lỗi: Lấy tài khoản thất bại: {exc}"
+    if not snapshot.get("ok", True):
+        return f"📊 VT/PNL/SD {date_time_label()}\n🚨 Lỗi: {_reason_vi(snapshot.get('error') or '-')}"
+
+    positions = snapshot.get("positions") or []
+    lines = [
+        f"📊 VT/PNL/SD {date_time_label()}",
+        f"💵 SD: {_fmt_number(snapshot.get('balance_usdt'), 2)} USDT",
+        f"📌 VT đang mở: {len(positions)}",
+        f"🟡 LC đang chờ: {snapshot.get('pending_count', 0)}",
+    ]
+    if not positions:
+        lines.append("⚪ Không có vị thế mở")
+        return "\n".join(lines)
+    for index, position in enumerate(positions, 1):
+        lines.append(
+            f"{index}. {_coin_icon(position.get('symbol'))} {_pnl_icon(position.get('pnl_usdt'))} {_side_icon(position.get('side'))} "
+            f"{position.get('symbol', '-')} {str(position.get('side', '-')).upper()}"
+        )
+        lines.append(
+            f"   💰 PNL: {_fmt_signed(position.get('pnl_usdt'), 4)} USDT "
+            f"({_fmt_signed(position.get('pnl_pct'), 2, '%')})"
+        )
+        lines.append(
+            f"   🎯 Vào: {_fmt_number(position.get('entry_price'), 6)} | Mark: {_fmt_number(position.get('mark_price'), 6)}"
+        )
+        lines.append(
+            f"   🛑 SL: {_fmt_position_target(position, 'stop_loss')} | ✅ TP: {_fmt_position_target(position, 'take_profit')}"
+        )
+    return "\n".join(lines)
 
 
 def format_telegram_menu() -> str:

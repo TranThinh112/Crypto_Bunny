@@ -1,13 +1,9 @@
 from __future__ import annotations
 
 import json
-import os
 import urllib.error
-import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
-
-from dotenv import load_dotenv
 
 from .codex_features import (
     build_market_prompt_dto,
@@ -18,7 +14,7 @@ from .codex_features import (
 )
 from .market import fetch_market_snapshots, fetch_top_volume_symbols
 from .market_guard import market_guard_symbol_layers
-from .models import RiskCheck, TradeCandidate, to_jsonable
+from .models import RiskCheck, TradeCandidate
 from .news import collect_news
 from .sizing import apply_position_sizing
 from .storage import get_journal_state, list_pending_orders, recent_market_scan_memory, set_journal_state
@@ -77,43 +73,132 @@ def _pending_summary_row(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _role_api_key(config: dict[str, Any], role_config: dict[str, Any]) -> tuple[str, str]:
-    load_dotenv()
-    key_env = str(role_config.get("api_key_env", ai_config(config).get("api_key_env", "OPENAI_API_KEY")))
-    return key_env, os.getenv(key_env, "").strip()
+def _compact_dict(source: dict[str, Any], keys: list[str]) -> dict[str, Any]:
+    return {key: source.get(key) for key in keys if key in source and source.get(key) is not None}
 
 
-def _openai_chat_json(role_config: dict[str, Any], api_key: str, messages: list[dict[str, str]]) -> dict[str, Any]:
-    payload = {
-        "model": str(role_config.get("model", "gpt-5.5")),
-        "response_format": {"type": "json_object"},
-        "messages": messages,
+def _compact_runtime_state(system_state: dict[str, Any], health_state: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "system": _compact_dict(
+            system_state,
+            [
+                "isRecoveryMode",
+                "currentNormalMinRuleScore",
+                "currentRecoveryMinRuleScore",
+                "maxActiveTrades",
+                "activeTrades",
+                "dailyOrderCount",
+                "dailyPlannedRiskUsdt",
+            ],
+        ),
+        "health": _compact_dict(
+            health_state,
+            [
+                "isWarning",
+                "isCritical",
+                "status",
+                "drawdownPercent",
+                "consecutiveLosses",
+                "blockedUntil",
+            ],
+        ),
     }
-    if "temperature" in role_config:
-        payload["temperature"] = role_config.get("temperature")
-    request = urllib.request.Request(
-        "https://api.openai.com/v1/chat/completions",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
+
+
+def _compact_risk_check(risk_check: RiskCheck) -> dict[str, Any]:
+    return {
+        "passed": risk_check.passed,
+        "reasons": risk_check.reasons[:3],
+        "warnings": risk_check.warnings[:2],
+    }
+
+
+def _compact_lc_memory(memory: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "pending_total": memory.get("pending_total"),
+        "lc_okx_count": memory.get("lc_okx_count"),
+        "local_lc_count": memory.get("local_lc_count"),
+        "preferred": memory.get("preferred"),
+        "orders": (memory.get("orders") or [])[:3],
+    }
+
+
+def _round_optional(value: Any, digits: int = 4) -> float | str | None:
+    if value is None or value == "":
+        return None
     try:
-        with urllib.request.urlopen(request, timeout=float(role_config.get("timeout_seconds", 20) or 20)) as response:
-            raw = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        try:
-            body = exc.read().decode("utf-8", errors="replace")
-        except Exception:
-            body = ""
-        detail = f"OpenAI HTTP {exc.code}"
-        if body:
-            detail = f"{detail}: {body[:500]}"
-        raise RuntimeError(detail) from exc
-    content = raw["choices"][0]["message"]["content"]
-    return json.loads(content)
+        return round(float(value), digits)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _level_distance_pct(price: Any, level: Any) -> float | None:
+    try:
+        price_value = float(price)
+        level_value = float(level)
+    except (TypeError, ValueError):
+        return None
+    if price_value <= 0:
+        return None
+    return round((level_value - price_value) / price_value * 100, 3)
+
+
+def _compact_pattern_summary(patterns: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(patterns, dict):
+        return {}
+    raw_patterns = patterns.get("patterns")
+    return {
+        "direction": patterns.get("direction"),
+        "trend_context": patterns.get("trend_context"),
+        "strongest_pattern": patterns.get("strongest_pattern"),
+        "patterns": raw_patterns[:3] if isinstance(raw_patterns, list) else raw_patterns,
+        "bullish_score": _round_optional(patterns.get("bullish_score"), 2),
+        "bearish_score": _round_optional(patterns.get("bearish_score"), 2),
+        "signal_summary": patterns.get("signal_summary"),
+    }
+
+
+def _compact_indicator_summary(summary: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(summary, dict):
+        return {}
+    last = summary.get("last")
+    ema_fast = summary.get("ema_fast")
+    ema_slow = summary.get("ema_slow")
+    support = summary.get("support")
+    resistance = summary.get("resistance")
+    compact = {
+        "last": _round_optional(last),
+        "trend": summary.get("trend"),
+        "rsi": _round_optional(summary.get("rsi"), 2),
+        "atr_pct": _round_optional(summary.get("atr_pct"), 3),
+        "volume_ratio": _round_optional(summary.get("volume_ratio"), 3),
+        "spread_pct": _round_optional(summary.get("spread_pct"), 4),
+        "ema_gap_pct": _level_distance_pct(ema_slow, ema_fast),
+        "price_vs_ema_fast_pct": _level_distance_pct(ema_fast, last),
+        "support_distance_pct": _level_distance_pct(last, support),
+        "resistance_distance_pct": _level_distance_pct(last, resistance),
+    }
+    higher_timeframes = summary.get("higher_timeframes")
+    if isinstance(higher_timeframes, dict):
+        compact["higher_timeframes"] = {
+            str(frame): {
+                "trend": data.get("trend"),
+                "rsi": _round_optional(data.get("rsi"), 2),
+                "ema_gap_pct": _round_optional(data.get("ema_gap_pct"), 3),
+                "price_vs_ema_slow_pct": _round_optional(data.get("price_vs_ema_slow_pct"), 3),
+                "range_position": data.get("range_position"),
+            }
+            for frame, data in higher_timeframes.items()
+            if str(frame).lower() in {"5m", "15m", "1h", "4h"} and isinstance(data, dict)
+        }
+    candlesticks = summary.get("candlestick_patterns")
+    if isinstance(candlesticks, dict):
+        compact["candlestick_patterns"] = {
+            str(frame): _compact_pattern_summary(data)
+            for frame, data in candlesticks.items()
+            if str(frame).lower() in {"5m", "15m", "1h", "4h"} and isinstance(data, dict)
+        }
+    return {key: value for key, value in compact.items() if value not in (None, {}, [])}
 
 
 def _openai_internal_market_scan(
@@ -124,14 +209,14 @@ def _openai_internal_market_scan(
     internal_config = ai_config(config).get("internal", {})
     system_state = get_trading_system_state(config)
     health_state = get_bunny_health_state(config)
+    runtime_state = _compact_runtime_state(system_state, health_state)
     prompt_package = build_prompt(
         config,
         build_market_prompt_dto(
             candidates=candidates,
-            market_snapshot=local_result,
-            trading_system_state=system_state,
-            trading_health_state=health_state,
-            extra={"policyPrefilter": local_result},
+            market_snapshot={"localPolicy": local_result},
+            trading_system_state=runtime_state["system"],
+            trading_health_state=runtime_state["health"],
         ),
         instruction_key="mini-analysis",
         recovery_mode=bool(system_state.get("isRecoveryMode")),
@@ -142,6 +227,7 @@ def _openai_internal_market_scan(
         internal_config,
         prompt_package,
         model_name=str(internal_config.get("model", "gpt-5.4-mini")),
+        purpose="mini_market_scan",
     )
     parsed = dict(response["parsed"])
     parsed.update(
@@ -195,6 +281,39 @@ def internal_market_scan_interval(config: dict[str, Any]) -> int:
     return max(3600, int(internal_config.get("market_scan_interval_seconds", 14400) or 14400))
 
 
+def _internal_market_scan_timezone(config: dict[str, Any]) -> timezone:
+    internal_config = ai_config(config).get("internal", {})
+    name = str(internal_config.get("market_scan_timezone") or config.get("timezone") or "Asia/Ho_Chi_Minh")
+    if name in {"Asia/Ho_Chi_Minh", "Asia/Saigon", "UTC+7", "+07:00"}:
+        return timezone(timedelta(hours=7))
+    return timezone.utc
+
+
+def _internal_market_scan_slot_start(config: dict[str, Any], now: datetime) -> datetime:
+    interval_hours = max(1, int(internal_market_scan_interval(config) // 3600))
+    local_now = now.astimezone(_internal_market_scan_timezone(config))
+    slot_hour = (local_now.hour // interval_hours) * interval_hours
+    local_slot = local_now.replace(hour=slot_hour, minute=0, second=0, microsecond=0)
+    return local_slot.astimezone(timezone.utc)
+
+
+def _internal_market_scan_slot_id(config: dict[str, Any], now: datetime) -> str:
+    return _internal_market_scan_slot_start(config, now).isoformat()
+
+
+def next_internal_market_scan_at(config: dict[str, Any], now: datetime | None = None) -> datetime:
+    now = now or datetime.now(timezone.utc)
+    if bool(ai_config(config).get("internal", {}).get("market_scan_fixed_schedule", True)):
+        interval_hours = max(1, int(internal_market_scan_interval(config) // 3600))
+        slot_start = _internal_market_scan_slot_start(config, now)
+        return slot_start + timedelta(hours=interval_hours)
+    latest = latest_internal_market_scan(config)
+    created_at = _parse_time((latest or {}).get("created_at"))
+    if not created_at:
+        return now
+    return created_at + timedelta(seconds=internal_market_scan_interval(config))
+
+
 def latest_internal_market_scan(config: dict[str, Any]) -> dict[str, Any] | None:
     raw = get_journal_state(config, INTERNAL_MARKET_SCAN_STATE_KEY)
     if not raw:
@@ -216,12 +335,20 @@ def internal_market_scan_due(config: dict[str, Any], now: datetime | None = None
     created_at = _parse_time((latest or {}).get("created_at"))
     if not created_at:
         return True
+    if bool(internal_config.get("market_scan_fixed_schedule", True)):
+        slot_start = _internal_market_scan_slot_start(config, now)
+        slot_id = _internal_market_scan_slot_id(config, now)
+        if latest.get("slot_id") == slot_id:
+            return False
+        return created_at < slot_start <= now
     return (now - created_at).total_seconds() >= internal_market_scan_interval(config)
 
 
 def _candidate_market_summary(
     candidate: TradeCandidate,
     scan_memory_by_symbol: dict[str, dict[str, list[dict[str, Any]]]] | None = None,
+    *,
+    compact: bool = True,
 ) -> dict[str, Any]:
     def _frame_payload(frame_name: str, pattern_data: dict[str, Any], frame_data: dict[str, Any] | None = None) -> dict[str, Any]:
         frame_data = frame_data or {}
@@ -262,10 +389,12 @@ def _candidate_market_summary(
         elif str(frame_name).lower() in {"5m", "15m", "1h"}:
             code_timeframe_analysis.append(payload)
     symbol_memory = (scan_memory_by_symbol or {}).get(candidate.symbol, {})
+    allowed_memory_timeframes = {"5m", "1h", "4h"} if compact else {"1m", "5m", "15m", "1h", "4h"}
+    memory_limit = 1 if compact else 3
     rolling_scan_memory = {
-        timeframe: entries
+        timeframe: entries[:memory_limit]
         for timeframe, entries in symbol_memory.items()
-        if timeframe.lower() in {"1m", "5m", "15m", "1h", "4h"}
+        if timeframe.lower() in allowed_memory_timeframes
     }
     return {
         "symbol": candidate.symbol,
@@ -279,13 +408,12 @@ def _candidate_market_summary(
         "spread_pct": candidate.spread_pct,
         "news_score": candidate.news_score,
         "news_count": candidate.news_count,
-        "indicator_summary": candidate.indicator_summary,
-        "candlestick_patterns": candidate.candlestick_patterns,
+        "indicator_summary": _compact_indicator_summary(candidate.indicator_summary),
         "code_timeframe_analysis": code_timeframe_analysis,
         "mini_context_4h": mini_context_4h,
         "rolling_scan_memory": rolling_scan_memory,
-        "reasons": candidate.reasons[:6],
-        "warnings": candidate.warnings[:4],
+        "reasons": candidate.reasons[:3] if compact else candidate.reasons[:6],
+        "warnings": candidate.warnings[:2] if compact else candidate.warnings[:4],
     }
 
 
@@ -304,15 +432,19 @@ def _local_market_scan_result(config: dict[str, Any], candidates: list[TradeCand
         key=lambda item: (float(item.win_probability_pct or 0), float(item.confidence or 0)),
         reverse=True,
     )
-    eligible = [
+    qualified = [
         candidate
         for candidate in ranked
         if candidate.win_probability_pct is not None and float(candidate.win_probability_pct) >= threshold
     ][:max_symbols]
+    minimum_approved = max(1, min(max_symbols, int(internal_config.get("market_scan_min_approved_symbols", 1) or 1)))
+    fallback = ranked[:max_symbols]
+    eligible = qualified or fallback[:minimum_approved]
     return {
         "provider": "local_policy",
         "decision": "prefilter",
         "threshold_win_probability_pct": threshold,
+        "qualified_symbols": [candidate.symbol for candidate in qualified],
         "approved_symbols": [candidate.symbol for candidate in eligible],
         "approved_count": len(eligible),
         "candidate_count": len(candidates),
@@ -322,21 +454,41 @@ def _local_market_scan_result(config: dict[str, Any], candidates: list[TradeCand
 
 def _validated_ai_symbols(review: dict[str, Any], allowed_symbols: set[str], fallback_symbols: list[str], max_symbols: int) -> list[str]:
     raw = review.get("approved_symbols")
+    minimum_symbols = 1
+    if isinstance(review.get("minimum_approved_symbols"), int):
+        minimum_symbols = max(1, int(review.get("minimum_approved_symbols") or 1))
     if not isinstance(raw, list):
-        return fallback_symbols
+        return fallback_symbols[:max(minimum_symbols, 1)]
     symbols: list[str] = []
     for item in raw:
         symbol = str(item or "")
         if symbol in allowed_symbols and symbol not in symbols:
             symbols.append(symbol)
-    return symbols[:max_symbols] or fallback_symbols
+    return symbols[:max_symbols] or fallback_symbols[:max(minimum_symbols, 1)]
 
 
-def run_internal_market_scan(config: dict[str, Any]) -> dict[str, Any]:
+def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     internal_config = ai_config(config).get("internal", {})
+    fixed_schedule = bool(internal_config.get("market_scan_fixed_schedule", True))
+    slot_id = _internal_market_scan_slot_id(config, now) if fixed_schedule else None
+    slot_start = _internal_market_scan_slot_start(config, now) if fixed_schedule else None
+    latest = latest_internal_market_scan(config)
+    latest_created_at = _parse_time((latest or {}).get("created_at"))
+    if (
+        fixed_schedule
+        and not force
+        and latest
+        and (latest.get("slot_id") == slot_id or (latest_created_at and slot_start and latest_created_at >= slot_start))
+    ):
+        return {
+            **latest,
+            "skipped": True,
+            "skip_reason": f"mini scan already ran for slot {slot_id}",
+        }
     max_source_symbols = max(1, min(50, int(internal_config.get("market_scan_source_symbols", 50) or 50)))
-    max_symbols = max(1, int(internal_config.get("market_scan_max_symbols", 12) or 12))
+    max_symbols = max(1, min(3, int(internal_config.get("market_scan_max_symbols", 3) or 3)))
+    compact_payload = bool(internal_config.get("compact_ai_payload", True))
     source_symbols, source_warnings = fetch_top_volume_symbols(config)
     if source_symbols:
         source_symbols = source_symbols[:max_source_symbols]
@@ -361,13 +513,18 @@ def run_internal_market_scan(config: dict[str, Any]) -> dict[str, Any]:
     scan_memory = recent_market_scan_memory(
         config,
         symbols=source_symbols,
-        timeframes=["1m", "5m", "15m", "1h", "4h"],
+        timeframes=["5m", "1h", "4h"] if compact_payload else ["1m", "5m", "15m", "1h", "4h"],
         lookback_hours=12,
-        per_symbol_timeframe_limit=3,
+        per_symbol_timeframe_limit=1 if compact_payload else 3,
+    )
+    ranked_candidates = sorted(
+        candidates,
+        key=lambda item: (float(item.win_probability_pct or 0), float(item.confidence or 0)),
+        reverse=True,
     )
     candidate_summaries = [
-        _candidate_market_summary(candidate, scan_memory_by_symbol=scan_memory)
-        for candidate in candidates[:max_source_symbols]
+        _candidate_market_summary(candidate, scan_memory_by_symbol=scan_memory, compact=compact_payload)
+        for candidate in ranked_candidates[:max_symbols]
     ]
     local_result = _local_market_scan_result(config, candidates, warnings)
 
@@ -375,6 +532,9 @@ def run_internal_market_scan(config: dict[str, Any]) -> dict[str, Any]:
         "enabled": True,
         "agent": "internal_market_scan",
         "created_at": now.isoformat(),
+        "slot_id": slot_id,
+        "slot_start": slot_start.isoformat() if slot_start else None,
+        "status": "scanning",
         "interval_seconds": internal_market_scan_interval(config),
         "provider": str(internal_config.get("provider", "local_policy") or "local_policy"),
         "model": str(internal_config.get("model", "gpt-5.4-mini")),
@@ -384,9 +544,11 @@ def run_internal_market_scan(config: dict[str, Any]) -> dict[str, Any]:
         "local_policy": local_result,
         "approved_symbols": list(local_result.get("approved_symbols") or []),
         "candidates": candidate_summaries[:max_symbols],
-        "scan_memory": scan_memory,
+        "scan_memory": scan_memory if not compact_payload else {},
+        "compact_ai_payload": compact_payload,
         "warnings": warnings[:20],
     }
+    set_journal_state(config, INTERNAL_MARKET_SCAN_STATE_KEY, json.dumps(result, ensure_ascii=False))
 
     if result["provider"] == "openai" and bool(internal_config.get("market_scan_use_ai", True)):
         try:
@@ -401,7 +563,7 @@ def run_internal_market_scan(config: dict[str, Any]) -> dict[str, Any]:
                 ai_review,
                 allowed,
                 list(local_result.get("approved_symbols") or []),
-                max_symbols,
+                max(1, min(max_symbols, int(internal_config.get("market_scan_pending_limit", 1) or 1))),
             )
             scores = ai_review.get("setup_scores")
             if isinstance(scores, dict):
@@ -414,6 +576,7 @@ def run_internal_market_scan(config: dict[str, Any]) -> dict[str, Any]:
             result["ai_review_error"] = str(exc)
             result["fallback"] = "local_policy"
 
+    result["status"] = "done"
     set_journal_state(config, INTERNAL_MARKET_SCAN_STATE_KEY, json.dumps(result, ensure_ascii=False))
     return result
 
@@ -463,8 +626,9 @@ def _candidate_summary(candidate: TradeCandidate) -> dict[str, Any]:
         "quantity": candidate.quantity,
         "order_usdt": candidate.order_usdt,
         "planned_risk_usdt": round(candidate.planned_risk_usdt, 4),
-        "reasons": candidate.reasons,
-        "warnings": candidate.warnings,
+        "indicator_summary": _compact_indicator_summary(candidate.indicator_summary),
+        "reasons": candidate.reasons[:3],
+        "warnings": candidate.warnings[:2],
     }
 
 
@@ -518,16 +682,20 @@ def _openai_json_decision(
     okx_config = ai_config(config).get("okx", {})
     system_state = get_trading_system_state(config)
     health_state = get_bunny_health_state(config)
+    runtime_state = _compact_runtime_state(system_state, health_state)
     prompt_package = build_prompt(
         config,
         build_market_prompt_dto(
             candidates=[_candidate_summary(candidate)],
-            market_snapshot={"riskCheck": to_jsonable(risk_check), "context": context},
-            trading_system_state=system_state,
-            trading_health_state=health_state,
-            open_positions=pending_memory.get("orders") or [],
+            market_snapshot={
+                "riskCheck": _compact_risk_check(risk_check),
+                "route": _compact_dict(context, ["route", "lc_id", "from_status", "source"]),
+            },
+            trading_system_state=runtime_state["system"],
+            trading_health_state=runtime_state["health"],
+            open_positions=[],
             recent_trades=[],
-            extra={"internalLcMemory": pending_memory},
+            extra={"lcMemory": _compact_lc_memory(pending_memory)},
         ),
         instruction_key="final-decision",
         recovery_mode=bool(system_state.get("isRecoveryMode")),
@@ -538,6 +706,8 @@ def _openai_json_decision(
         okx_config,
         prompt_package,
         model_name=str(okx_config.get("model", "gpt-5.5")),
+        purpose="okx_final_approval",
+        route=str(context.get("route") or ""),
     )
     decision = dict(response["parsed"])
     return {

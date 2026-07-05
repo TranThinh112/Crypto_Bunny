@@ -15,6 +15,7 @@ Trạng thái: Đã triển khai.
   raw prompt/response,
   market regime,
   snapshot JSON.
+
 - Mỗi lần `engine.run_once()` xong sẽ tự ghi một dòng decision analytics.
 - Đã mở API:
   `POST /api/ai-decisions`

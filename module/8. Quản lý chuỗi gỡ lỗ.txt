@@ -1,0 +1,279 @@
+Hãy tạo module Recovery Chain Manager cho bot AI trading crypto.
+
+Mục tiêu:
+- Quản lý từng chuỗi recovery riêng biệt.
+- Khi một lệnh LOSS, tạo hoặc cập nhật recovery chain.
+- Lệnh thắng ở chain khác KHÔNG được reset chain đang lỗ.
+- Theo dõi còn bao nhiêu khoản lỗ chưa được recover.
+- Có thể chạy song song với Bunny Minimize Losses.
+- Module này KHÔNG tự sửa rule trading và KHÔNG tự ép vào lệnh.
+
+Tech stack:
+- Python 3.11+
+- SQLite
+- SQLAlchemy
+- FastAPI
+- Pydantic
+
+Cấu hình:
+
+{
+  "RecoveryChain": {
+    "ActiveRecoveryChainsThreshold": 2,
+    "MaxRecoveryLevel": 5,
+    "TargetNetProfit": 0.3,
+    "PauseWhenActiveChainsExceed": 4
+  }
+}
+
+Yêu cầu database SQLite:
+
+1. Tạo bảng trade_executions:
+   - id
+   - created_at
+   - symbol
+   - position_slot
+   - chain_id
+   - parent_trade_id
+   - side: LONG / SHORT
+   - entry_price
+   - stop_loss
+   - take_profit
+   - risk_reward
+   - volume
+   - leverage
+   - status: OPEN / WIN / LOSS / BREAKEVEN / CLOSED
+   - pnl
+   - fee
+   - funding_fee
+   - net_pnl
+   - closed_at
+
+2. Tạo bảng recovery_chains:
+   - id
+   - created_at
+   - updated_at
+   - symbol
+   - position_slot
+   - start_trade_id
+   - current_trade_id
+   - current_level
+   - total_loss
+   - recovered_profit
+   - remaining_loss
+   - target_net_profit
+   - status: ACTIVE / COMPLETED / FAILED
+   - completed_at
+   - failed_reason
+
+Logic:
+
+1. Khi một trade đóng LOSS:
+   - Nếu trade chưa thuộc chain nào:
+     + tạo recovery_chain mới.
+     + total_loss = abs(net_pnl)
+     + remaining_loss = total_loss + target_net_profit
+     + current_level = 1
+     + status = ACTIVE
+   - Nếu trade đã thuộc chain:
+     + cập nhật chain đó.
+     + total_loss += abs(net_pnl)
+     + remaining_loss = total_loss + target_net_profit - recovered_profit
+     + current_level += 1
+
+2. Khi một trade đóng WIN:
+   - Nếu trade thuộc chain:
+     + recovered_profit += net_pnl
+     + remaining_loss = total_loss + target_net_profit - recovered_profit
+     + nếu remaining_loss <= 0:
+       status = COMPLETED
+       completed_at = now
+   - Nếu trade không thuộc chain:
+     + không ảnh hưởng đến recovery chain khác.
+
+3. Khi một trade đóng BREAKEVEN:
+   - Nếu thuộc chain:
+     + không tăng total_loss
+     + không tăng recovered_profit
+     + chain vẫn ACTIVE.
+   - Nếu không thuộc chain:
+     + không ảnh hưởng.
+
+4. Nếu current_level >= MaxRecoveryLevel và vẫn chưa recover:
+   - status = FAILED
+   - failed_reason = "Max recovery level reached"
+
+5. Tạo RecoveryChainService:
+   - create_chain_from_loss(trade_id)
+   - update_chain_on_trade_close(trade_id)
+   - get_active_chains()
+   - get_active_chain_count()
+   - get_chain_by_id(chain_id)
+   - should_enable_recovery_mode()
+   - should_pause_trading()
+   - get_next_recovery_requirement(chain_id)
+
+6. should_enable_recovery_mode:
+   - true nếu active_chain_count >= ActiveRecoveryChainsThreshold.
+
+7. should_pause_trading:
+   - true nếu active_chain_count >= PauseWhenActiveChainsExceed.
+
+8. get_next_recovery_requirement(chain_id):
+   Trả về:
+   - remaining_loss
+   - target_net_profit
+   - required_net_profit
+   - current_level
+   - max_recovery_level
+
+API FastAPI:
+
+1. POST /trades/close
+Input:
+   - trade_id
+   - status: WIN / LOSS / BREAKEVEN
+   - pnl
+   - fee
+   - funding_fee
+
+Xử lý:
+   - net_pnl = pnl - fee - funding_fee
+   - cập nhật trade_executions.
+   - gọi RecoveryChainService.update_chain_on_trade_close(trade_id).
+   - trả về chain state mới nếu có.
+
+2. GET /recovery-chains/active
+Trả danh sách chain ACTIVE.
+
+3. GET /recovery-chains/{chain_id}
+Trả chi tiết một chain.
+
+4. GET /recovery-chains/state
+Trả:
+   - active_chain_count
+   - should_enable_recovery_mode
+   - should_pause_trading
+   - active_chains_summary
+
+5. POST /recovery-chains/{chain_id}/fail
+Cho phép đánh dấu chain FAILED thủ công.
+
+Yêu cầu code:
+- Tách file rõ ràng:
+  - main.py
+  - database.py
+  - models.py
+  - schemas.py
+  - services/recovery_chain_service.py
+  - routers/trades.py
+  - routers/recovery_chains.py
+  - config.py
+- Có type hints đầy đủ.
+- Có xử lý lỗi cơ bản.
+- Có transaction khi cập nhật trade và chain.
+- Không hard-code threshold.
+- Không dùng GPT trong module này.
+- Không tự mở lệnh mới.
+- Không reset chain chỉ vì một lệnh khác thắng.
+- Trả về code đầy đủ để chạy được. 
+
+Bổ sung yêu cầu tối ưu và an toàn:
+
+1. API POST /trades/close phải idempotent:
+   - Nếu trade đã có status WIN / LOSS / BREAKEVEN và closed_at != null thì không xử lý lại.
+   - Không được cộng pnl/net_pnl vào recovery_chain lần thứ hai.
+   - Trả về trạng thái hiện tại của trade và chain.
+
+2. recovery_chains thêm field:
+   - last_processed_trade_id
+   - paused_at
+   - paused_reason
+
+3. recovery_chains status thêm:
+   - PAUSED
+
+Status đầy đủ:
+   ACTIVE / COMPLETED / FAILED / PAUSED
+
+4. RecoveryChainManager chỉ tính realized net_pnl từ trade đã đóng.
+   - Không tính floating PnL của lệnh OPEN.
+   - Không dùng unrealized PnL để completed chain.
+
+5. Thêm SQLite indexes:
+   - trade_executions(chain_id)
+   - trade_executions(status)
+   - trade_executions(closed_at)
+   - trade_executions(position_slot)
+   - recovery_chains(status)
+   - recovery_chains(position_slot)
+   - recovery_chains(current_trade_id)
+
+6. Dùng transaction khi:
+   - cập nhật trade_executions
+   - cập nhật recovery_chains
+   - tạo recovery_chain mới
+   - đánh dấu chain FAILED / PAUSED / COMPLETED
+
+7. Tránh race condition:
+   - Trước khi xử lý close trade, reload trade mới nhất từ database trong transaction.
+   - Nếu trade đã đóng thì không xử lý lại.
+   - Nếu chain đã COMPLETED hoặc FAILED thì không cập nhật tiếp, trừ endpoint reopen thủ công.
+
+8. Không được reset hoặc completed chain nếu lệnh WIN không thuộc chain đó.
+
+9. Thêm endpoint:
+   POST /recovery-chains/{chain_id}/pause
+
+Input:
+   - reason
+
+Xử lý:
+   - status = PAUSED
+   - paused_at = now
+   - paused_reason = reason
+
+10. Thêm endpoint:
+   POST /recovery-chains/{chain_id}/reopen
+
+Input:
+   - reason
+
+Xử lý:
+   - Chỉ cho reopen chain có status PAUSED hoặc FAILED.
+   - Đổi status về ACTIVE.
+   - Không reset total_loss, recovered_profit, remaining_loss.
+   - Ghi log lý do reopen.
+
+11. Thêm bảng recovery_chain_events:
+   - id
+   - chain_id
+   - trade_id
+   - event_type
+   - message
+   - created_at
+
+Event types:
+   - CHAIN_CREATED
+   - TRADE_LOSS_ADDED
+   - TRADE_WIN_RECOVERED
+   - CHAIN_COMPLETED
+   - CHAIN_FAILED
+   - CHAIN_PAUSED
+   - CHAIN_REOPENED
+
+12. Mỗi thay đổi quan trọng của chain phải ghi recovery_chain_events.
+
+13. get_next_recovery_requirement(chain_id) phải tính:
+   - required_net_profit = max(0, remaining_loss)
+   - next_level = current_level + 1
+   - can_continue = status == ACTIVE and current_level < MaxRecoveryLevel
+
+14. Nếu current_level >= MaxRecoveryLevel và remaining_loss > 0:
+   - status = FAILED
+   - failed_reason = "Max recovery level reached"
+   - ghi event CHAIN_FAILED
+
+15. Không tự mở lệnh recovery mới.
+   Module chỉ trả về required_net_profit và trạng thái chain.
+   Trading Engine bên ngoài sẽ quyết định có mở lệnh tiếp hay không.

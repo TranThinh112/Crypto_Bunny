@@ -1,0 +1,234 @@
+Hãy tạo module Configuration Impact Analyzer cho bot AI trading crypto.
+
+Tên tiếng Việt: Phân tích tác động cấu hình.
+
+Mục tiêu:
+- Khi người dùng muốn thay đổi cấu hình trading, hệ thống KHÔNG áp dụng ngay.
+- Hệ thống phải phân tích tác động trước khi xác nhận.
+- Áp dụng cho các thay đổi:
+  + tăng/giảm số lượng vị thế cho phép
+  + tăng/giảm khối lượng mỗi vị thế
+  + thay đổi reserve percent
+  + thay đổi max recovery level
+  + thay đổi stop loss percent
+  + thay đổi take profit percent
+  + thay đổi leverage
+  + thay đổi target net profit
+- Module KHÔNG tự mở lệnh.
+- Module KHÔNG sửa rule trading.
+- Module KHÔNG gọi GPT.
+
+Tech stack:
+- Python 3.11+
+- SQLite
+- SQLAlchemy
+- FastAPI
+- Pydantic
+
+Cấu hình hiện tại KHÔNG dùng TotalCapital cố định.
+Vốn phải lấy từ capital_reserve_state hoặc capital_snapshot mới nhất.
+
+Input cấu hình mẫu:
+
+{
+  "max_concurrent_positions": 3,
+  "initial_order_size": 8,
+  "max_recovery_level": 3,
+  "stop_loss_percent": 50,
+  "take_profit_percent": 75,
+  "target_net_profit": 0.3,
+  "reserve_percent": 20,
+  "leverage": 20
+}
+
+Database SQLite:
+
+1. Tạo bảng trading_config_versions:
+   - id
+   - created_at
+   - version
+   - max_concurrent_positions
+   - initial_order_size
+   - max_recovery_level
+   - stop_loss_percent
+   - take_profit_percent
+   - target_net_profit
+   - reserve_percent
+   - leverage
+   - is_active
+   - note
+
+2. Tạo bảng configuration_impact_reports:
+   - id
+   - created_at
+   - current_config_json
+   - proposed_config_json
+   - realized_capital
+   - trading_capital_before
+   - trading_capital_after
+   - required_capital_before
+   - required_capital_after
+   - suggested_order_size
+   - max_safe_order_size
+   - safety_score
+   - is_safe
+   - risk_level: LOW / MEDIUM / HIGH / CRITICAL
+   - summary
+   - warnings_json
+   - recommendations_json
+
+Service:
+
+Tạo ConfigurationImpactAnalyzerService với methods:
+- analyze_change(current_config, proposed_config)
+- get_current_config()
+- get_latest_realized_capital()
+- calculate_trading_capital(realized_capital, reserve_percent)
+- calculate_required_capital(config, trading_capital)
+- calculate_max_safe_order_size(config, realized_capital)
+- calculate_suggested_order_size(config, realized_capital)
+- calculate_safety_score(trading_capital, required_capital)
+- classify_risk_level(safety_score)
+- generate_warnings(current_config, proposed_config, result)
+- generate_recommendations(current_config, proposed_config, result)
+
+Công thức vốn:
+- realized_capital lấy từ capital_snapshot mới nhất hoặc capital_reserve_state mới nhất.
+- trading_capital = realized_capital * (1 - reserve_percent / 100)
+
+Không được dùng:
+- equity
+- unrealized_pnl
+- floating pnl
+để tính trading capital.
+
+Công thức cơ bản:
+- loss_per_order = order_size * stop_loss_percent / 100
+- win_per_order = order_size * take_profit_percent / 100
+
+Recovery calculation:
+- Khi một lệnh thua:
+  loss = order_size * stop_loss_percent / 100
+- Lệnh recovery tiếp theo cần bù:
+  previous_losses + target_net_profit
+- required_recovery_order_size =
+  (previous_losses + target_net_profit) / (take_profit_percent / 100)
+
+calculate_required_capital:
+- Tính tổng vốn cần để chịu được max_recovery_level cho toàn bộ max_concurrent_positions.
+- Bao gồm:
+  + tổng initial_order_size
+  + tổng recovery_order_size theo từng level
+  + target_net_profit
+- Không tính phí/funding/slippage ở phiên bản đầu.
+- Để sẵn field mở rộng cho fee, funding, slippage.
+
+calculate_max_safe_order_size:
+- Tìm order_size tối đa sao cho required_capital <= trading_capital.
+- Dùng binary search.
+- Làm tròn 2 chữ số.
+
+calculate_suggested_order_size:
+- Nếu proposed initial_order_size an toàn thì giữ nguyên.
+- Nếu không an toàn thì đề xuất max_safe_order_size.
+- Nếu max_safe_order_size <= 0 thì đề xuất 0 và cảnh báo không đủ vốn.
+
+calculate_safety_score:
+- safety_ratio = trading_capital / required_capital
+- Nếu required_capital <= 0 thì safety_score = 0.
+- Nếu safety_ratio >= 1.5 → safety_score = 100
+- Nếu safety_ratio >= 1.2 → safety_score = 80
+- Nếu safety_ratio >= 1.0 → safety_score = 60
+- Nếu safety_ratio >= 0.8 → safety_score = 40
+- Nếu thấp hơn → safety_score = 20
+
+classify_risk_level:
+- safety_score >= 85 → LOW
+- safety_score >= 65 → MEDIUM
+- safety_score >= 45 → HIGH
+- thấp hơn → CRITICAL
+
+generate_warnings:
+Cảnh báo khi:
+- max_concurrent_positions tăng làm order size an toàn giảm.
+- initial_order_size vượt max_safe_order_size.
+- required_capital_after > trading_capital_after.
+- reserve_percent dưới 10.
+- max_recovery_level quá cao.
+- trading_capital_after < 10.
+- risk_level HIGH hoặc CRITICAL.
+- leverage quá cao.
+
+generate_recommendations:
+Trả đề xuất:
+- giảm initial_order_size.
+- giảm max_concurrent_positions.
+- tăng realized capital.
+- tăng reserve_percent nếu rủi ro cao.
+- giảm max_recovery_level.
+- không áp dụng cấu hình nếu risk_level = CRITICAL.
+
+API FastAPI:
+
+1. GET /configuration/current
+Trả config active hiện tại.
+
+2. POST /configuration/impact/analyze
+Input:
+- proposed_config
+
+Output:
+- realized_capital
+- trading_capital_before
+- trading_capital_after
+- required_capital_before
+- required_capital_after
+- suggested_order_size
+- max_safe_order_size
+- safety_score
+- is_safe
+- risk_level
+- summary
+- warnings
+- recommendations
+
+3. POST /configuration/apply
+Input:
+- proposed_config
+- confirm: true/false
+- force: true/false
+
+Logic:
+- Nếu confirm = false thì không áp dụng.
+- Trước khi apply phải chạy analyze_change.
+- Nếu risk_level = CRITICAL thì không cho apply, trừ khi force = true.
+- Khi apply, tạo trading_config_versions mới, set is_active = true.
+- Set config cũ is_active = false.
+
+4. GET /configuration/impact/history
+Trả lịch sử report.
+
+5. GET /configuration/versions
+Trả lịch sử config versions.
+
+Response summary mẫu:
+"Khi tăng số vị thế từ 3 lên 5, với realized capital 100 USDT và reserve 20%, trading capital là 80 USDT. Khối lượng hiện tại 8 USDT/lệnh không còn an toàn cho 3 tầng recovery. Khối lượng đề xuất mới là 4.8 USDT/lệnh."
+
+Yêu cầu code:
+- Tách file rõ ràng:
+  - main.py
+  - database.py
+  - models.py
+  - schemas.py
+  - config.py
+  - services/configuration_impact_analyzer.py
+  - routers/configuration.py
+- Có type hints đầy đủ.
+- Có validation cơ bản.
+- Có transaction khi apply config.
+- Không hard-code vốn.
+- Không dùng TotalCapital cố định.
+- Không dùng unrealized_pnl để tính vốn.
+- Không gọi GPT.
+- Không tự áp dụng cấu hình nếu chưa confirm.
+- Trả về code đầy đủ để chạy được.

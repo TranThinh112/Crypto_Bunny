@@ -1,0 +1,73 @@
+1. Màn hình tổng quan
+
+Hiển thị các chỉ số chính:
+
+Mục	Ví dụ
+Realized Capital	100 USDT
+Reserve Capital	20 USDT
+Trading Capital	80 USDT
+Used Trading Capital	32 USDT
+Available Trading Capital	48 USDT
+Mode	HEALTHY
+Reserve Percent	20%
+2. Các thao tác nên có
+Đồng bộ vốn
+
+Nút:
+
+Sync from OKX
+
+Chức năng:
+
+Lấy số dư mới nhất từ OKX.
+Cập nhật capital_snapshot.
+Tính lại reserve/trading capital.
+Kiểm tra mở lệnh
+
+Form:
+
+Required Margin: 12 USDT
+[Check Allocation]
+
+Trả:
+
+Allowed: YES
+Available: 48 USDT
+Reason: OK
+Phân tích thay đổi cấu hình
+
+Form:
+
+Max Positions: 3 → 5
+Order Size: 8 → 6
+Reserve: 20% → 25%
+Recovery Level: 3
+
+Nút:
+
+Analyze Impact
+
+Kết quả:
+
+Safety Score: 82/100
+Risk Level: MEDIUM
+Suggested Order Size: 5.8 USDT
+Recommendation: Có thể áp dụng
+Apply cấu hình
+
+Chỉ cho apply sau khi analyze:
+
+[Apply Config]
+
+Nếu CRITICAL thì yêu cầu:
+
+Force Apply
+3. Nên có cảnh báo rõ
+
+Ví dụ:
+
+⚠️ Reserve đang tăng lên 30% vì Recovery Mode đang bật.
+
+hoặc:
+
+❌ Không đủ vốn giao dịch sau khi trừ quỹ dự phòng.

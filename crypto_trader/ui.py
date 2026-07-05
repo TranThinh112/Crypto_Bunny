@@ -4,9 +4,10 @@ import json
 import math
 import os
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import yaml
 from dotenv import load_dotenv
@@ -15,11 +16,13 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import DEFAULT_CONFIG, load_config, project_path
+from .ai_coordinator import next_internal_market_scan_at, run_internal_market_scan_if_due
 from .codex_features import (
     activate_strategy_version,
     ai_trade_decision_stats,
     build_market_prompt_dto,
     build_prompt,
+    call_openai_json,
     close_trade_execution,
     create_ai_experiment,
     create_ai_trade_decision,
@@ -35,12 +38,25 @@ from .codex_features import (
     prompt_history,
     prompt_status,
     recent_ai_trade_decisions,
+    recent_ai_call_history,
     refresh_bunny_health_state,
     replay_batch,
     replay_stats,
     replay_trade_execution,
     strategy_history,
     validate_entry,
+)
+from .dashboard_services import (
+    analytics_dashboard,
+    refresh_system_checklist_snapshot,
+    replay_dashboard_payload,
+    scan_memory_dashboard,
+    system_checklist_history as dashboard_system_checklist_history,
+    system_checklist_payload,
+    system_checklist_snapshot as dashboard_system_checklist_snapshot,
+    system_checklist_summary as dashboard_system_checklist_summary,
+    system_health_dashboard,
+    timeframe_state_dashboard,
 )
 from .engine import run_once
 from .market import create_exchange
@@ -61,6 +77,7 @@ from .notifier import (
     telegram_buttons_enabled,
     telegram_control_keyboard,
     telegram_leverage_keyboard,
+    telegram_max_positions_keyboard,
     telegram_notify_scans,
     telegram_order_usdt_keyboard,
 )
@@ -73,8 +90,7 @@ from .reporting import (
     format_market_scan_memory_view,
     format_pending_orders_view,
     format_pending_event_messages,
-    format_pnl_sd_view,
-    format_positions_view,
+    format_positions_account_view,
     format_scan_message,
     format_telegram_menu,
 )
@@ -83,8 +99,11 @@ from .storage import (
     get_journal_state,
     latest_decision_payload,
     list_paper_trades,
+    prune_market_scan_observations,
     recent_market_scan_memory,
+    run_storage_maintenance,
     set_journal_state,
+    storage_stats,
 )
 from .sizing import STATE_KEY as SIZING_STATE_KEY
 
@@ -164,6 +183,26 @@ def _save_base_margin(config_path: str | Path, margin_usdt: float) -> dict[str, 
         leverage = float(DEFAULT_CONFIG["exchange"]["leverage"])
     risk = user_config.setdefault("risk", {})
     risk["order_usdt"] = round(margin_usdt * leverage, 4)
+
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with tmp_path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(user_config, handle, sort_keys=False, allow_unicode=True)
+    tmp_path.replace(path)
+    return load_config(path)
+
+
+def _save_max_positions(config_path: str | Path, max_positions: int) -> dict[str, Any]:
+    path = _config_file(config_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Config file not found: {path}")
+    with path.open("r", encoding="utf-8") as handle:
+        user_config = yaml.safe_load(handle) or {}
+    risk = user_config.setdefault("risk", {})
+    risk["max_active_trades"] = max_positions
+    paper = user_config.setdefault("paper_trading", {})
+    paper["max_active_trades"] = max_positions
+    trading_risk = user_config.setdefault("trading_risk", {})
+    trading_risk["max_concurrent_positions"] = max_positions
 
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     with tmp_path.open("w", encoding="utf-8") as handle:
@@ -410,6 +449,25 @@ def _automation_status_payload(app: FastAPI) -> dict[str, Any]:
     return status
 
 
+def _system_timezone(config: dict[str, Any] | None = None) -> tzinfo:
+    config = config or {}
+    timezone_name = (
+        config.get("timezone")
+        or config.get("ai", {}).get("internal", {}).get("market_scan_timezone")
+        or "Asia/Ho_Chi_Minh"
+    )
+    try:
+        return ZoneInfo(str(timezone_name))
+    except Exception:
+        return timezone(timedelta(hours=7), "Asia/Ho_Chi_Minh")
+
+
+def _today_key(config: dict[str, Any] | None = None) -> str:
+    return datetime.now(_system_timezone(config)).date().isoformat()
+
+
+
+
 def _run_automation_cycle(app: FastAPI) -> None:
     now = datetime.now(timezone.utc)
     config = load_config(app.state.config_path)
@@ -474,6 +532,19 @@ def _run_automation_cycle(app: FastAPI) -> None:
         app.state.automation_status = status
         app.state.lock.release()
 
+    try:
+        refresh_system_checklist_snapshot(config, automation=status)
+    except Exception:
+        pass
+    try:
+        timeframe_state_dashboard(config, force_refresh=True)
+        scan_memory_dashboard(config, force_refresh=True)
+        analytics_dashboard(config, force_refresh=True)
+        replay_dashboard_payload(config, force_refresh=True)
+        system_health_dashboard(config, force_refresh=True)
+    except Exception:
+        pass
+
     messages: list[str] = []
     should_notify_scan = status.get("last_result") == "error" or telegram_notify_scans(config)
     if should_notify_scan:
@@ -507,6 +578,135 @@ def _telegram_chat_allowed(config: dict[str, Any], chat_id: Any) -> bool:
     return bool(expected) and str(chat_id) == expected
 
 
+
+def _max_positions_menu_message(config: dict[str, Any]) -> str:
+    try:
+        current = int(float(config.get("risk", {}).get("max_active_trades", 1) or 1))
+    except (TypeError, ValueError):
+        current = 1
+    return (
+        "📈 Cài số vị thế tối đa mở cùng lúc\n"
+        f"Đang dùng: {current} vị thế\n"
+        "Chọn nút bên dưới hoặc gửi /maxvt 3"
+    )
+
+
+def _set_max_positions_from_telegram(
+    config_path: str | Path,
+    config: dict[str, Any],
+    raw_value: str,
+) -> tuple[dict[str, Any], str, dict[str, Any]]:
+    try:
+        max_positions = int(float(raw_value))
+    except (TypeError, ValueError):
+        return config, "⚠️ Số vị thế không hợp lệ. Ví dụ: /maxvt 3", telegram_max_positions_keyboard(config)
+    if max_positions < 1 or max_positions > 10:
+        return config, "⚠️ Chỉ nhận số vị thế từ 1 đến 10.", telegram_max_positions_keyboard(config)
+
+    updated = _save_max_positions(config_path, max_positions)
+    message = (
+        "✅ Đã lưu số vị thế tối đa\n"
+        f"Max vị thế mở cùng lúc: {max_positions}\n"
+        "Áp dụng từ chu kỳ scan/lệnh tiếp theo."
+    )
+    return updated, message, telegram_max_positions_keyboard(updated)
+
+
+def _ai_history_keyboard(*, expanded: bool, has_more: bool) -> dict[str, Any]:
+    rows: list[list[dict[str, str]]] = []
+    if has_more and not expanded:
+        rows.append([{"text": "🔎 Xem thêm 10 lần cũ", "callback_data": "view_ai_more"}])
+    if expanded:
+        rows.append([{"text": "🔙 Thu gọn 5 lần gần nhất", "callback_data": "view_ai"}])
+    rows.append([{"text": "📲 Menu", "callback_data": "view_menu"}])
+    return {"inline_keyboard": rows}
+
+
+def _telegram_side_label(value: Any) -> str:
+    side = str(value or "").strip().lower()
+    if side == "long":
+        return "LONG"
+    if side == "short":
+        return "SHORT"
+    return str(value or "-").upper() if value else "-"
+
+
+def _ai_symbol_detail_lines(item: dict[str, Any]) -> list[str]:
+    details = item.get("candidate_details") if isinstance(item.get("candidate_details"), list) else []
+    approved = [str(symbol) for symbol in item.get("approved_symbols") or [] if str(symbol)]
+    scores = item.get("setup_scores") if isinstance(item.get("setup_scores"), dict) else {}
+    lines: list[str] = []
+    if details:
+        lines.append("3 cặp giao dịch được mini đánh giá:")
+        for index, detail in enumerate(details[:3], start=1):
+            if not isinstance(detail, dict):
+                continue
+            symbol = str(detail.get("symbol") or "-")
+            chosen = " ✅ mini gửi LC" if symbol in approved else ""
+            metric_parts = []
+            if detail.get("win_probability_pct") is not None:
+                metric_parts.append(f"Win {_telegram_number(detail.get('win_probability_pct'), '%')}")
+            if detail.get("confidence") is not None:
+                metric_parts.append(f"Tin cậy {_telegram_number(detail.get('confidence'))}")
+            if detail.get("risk_reward") is not None:
+                metric_parts.append(f"R:R {_telegram_number(detail.get('risk_reward'))}")
+            if scores.get(symbol) is not None:
+                metric_parts.append(f"Mini score {_telegram_number(scores.get(symbol))}")
+            lines.append(f"{index}. {symbol} | {_telegram_side_label(detail.get('side'))}{chosen}")
+            if metric_parts:
+                lines.append("   " + " | ".join(metric_parts))
+            reasons = [str(reason) for reason in detail.get("reasons") or [] if str(reason)]
+            if reasons:
+                lines.append("   Lý do:")
+                for reason in reasons[:3]:
+                    lines.append(f"   - {reason[:180]}")
+        if approved:
+            lines.append("Mini chọn gửi:")
+            for symbol in approved[:3]:
+                lines.append(f"- {symbol}")
+        return lines
+
+    symbols = [str(symbol) for symbol in item.get("symbols") or [] if str(symbol)]
+    if symbols:
+        lines.append("Cặp giao dịch:")
+        for index, symbol in enumerate(symbols[:5], start=1):
+            marker = " ✅ mini gửi LC" if symbol in approved else ""
+            lines.append(f"{index}. {symbol}{marker}")
+    return lines
+
+
+def _format_ai_call_history_view(config: dict[str, Any], *, expanded: bool = False) -> str:
+    limit = 15 if expanded else 5
+    items = recent_ai_call_history(config, limit=limit)
+    if not items:
+        return "🤖 AI: chưa có lịch sử gọi GPT nào được lưu."
+    title = "🤖 Lịch sử gọi AI gần nhất"
+    title += " (15 lần, mới nhất ở dưới)" if expanded else " (5 lần, mới nhất ở dưới)"
+    lines = [title]
+    for item in items:
+        role = str(item.get("role") or "ai").upper()
+        created_at = str(item.get("created_at") or "")
+        try:
+            created_label = datetime.fromisoformat(created_at.replace("Z", "+00:00")).astimezone(
+                _system_timezone(config)
+            ).strftime("%d/%m/%Y %H:%M:%S VN")
+        except ValueError:
+            created_label = created_at[:16] or "-"
+        lines.append("")
+        lines.append(f"🕒 {created_label}")
+        lines.append(f"Vai trò: {role}")
+        lines.append(f"Model: {item.get('model', '-')}")
+        lines.append(f"Trạng thái: {item.get('status', '-')}")
+        lines.extend(_ai_symbol_detail_lines(item))
+        reason = str(item.get("reason") or "")
+        if reason:
+            lines.append("Lý do AI:")
+            for part in reason.replace("; ", "\n").splitlines():
+                text = part.strip()
+                if text:
+                    lines.append(f"- {text[:220]}")
+    return "\n".join(lines)
+
 def _telegram_number(value: Any, suffix: str = "") -> str:
     try:
         number = float(value)
@@ -516,6 +716,19 @@ def _telegram_number(value: Any, suffix: str = "") -> str:
         return "-"
     text = str(int(number)) if number.is_integer() else f"{number:g}"
     return f"{text}{suffix}"
+
+
+def _telegram_vn_time(config: dict[str, Any], value: Any) -> str:
+    if not value:
+        return "-"
+    try:
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return dt.astimezone(_system_timezone(config)).strftime("%d/%m/%Y %H:%M:%S VN")
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def _telegram_dashboard_message(
@@ -577,6 +790,11 @@ def _telegram_dashboard_message(
         f"🟡 LC đang chờ: {pending_count}",
     ]
     lines.insert(3, f"AI: internal {ai_internal.get('model', '-')} | OKX {ai_okx.get('model', '-')}")
+    try:
+        next_mini = _telegram_vn_time(config, next_internal_market_scan_at(config))
+        lines.insert(4, f"🤖 Mini scan tiếp: {next_mini}")
+    except Exception:
+        pass
     if top:
         lines.append(
             "🏆 Top hiện tại: "
@@ -592,9 +810,9 @@ def _telegram_dashboard_message(
     if reasons:
         lines.append("⚠️ Lý do: " + " | ".join(str(item) for item in reasons[:2]))
     if status.get("last_finished_at"):
-        lines.append(f"🕒 Scan gần nhất: {status.get('last_finished_at')}")
+        lines.append(f"🕒 Scan gần nhất: {_telegram_vn_time(config, status.get('last_finished_at'))}")
     if status.get("next_scan_at"):
-        lines.append(f"⏭ Scan tự động tiếp: {status.get('next_scan_at')}")
+        lines.append(f"⏭ Scan tự động tiếp: {_telegram_vn_time(config, status.get('next_scan_at'))}")
     lines.append("Bấm nút bên dưới để thao tác trực tiếp trong Telegram.")
     return "\n".join(lines)
 
@@ -657,16 +875,26 @@ def _telegram_action_response(
         return _run_telegram_scan(app, config_path)
     if action == "view_guard":
         return config, _telegram_guard_message(config, app), telegram_control_keyboard()
+    if action == "view_positions_account":
+        return config, format_positions_account_view(config), None
     if action == "view_vt":
-        return config, format_positions_view(config), None
+        return config, format_positions_account_view(config), None
     if action == "view_sd":
         return config, format_balance_view(config), None
     if action == "view_lc":
         return config, format_pending_orders_view(config), None
     if action == "view_memory":
         return config, format_market_scan_memory_view(config), None
+    if action == "view_ai":
+        has_more = len(recent_ai_call_history(config, limit=6)) > 5
+        return config, _format_ai_call_history_view(config), _ai_history_keyboard(expanded=False, has_more=has_more)
+    if action == "view_ai_more":
+        return config, _format_ai_call_history_view(config, expanded=True), _ai_history_keyboard(
+            expanded=True,
+            has_more=False,
+        )
     if action == "view_pnl_sd":
-        return config, format_pnl_sd_view(config), None
+        return config, format_positions_account_view(config), None
     if action == "set_order_usdt":
         return config, _order_usdt_menu_message(config), telegram_order_usdt_keyboard(config)
     if action.startswith("set_order_usdt:"):
@@ -675,6 +903,10 @@ def _telegram_action_response(
         return config, _leverage_menu_message(config), telegram_leverage_keyboard(config)
     if action.startswith("set_leverage:"):
         return _set_leverage_from_telegram(config_path, config, action.split(":", 1)[1])
+    if action == "set_max_positions":
+        return config, _max_positions_menu_message(config), telegram_max_positions_keyboard(config)
+    if action.startswith("set_max_positions:"):
+        return _set_max_positions_from_telegram(config_path, config, action.split(":", 1)[1])
     return config, _telegram_dashboard_message(config, app), telegram_control_keyboard()
 
 
@@ -683,6 +915,8 @@ def _telegram_action_message(config: dict[str, Any], action: str) -> str:
         return _order_usdt_menu_message(config)
     if action == "set_leverage" or action.startswith("set_leverage:"):
         return _leverage_menu_message(config)
+    if action == "set_max_positions" or action.startswith("set_max_positions:"):
+        return _max_positions_menu_message(config)
     return _telegram_action_response(config, action, config.get("_config_path") or ".")[1]
 
 
@@ -760,6 +994,29 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
             reply_markup=reply_markup,
         )
         return
+    if parts and parts[0] in {"/maxvt", "/maxpos", "/maxpositions"}:
+        if len(parts) == 1:
+            response_config, response_text, reply_markup = _telegram_action_response(
+                config, "set_max_positions", config_path, app
+            )
+            send_telegram_chat_message(
+                response_config,
+                chat_id,
+                response_text,
+                message_thread_id=message.get("message_thread_id"),
+                reply_markup=reply_markup,
+            )
+            return
+        value = parts[1] if len(parts) > 1 else ""
+        response_config, response_text, reply_markup = _set_max_positions_from_telegram(config_path, config, value)
+        send_telegram_chat_message(
+            response_config,
+            chat_id,
+            response_text,
+            message_thread_id=message.get("message_thread_id"),
+            reply_markup=reply_markup,
+        )
+        return
     command_map = {
         "/start": "view_menu",
         "/menu": "view_menu",
@@ -767,15 +1024,19 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
         "/dashboard": "view_menu",
         "/scan": "scan_now",
         "/guard": "view_guard",
-        "/vt": "view_vt",
+        "/vt": "view_positions_account",
         "/sd": "view_sd",
         "/lc": "view_lc",
         "/memory": "view_memory",
-        "/pnl": "view_pnl_sd",
+        "/ai": "view_ai",
+        "/pnl": "view_positions_account",
         "/lev": "set_leverage",
         "/leverage": "set_leverage",
         "/donbay": "set_leverage",
         "/usdt": "set_order_usdt",
+        "/maxvt": "set_max_positions",
+        "/maxpos": "set_max_positions",
+        "/maxpositions": "set_max_positions",
     }
     action = command_map.get(parts[0] if parts else "")
     if not action:
@@ -914,6 +1175,55 @@ def _empty_price_row(symbol: str, error: str) -> dict[str, Any]:
     }
 
 
+def _okx_target_from_payload(payload: dict[str, Any]) -> dict[str, float | None]:
+    info = payload.get("info", {}) if isinstance(payload.get("info"), dict) else {}
+    source = {**info, **payload}
+    stop_loss = None
+    take_profit = None
+    for key in ("slTriggerPx", "slOrdPx", "stopLossPrice", "stopLoss", "stop_loss"):
+        stop_loss = _safe_float(source.get(key), math.nan)
+        if math.isfinite(stop_loss):
+            break
+        stop_loss = None
+    for key in ("tpTriggerPx", "tpOrdPx", "takeProfitPrice", "takeProfit", "take_profit"):
+        take_profit = _safe_float(source.get(key), math.nan)
+        if math.isfinite(take_profit):
+            break
+        take_profit = None
+    attach_orders = source.get("attachAlgoOrds")
+    if isinstance(attach_orders, str):
+        try:
+            attach_orders = json.loads(attach_orders)
+        except json.JSONDecodeError:
+            attach_orders = []
+    if isinstance(attach_orders, list):
+        for item in attach_orders:
+            if not isinstance(item, dict):
+                continue
+            if stop_loss is None:
+                value = _safe_float(item.get("slTriggerPx") or item.get("slOrdPx"), math.nan)
+                stop_loss = value if math.isfinite(value) else None
+            if take_profit is None:
+                value = _safe_float(item.get("tpTriggerPx") or item.get("tpOrdPx"), math.nan)
+                take_profit = value if math.isfinite(value) else None
+    return {"stop_loss": stop_loss, "take_profit": take_profit}
+
+
+def _okx_targets_from_orders(open_orders: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, float | None]]:
+    targets: dict[tuple[str, str], dict[str, float | None]] = {}
+    for order in open_orders:
+        symbol = str(order.get("symbol") or "")
+        raw_side = str(order.get("side") or "").lower()
+        if not symbol:
+            continue
+        position_side = "long" if raw_side == "sell" else "short" if raw_side == "buy" else raw_side
+        target = _okx_target_from_payload(order.get("raw") or order)
+        current = targets.setdefault((symbol, position_side), {"stop_loss": None, "take_profit": None})
+        current["stop_loss"] = current.get("stop_loss") or target.get("stop_loss")
+        current["take_profit"] = current.get("take_profit") or target.get("take_profit")
+    return targets
+
+
 def _open_okx_positions(config: dict[str, Any]) -> dict[str, Any]:
     status = _okx_demo_status(config) if config.get("mode") == "demo" else {"ready": config.get("mode") == "live"}
     if config.get("mode") == "dry_run":
@@ -935,26 +1245,6 @@ def _open_okx_positions(config: dict[str, Any]) -> dict[str, Any]:
 
     exchange = create_exchange(config, authenticated=True)
     exchange.load_markets()
-    positions = []
-    for item in exchange.fetch_positions():
-        contracts = float(item.get("contracts") or item.get("info", {}).get("pos") or 0)
-        if abs(contracts) <= 0:
-            continue
-        positions.append(
-            {
-                "symbol": item.get("symbol") or item.get("info", {}).get("instId"),
-                "side": _position_side(item),
-                "contracts": abs(contracts),
-                "entry_price": item.get("entryPrice") or item.get("info", {}).get("avgPx"),
-                "mark_price": item.get("markPrice") or item.get("info", {}).get("markPx"),
-                "notional": item.get("notional") or item.get("info", {}).get("notionalUsd"),
-                "leverage": item.get("leverage") or item.get("info", {}).get("lever"),
-                "unrealized_pnl": item.get("unrealizedPnl") or item.get("info", {}).get("upl"),
-                "percentage": item.get("percentage"),
-                "margin_mode": item.get("marginMode") or item.get("info", {}).get("mgnMode"),
-            }
-        )
-
     open_orders = []
     for order in exchange.fetch_open_orders():
         open_orders.append(
@@ -969,6 +1259,40 @@ def _open_okx_positions(config: dict[str, Any]) -> dict[str, Any]:
                 "price": order.get("price"),
                 "status": order.get("status"),
                 "datetime": order.get("datetime"),
+                "raw": order,
+            }
+        )
+    order_targets = _okx_targets_from_orders(open_orders)
+    for order in open_orders:
+        order.pop("raw", None)
+
+    positions = []
+    for item in exchange.fetch_positions():
+        info = item.get("info", {}) if isinstance(item.get("info"), dict) else {}
+        contracts = float(item.get("contracts") or info.get("pos") or 0)
+        if abs(contracts) <= 0:
+            continue
+        symbol = item.get("symbol") or info.get("instId")
+        side = _position_side(item)
+        direct_target = _okx_target_from_payload(item)
+        order_target = order_targets.get((str(symbol), side), {"stop_loss": None, "take_profit": None})
+        stop_loss = direct_target.get("stop_loss") or order_target.get("stop_loss")
+        take_profit = direct_target.get("take_profit") or order_target.get("take_profit")
+        positions.append(
+            {
+                "symbol": symbol,
+                "side": side,
+                "contracts": abs(contracts),
+                "entry_price": item.get("entryPrice") or info.get("avgPx"),
+                "mark_price": item.get("markPrice") or info.get("markPx"),
+                "notional": item.get("notional") or info.get("notionalUsd"),
+                "leverage": item.get("leverage") or info.get("lever"),
+                "unrealized_pnl": item.get("unrealizedPnl") or info.get("upl"),
+                "percentage": item.get("percentage"),
+                "margin_mode": item.get("marginMode") or info.get("mgnMode"),
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "tp_sl_status": "ok" if stop_loss is not None and take_profit is not None else "missing",
             }
         )
 
@@ -1017,7 +1341,7 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
             f"🤖 Tự động: {'bật' if enabled else 'tắt'}\n"
             f"⏱️ Chu kỳ: {interval}s\n"
             f"🛡️ Guard: {'bật' if market_guard_enabled(config) else 'tắt'} / {market_guard_interval(config)}s, báo Telegram mỗi {market_guard_notify_interval(config) // 60} phút\n"
-            "📲 Có thể bấm nút bên dưới để xem VT, SD, LC bất cứ lúc nào.",
+            "📲 Có thể bấm nút bên dưới để xem VT/PNL/SD, SD, LC bất cứ lúc nào.",
         )
 
         def delayed_worker() -> None:
@@ -1153,6 +1477,81 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
             "memory": memory,
         }
 
+    @app.post("/api/market-scan-memory/prune")
+    def market_scan_memory_prune() -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        result = prune_market_scan_observations(config)
+        return {
+            "ok": True,
+            "retention": config.get("market_scan_memory", {}),
+            **result,
+        }
+
+    @app.get("/api/storage/stats")
+    def storage_stats_endpoint() -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        return storage_stats(config)
+
+    @app.post("/api/storage/maintenance")
+    def storage_maintenance_endpoint(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        payload = payload or {}
+        return run_storage_maintenance(
+            config,
+            vacuum=bool(payload.get("vacuum", False)),
+            emergency=bool(payload.get("emergency", False)),
+        )
+
+    @app.get("/api/system-checklist")
+    def system_checklist_endpoint(date: str | None = None) -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        if date:
+            snapshot = dashboard_system_checklist_snapshot(config, date)
+            if snapshot is None:
+                raise HTTPException(status_code=404, detail=f"No system checklist snapshot for {date}")
+            return snapshot
+        return system_checklist_payload(config, automation=_automation_status_payload(app))
+
+    @app.get("/api/system-checklist/history")
+    def system_checklist_history_endpoint(limit: int = 30) -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        items = dashboard_system_checklist_history(config, limit=limit)
+        return {"items": [{"date": item.get("date"), "ok_count": item.get("ok_count"), "total": item.get("total"), "module_count": item.get("module_count")} for item in items]}
+
+    @app.get("/api/system-checklist/summary")
+    def system_checklist_summary_endpoint(period: str = "week") -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        return dashboard_system_checklist_summary(config, period)
+
+    @app.get("/api/dashboard/timeframes")
+    def dashboard_timeframes_endpoint(lookback_hours: int = 24) -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        return timeframe_state_dashboard(config, lookback_hours=lookback_hours)
+
+    @app.get("/api/dashboard/scan-memory")
+    def dashboard_scan_memory_endpoint(lookback_hours: int = 24, per_symbol_timeframe_limit: int = 5) -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        return scan_memory_dashboard(
+            config,
+            lookback_hours=lookback_hours,
+            per_symbol_timeframe_limit=per_symbol_timeframe_limit,
+        )
+
+    @app.get("/api/dashboard/analytics")
+    def dashboard_analytics_endpoint(lookback_hours: int = 24) -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        return analytics_dashboard(config, lookback_hours=lookback_hours)
+
+    @app.get("/api/dashboard/replay")
+    def dashboard_replay_endpoint(limit: int = 50) -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        return replay_dashboard_payload(config, limit=limit)
+
+    @app.get("/api/dashboard/system-health")
+    def dashboard_system_health_endpoint(history_limit: int = 30) -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        return system_health_dashboard(config, history_limit=history_limit)
+
     @app.get("/api/okx-positions")
     def okx_positions() -> dict[str, Any]:
         config = load_config(app.state.config_path)
@@ -1191,6 +1590,263 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
             }
         finally:
             app.state.lock.release()
+
+    @app.post("/api/demo-ai-flow-check")
+    def demo_ai_flow_check() -> dict[str, Any]:
+        if not app.state.lock.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="Analysis is already running")
+        try:
+            config = load_config(app.state.config_path)
+            status = _okx_demo_status(config)
+            if config.get("mode") != "demo":
+                raise HTTPException(status_code=400, detail="AI flow check requires mode: demo")
+            if status["missing_env"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Missing OKX demo env: {', '.join(status['missing_env'])}",
+                )
+            before_prompt = prompt_status(config)
+            forced_internal_scan = run_internal_market_scan_if_due(config)
+            decision_result = run_once(config, execute=True)
+            after_prompt = prompt_status(config)
+            decision_payload = to_jsonable(decision_result)
+            scan_comparison = decision_payload.get("scan_comparison") or {}
+            mini_pending_queue = scan_comparison.get("mini_pending_queue") or {}
+            return {
+                "ok": True,
+                "mode": config.get("mode"),
+                "demo_status": _okx_demo_status(config),
+                "prompt_before": before_prompt.get("metrics") or {},
+                "prompt_after": after_prompt.get("metrics") or {},
+                "forced_internal_scan": {
+                    "provider": forced_internal_scan.get("provider"),
+                    "model": forced_internal_scan.get("model"),
+                    "approved_symbols": forced_internal_scan.get("approved_symbols") or [],
+                    "candidate_count": forced_internal_scan.get("candidate_count"),
+                    "ai_review": forced_internal_scan.get("ai_review"),
+                    "ai_review_error": forced_internal_scan.get("ai_review_error"),
+                    "fallback": forced_internal_scan.get("fallback"),
+                },
+                "mini_pending_created": mini_pending_queue.get("created_orders") or [],
+                "mini_pending_queue": mini_pending_queue,
+                "okx_ai_approval": scan_comparison.get("ai_okx_approval"),
+                "pending_events": (scan_comparison.get("pending_orders") or {}).get("events") or [],
+                "pending_warnings": (scan_comparison.get("pending_orders") or {}).get("warnings") or [],
+                "decision": {
+                    "created_at": decision_payload.get("created_at"),
+                    "action": decision_payload.get("action"),
+                    "selected": decision_payload.get("selected"),
+                    "risk_check": decision_payload.get("risk_check"),
+                    "execution": decision_payload.get("execution"),
+                },
+            }
+        finally:
+            app.state.lock.release()
+
+    @app.post("/api/demo-ai-fake-flow")
+    def demo_ai_fake_flow() -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        if config.get("mode") != "demo":
+            raise HTTPException(status_code=400, detail="Fake AI flow requires mode: demo")
+
+        ai_config = config.get("ai", {})
+        internal_config = ai_config.get("internal", {})
+        okx_config = ai_config.get("okx", {})
+        fake_candidates = [
+            {
+                "symbol": "BTC/USDT:USDT",
+                "side": "long",
+                "confidence": 97.8,
+                "win_probability_pct": 91.4,
+                "risk_reward": 2.4,
+                "entry": 61250.0,
+                "stop_loss": 60620.0,
+                "take_profit": 62890.0,
+                "spread_pct": 0.01,
+                "news_score": 0.35,
+                "news_count": 3,
+                "indicator_summary": {
+                    "last": 61250.0,
+                    "ema_fast": 61120.0,
+                    "ema_slow": 60780.0,
+                    "rsi": 61.2,
+                    "atr_pct": 0.42,
+                    "volume_ratio": 3.1,
+                    "support": 60700.0,
+                    "resistance": 63100.0,
+                    "candlestick_patterns": {
+                        "1m": {
+                            "patterns": ["bullish_engulfing", "bullish_marubozu"],
+                            "direction": "bullish",
+                            "signal_summary": "bullish engulfing confirms continuation above EMA support",
+                        }
+                    },
+                },
+                "higher_timeframes": {
+                    "5m": {"trend": "up", "rsi": 58.5, "ema_gap_pct": 0.45, "signal_summary": "trend aligned up"},
+                    "1h": {"trend": "up", "rsi": 57.4, "ema_gap_pct": 1.05, "signal_summary": "structure supports long"},
+                    "4h": {"trend": "up", "rsi": 55.2, "signal_summary": "higher timeframe bullish continuation"},
+                },
+                "reasons": [
+                    "FAKE_SANDBOX: multi-timeframe long alignment",
+                    "FAKE_SANDBOX: volume expansion and clean invalidation",
+                ],
+                "warnings": [],
+            },
+            {
+                "symbol": "ETH/USDT:USDT",
+                "side": "long",
+                "confidence": 94.2,
+                "win_probability_pct": 88.6,
+                "risk_reward": 2.1,
+                "entry": 3380.0,
+                "stop_loss": 3342.0,
+                "take_profit": 3460.0,
+                "spread_pct": 0.015,
+                "news_score": 0.22,
+                "news_count": 2,
+                "higher_timeframes": {
+                    "5m": {"trend": "up", "rsi": 56.0, "signal_summary": "pullback held EMA"},
+                    "1h": {"trend": "up", "rsi": 59.1, "signal_summary": "bull flag continuation"},
+                    "4h": {"trend": "up", "rsi": 53.8, "signal_summary": "not overextended"},
+                },
+                "reasons": ["FAKE_SANDBOX: secondary long setup"],
+                "warnings": ["Slightly weaker volume than BTC"],
+            },
+            {
+                "symbol": "SOL/USDT:USDT",
+                "side": "short",
+                "confidence": 92.5,
+                "win_probability_pct": 86.9,
+                "risk_reward": 2.0,
+                "entry": 145.2,
+                "stop_loss": 147.1,
+                "take_profit": 141.0,
+                "spread_pct": 0.02,
+                "news_score": -0.15,
+                "news_count": 1,
+                "higher_timeframes": {
+                    "5m": {"trend": "down", "rsi": 43.0, "signal_summary": "lower high rejection"},
+                    "1h": {"trend": "down", "rsi": 45.3, "signal_summary": "EMA rejection"},
+                    "4h": {"trend": "neutral_down", "rsi": 48.0, "signal_summary": "failed breakout"},
+                },
+                "reasons": ["FAKE_SANDBOX: hedge short setup"],
+                "warnings": ["Counter to configured long bias"],
+            },
+        ]
+        fake_market_snapshot = {
+            "provider": "fake_sandbox",
+            "decision": "prefilter",
+            "threshold_win_probability_pct": 80,
+            "approved_symbols": [candidate["symbol"] for candidate in fake_candidates],
+            "approved_count": len(fake_candidates),
+            "candidate_count": len(fake_candidates),
+            "warnings": ["FAKE_SANDBOX_ONLY: do not submit real exchange orders"],
+        }
+        fake_system_state = get_trading_system_state(config)
+        fake_health_state = get_bunny_health_state(config)
+        before_prompt = prompt_status(config)
+        mini_prompt = build_prompt(
+            config,
+            build_market_prompt_dto(
+                candidates=fake_candidates,
+                market_snapshot=fake_market_snapshot,
+                trading_system_state=fake_system_state,
+                trading_health_state=fake_health_state,
+                open_positions=[],
+                recent_trades=[],
+                extra={"fakeSandbox": True, "instruction": "Approve the best fake setup if coherent."},
+            ),
+            instruction_key="mini-analysis",
+        )
+        mini_response = call_openai_json(
+            config,
+            internal_config,
+            mini_prompt,
+            model_name=str(internal_config.get("model", "gpt-5.4-mini")),
+            purpose="debug_fake_flow",
+        )
+        mini_decision = dict(mini_response["parsed"])
+        approved_symbols = [str(symbol) for symbol in mini_decision.get("approved_symbols") or [] if str(symbol)]
+        selected_symbol = approved_symbols[0] if approved_symbols else fake_candidates[0]["symbol"]
+        selected = next(
+            (candidate for candidate in fake_candidates if candidate["symbol"] == selected_symbol),
+            fake_candidates[0],
+        )
+        okx_prompt = build_prompt(
+            config,
+            build_market_prompt_dto(
+                candidates=[selected],
+                market_snapshot={
+                    "riskCheck": {"passed": True, "reasons": [], "warnings": ["FAKE_SANDBOX_ONLY"]},
+                    "context": {
+                        "route": "fake_sandbox_okx_final_check",
+                        "source": "demo-ai-fake-flow",
+                        "willSubmitRealOrder": False,
+                    },
+                },
+                trading_system_state=fake_system_state,
+                trading_health_state=fake_health_state,
+                open_positions=[],
+                recent_trades=[],
+                extra={"fakeSandbox": True, "miniDecision": mini_decision},
+            ),
+            instruction_key="final-decision",
+        )
+        okx_response = call_openai_json(
+            config,
+            okx_config,
+            okx_prompt,
+            model_name=str(okx_config.get("model", "gpt-5.5")),
+            purpose="debug_fake_flow",
+            route="fake_sandbox_okx_final_check",
+        )
+        okx_decision = dict(okx_response["parsed"])
+        simulated_order = {
+            "submitted": False,
+            "simulated": True,
+            "symbol": selected.get("symbol"),
+            "side": selected.get("side"),
+            "entry": selected.get("entry"),
+            "stop_loss": selected.get("stop_loss"),
+            "take_profit": selected.get("take_profit"),
+            "reason": "FAKE_SANDBOX_ONLY: GPT OKX final check completed; no real OKX order submitted",
+            "okx_approved": bool(okx_decision.get("approved")),
+        }
+        after_prompt = prompt_status(config)
+        summary = (
+            "🧪 Fake AI sandbox hoàn tất\n"
+            f"✅ Mini gọi: {internal_config.get('model', 'gpt-5.4-mini')}\n"
+            f"Mini duyệt: {', '.join(approved_symbols) if approved_symbols else 'không duyệt rõ, dùng BTC fake để test OKX'}\n"
+            f"✅ OKX gọi: {okx_config.get('model', 'gpt-5.5')}\n"
+            f"OKX quyết định: {okx_decision.get('decision') or okx_decision.get('approved')}\n"
+            f"Lệnh mô phỏng: {selected.get('side')} {selected.get('symbol')}\n"
+            "⚠️ Không gửi lệnh thật lên OKX."
+        )
+        send_telegram_message(config, summary, with_buttons=False)
+        return {
+            "ok": True,
+            "fake_sandbox": True,
+            "prompt_before": before_prompt.get("metrics") or {},
+            "prompt_after": after_prompt.get("metrics") or {},
+            "mini": {
+                "model": str(internal_config.get("model", "gpt-5.4-mini")),
+                "decision": mini_decision,
+                "latency_ms": mini_response.get("latency_ms"),
+                "prompt_tokens": mini_response.get("prompt_tokens"),
+                "completion_tokens": mini_response.get("completion_tokens"),
+            },
+            "okx": {
+                "model": str(okx_config.get("model", "gpt-5.5")),
+                "decision": okx_decision,
+                "latency_ms": okx_response.get("latency_ms"),
+                "prompt_tokens": okx_response.get("prompt_tokens"),
+                "completion_tokens": okx_response.get("completion_tokens"),
+            },
+            "fake_candidates": fake_candidates,
+            "selected": selected,
+            "simulated_order": simulated_order,
+        }
 
     @app.get("/api/config")
     def config_summary() -> dict[str, Any]:

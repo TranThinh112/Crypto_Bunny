@@ -1,79 +1,17 @@
-Review the provided market scan candidates.
-Pick only the strongest setups that remain valid under the current market context.
-Return approved symbols in priority order and include short reasons.
+Task: review up to 3 code-ranked setups and choose LC candidates.
 
-Candlestick reasoning rules:
+Rules:
+- Pick at least 1 symbol when candidates exist, unless all are clearly invalid.
+- Prefer setups with aligned 4h bias, 1h/15m/5m confirmation, acceptable RR, volume support, and clean levels.
+- Reject/avoid if 4h conflicts strongly, RR is weak, volume is missing, or warnings show major risk.
+- Treat code fields as precomputed evidence; do not ask for raw candles.
+- Use rolling memory only when present and only to judge improving/weakening momentum.
 
-Role split:
-- Code already analyzes 5m, 15m, and 1h structure, momentum, and tactical candlestick context.
-- Mini should mainly learn from and reason with 4h context.
-- Use the provided lower-timeframe analysis as precomputed evidence, not as the main place to improvise.
-- Also use rolling scan memory from earlier scans so you can compare old lower-timeframe state with the newest update.
-
-1. Reversal patterns after decline often support bullish continuation on the next move if confirmed.
-Examples:
-- hammer
-- bullish_pin_bar
-- inverted_hammer
-- morning_star
-- bullish_engulfing
-- piercing_line
-- dragonfly_doji
-- tweezer_bottom
-
-2. Reversal patterns after advance often support bearish continuation on the next move if confirmed.
-Examples:
-- hanging_man
-- bearish_pin_bar
-- shooting_star
-- evening_star
-- bearish_engulfing
-- dark_cloud_cover
-- gravestone_doji
-- tweezer_top
-
-3. Continuation patterns should strengthen the current trend, not be treated as early reversal by default.
-Examples:
-- bullish_marubozu
-- bearish_marubozu
-- three_white_soldiers
-- three_black_crows
-
-4. Indecision patterns mean caution, not automatic entry.
-Examples:
-- doji
-- mixed weak-body candles
-If only indecision is present without confirmation, prefer NO_TRADE or lower priority.
-
-5. Read the pattern in context:
-- A bullish reversal pattern is stronger when trend_context is down or price is near support.
-- A bearish reversal pattern is stronger when trend_context is up or price is near resistance.
-- A continuation pattern is stronger when EMA trend, volume, and broader timeframe align.
-
-6. Timeframe priority for candlestick inference:
-- 4h pattern is your main broader-frame clue.
-- 1h and 15m are tactical confirmation layers already summarized by code.
-- 5m is a fast execution layer already summarized by code.
-- 1m is only a local trigger and must not override higher context.
-
-7. Infer next price direction carefully:
-- If 4h supports bullish continuation or bullish reversal, and the code summary for 5m/15m/1h also leans bullish, expect the next move more likely upward.
-- If 4h supports bearish continuation or bearish reversal, and the code summary for 5m/15m/1h also leans bearish, expect the next move more likely downward.
-- If 4h is mixed while lower frames are strong, reduce confidence and avoid overstating conviction.
-- If 4h directly conflicts with the lower-timeframe code thesis, prefer caution or NO_TRADE.
-
-8. Use rolling scan memory across consecutive scans:
-- Compare the newest 1m scan with the previous 1m scan to detect acceleration, weakening, or reversal.
-- Compare the newest 5m scan with the previous 5m scan to detect whether the tactical move is improving or fading.
-- Compare the newest 15m scan with the previous 15m scan to detect whether the setup is maturing or failing.
-- Compare the newest 1h scan with the previous 1h scan to detect whether the broader intraday structure is strengthening or deteriorating.
-- If several consecutive scans improve in the same direction, confidence may increase.
-- If the newest scan weakens compared with prior scans, confidence should fall even if the current snapshot still looks decent.
-
-9. Never approve a setup only because a pattern name looks attractive.
-Require agreement from:
-- candlestick signal summary
-- trend
-- risk/reward
-- volume
-- wider timeframe structure, especially 4h
+Return JSON:
+{
+  "approved_symbols":["SYMBOL"],
+  "decision":"LC|NO_TRADE",
+  "confidence":0-100,
+  "setup_scores":{"SYMBOL":0-100},
+  "reason":"<=180 chars"
+}

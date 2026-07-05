@@ -1,0 +1,134 @@
+from __future__ import annotations
+
+import io
+import json
+import os
+import tempfile
+import urllib.error
+from pathlib import Path
+from unittest import TestCase
+from unittest.mock import patch
+
+from crypto_trader.codex_features import call_openai_json
+
+
+class _FakeOpenAIResponse:
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+
+    def __enter__(self) -> "_FakeOpenAIResponse":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return json.dumps(self.payload).encode("utf-8")
+
+
+class CodexFeaturesTest(TestCase):
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+
+    def tearDown(self) -> None:
+        self._tmpdir.cleanup()
+
+    def _config(self) -> dict:
+        return {
+            "state_db_path": str(Path(self._tmpdir.name) / "state.sqlite"),
+            "notifications": {
+                "telegram": {
+                    "enabled": True,
+                    "notify_ai_api_calls": True,
+                }
+            },
+            "ai": {"enabled": True, "manual_only": False, "allow_api_calls": True},
+        }
+
+    def _role_config(self) -> dict:
+        return {"api_key_env": "OPENAI_API_KEY_TEST", "timeout_seconds": 1}
+
+    def _prompt_package(self) -> dict:
+        return {
+            "messages": [{"role": "system", "content": "Return JSON."}, {"role": "user", "content": "{}"}],
+            "prompt_version": "prompt-v-test",
+            "prompt_hash": "abcdef1234567890",
+            "estimated_static_tokens": 12,
+            "estimated_dynamic_tokens": 3,
+            "estimated_cache_hit": 80,
+        }
+
+    @patch.dict(os.environ, {"OPENAI_API_KEY_TEST": "test-key"})
+    @patch("crypto_trader.codex_features.register_model_version")
+    @patch("crypto_trader.codex_features.register_prompt_metric")
+    @patch("crypto_trader.notifier.send_telegram_message")
+    @patch("crypto_trader.codex_features.urllib.request.urlopen")
+    def test_openai_success_sends_telegram_notice(
+        self,
+        urlopen,
+        send_telegram_message,
+        _register_prompt_metric,
+        _register_model_version,
+    ) -> None:
+        urlopen.return_value = _FakeOpenAIResponse(
+            {
+                "choices": [{"message": {"content": "{\"approved\": true}"}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 4},
+            }
+        )
+
+        result = call_openai_json(
+            self._config(),
+            self._role_config(),
+            self._prompt_package(),
+            model_name="gpt-test",
+            purpose="mini_market_scan",
+        )
+
+        self.assertEqual(result["parsed"], {"approved": True})
+        send_telegram_message.assert_called_once()
+        message = send_telegram_message.call_args.args[1]
+        self.assertIn("AI được gọi", message)
+        self.assertIn("gpt-test", message)
+        self.assertIn("Trạng thái: OK", message)
+        self.assertFalse(send_telegram_message.call_args.kwargs["with_buttons"])
+        self.assertFalse(send_telegram_message.call_args.kwargs["replace_previous"])
+
+    @patch.dict(os.environ, {"OPENAI_API_KEY_TEST": "test-key"})
+    @patch("crypto_trader.notifier.send_telegram_message")
+    @patch("crypto_trader.codex_features.urllib.request.urlopen")
+    def test_openai_http_error_sends_telegram_notice(self, urlopen, send_telegram_message) -> None:
+        urlopen.side_effect = urllib.error.HTTPError(
+            url="https://api.openai.com/v1/chat/completions",
+            code=429,
+            msg="Too Many Requests",
+            hdrs=None,
+            fp=io.BytesIO(b'{"error":"rate limit"}'),
+        )
+
+        with self.assertRaises(RuntimeError):
+            call_openai_json(
+                self._config(),
+                self._role_config(),
+                self._prompt_package(),
+                model_name="gpt-test",
+                purpose="mini_market_scan",
+            )
+
+        send_telegram_message.assert_called_once()
+        message = send_telegram_message.call_args.args[1]
+        self.assertIn("GPT API lỗi", message)
+        self.assertIn("OpenAI HTTP 429", message)
+
+    @patch.dict(os.environ, {"OPENAI_API_KEY_TEST": "test-key"})
+    @patch("crypto_trader.codex_features.urllib.request.urlopen")
+    def test_openai_call_requires_policy_purpose(self, urlopen) -> None:
+        with self.assertRaises(RuntimeError):
+            call_openai_json(
+                self._config(),
+                self._role_config(),
+                self._prompt_package(),
+                model_name="gpt-test",
+            )
+
+        urlopen.assert_not_called()

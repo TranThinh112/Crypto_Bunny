@@ -1,8 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import json
 import random
+import re
 import time
 import urllib.error
 import urllib.request
@@ -16,7 +17,7 @@ from dotenv import load_dotenv
 
 from .config import deep_merge, project_path
 from .models import Decision, RiskCheck, TradeCandidate, to_jsonable
-from .storage import connect_state_db
+from .storage import connect_state_db, get_journal_state, set_journal_state
 
 
 PROMPT_FILE_ORDER = (
@@ -34,6 +35,7 @@ PROMPT_INSTRUCTION_MAP = {
 OPEN_EXECUTION_STATUSES = {"OPEN"}
 CLOSED_EXECUTION_STATUSES = {"WIN", "LOSS", "BREAKEVEN", "CLOSED"}
 STATE_VERSION = "python-codex-v1"
+AI_CALL_HISTORY_STATE_KEY = "ai_call_history"
 
 
 def _utcnow() -> datetime:
@@ -317,6 +319,7 @@ def build_prompt(
         "prompt_version": prompt_version,
         "prompt_hash": prompt_hash,
         "experiment_name": experiment_name,
+        "instruction_key": instruction_key,
         "market_json": market_json,
         "sections": {
             "system": sections[0],
@@ -337,13 +340,230 @@ def _role_api_key(config: dict[str, Any], role_config: dict[str, Any]) -> tuple[
     return key_env, os.getenv(key_env, "").strip()
 
 
+def _telegram_notify_ai_api_calls(config: dict[str, Any]) -> bool:
+    telegram_config = config.get("notifications", {}).get("telegram", {})
+    return bool(telegram_config.get("notify_ai_api_calls", True))
+
+
+def _local_time_label(iso_value: str) -> str:
+    try:
+        dt = datetime.fromisoformat(str(iso_value).replace("Z", "+00:00"))
+    except ValueError:
+        dt = _utcnow()
+    return dt.astimezone(timezone(timedelta(hours=7))).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _ai_call_role(model_name: str, prompt_package: dict[str, Any]) -> str:
+    instruction_key = str(prompt_package.get("instruction_key") or "")
+    lowered = model_name.lower()
+    if instruction_key == "mini-analysis" or "mini" in lowered or "5.4" in lowered:
+        return "mini"
+    if instruction_key == "final-decision" or "5.5" in lowered:
+        return "okx"
+    return "ai"
+
+
+def _extract_prompt_symbols(prompt_package: dict[str, Any], parsed: dict[str, Any] | None = None) -> list[str]:
+    symbols: list[str] = []
+    parsed = parsed or {}
+    for value in parsed.get("approved_symbols") or []:
+        symbol = str(value)
+        if symbol and symbol not in symbols:
+            symbols.append(symbol)
+    content = str(prompt_package.get("market_json") or "")
+    if not content:
+        messages = prompt_package.get("messages") or []
+        content = "\n".join(str(message.get("content") or "") for message in messages if isinstance(message, dict))
+    for match in re.finditer(r'"symbol"\s*:\s*"([^"]+)"', content):
+        symbol = match.group(1)
+        if symbol and symbol not in symbols:
+            symbols.append(symbol)
+        if len(symbols) >= 5:
+            break
+    return symbols
+
+
+def _extract_prompt_candidates(prompt_package: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    content = str(prompt_package.get("market_json") or "")
+    if not content:
+        return candidates
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        return candidates
+    raw_candidates = payload.get("candidates") if isinstance(payload, dict) else None
+    if not isinstance(raw_candidates, list):
+        return candidates
+    for item in raw_candidates[:3]:
+        if not isinstance(item, dict):
+            continue
+        candidates.append(
+            {
+                "symbol": item.get("symbol"),
+                "side": item.get("side"),
+                "confidence": item.get("confidence"),
+                "win_probability_pct": item.get("win_probability_pct"),
+                "risk_reward": item.get("risk_reward"),
+                "reasons": item.get("reasons") if isinstance(item.get("reasons"), list) else [],
+            }
+        )
+    return candidates
+
+
+def recent_ai_call_history(config: dict[str, Any], limit: int = 10) -> list[dict[str, Any]]:
+    raw = get_journal_state(config, AI_CALL_HISTORY_STATE_KEY)
+    if not raw:
+        return []
+    try:
+        items = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)][-limit:]
+
+
+def _record_ai_call_history(config: dict[str, Any], item: dict[str, Any]) -> None:
+    try:
+        history = recent_ai_call_history(config, limit=50)
+        history.append(item)
+        set_journal_state(config, AI_CALL_HISTORY_STATE_KEY, json.dumps(history[-50:], ensure_ascii=False))
+    except Exception:
+        return
+
+
+def _ai_call_message(item: dict[str, Any]) -> str:
+    role = str(item.get("role") or "ai")
+    status = str(item.get("status") or "-")
+    symbols = ", ".join(str(symbol) for symbol in item.get("symbols") or []) or "-"
+    lines = [
+        "🤖 AI được gọi" if role != "okx" else "🤖 AI OKX 5.5 được gọi",
+        f"Model: {item.get('model', '-')}",
+        f"Cặp giao dịch: {symbols}",
+        f"Trạng thái: {status}",
+    ]
+    if role == "mini":
+        lines.append(f"Thời gian mini đề xuất LC: {_local_time_label(str(item.get('created_at') or _iso_now()))}")
+    elif role == "okx":
+        if item.get("approved"):
+            lines.append(f"Thời gian vào lệnh: {_local_time_label(str(item.get('created_at') or _iso_now()))}")
+            lines.append(f"Lý do vào lệnh: {str(item.get('reason') or '-')[:700]}")
+        else:
+            lines.append(f"Thời gian check: {_local_time_label(str(item.get('created_at') or _iso_now()))}")
+            lines.append(f"Lý do không vào lệnh: {str(item.get('reason') or '-')[:700]}")
+    else:
+        lines.append(f"Thời gian gọi: {_local_time_label(str(item.get('created_at') or _iso_now()))}")
+    if item.get("latency_ms") is not None:
+        lines.append(f"Độ trễ: {item.get('latency_ms')} ms")
+    return "\n".join(lines)
+
+
+def _notify_openai_api_call(
+    config: dict[str, Any],
+    *,
+    model_name: str,
+    prompt_package: dict[str, Any],
+    success: bool,
+    latency_ms: float | None = None,
+    usage: dict[str, Any] | None = None,
+    error: str | None = None,
+    parsed: dict[str, Any] | None = None,
+) -> None:
+    created_at = _iso_now()
+    role = _ai_call_role(model_name, prompt_package)
+    parsed = parsed or {}
+    approved = bool(parsed.get("approved")) if success else False
+    status = "ERROR"
+    if success:
+        if role == "okx":
+            status = "VÀO LỆNH" if approved else "KHÔNG VÀO LỆNH"
+        elif role == "mini":
+            approved_symbols = parsed.get("approved_symbols") or []
+            status = "MINI ĐỀ XUẤT LC" if approved_symbols or approved else "NO_TRADE"
+        else:
+            status = "OK"
+    item = {
+        "created_at": created_at,
+        "role": role,
+        "model": model_name,
+        "symbols": _extract_prompt_symbols(prompt_package, parsed),
+        "candidate_details": _extract_prompt_candidates(prompt_package),
+        "approved_symbols": parsed.get("approved_symbols") if isinstance(parsed.get("approved_symbols"), list) else [],
+        "setup_scores": parsed.get("setup_scores") if isinstance(parsed.get("setup_scores"), dict) else {},
+        "status": status,
+        "approved": approved,
+        "decision": parsed.get("decision"),
+        "reason": str(parsed.get("reason") or error or ""),
+        "prompt_version": prompt_package.get("prompt_version"),
+        "prompt_hash": prompt_package.get("prompt_hash"),
+        "latency_ms": latency_ms,
+        "prompt_tokens": _safe_int((usage or {}).get("prompt_tokens")),
+        "completion_tokens": _safe_int((usage or {}).get("completion_tokens")),
+    }
+    _record_ai_call_history(config, item)
+    if not _telegram_notify_ai_api_calls(config):
+        return
+    try:
+        from .notifier import send_telegram_message
+
+        if success:
+            text = _ai_call_message(item)
+        else:
+            text = "\n".join(
+                [
+                    "🚨 GPT API lỗi",
+                    f"Model: {model_name}",
+                    f"Cặp giao dịch: {', '.join(item['symbols']) if item['symbols'] else '-'}",
+                    f"Trạng thái: {status}",
+                    f"Lỗi: {(error or '-')[:450]}",
+                ]
+            )
+        send_telegram_message(config, text, with_buttons=False, replace_previous=False)
+    except Exception:
+        return
+
 def call_openai_json(
     config: dict[str, Any],
     role_config: dict[str, Any],
     prompt_package: dict[str, Any],
     *,
     model_name: str,
+    purpose: str | None = None,
+    route: str | None = None,
 ) -> dict[str, Any]:
+    ai_settings = config.get("ai", {})
+    purpose = str(purpose or "").strip()
+    route = str(route or "").strip()
+    if not bool(ai_settings.get("enabled", True)):
+        raise RuntimeError("OpenAI API calls are disabled by config: ai.enabled=false")
+    if not bool(ai_settings.get("allow_api_calls", False)):
+        raise RuntimeError("OpenAI API calls are disabled by config: ai.allow_api_calls=false")
+    if not purpose:
+        raise RuntimeError("OpenAI API call blocked: missing ai call purpose")
+    allowed_purposes = {
+        "mini_market_scan",
+        "okx_final_approval",
+    }
+    if bool(ai_settings.get("replay", {}).get("allow_api_calls", False)):
+        allowed_purposes.add("replay")
+    if bool(ai_settings.get("debug", {}).get("allow_api_calls", False)):
+        allowed_purposes.add("debug_fake_flow")
+    if purpose not in allowed_purposes:
+        raise RuntimeError(f"OpenAI API call blocked by policy: purpose={purpose}")
+    if purpose == "mini_market_scan":
+        internal_config = ai_settings.get("internal", {})
+        if not bool(internal_config.get("market_scan_enabled", True)):
+            raise RuntimeError("OpenAI mini scan blocked: ai.internal.market_scan_enabled=false")
+        if not bool(internal_config.get("market_scan_use_ai", True)):
+            raise RuntimeError("OpenAI mini scan blocked: ai.internal.market_scan_use_ai=false")
+    if purpose == "okx_final_approval":
+        allowed_routes = {"new_vt", "local_lc_release", "lc_okx_release"}
+        if route not in allowed_routes:
+            raise RuntimeError(f"OpenAI OKX approval blocked by policy: route={route or '-'}")
+        okx_config = ai_settings.get("okx", {})
+        if not bool(okx_config.get("approval_enabled", True)):
+            raise RuntimeError("OpenAI OKX approval blocked: ai.okx.approval_enabled=false")
     key_env, api_key = _role_api_key(config, role_config)
     if not api_key:
         raise RuntimeError(f"missing {key_env}")
@@ -373,7 +593,23 @@ def call_openai_json(
         detail = f"OpenAI HTTP {exc.code}"
         if body:
             detail = f"{detail}: {body[:500]}"
+        _notify_openai_api_call(
+            config,
+            model_name=model_name,
+            prompt_package=prompt_package,
+            success=False,
+            error=detail,
+        )
         raise RuntimeError(detail) from exc
+    except Exception as exc:
+        _notify_openai_api_call(
+            config,
+            model_name=model_name,
+            prompt_package=prompt_package,
+            success=False,
+            error=str(exc),
+        )
+        raise
     latency_ms = round((time.perf_counter() - start) * 1000, 2)
     content = raw["choices"][0]["message"]["content"]
     parsed = json.loads(content)
@@ -390,6 +626,15 @@ def call_openai_json(
             "estimated_dynamic_tokens": prompt_package["estimated_dynamic_tokens"],
             "cache_hit_percent": prompt_package["estimated_cache_hit"],
         },
+    )
+    _notify_openai_api_call(
+        config,
+        model_name=model_name,
+        prompt_package=prompt_package,
+        success=True,
+        latency_ms=latency_ms,
+        usage=usage,
+        parsed=parsed,
     )
     register_model_version(
         config,
@@ -1936,7 +2181,13 @@ def replay_trade_execution(config: dict[str, Any], trade_execution_id: int) -> d
     if provider == "openai":
         try:
             role_config = deepcopy(config.get("ai", {}).get("okx", {}))
-            response = call_openai_json(config, role_config, prompt_package, model_name=model_name)
+            response = call_openai_json(
+                config,
+                role_config,
+                prompt_package,
+                model_name=model_name,
+                purpose="replay",
+            )
             parsed = response["parsed"]
             new_decision = str(parsed.get("decision") or ("LONG" if parsed.get("approved") else "NO_TRADE")).upper()
             new_confidence = _safe_float(parsed.get("confidence"), old_confidence)
@@ -2072,3 +2323,4 @@ def replay_stats(config: dict[str, Any]) -> dict[str, Any]:
         "performance": performance,
         "recent": payloads[:20],
     }
+

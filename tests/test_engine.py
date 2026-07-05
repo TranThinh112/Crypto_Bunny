@@ -3,10 +3,11 @@ from __future__ import annotations
 import tempfile
 from copy import deepcopy
 from unittest import TestCase
+from unittest.mock import patch
 
 from crypto_trader.config import DEFAULT_CONFIG
 from crypto_trader.engine import _create_pending_from_internal_scan
-from crypto_trader.models import TradeCandidate
+from crypto_trader.models import ExecutionResult, TradeCandidate
 from crypto_trader.storage import list_pending_orders
 
 
@@ -39,7 +40,7 @@ class EngineMiniQueueTest(TestCase):
         config["mode"] = "dry_run"
         config["news"]["require_symbol_news"] = False
         config["ai"]["internal"]["market_scan_to_pending"] = True
-        config["ai"]["internal"]["market_scan_pending_limit"] = 3
+        config["ai"]["internal"]["market_scan_pending_limit"] = 1
         config["ai"]["internal"]["market_scan_require_ai_for_pending"] = True
         return config
 
@@ -48,7 +49,7 @@ class EngineMiniQueueTest(TestCase):
         if tmpdir:
             tmpdir.cleanup()
 
-    def test_mini_scan_creates_local_lc_only_after_ai_review(self) -> None:
+    def test_mini_scan_creates_only_best_lc_after_ai_review(self) -> None:
         config = self._config()
         candidates = [_candidate("BTC/USDT:USDT"), _candidate("ETH/USDT:USDT")]
         scan = {
@@ -61,11 +62,68 @@ class EngineMiniQueueTest(TestCase):
         result = _create_pending_from_internal_scan(config, candidates, scan, (5, set(), []), set())
 
         self.assertTrue(result["allowed"])
-        self.assertEqual(result["created"], 2)
+        self.assertEqual(result["created"], 1)
         self.assertEqual(
             {order["symbol"] for order in list_pending_orders(config, status="OPEN")},
-            {"BTC/USDT:USDT", "ETH/USDT:USDT"},
+            {"ETH/USDT:USDT"},
         )
+
+    def test_mini_scan_uses_pending_gate_before_final_entry_gate(self) -> None:
+        config = self._config()
+        config["news"]["require_symbol_news"] = True
+        config["strategy"]["min_win_probability_pct"] = 80
+        candidate = _candidate("LIT/USDT:USDT")
+        candidate.win_probability_pct = 60.84
+        candidate.news_count = 0
+        scan = {
+            "provider": "openai",
+            "model": "gpt-5.4-mini",
+            "approved_symbols": ["LIT/USDT:USDT"],
+            "ai_review": {"approved_symbols": ["LIT/USDT:USDT"]},
+        }
+
+        result = _create_pending_from_internal_scan(config, [candidate], scan, (5, set(), []), set())
+
+        self.assertTrue(result["allowed"])
+        self.assertEqual(result["created"], 1)
+        self.assertEqual(result["skipped"], [])
+        orders = list_pending_orders(config, status="OPEN")
+        self.assertEqual(len(orders), 1)
+        self.assertEqual(orders[0]["symbol"], "LIT/USDT:USDT")
+
+    def test_mini_scan_submits_demo_lc_to_okx_as_lc_okx(self) -> None:
+        config = self._config()
+        config["mode"] = "demo"
+        candidates = [_candidate("BTC/USDT:USDT")]
+        scan = {
+            "provider": "openai",
+            "model": "gpt-5.4-mini",
+            "approved_symbols": ["BTC/USDT:USDT"],
+            "ai_review": {"approved_symbols": ["BTC/USDT:USDT"]},
+        }
+
+        with patch(
+            "crypto_trader.engine.execute_candidate",
+            return_value=ExecutionResult(
+                mode="demo",
+                submitted=True,
+                order_id="limit-123",
+                message="demo: limit order submitted",
+                journal_type="LC",
+                journal_id=1,
+            ),
+        ) as execute:
+            result = _create_pending_from_internal_scan(config, candidates, scan, (5, set(), []), set())
+
+        execute.assert_called_once()
+        self.assertEqual(execute.call_args.kwargs["order_type_override"], "limit")
+        self.assertEqual(execute.call_args.kwargs["entry_type"], "mini_lc_okx")
+        self.assertEqual(result["created"], 1)
+        self.assertEqual(result["created_orders"][0]["status"], "LC_OKX")
+        self.assertEqual(result["created_orders"][0]["exchange_order_id"], "limit-123")
+        orders = list_pending_orders(config, status="LC_OKX")
+        self.assertEqual(len(orders), 1)
+        self.assertEqual(orders[0]["exchange_order_id"], "limit-123")
 
     def test_mini_scan_fallback_does_not_create_local_lc(self) -> None:
         config = self._config()

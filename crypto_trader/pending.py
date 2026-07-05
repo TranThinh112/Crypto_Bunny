@@ -627,28 +627,6 @@ def maintain_pending_orders(
                         )
                         kept += 1
                         continue
-                    ai_decision = okx_ai_approval(
-                        config,
-                        candidate,
-                        submit_check,
-                        context={"route": "local_lc_submit_okx", "lc_id": lc_id, "from_status": "OPEN"},
-                    )
-                    if not ai_decision.get("approved"):
-                        warnings.append(
-                            f"{symbol}: OKX AI kept local LC before OKX submit: {ai_decision.get('reason') or ai_decision.get('decision')}"
-                        )
-                        events.append(
-                            {
-                                "type": "pending_ai_deferred",
-                                "source": "local_lc_submit_okx",
-                                "lc_id": lc_id,
-                                "symbol": symbol,
-                                "side": str(record.get("side") or ""),
-                                "reason": ai_decision.get("reason") or ai_decision.get("decision"),
-                            }
-                        )
-                        kept += 1
-                        continue
                     final_check = evaluate_candidate(
                         config,
                         candidate,

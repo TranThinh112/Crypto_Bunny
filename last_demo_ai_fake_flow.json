@@ -1,0 +1,269 @@
+﻿{
+    "ok":  true,
+    "fake_sandbox":  true,
+    "prompt_before":  {
+                          "prompt_version":  "prompt-v1",
+                          "prompt_hash":  "9cd8afd5cc088e625f00017564c50141167d6f384cd5812ab728c2202a668ea2",
+                          "total_requests":  2,
+                          "average_prompt_tokens":  55599.5,
+                          "average_completion_tokens":  126.5,
+                          "average_latency":  2327.34,
+                          "estimated_cached_tokens":  624.0,
+                          "estimated_dynamic_tokens":  48450.625,
+                          "cache_hit_percent":  5.06,
+                          "updated_at":  "2026-07-04T11:03:07.463241+00:00"
+                      },
+    "prompt_after":  {
+                         "prompt_version":  "prompt-v1",
+                         "prompt_hash":  "9cd8afd5cc088e625f00017564c50141167d6f384cd5812ab728c2202a668ea2",
+                         "total_requests":  4,
+                         "average_prompt_tokens":  28673.75,
+                         "average_completion_tokens":  184.75,
+                         "average_latency":  3007.0299999999997,
+                         "estimated_cached_tokens":  624.0,
+                         "estimated_dynamic_tokens":  24605.125,
+                         "cache_hit_percent":  25.16,
+                         "updated_at":  "2026-07-04T11:07:43.463325+00:00"
+                     },
+    "mini":  {
+                 "model":  "gpt-5.4-mini",
+                 "decision":  {
+                                  "approved":  true,
+                                  "decision":  "approve_best_setup_only",
+                                  "reason":  "BTC has the strongest coherent multi-timeframe long: 4h bullish continuation aligns with 1h/5m uptrend, volume expansion, bullish 1m continuation candles above EMA support, and clean risk/reward. ETH is valid but weaker volume and lower conviction. SOL conflicts with the requested long-bias emphasis and is only a hedge short, so it is not selected.",
+                                  "approved_symbols":  [
+                                                           "BTC/USDT:USDT"
+                                                       ],
+                                  "setup_scores":  {
+                                                       "BTC/USDT:USDT":  96,
+                                                       "ETH/USDT:USDT":  88,
+                                                       "SOL/USDT:USDT":  41
+                                                   },
+                                  "confidence":  95
+                              },
+                 "latency_ms":  2018.75,
+                 "prompt_tokens":  2168,
+                 "completion_tokens":  146
+             },
+    "okx":  {
+                "model":  "gpt-5.5",
+                "decision":  {
+                                 "approved":  true,
+                                 "decision":  "approve_best_setup_only",
+                                 "reason":  "Approved BTC/USDT:USDT long. Risk check passed, system healthy, not in recovery, no open positions, RR 2.4 exceeds 1.5 minimum, and confidence exceeds normal threshold. 4h bullish continuation confirms the proposed long, 1h and 5m trends are aligned up, EMA structure is bullish, RSI is constructive but not overbought, volume expansion confirms participation, and entry is above support with resistance allowing target room. 1m bullish engulfing/marubozu is acceptable as a local trigger because higher timeframes support it. FAKE_SANDBOX_ONLY is noted but not a blocking execution risk in this route.",
+                                 "approved_symbols":  [
+                                                          "BTC/USDT:USDT"
+                                                      ],
+                                 "setup_scores":  {
+                                                      "BTC/USDT:USDT":  96
+                                                  },
+                                 "confidence":  95
+                             },
+                "latency_ms":  5354.69,
+                "prompt_tokens":  1328,
+                "completion_tokens":  340
+            },
+    "fake_candidates":  [
+                            {
+                                "symbol":  "BTC/USDT:USDT",
+                                "side":  "long",
+                                "confidence":  97.8,
+                                "win_probability_pct":  91.4,
+                                "risk_reward":  2.4,
+                                "entry":  61250.0,
+                                "stop_loss":  60620.0,
+                                "take_profit":  62890.0,
+                                "spread_pct":  0.01,
+                                "news_score":  0.35,
+                                "news_count":  3,
+                                "indicator_summary":  {
+                                                          "last":  61250.0,
+                                                          "ema_fast":  61120.0,
+                                                          "ema_slow":  60780.0,
+                                                          "rsi":  61.2,
+                                                          "atr_pct":  0.42,
+                                                          "volume_ratio":  3.1,
+                                                          "support":  60700.0,
+                                                          "resistance":  63100.0,
+                                                          "candlestick_patterns":  {
+                                                                                       "1m":  {
+                                                                                                  "patterns":  [
+                                                                                                                   "bullish_engulfing",
+                                                                                                                   "bullish_marubozu"
+                                                                                                               ],
+                                                                                                  "direction":  "bullish",
+                                                                                                  "signal_summary":  "bullish engulfing confirms continuation above EMA support"
+                                                                                              }
+                                                                                   }
+                                                      },
+                                "higher_timeframes":  {
+                                                          "5m":  {
+                                                                     "trend":  "up",
+                                                                     "rsi":  58.5,
+                                                                     "ema_gap_pct":  0.45,
+                                                                     "signal_summary":  "trend aligned up"
+                                                                 },
+                                                          "1h":  {
+                                                                     "trend":  "up",
+                                                                     "rsi":  57.4,
+                                                                     "ema_gap_pct":  1.05,
+                                                                     "signal_summary":  "structure supports long"
+                                                                 },
+                                                          "4h":  {
+                                                                     "trend":  "up",
+                                                                     "rsi":  55.2,
+                                                                     "signal_summary":  "higher timeframe bullish continuation"
+                                                                 }
+                                                      },
+                                "reasons":  [
+                                                "FAKE_SANDBOX: multi-timeframe long alignment",
+                                                "FAKE_SANDBOX: volume expansion and clean invalidation"
+                                            ],
+                                "warnings":  [
+
+                                             ]
+                            },
+                            {
+                                "symbol":  "ETH/USDT:USDT",
+                                "side":  "long",
+                                "confidence":  94.2,
+                                "win_probability_pct":  88.6,
+                                "risk_reward":  2.1,
+                                "entry":  3380.0,
+                                "stop_loss":  3342.0,
+                                "take_profit":  3460.0,
+                                "spread_pct":  0.015,
+                                "news_score":  0.22,
+                                "news_count":  2,
+                                "higher_timeframes":  {
+                                                          "5m":  {
+                                                                     "trend":  "up",
+                                                                     "rsi":  56.0,
+                                                                     "signal_summary":  "pullback held EMA"
+                                                                 },
+                                                          "1h":  {
+                                                                     "trend":  "up",
+                                                                     "rsi":  59.1,
+                                                                     "signal_summary":  "bull flag continuation"
+                                                                 },
+                                                          "4h":  {
+                                                                     "trend":  "up",
+                                                                     "rsi":  53.8,
+                                                                     "signal_summary":  "not overextended"
+                                                                 }
+                                                      },
+                                "reasons":  [
+                                                "FAKE_SANDBOX: secondary long setup"
+                                            ],
+                                "warnings":  [
+                                                 "Slightly weaker volume than BTC"
+                                             ]
+                            },
+                            {
+                                "symbol":  "SOL/USDT:USDT",
+                                "side":  "short",
+                                "confidence":  92.5,
+                                "win_probability_pct":  86.9,
+                                "risk_reward":  2.0,
+                                "entry":  145.2,
+                                "stop_loss":  147.1,
+                                "take_profit":  141.0,
+                                "spread_pct":  0.02,
+                                "news_score":  -0.15,
+                                "news_count":  1,
+                                "higher_timeframes":  {
+                                                          "5m":  {
+                                                                     "trend":  "down",
+                                                                     "rsi":  43.0,
+                                                                     "signal_summary":  "lower high rejection"
+                                                                 },
+                                                          "1h":  {
+                                                                     "trend":  "down",
+                                                                     "rsi":  45.3,
+                                                                     "signal_summary":  "EMA rejection"
+                                                                 },
+                                                          "4h":  {
+                                                                     "trend":  "neutral_down",
+                                                                     "rsi":  48.0,
+                                                                     "signal_summary":  "failed breakout"
+                                                                 }
+                                                      },
+                                "reasons":  [
+                                                "FAKE_SANDBOX: hedge short setup"
+                                            ],
+                                "warnings":  [
+                                                 "Counter to configured long bias"
+                                             ]
+                            }
+                        ],
+    "selected":  {
+                     "symbol":  "BTC/USDT:USDT",
+                     "side":  "long",
+                     "confidence":  97.8,
+                     "win_probability_pct":  91.4,
+                     "risk_reward":  2.4,
+                     "entry":  61250.0,
+                     "stop_loss":  60620.0,
+                     "take_profit":  62890.0,
+                     "spread_pct":  0.01,
+                     "news_score":  0.35,
+                     "news_count":  3,
+                     "indicator_summary":  {
+                                               "last":  61250.0,
+                                               "ema_fast":  61120.0,
+                                               "ema_slow":  60780.0,
+                                               "rsi":  61.2,
+                                               "atr_pct":  0.42,
+                                               "volume_ratio":  3.1,
+                                               "support":  60700.0,
+                                               "resistance":  63100.0,
+                                               "candlestick_patterns":  {
+                                                                            "1m":  {
+                                                                                       "patterns":  [
+                                                                                                        "bullish_engulfing",
+                                                                                                        "bullish_marubozu"
+                                                                                                    ],
+                                                                                       "direction":  "bullish",
+                                                                                       "signal_summary":  "bullish engulfing confirms continuation above EMA support"
+                                                                                   }
+                                                                        }
+                                           },
+                     "higher_timeframes":  {
+                                               "5m":  {
+                                                          "trend":  "up",
+                                                          "rsi":  58.5,
+                                                          "ema_gap_pct":  0.45,
+                                                          "signal_summary":  "trend aligned up"
+                                                      },
+                                               "1h":  {
+                                                          "trend":  "up",
+                                                          "rsi":  57.4,
+                                                          "ema_gap_pct":  1.05,
+                                                          "signal_summary":  "structure supports long"
+                                                      },
+                                               "4h":  {
+                                                          "trend":  "up",
+                                                          "rsi":  55.2,
+                                                          "signal_summary":  "higher timeframe bullish continuation"
+                                                      }
+                                           },
+                     "reasons":  [
+                                     "FAKE_SANDBOX: multi-timeframe long alignment",
+                                     "FAKE_SANDBOX: volume expansion and clean invalidation"
+                                 ],
+                     "warnings":  [
+
+                                  ]
+                 },
+    "simulated_order":  {
+                            "submitted":  false,
+                            "simulated":  true,
+                            "symbol":  "BTC/USDT:USDT",
+                            "side":  "long",
+                            "entry":  61250.0,
+                            "stop_loss":  60620.0,
+                            "take_profit":  62890.0,
+                            "reason":  "FAKE_SANDBOX_ONLY: GPT OKX final check completed; no real OKX order submitted",
+                            "okx_approved":  true
+                        }
+}

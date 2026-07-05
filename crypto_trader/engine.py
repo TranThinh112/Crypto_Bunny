@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -222,6 +223,27 @@ def _internal_scan_allows_pending(config: dict[str, Any], scan: dict[str, Any] |
     return True, "Mini scan can create pending setups"
 
 
+def _mini_pending_risk_config(config: dict[str, Any]) -> dict[str, Any]:
+    pending_config = config.get("pending_orders", {})
+    review_config = pending_config.get("review", {})
+    risk_config = deepcopy(config)
+    risk_config.setdefault("strategy", {})
+    risk_config.setdefault("news", {})
+    risk_config["strategy"]["min_confidence"] = float(
+        review_config.get("min_confidence", risk_config["strategy"].get("min_confidence", 75)) or 75
+    )
+    risk_config["strategy"]["min_win_probability_pct"] = float(
+        review_config.get("min_win_probability_pct", 50) or 50
+    )
+    risk_config["strategy"]["min_risk_reward"] = float(
+        review_config.get("min_risk_reward", risk_config["strategy"].get("min_risk_reward", 1.5)) or 1.5
+    )
+    risk_config["news"]["require_symbol_news"] = bool(
+        pending_config.get("require_symbol_news_for_mini_lc", False)
+    )
+    return risk_config
+
+
 def _create_pending_from_internal_scan(
     config: dict[str, Any],
     candidates: list[Any],
@@ -245,18 +267,21 @@ def _create_pending_from_internal_scan(
         return result
 
     approved = [str(symbol) for symbol in (internal_scan or {}).get("approved_symbols") or [] if str(symbol)]
-    approved_set = set(approved)
+    candidates_by_symbol = {candidate.symbol: candidate for candidate in candidates}
     created_symbols = set(pending_symbols)
-    for candidate in candidates:
+    for symbol in approved:
         if result["created"] >= pending_limit:
             break
-        if candidate.symbol not in approved_set:
+        candidate = candidates_by_symbol.get(symbol)
+        if candidate is None:
+            result["skipped"].append({"symbol": symbol, "reason": "approved symbol not found in current candidates"})
             continue
         if candidate.symbol in created_symbols:
             result["skipped"].append({"symbol": candidate.symbol, "reason": "already pending or active in LC memory"})
             continue
+        pending_risk_config = _mini_pending_risk_config(config)
         check = evaluate_candidate(
-            config,
+            pending_risk_config,
             candidate,
             active_summary=active_summary,
             enforce_active_limit=False,
@@ -272,11 +297,37 @@ def _create_pending_from_internal_scan(
             )
             continue
         journal_id = next_global_counter(config, "LC") if config.get("mode") != "dry_run" else None
+        exchange_order_id: str | None = None
+        order_status = "OPEN"
+        if config.get("mode") != "dry_run":
+            order_type = str(config.get("pending_orders", {}).get("order_type", "limit") or "limit")
+            execution = execute_candidate(
+                config,
+                candidate,
+                order_type_override=order_type,
+                entry_type="mini_lc_okx",
+                journal_type="LC",
+                journal_id=journal_id,
+            )
+            if not execution.submitted or not execution.order_id:
+                result["skipped"].append(
+                    {
+                        "symbol": candidate.symbol,
+                        "side": candidate.side,
+                        "reason": f"OKX LC submit failed: {execution.message}",
+                    }
+                )
+                continue
+            exchange_order_id = execution.order_id
+            order_status = "LC_OKX"
         record = save_pending_order(
             config,
             candidate,
-            None,
-            max_age_hours=float(config.get("pending_orders", {}).get("local_max_age_hours", 6) or 6),
+            exchange_order_id,
+            max_age_days=float(config.get("pending_orders", {}).get("exchange_max_age_days", 1.5) or 1.5)
+            if exchange_order_id
+            else float(config.get("pending_orders", {}).get("max_age_days", 3) or 3),
+            max_age_hours=None if exchange_order_id else float(config.get("pending_orders", {}).get("local_max_age_hours", 6) or 6),
             journal_id=journal_id,
         )
         result["created"] += 1
@@ -285,8 +336,10 @@ def _create_pending_from_internal_scan(
             {
                 "id": record.get("id"),
                 "lc_id": journal_id or record.get("id"),
+                "status": order_status,
                 "symbol": candidate.symbol,
                 "side": candidate.side,
+                "exchange_order_id": exchange_order_id,
                 "win_probability_pct": candidate.win_probability_pct,
                 "confidence": candidate.confidence,
             }
@@ -357,7 +410,7 @@ def run_once(config: dict[str, Any], execute: bool) -> Decision:
             config,
             all_new_candidates,
             source="continuous_1m_5m_1h_scan",
-            limit=100,
+            limit=int(config.get("market_scan_memory", {}).get("max_saved_candidates_per_scan", 20) or 20),
         ),
         "timeframes": [
             str(config.get("strategy", {}).get("timeframe", "1m")),
@@ -496,10 +549,10 @@ def run_once(config: dict[str, Any], execute: bool) -> Decision:
             submitted=True,
             order_id=None,
             message=(
-                f"{int((mini_pending_queue or {}).get('created') or 0)} GPT mini setup(s) saved as local LC; "
-                "GPT 5.5 will be called only when a setup is about to enter OKX"
+                f"{int((mini_pending_queue or {}).get('created') or 0)} GPT mini setup(s) submitted as LC_OKX; "
+                "GPT 5.5 will only review LC_OKX release when an active slot is available"
             ),
-            raw={"local_pending": True, "mini_pending_queue": mini_pending_queue},
+            raw={"lc_okx_pending": True, "mini_pending_queue": mini_pending_queue},
             journal_type="LC",
             journal_id=first_created.get("lc_id"),
         )

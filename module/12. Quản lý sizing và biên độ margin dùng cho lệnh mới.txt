@@ -1,0 +1,201 @@
+Hãy tạo module Position Sizing cho bot AI trading crypto.
+
+Tên tiếng Việt: Tính khối lượng vị thế.
+
+Mục tiêu:
+- Tự tính khối lượng mỗi lệnh dựa trên vốn thực tế, quỹ dự phòng, risk percent, stop loss, leverage và số slot đang mở.
+- Không dùng khối lượng cố định.
+- Không dùng unrealized PnL để tăng khối lượng.
+- Không tự mở lệnh.
+- Không sửa rule trading.
+- Không gọi GPT.
+
+Tech stack:
+- Python 3.11+
+- SQLite
+- SQLAlchemy
+- FastAPI
+- Pydantic
+
+Phụ thuộc:
+- Capital Reserve Manager
+- Recovery Chain Manager
+- Bunny Health Monitor
+- Bunny Minimize Losses
+
+Cấu hình:
+
+{
+  "PositionSizing": {
+    "Enabled": true,
+    "NormalRiskPercent": 1.0,
+    "WarningRiskPercent": 0.7,
+    "RecoveryRiskPercent": 0.5,
+    "CriticalRiskPercent": 0.0,
+
+    "MinOrderSize": 1,
+    "MaxOrderSizePercentOfTradingCapital": 20,
+
+    "MinLeverage": 1,
+    "MaxLeverage": 20,
+
+    "DefaultStopLossPercent": 50,
+    "DefaultTakeProfitPercent": 75,
+
+    "RoundOrderSizeDecimals": 2,
+    "RoundMarginDecimals": 2
+  }
+}
+
+Database SQLite:
+
+1. Tạo bảng position_size_calculations:
+   - id
+   - created_at
+   - mode: HEALTHY / WARNING / RECOVERY / CRITICAL
+   - symbol
+   - side: LONG / SHORT
+   - realized_capital
+   - reserve_amount
+   - trading_capital
+   - used_trading_capital
+   - available_trading_capital
+   - risk_percent
+   - risk_amount
+   - stop_loss_percent
+   - take_profit_percent
+   - leverage
+   - max_order_size_by_risk
+   - max_order_size_by_capital
+   - suggested_order_size
+   - required_margin
+   - estimated_loss
+   - estimated_profit
+   - allowed
+   - reason
+
+Service:
+
+Tạo PositionSizingService với methods:
+- calculate_position_size(request)
+- get_latest_calculation()
+- get_history(limit)
+- validate_position_size(request)
+
+Input PositionSizeRequest:
+- symbol
+- side
+- mode
+- stop_loss_percent
+- take_profit_percent
+- leverage
+- requested_order_size optional
+- recovery_chain_id optional
+
+Logic:
+
+1. Lấy CapitalReserveState mới nhất:
+   - realized_capital
+   - reserve_amount
+   - trading_capital
+   - used_trading_capital
+   - available_trading_capital
+
+2. Chọn risk_percent theo mode:
+   - HEALTHY → NormalRiskPercent
+   - WARNING → WarningRiskPercent
+   - RECOVERY → RecoveryRiskPercent
+   - CRITICAL → CriticalRiskPercent
+
+3. Nếu mode = CRITICAL:
+   - allowed = false
+   - reason = "Critical mode: new positions are disabled"
+
+4. Công thức:
+   - risk_amount = trading_capital * risk_percent / 100
+   - max_order_size_by_risk = risk_amount / (stop_loss_percent / 100)
+   - max_order_size_by_capital = trading_capital * MaxOrderSizePercentOfTradingCapital / 100
+   - raw_order_size = min(max_order_size_by_risk, max_order_size_by_capital)
+   - required_margin = raw_order_size / leverage
+   - estimated_loss = raw_order_size * stop_loss_percent / 100
+   - estimated_profit = raw_order_size * take_profit_percent / 100
+
+5. Nếu requested_order_size có giá trị:
+   - Tính required_margin theo requested_order_size.
+   - Tính estimated_loss.
+   - Nếu requested_order_size > raw_order_size thì reject.
+   - Nếu required_margin > available_trading_capital thì reject.
+
+6. Nếu không có requested_order_size:
+   - suggested_order_size = raw_order_size.
+   - Nếu required_margin > available_trading_capital thì giảm suggested_order_size theo available_trading_capital * leverage.
+
+7. Kiểm tra:
+   - suggested_order_size >= MinOrderSize.
+   - leverage nằm trong MinLeverage và MaxLeverage.
+   - stop_loss_percent > 0.
+   - take_profit_percent > 0.
+   - available_trading_capital > 0.
+   - required_margin <= available_trading_capital.
+   - Không được dùng reserve_amount để mở lệnh mới.
+
+8. Nếu có recovery_chain_id:
+   - Lấy RecoveryChain.
+   - required_net_profit = remaining_loss.
+   - recovery_required_order_size = required_net_profit / (take_profit_percent / 100).
+   - suggested_order_size = min(recovery_required_order_size, raw_order_size).
+   - Nếu recovery_required_order_size > raw_order_size:
+     allowed = false
+     reason = "Recovery required size exceeds risk limit"
+
+9. Lưu mọi calculation vào position_size_calculations.
+
+API FastAPI:
+
+1. POST /position-sizing/calculate
+Input:
+- symbol
+- side
+- mode
+- stop_loss_percent
+- take_profit_percent
+- leverage
+- requested_order_size optional
+- recovery_chain_id optional
+
+Output:
+- allowed
+- reason
+- suggested_order_size
+- required_margin
+- risk_percent
+- risk_amount
+- estimated_loss
+- estimated_profit
+- max_order_size_by_risk
+- max_order_size_by_capital
+- available_trading_capital
+
+2. GET /position-sizing/latest
+
+3. GET /position-sizing/history?limit=50
+
+Yêu cầu code:
+- Tách file rõ ràng:
+  - main.py
+  - database.py
+  - models.py
+  - schemas.py
+  - config.py
+  - services/position_sizing_service.py
+  - routers/position_sizing.py
+- Có type hints đầy đủ.
+- Có validation cơ bản.
+- Có transaction khi lưu calculation.
+- Không hard-code vốn.
+- Không hard-code order size.
+- Không dùng unrealized PnL.
+- Không dùng reserve để mở lệnh mới.
+- Không gọi GPT.
+- Không tự mở lệnh.
+- Trả về code đầy đủ để chạy được.

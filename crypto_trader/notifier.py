@@ -48,22 +48,25 @@ def telegram_control_keyboard() -> dict[str, Any]:
     return {
         "inline_keyboard": [
             [
-                {"text": "📲 Dashboard", "callback_data": "view_menu"},
-                {"text": "🔎 Scan ngay", "callback_data": "scan_now"},
+                {"text": "\U0001f4f2 Dashboard", "callback_data": "view_menu"},
+                {"text": "\U0001f50e Scan ngay", "callback_data": "scan_now"},
             ],
             [
-                {"text": "📌 VT", "callback_data": "view_vt"},
-                {"text": "💵 SD", "callback_data": "view_sd"},
-                {"text": "🟡 LC", "callback_data": "view_lc"},
+                {"text": "\U0001f4ca VT/PNL/SD", "callback_data": "view_positions_account"},
+                {"text": "\U0001f4b5 SD", "callback_data": "view_sd"},
+                {"text": "\U0001f7e1 LC", "callback_data": "view_lc"},
             ],
             [
-                {"text": "📊 PNL/SD", "callback_data": "view_pnl_sd"},
-                {"text": "🛡 Guard", "callback_data": "view_guard"},
-                {"text": "🧠 Memory", "callback_data": "view_memory"},
+                {"text": "\U0001f6e1 Guard", "callback_data": "view_guard"},
+                {"text": "\U0001f9e0 Memory", "callback_data": "view_memory"},
+                {"text": "\U0001f916 AI", "callback_data": "view_ai"},
             ],
             [
-                {"text": "💰 Set USDT", "callback_data": "set_order_usdt"},
-                {"text": "⚙️ Đòn bẩy", "callback_data": "set_leverage"},
+                {"text": "\U0001f4c8 Max VT", "callback_data": "set_max_positions"},
+                {"text": "\U0001f4b0 Set USDT", "callback_data": "set_order_usdt"},
+            ],
+            [
+                {"text": "\u2699\ufe0f Đòn bẩy", "callback_data": "set_leverage"},
             ],
         ]
     }
@@ -137,6 +140,29 @@ def telegram_leverage_keyboard(config: dict[str, Any]) -> dict[str, Any]:
     if row:
         rows.append(row)
     rows.append([{"text": "⬅️ Menu", "callback_data": "view_menu"}])
+    return {"inline_keyboard": rows}
+
+
+def telegram_max_positions_keyboard(config: dict[str, Any]) -> dict[str, Any]:
+    try:
+        current = int(float(config.get("risk", {}).get("max_active_trades", 1) or 1))
+    except (TypeError, ValueError):
+        current = 1
+    presets = [1, 2, 3, 4, 5, 7, 10]
+    if current not in presets and 1 <= current <= 10:
+        presets.insert(0, current)
+    rows: list[list[dict[str, str]]] = []
+    row: list[dict[str, str]] = []
+    for value in presets:
+        prefix = "\u2705 " if value == current else ""
+        label = f"{prefix}{value} VT"
+        row.append({"text": label, "callback_data": f"set_max_positions:{value}"})
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([{"text": "\u2b05\ufe0f Menu", "callback_data": "view_menu"}])
     return {"inline_keyboard": rows}
 
 

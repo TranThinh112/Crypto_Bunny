@@ -2,10 +2,6 @@ mode: demo
 report_path: reports/latest_decision.json
 ledger_path: data/trades.jsonl
 state_db_path: data/bot_state.sqlite
-runtime:
-  interval_seconds: 300
-news:
-  require_symbol_news: false
 exchange:
   leverage: 25
   leverage_presets:
@@ -14,11 +10,118 @@ exchange:
   - 15
   - 20
   - 25
+automation:
+  enabled: true
+  scan_interval_seconds: 300
+  execute_demo: true
+  execute_live: false
+  initial_delay_seconds: 5
+risk:
+  order_usdt: 375.0
+  max_active_trades: 5
+  max_daily_orders: 20
+  max_daily_planned_risk_usdt: 150
+  cooldown_minutes: 0
+  max_spread_pct: 0.15
+  min_stop_distance_pct: 0.35
+  max_stop_distance_pct: 6.0
+  news_conflict_threshold: 2.0
+paper_trading:
+  enabled: true
+  auto_scan_enabled: false
+  scan_interval_seconds: 300
+  max_active_trades: 5
+pending_orders:
+  enabled: true
+  max_age_days: 3
+  local_max_age_hours: 6
+  exchange_max_age_days: 1.5
+  order_type: limit
+  review:
+    enabled: true
+    min_confidence: 70
+    min_win_probability_pct: 50
+    max_confidence_drop: 12
+    max_win_probability_drop_pct: 8
+    min_risk_reward: 1.5
+    max_entry_drift_pct: 1.2
+    use_market_guard_memory: true
+    cancel_on_guard_avoid: true
+    cancel_on_opposite_guard_direction: true
+    opposite_guard_min_risk_score: 4.0
+ai:
+  enabled: true
+  manual_only: false
+  allow_api_calls: true
+  api_key_env: OPENAI_API_KEY
+  internal:
+    provider: openai
+    model: gpt-5.4-mini
+    api_key_env: OPENAI_API_KEY_INTERNAL
+    market_scan_enabled: true
+    market_scan_interval_seconds: 14400
+    market_scan_fixed_schedule: true
+    market_scan_timezone: Asia/Ho_Chi_Minh
+    market_scan_source_symbols: 50
+    market_scan_max_symbols: 3
+    market_scan_min_approved_symbols: 1
+    market_scan_min_win_probability_pct: 80
+    market_scan_use_ai: true
+    market_scan_use_shortlist: true
+    market_scan_to_pending: true
+    market_scan_pending_limit: 1
+    market_scan_require_ai_for_pending: true
+    compact_ai_payload: true
+    timeout_seconds: 15
+  okx:
+    provider: local_policy
+    model: gpt-5.5
+    api_key_env: OPENAI_API_KEY_OKX
+    approval_enabled: false
+    ask_internal_before_entry: true
+    require_external_approval: false
+    timeout_seconds: 20
+market_guard:
+  enabled: true
+  interval_seconds: 60
+  notify_interval_seconds: 600
+  timeframe: 1m
+  ohlcv_limit: 40
+  lookback_candles: 5
+  price_move_5m_pct: 0.8
+  critical_price_move_5m_pct: 1.4
+  candle_range_pct: 0.9
+  critical_candle_range_pct: 1.8
+  wick_pct: 0.45
+  wick_body_ratio: 2.5
+  volume_ratio: 2.5
+  pause_new_entries_seconds: 900
+  max_symbols: 50
+  layer_5m_samples: 5
+  layer_20m_samples: 20
+  memory_keep_hours: 24
+  use_memory_in_strategy: true
+market_scan_memory:
+  keep_hours: 72
+  max_rows_per_symbol_timeframe: 200
+  max_json_bytes: 8000
+  max_saved_candidates_per_scan: 20
+  compact_batch_limit: 5000
+  emergency_keep_hours: 24
+  emergency_max_rows_per_symbol_timeframe: 50
+decision_history:
+  keep_hours: 24
+  max_rows: 120
+  emergency_keep_hours: 6
+  emergency_max_rows: 30
 strategy:
   timeframe: 1m
   ohlcv_limit: 180
-  min_confidence: 60
   min_win_probability_pct: 80
+  target:
+    mode: roi_percent
+    take_profit_pct: 75
+    stop_loss_pct: 50
   confirmation_timeframes:
     enabled: true
     frames:
@@ -40,16 +143,13 @@ strategy:
     quote: USDT
     max_symbols: 50
     asset_class: crypto
-risk:
-  order_usdt: 500.0
-  max_active_trades: 5
-  max_spread_pct: 0.5
-  cooldown_minutes: 0
-  max_daily_orders: 20
-  max_daily_planned_risk_usdt: 100
+  long_short_bias:
+    enabled: true
+    target_long_ratio: 0.6
+    strength: 10
 position_sizing:
   enabled: true
-  base_margin_usdt: 20.0
+  base_margin_usdt: 15.0
   target_profit_usdt: 0.3
   tp_roi: 0.75
   sl_roi: 0.5
@@ -76,102 +176,22 @@ position_sizing:
   - 50
   history_limit: 100
   bootstrap_existing_history: false
-automation:
-  enabled: true
-  scan_interval_seconds: 300
-  execute_demo: true
-  execute_live: false
-  initial_delay_seconds: 5
-paper_trading:
-  enabled: true
-  auto_scan_enabled: true
-  scan_interval_seconds: 300
-  max_active_trades: 5
-pending_orders:
-  enabled: true
-  max_age_days: 3
-  local_max_age_hours: 6
-  exchange_max_age_days: 1.5
-  order_type: limit
-  review:
+notifications:
+  telegram:
     enabled: true
-    min_confidence: 70
-    min_win_probability_pct: 50
-    max_confidence_drop: 12
-    max_win_probability_drop_pct: 8
-    min_risk_reward: 1.5
-    max_entry_drift_pct: 1.2
-    use_market_guard_memory: true
-    cancel_on_guard_avoid: true
-    cancel_on_opposite_guard_direction: true
-    opposite_guard_min_risk_score: 4.0
+    notify_scans: false
+    notify_ai_api_calls: true
+    timeout_seconds: 8
+    retry_count: 2
+    buttons_enabled: true
+    replace_previous_message: true
+    polling_enabled: true
+    poll_timeout_seconds: 1
+    button_cache_ttl_seconds: 15
+    account_report_interval_seconds: 18000
+    daily_summary_enabled: true
+    trade_memory_limit: 100
 execution:
   order_type: market
   attach_tp_sl: true
   enable_live: false
-ai:
-  enabled: true
-  manual_only: false
-  allow_api_calls: true
-  api_key_env: OPENAI_API_KEY
-  internal:
-    provider: openai
-    model: gpt-5.4-mini
-    api_key_env: OPENAI_API_KEY_INTERNAL
-    market_scan_enabled: true
-    market_scan_interval_seconds: 14400
-    market_scan_fixed_schedule: true
-    market_scan_timezone: Asia/Ho_Chi_Minh
-    market_scan_source_symbols: 50
-    market_scan_max_symbols: 3
-    market_scan_min_approved_symbols: 1
-    market_scan_min_win_probability_pct: 80
-    market_scan_use_ai: true
-    market_scan_use_shortlist: true
-    market_scan_to_pending: true
-    market_scan_pending_limit: 1
-    market_scan_require_ai_for_pending: true
-    compact_ai_payload: true
-    timeout_seconds: 15
-  okx:
-    provider: openai
-    model: gpt-5.5
-    api_key_env: OPENAI_API_KEY_OKX
-    approval_enabled: true
-    ask_internal_before_entry: true
-    require_external_approval: false
-    timeout_seconds: 20
-market_guard:
-  enabled: true
-  interval_seconds: 60
-  notify_interval_seconds: 600
-  timeframe: 1m
-  ohlcv_limit: 40
-  lookback_candles: 5
-  price_move_5m_pct: 0.8
-  critical_price_move_5m_pct: 1.4
-  candle_range_pct: 0.9
-  critical_candle_range_pct: 1.8
-  wick_pct: 0.45
-  wick_body_ratio: 2.5
-  volume_ratio: 2.5
-  pause_new_entries_seconds: 900
-  max_symbols: 50
-  layer_5m_samples: 5
-  layer_20m_samples: 20
-  memory_keep_hours: 24
-  use_memory_in_strategy: true
-
-market_scan_memory:
-  keep_hours: 72
-  max_rows_per_symbol_timeframe: 200
-  max_json_bytes: 8000
-  max_saved_candidates_per_scan: 20
-  compact_batch_limit: 5000
-  emergency_keep_hours: 24
-  emergency_max_rows_per_symbol_timeframe: 50
-decision_history:
-  keep_hours: 24
-  max_rows: 120
-  emergency_keep_hours: 6
-  emergency_max_rows: 30

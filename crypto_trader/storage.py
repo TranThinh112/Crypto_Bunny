@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -12,6 +13,7 @@ from .models import Decision, TradeCandidate, to_jsonable
 
 
 ACTIVE_PENDING_STATUSES = ("OPEN", "LC_OKX")
+DEFAULT_MARKET_SCAN_MAX_JSON_BYTES = 8000
 
 
 def state_db_path(config: dict[str, Any]) -> Path:
@@ -548,9 +550,185 @@ def next_daily_counter(config: dict[str, Any], name: str, date_key: str) -> int:
     return value
 
 
+def _round_float(value: Any, digits: int = 6) -> Any:
+    if isinstance(value, bool):
+        return value
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return value
+    return round(number, digits)
+
+
+def _trim_list(items: Any, limit: int) -> list[Any]:
+    return list(items[:limit]) if isinstance(items, list) else []
+
+
+def _compact_market_indicator(indicator: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(indicator, dict):
+        return {}
+    keep_keys = {
+        "timeframe",
+        "last",
+        "trend",
+        "rsi",
+        "atr_pct",
+        "volume_ratio",
+        "spread_pct",
+        "ema_gap_pct",
+        "price_vs_ema_fast_pct",
+        "price_vs_ema_slow_pct",
+        "support_distance_pct",
+        "resistance_distance_pct",
+        "range_position",
+        "signal_summary",
+        "direction",
+        "trend_context",
+        "strongest_pattern",
+        "bullish_score",
+        "bearish_score",
+    }
+    compact: dict[str, Any] = {}
+    for key in keep_keys:
+        value = indicator.get(key)
+        if value not in (None, "", [], {}):
+            compact[key] = _round_float(value)
+    patterns = indicator.get("candlestick_patterns")
+    if isinstance(patterns, dict):
+        compact["candlestick_patterns"] = {
+            "direction": patterns.get("direction"),
+            "trend_context": patterns.get("trend_context"),
+            "strongest_pattern": patterns.get("strongest_pattern"),
+            "signal_summary": patterns.get("signal_summary"),
+            "patterns": _trim_list(patterns.get("patterns"), 3),
+            "bullish_score": _round_float(patterns.get("bullish_score"), 3),
+            "bearish_score": _round_float(patterns.get("bearish_score"), 3),
+        }
+        compact["candlestick_patterns"] = {
+            key: value for key, value in compact["candlestick_patterns"].items()
+            if value not in (None, "", [], {})
+        }
+    higher_timeframes = indicator.get("higher_timeframes")
+    if isinstance(higher_timeframes, dict):
+        compact["higher_timeframes"] = {
+            str(frame): _compact_market_indicator(data)
+            for frame, data in higher_timeframes.items()
+            if isinstance(data, dict) and str(frame).lower() in {"5m", "15m", "1h", "4h"}
+        }
+        if not compact["higher_timeframes"]:
+            compact.pop("higher_timeframes", None)
+    return {key: value for key, value in compact.items() if value not in (None, "", [], {})}
+
+
+def _compact_market_scan_payload(candidate: TradeCandidate, payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "symbol": candidate.symbol,
+        "base": candidate.base,
+        "side": candidate.side,
+        "confidence": _round_float(candidate.confidence, 3),
+        "win_probability_pct": _round_float(candidate.win_probability_pct, 3),
+        "risk_reward": _round_float(candidate.risk_reward, 3),
+        "entry": _round_float(candidate.entry),
+        "stop_loss": _round_float(candidate.stop_loss),
+        "take_profit": _round_float(candidate.take_profit),
+        "order_usdt": _round_float(candidate.order_usdt, 4),
+        "quantity": _round_float(candidate.quantity, 8),
+        "spread_pct": _round_float(candidate.spread_pct, 5),
+        "news_score": _round_float(candidate.news_score, 4),
+        "news_count": candidate.news_count,
+        "target_mode": candidate.target_mode,
+        "take_profit_pct": _round_float(candidate.take_profit_pct, 3),
+        "stop_loss_pct": _round_float(candidate.stop_loss_pct, 3),
+        "price_take_profit_pct": _round_float(candidate.price_take_profit_pct, 4),
+        "price_stop_loss_pct": _round_float(candidate.price_stop_loss_pct, 4),
+        "setup_quality": candidate.setup_quality,
+        "market_regime": candidate.market_regime,
+        "regime_confidence": _round_float(candidate.regime_confidence, 3),
+        "scan_source": candidate.scan_source,
+        "indicator_summary": _compact_market_indicator(candidate.indicator_summary),
+        "reasons": _trim_list(payload.get("reasons"), 4),
+        "warnings": _trim_list(payload.get("warnings"), 3),
+    }
+
+
+def _compact_frame_payload(candidate: TradeCandidate, frame_name: str, frame_indicator: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "symbol": candidate.symbol,
+        "side": candidate.side,
+        "timeframe": str(frame_name),
+        "confidence": _round_float(candidate.confidence, 3),
+        "win_probability_pct": _round_float(candidate.win_probability_pct, 3),
+        "risk_reward": _round_float(candidate.risk_reward, 3),
+        "frame_summary": _compact_market_indicator(frame_indicator),
+    }
+
+
+def _json_limited(payload: dict[str, Any], max_bytes: int) -> str:
+    text = json.dumps(
+        {key: value for key, value in payload.items() if value not in (None, "", [], {})},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max(256, max_bytes):
+        return text
+    trimmed = dict(payload)
+    for key in ("reasons", "warnings"):
+        if isinstance(trimmed.get(key), list):
+            trimmed[key] = trimmed[key][:1]
+    for key in ("indicator_summary", "frame_summary"):
+        if isinstance(trimmed.get(key), dict):
+            compact = dict(trimmed[key])
+            compact.pop("higher_timeframes", None)
+            compact.pop("candlestick_patterns", None)
+            trimmed[key] = compact
+    text = json.dumps(
+        {key: value for key, value in trimmed.items() if value not in (None, "", [], {})},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    if len(text.encode("utf-8")) <= max(256, max_bytes):
+        return text
+    return json.dumps(
+        {
+            "symbol": payload.get("symbol"),
+            "side": payload.get("side"),
+            "timeframe": payload.get("timeframe"),
+            "confidence": payload.get("confidence"),
+            "win_probability_pct": payload.get("win_probability_pct"),
+            "risk_reward": payload.get("risk_reward"),
+            "entry": payload.get("entry"),
+            "stop_loss": payload.get("stop_loss"),
+            "take_profit": payload.get("take_profit"),
+            "truncated": True,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
 def save_decision(config: dict[str, Any], decision: Decision) -> int:
     payload = to_jsonable(decision)
     selected = decision.selected
+    prune_decision_history(config)
+    try:
+        return _insert_decision_payload(config, decision, payload, selected)
+    except sqlite3.OperationalError as exc:
+        if "disk" not in str(exc).lower() and "full" not in str(exc).lower():
+            raise
+        run_storage_maintenance(config, emergency=True)
+        return _insert_decision_payload(config, decision, payload, selected)
+
+
+def _insert_decision_payload(
+    config: dict[str, Any],
+    decision: Decision,
+    payload: dict[str, Any],
+    selected: TradeCandidate | None,
+) -> int:
     with _connect(config) as connection:
         cursor = connection.execute(
             """
@@ -577,6 +755,47 @@ def save_decision(config: dict[str, Any], decision: Decision) -> int:
         return int(cursor.lastrowid)
 
 
+def prune_decision_history(
+    config: dict[str, Any],
+    *,
+    keep_hours: int | None = None,
+    max_rows: int | None = None,
+) -> dict[str, int]:
+    history_config = config.get("decision_history", {})
+    keep_hours = int(keep_hours or history_config.get("keep_hours", 24) or 24)
+    max_rows = int(max_rows or history_config.get("max_rows", 120) or 120)
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=max(1, keep_hours))).isoformat()
+    deleted_old = 0
+    deleted_over_limit = 0
+    with _connect(config) as connection:
+        cursor = connection.execute(
+            """
+            DELETE FROM decisions
+            WHERE created_at < ?
+              AND id NOT IN (SELECT id FROM decisions ORDER BY id DESC LIMIT 1)
+            """,
+            (cutoff,),
+        )
+        deleted_old = int(cursor.rowcount or 0)
+        cursor = connection.execute(
+            """
+            DELETE FROM decisions
+            WHERE id IN (
+                SELECT id
+                FROM (
+                    SELECT id, ROW_NUMBER() OVER (ORDER BY created_at DESC, id DESC) AS row_number
+                    FROM decisions
+                )
+                WHERE row_number > ?
+            )
+            """,
+            (max(1, max_rows),),
+        )
+        deleted_over_limit = int(cursor.rowcount or 0)
+        connection.commit()
+    return {"deleted_old": deleted_old, "deleted_over_limit": deleted_over_limit}
+
+
 def save_market_scan_observations(
     config: dict[str, Any],
     candidates: list[TradeCandidate],
@@ -586,11 +805,14 @@ def save_market_scan_observations(
 ) -> int:
     if not candidates:
         return 0
+    memory_config = config.get("market_scan_memory", {})
+    max_json_bytes = int(memory_config.get("max_json_bytes", DEFAULT_MARKET_SCAN_MAX_JSON_BYTES) or DEFAULT_MARKET_SCAN_MAX_JSON_BYTES)
     now = datetime.now(timezone.utc).isoformat()
     rows: list[tuple[Any, ...]] = []
     for candidate in candidates[: max(1, int(limit or 100))]:
         payload = to_jsonable(candidate)
-        indicator = to_jsonable(candidate.indicator_summary or {})
+        indicator = _compact_market_indicator(to_jsonable(candidate.indicator_summary or {}))
+        compact_payload = _compact_market_scan_payload(candidate, payload if isinstance(payload, dict) else {})
         score = float(candidate.win_probability_pct or candidate.confidence or 0)
         timeframe = str(indicator.get("timeframe") or config.get("strategy", {}).get("timeframe") or "")
         rows.append(
@@ -604,8 +826,8 @@ def save_market_scan_observations(
                 candidate.win_probability_pct,
                 candidate.risk_reward,
                 score,
-                json.dumps(indicator, ensure_ascii=False),
-                json.dumps(payload, ensure_ascii=False),
+                _json_limited(indicator, max_json_bytes),
+                _json_limited(compact_payload, max_json_bytes),
             )
         )
         higher_timeframes = payload.get("higher_timeframes") if isinstance(payload, dict) else {}
@@ -613,18 +835,14 @@ def save_market_scan_observations(
             for frame_name, frame_payload in higher_timeframes.items():
                 if not isinstance(frame_payload, dict):
                     continue
-                frame_indicator = dict(frame_payload)
+                frame_indicator = _compact_market_indicator(dict(frame_payload))
                 frame_indicator.setdefault("timeframe", str(frame_name))
-                frame_payload_json = {
-                    "symbol": candidate.symbol,
-                    "side": candidate.side,
-                    "timeframe": str(frame_name),
-                    "frame_summary": frame_indicator,
-                    "candidate": payload,
-                }
+                frame_payload_json = _compact_frame_payload(candidate, str(frame_name), frame_indicator)
                 frame_score = float(
-                    frame_indicator.get("candlestick_patterns", {}).get("bullish_score")
-                    or frame_indicator.get("candlestick_patterns", {}).get("bearish_score")
+                    frame_indicator.get("bullish_score")
+                    or frame_indicator.get("bearish_score")
+                    or (frame_indicator.get("candlestick_patterns") or {}).get("bullish_score")
+                    or (frame_indicator.get("candlestick_patterns") or {}).get("bearish_score")
                     or candidate.confidence
                     or 0
                 )
@@ -639,10 +857,23 @@ def save_market_scan_observations(
                         candidate.win_probability_pct,
                         candidate.risk_reward,
                         frame_score,
-                        json.dumps(frame_indicator, ensure_ascii=False),
-                        json.dumps(frame_payload_json, ensure_ascii=False),
+                        _json_limited(frame_indicator, max_json_bytes),
+                        _json_limited(frame_payload_json, max_json_bytes),
                     )
                 )
+    prune_market_scan_observations(config)
+    try:
+        _insert_market_scan_rows(config, rows)
+    except sqlite3.OperationalError as exc:
+        if "disk" not in str(exc).lower() and "full" not in str(exc).lower():
+            raise
+        run_storage_maintenance(config, emergency=True)
+        _insert_market_scan_rows(config, rows)
+    run_storage_maintenance(config, vacuum=False)
+    return len(rows)
+
+
+def _insert_market_scan_rows(config: dict[str, Any], rows: list[tuple[Any, ...]]) -> None:
     with _connect(config) as connection:
         connection.executemany(
             """
@@ -664,7 +895,297 @@ def save_market_scan_observations(
             rows,
         )
         connection.commit()
-    return len(rows)
+
+
+def prune_market_scan_observations(
+    config: dict[str, Any],
+    *,
+    keep_hours: int | None = None,
+    max_rows_per_symbol_timeframe: int | None = None,
+) -> dict[str, int]:
+    memory_config = config.get("market_scan_memory", {})
+    keep_hours = int(keep_hours or memory_config.get("keep_hours", 72) or 72)
+    max_rows = int(
+        max_rows_per_symbol_timeframe
+        or memory_config.get("max_rows_per_symbol_timeframe", 200)
+        or 200
+    )
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=max(1, keep_hours))).isoformat()
+    deleted_old = 0
+    deleted_over_limit = 0
+    with _connect(config) as connection:
+        cursor = connection.execute(
+            "DELETE FROM market_scan_observations WHERE created_at < ?",
+            (cutoff,),
+        )
+        deleted_old = int(cursor.rowcount or 0)
+        cursor = connection.execute(
+            """
+            DELETE FROM market_scan_observations
+            WHERE id IN (
+                SELECT id
+                FROM (
+                    SELECT
+                        id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY symbol, timeframe
+                            ORDER BY created_at DESC, id DESC
+                        ) AS row_number
+                    FROM market_scan_observations
+                )
+                WHERE row_number > ?
+            )
+            """,
+            (max(1, max_rows),),
+        )
+        deleted_over_limit = int(cursor.rowcount or 0)
+        connection.commit()
+        try:
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_market_scan_timeframe_symbol_created
+                ON market_scan_observations(timeframe, symbol, created_at DESC)
+                """
+            )
+            connection.commit()
+        except sqlite3.OperationalError:
+            pass
+    return {
+        "deleted_old": deleted_old,
+        "deleted_over_limit": deleted_over_limit,
+    }
+
+
+def compact_market_scan_observations(config: dict[str, Any], *, batch_limit: int = 5000) -> dict[str, int]:
+    memory_config = config.get("market_scan_memory", {})
+    max_json_bytes = int(memory_config.get("max_json_bytes", DEFAULT_MARKET_SCAN_MAX_JSON_BYTES) or DEFAULT_MARKET_SCAN_MAX_JSON_BYTES)
+    checked = 0
+    compacted = 0
+    with _connect(config) as connection:
+        rows = connection.execute(
+            """
+            SELECT id, indicator_json, payload_json
+            FROM market_scan_observations
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (max(1, int(batch_limit or 5000)),),
+        ).fetchall()
+        for row in rows:
+            checked += 1
+            try:
+                indicator = json.loads(str(row["indicator_json"] or "{}"))
+            except json.JSONDecodeError:
+                indicator = {}
+            try:
+                payload = json.loads(str(row["payload_json"] or "{}"))
+            except json.JSONDecodeError:
+                payload = {}
+            compact_indicator = _compact_market_indicator(indicator)
+            compact_payload: dict[str, Any] = {}
+            if isinstance(payload, dict):
+                for key in (
+                    "symbol",
+                    "base",
+                    "side",
+                    "timeframe",
+                    "confidence",
+                    "win_probability_pct",
+                    "risk_reward",
+                    "entry",
+                    "stop_loss",
+                    "take_profit",
+                    "order_usdt",
+                    "quantity",
+                    "spread_pct",
+                    "news_score",
+                    "news_count",
+                    "target_mode",
+                    "take_profit_pct",
+                    "stop_loss_pct",
+                    "price_take_profit_pct",
+                    "price_stop_loss_pct",
+                    "setup_quality",
+                    "market_regime",
+                    "regime_confidence",
+                    "scan_source",
+                    "source",
+                ):
+                    if payload.get(key) not in (None, "", [], {}):
+                        compact_payload[key] = _round_float(payload.get(key))
+                if isinstance(payload.get("indicator_summary"), dict):
+                    compact_payload["indicator_summary"] = _compact_market_indicator(payload.get("indicator_summary"))
+                if isinstance(payload.get("frame_summary"), dict):
+                    compact_payload["frame_summary"] = _compact_market_indicator(payload.get("frame_summary"))
+                compact_payload["reasons"] = _trim_list(payload.get("reasons"), 4)
+                compact_payload["warnings"] = _trim_list(payload.get("warnings"), 3)
+            compact_indicator_json = _json_limited(compact_indicator, max_json_bytes)
+            compact_payload_json = _json_limited(compact_payload, max_json_bytes)
+            old_indicator_json = str(row["indicator_json"] or "{}")
+            old_payload_json = str(row["payload_json"] or "{}")
+            if (
+                compact_indicator_json != old_indicator_json
+                or compact_payload_json != old_payload_json
+                or len(old_indicator_json.encode("utf-8")) > max_json_bytes
+                or len(old_payload_json.encode("utf-8")) > max_json_bytes
+            ):
+                connection.execute(
+                    """
+                    UPDATE market_scan_observations
+                    SET indicator_json = ?, payload_json = ?
+                    WHERE id = ?
+                    """,
+                    (compact_indicator_json, compact_payload_json, row["id"]),
+                )
+                compacted += 1
+        connection.commit()
+    return {"checked": checked, "compacted": compacted}
+
+
+def _file_size(path: Path) -> int:
+    try:
+        return int(path.stat().st_size)
+    except OSError:
+        return 0
+
+
+def storage_stats(config: dict[str, Any]) -> dict[str, Any]:
+    db_path = state_db_path(config)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    usage = shutil.disk_usage(db_path.parent)
+    files = {
+        "db": {"path": str(db_path), "bytes": _file_size(db_path)},
+        "wal": {"path": str(db_path) + "-wal", "bytes": _file_size(Path(str(db_path) + "-wal"))},
+        "shm": {"path": str(db_path) + "-shm", "bytes": _file_size(Path(str(db_path) + "-shm"))},
+    }
+    tables = [
+        "decisions",
+        "paper_trades",
+        "pending_orders",
+        "journal_state",
+        "trade_memory",
+        "market_guard_observations",
+        "market_scan_observations",
+        "ai_trade_decisions",
+        "trade_executions",
+        "trading_system_state",
+        "trading_health_state",
+        "trade_candidates",
+        "market_regime_history",
+        "strategy_versions",
+        "prompt_versions",
+        "replay_history",
+    ]
+    row_counts: dict[str, int] = {}
+    payload_bytes: dict[str, int] = {}
+    market_scan_by_timeframe: list[dict[str, Any]] = []
+    with _connect(config) as connection:
+        for table in tables:
+            try:
+                row = connection.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()
+                row_counts[table] = int(row["count"] if row else 0)
+            except sqlite3.Error:
+                row_counts[table] = 0
+            try:
+                row = connection.execute(f"SELECT COALESCE(SUM(LENGTH(payload_json)), 0) AS bytes FROM {table}").fetchone()
+                payload_bytes[table] = int(row["bytes"] if row else 0)
+            except sqlite3.Error:
+                payload_bytes[table] = 0
+        try:
+            rows = connection.execute(
+                """
+                SELECT timeframe, COUNT(*) AS rows, COUNT(DISTINCT symbol) AS symbols, MAX(created_at) AS latest_at
+                FROM market_scan_observations
+                GROUP BY timeframe
+                ORDER BY timeframe
+                """
+            ).fetchall()
+            market_scan_by_timeframe = [dict(row) for row in rows]
+        except sqlite3.Error:
+            market_scan_by_timeframe = []
+    return {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "db_path": str(db_path),
+        "files": files,
+        "disk": {
+            "total_bytes": usage.total,
+            "used_bytes": usage.used,
+            "free_bytes": usage.free,
+            "free_percent": round((usage.free / usage.total) * 100, 2) if usage.total else 0,
+        },
+        "row_counts": row_counts,
+        "payload_bytes": payload_bytes,
+        "market_scan_by_timeframe": market_scan_by_timeframe,
+        "retention": config.get("market_scan_memory", {}),
+    }
+
+
+def run_storage_maintenance(
+    config: dict[str, Any],
+    *,
+    vacuum: bool = False,
+    emergency: bool = False,
+) -> dict[str, Any]:
+    memory_config = config.get("market_scan_memory", {})
+    decision_config = config.get("decision_history", {})
+    if emergency:
+        prune_result = prune_market_scan_observations(
+            config,
+            keep_hours=int(memory_config.get("emergency_keep_hours", 24) or 24),
+            max_rows_per_symbol_timeframe=int(memory_config.get("emergency_max_rows_per_symbol_timeframe", 50) or 50),
+        )
+        decision_prune_result = prune_decision_history(
+            config,
+            keep_hours=int(decision_config.get("emergency_keep_hours", 6) or 6),
+            max_rows=int(decision_config.get("emergency_max_rows", 30) or 30),
+        )
+    else:
+        prune_result = prune_market_scan_observations(config)
+        decision_prune_result = prune_decision_history(config)
+    compact_result = {"checked": 0, "compacted": 0}
+    checkpoint: list[Any] = []
+    optimized = False
+    vacuumed = False
+    errors: list[str] = []
+    try:
+        compact_result = compact_market_scan_observations(
+            config,
+            batch_limit=int(memory_config.get("compact_batch_limit", 5000) or 5000),
+        )
+    except sqlite3.Error as exc:
+        errors.append(f"compact_market_scan: {exc}")
+    try:
+        with _connect(config) as connection:
+            try:
+                checkpoint = [tuple(row) for row in connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()]
+            except sqlite3.Error as exc:
+                errors.append(f"wal_checkpoint: {exc}")
+            try:
+                connection.execute("PRAGMA optimize")
+                optimized = True
+            except sqlite3.Error as exc:
+                errors.append(f"optimize: {exc}")
+            if vacuum:
+                try:
+                    connection.execute("VACUUM")
+                    vacuumed = True
+                except sqlite3.Error as exc:
+                    errors.append(f"vacuum: {exc}")
+    except sqlite3.Error as exc:
+        errors.append(f"maintenance: {exc}")
+    return {
+        "ok": not errors,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "prune": prune_result,
+        "decision_prune": decision_prune_result,
+        "compact": compact_result,
+        "emergency": emergency,
+        "checkpoint": checkpoint,
+        "optimized": optimized,
+        "vacuumed": vacuumed,
+        "errors": errors,
+        "stats": storage_stats(config),
+    }
 
 
 def recent_market_scan_memory(

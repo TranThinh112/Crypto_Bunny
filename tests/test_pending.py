@@ -197,6 +197,7 @@ class PendingTest(TestCase):
 
         with (
             patch("crypto_trader.pending.create_exchange", return_value=FakeExchange()),
+            patch("crypto_trader.pending.okx_ai_approval") as ai_approval,
             patch(
                 "crypto_trader.pending.execute_candidate",
                 return_value=ExecutionResult(
@@ -211,6 +212,7 @@ class PendingTest(TestCase):
         ):
             result = maintain_pending_orders(config, [_candidate()])
 
+        ai_approval.assert_not_called()
         execute.assert_called_once()
         self.assertEqual(execute.call_args.kwargs["order_type_override"], "limit")
         self.assertEqual(result["events"][0]["type"], "pending_submitted")

@@ -1,0 +1,208 @@
+Hãy tạo module Capital Sync + Capital Reserve Manager cho bot AI trading crypto.
+
+Tên tiếng Việt:
+- Capital Sync Service: Đồng bộ vốn thực
+- Capital Reserve Manager: Quản lý quỹ dự phòng vốn
+
+Mục tiêu:
+- Tự đồng bộ vốn từ OKX.
+- Chỉ tính tiền gốc / vốn đã thực nhận.
+- KHÔNG dùng PnL thả nổi của các vị thế đang mở để tính vốn giao dịch.
+- Tách vốn thành:
+  + RealizedCapital
+  + ReserveCapital
+  + TradingCapital
+- Không cho Trading Engine sử dụng toàn bộ vốn tài khoản.
+- Module KHÔNG tự mở lệnh, KHÔNG sửa rule trading, KHÔNG gọi GPT.
+
+Tech stack:
+- Python 3.11+
+- SQLite
+- SQLAlchemy
+- FastAPI
+- Pydantic
+
+Cấu hình:
+
+{
+  "CapitalReserve": {
+    "Enabled": true,
+    "BaseReservePercent": 20,
+    "WarningReservePercent": 25,
+    "RecoveryReservePercent": 30,
+    "CriticalReservePercent": 40,
+    "AllowReserveUsage": false,
+    "EmergencyAllowReserveUsage": true,
+    "MinTradingCapital": 10
+  },
+  "CapitalSync": {
+    "CapitalSource": "OKX",
+    "RefreshIntervalSeconds": 60,
+    "UseRealizedCapitalOnly": true,
+    "ExcludeUnrealizedPnl": true,
+    "QuoteCurrency": "USDT"
+  }
+}
+
+Database SQLite:
+
+1. Tạo bảng capital_snapshots:
+   - id
+   - created_at
+   - source
+   - quote_currency
+   - wallet_balance
+   - available_balance
+   - equity
+   - unrealized_pnl
+   - realized_capital
+   - note
+
+2. Tạo bảng capital_reserve_states:
+   - id
+   - created_at
+   - updated_at
+   - mode: HEALTHY / WARNING / RECOVERY / CRITICAL
+   - realized_capital
+   - reserve_percent
+   - reserve_amount
+   - trading_capital
+   - used_trading_capital
+   - available_trading_capital
+   - allow_reserve_usage
+   - reason
+
+3. Tạo Options:
+   - CapitalReserveOptions
+   - CapitalSyncOptions
+
+Capital Sync Logic:
+
+1. Tạo CapitalSyncService:
+   - sync_from_okx()
+   - get_latest_snapshot()
+   - calculate_realized_capital(wallet_balance, unrealized_pnl)
+   - refresh_snapshot()
+
+2. Công thức bắt buộc:
+   - realized_capital = wallet_balance - unrealized_pnl
+
+3. Nếu OKX trả available balance không bao gồm floating PnL thì có thể lưu available_balance riêng, nhưng Capital Reserve Manager vẫn phải dùng realized_capital.
+
+4. Không được dùng:
+   - equity
+   - wallet_balance + unrealized_pnl
+   - floating pnl
+   để tính trading_capital.
+
+Capital Reserve Logic:
+
+1. Tạo CapitalReserveService:
+   - calculate_state(mode, used_trading_capital)
+   - get_current_state()
+   - refresh_state(mode, used_trading_capital)
+   - get_available_trading_capital()
+   - can_allocate_margin(required_margin)
+   - reserve_usage_allowed()
+
+2. Chọn reserve_percent theo mode:
+   - HEALTHY → BaseReservePercent
+   - WARNING → WarningReservePercent
+   - RECOVERY → RecoveryReservePercent
+   - CRITICAL → CriticalReservePercent
+
+3. Công thức:
+   - reserve_amount = realized_capital * reserve_percent / 100
+   - trading_capital = realized_capital - reserve_amount
+   - available_trading_capital = trading_capital - used_trading_capital
+
+4. Logic:
+   - Nếu available_trading_capital < required_margin thì reject mở lệnh.
+   - Nếu trading_capital < MinTradingCapital thì reject hoặc pause trading.
+   - Nếu AllowReserveUsage = false thì không được dùng reserve_amount để mở lệnh mới.
+   - Nếu mode = CRITICAL và EmergencyAllowReserveUsage = false thì reject mọi lệnh mới.
+   - Nếu mode = CRITICAL và EmergencyAllowReserveUsage = true thì chỉ cho phép dùng reserve để duy trì margin, không dùng để mở lệnh mới.
+
+Tích hợp hệ thống:
+
+1. Bunny Health Monitor WARNING → mode = WARNING.
+2. Bunny Minimize Losses Recovery Mode → mode = RECOVERY.
+3. Recovery Chain Manager active chains vượt ngưỡng → mode = RECOVERY.
+4. Bunny Health Monitor CRITICAL → mode = CRITICAL.
+5. Nếu không có cảnh báo → mode = HEALTHY.
+
+Validate Entry:
+
+1. Khi chuẩn bị mở lệnh:
+   - Lấy required_margin.
+   - Gọi CapitalReserveService.can_allocate_margin(required_margin).
+
+2. Nếu false:
+   - Reject với reason:
+     "Insufficient trading capital after reserve protection"
+
+API FastAPI:
+
+1. GET /capital/snapshot/latest
+Trả:
+   - wallet_balance
+   - available_balance
+   - equity
+   - unrealized_pnl
+   - realized_capital
+   - source
+   - quote_currency
+   - created_at
+
+2. POST /capital/sync
+Gọi sync_from_okx và lưu capital_snapshots.
+
+3. GET /capital-reserve/state
+Trả:
+   - mode
+   - realized_capital
+   - reserve_percent
+   - reserve_amount
+   - trading_capital
+   - used_trading_capital
+   - available_trading_capital
+   - allow_reserve_usage
+   - reason
+
+4. POST /capital-reserve/refresh
+Input:
+   - mode
+   - used_trading_capital
+
+5. POST /capital-reserve/check-allocation
+Input:
+   - required_margin
+
+Output:
+   - allowed: true/false
+   - reason
+   - available_trading_capital
+   - reserve_amount
+   - realized_capital
+
+Yêu cầu code:
+- Tách file rõ ràng:
+  - main.py
+  - database.py
+  - models.py
+  - schemas.py
+  - config.py
+  - services/capital_sync_service.py
+  - services/capital_reserve_service.py
+  - routers/capital.py
+  - routers/capital_reserve.py
+- Có type hints đầy đủ.
+- Có xử lý lỗi cơ bản.
+- Có transaction khi refresh state.
+- Không hard-code threshold.
+- Không dùng GPT.
+- Không tự mở lệnh.
+- Không cho dùng vốn dự phòng để mở lệnh mới nếu AllowReserveUsage = false.
+- Capital Reserve Manager chỉ được dùng realized_capital.
+- Không dùng unrealized_pnl để tăng khối lượng lệnh.
+- Trả về code đầy đủ để chạy được.
