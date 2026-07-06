@@ -4,6 +4,7 @@ import tempfile
 from copy import deepcopy
 from unittest import TestCase
 
+from crypto_trader.codex_features import get_trading_system_state
 from crypto_trader.config import DEFAULT_CONFIG
 from crypto_trader.models import TradeCandidate
 from crypto_trader.risk import evaluate_candidate
@@ -91,3 +92,8 @@ class RiskTest(TestCase):
         self.assertFalse(blocked.passed)
         self.assertIn("Win probability 76.50% is below minimum 80.00%", blocked.reasons)
         self.assertTrue(passed.passed)
+
+    def test_trading_system_prefers_risk_max_active_when_trading_risk_not_overridden(self) -> None:
+        state = get_trading_system_state(self._config())
+
+        self.assertEqual(state["maxConcurrentPositions"], 5)

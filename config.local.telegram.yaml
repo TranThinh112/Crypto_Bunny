@@ -26,6 +26,8 @@ risk:
   min_stop_distance_pct: 0.35
   max_stop_distance_pct: 6.0
   news_conflict_threshold: 2.0
+trading_risk:
+  max_concurrent_positions: 5
 paper_trading:
   enabled: true
   auto_scan_enabled: false

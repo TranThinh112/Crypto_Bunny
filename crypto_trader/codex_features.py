@@ -1452,10 +1452,12 @@ def _strategy_performance_stats(config: dict[str, Any], version: str) -> dict[st
 
 def _trading_risk_settings(config: dict[str, Any]) -> dict[str, Any]:
     settings = deepcopy(config.get("trading_risk", {}))
-    settings["max_concurrent_positions"] = max(
-        1,
-        _safe_int(settings.get("max_concurrent_positions"), _safe_int(config.get("risk", {}).get("max_active_trades"), 1)),
-    )
+    risk_max_active = max(1, _safe_int(config.get("risk", {}).get("max_active_trades"), 1))
+    configured_max_positions = _safe_int(settings.get("max_concurrent_positions"), 0)
+    if configured_max_positions > 1:
+        settings["max_concurrent_positions"] = configured_max_positions
+    else:
+        settings["max_concurrent_positions"] = risk_max_active
     return settings
 
 

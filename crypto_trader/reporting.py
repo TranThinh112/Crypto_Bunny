@@ -931,15 +931,19 @@ def _lc_pending_source_label(row: dict[str, Any]) -> str:
     state = str(row.get("state") or "").upper()
     if state == "CHUA_DUYET":
         source = row.get("source_slot") or row.get("source") or row.get("slot")
+        index = row.get("source_index")
     else:
         source = row.get("source") or row.get("slot")
+        index = row.get("source_index")
     source_text = str(source or "").lower()
+    if "four" in source_text or "4h" in source_text:
+        return f"4h #{index}" if index else "4h"
     if "two" in source_text or "2h" in source_text:
-        return "2h"
+        return f"2h #{index}" if index else "2h"
     if "hour" in source_text or "1h" in source_text:
-        return "1h"
+        return f"1h #{index}" if index else "1h"
     if state == "CHUA_DUYET":
-        return "2h"
+        return f"2h #{index}" if index else "2h"
     return "-"
 
 

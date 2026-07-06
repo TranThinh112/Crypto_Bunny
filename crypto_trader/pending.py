@@ -7,6 +7,7 @@ from .ai_coordinator import okx_ai_approval, prioritize_pending_records
 from .codex_features import record_trade_execution
 from .executor import execute_candidate
 from .ledger import append_event
+from .lc_pipeline import latest_lc_pipeline_mini_scan
 from .market import create_exchange
 from .models import RiskCheck, TradeCandidate
 from .risk import evaluate_candidate
@@ -338,6 +339,140 @@ def _missing_candidate_reason(record: dict[str, Any], candidates_by_symbol: dict
     return "LC không còn nằm trong danh sách setup tốt của lần scan mới"
 
 
+def _candidate_priority_key(candidate: TradeCandidate) -> tuple[float, float, float]:
+    try:
+        win_probability = float(candidate.win_probability_pct or 0)
+    except (TypeError, ValueError):
+        win_probability = 0.0
+    try:
+        confidence = float(candidate.confidence or 0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    try:
+        volume_ratio = float((candidate.indicator_summary or {}).get("volume_ratio") or 0)
+    except (TypeError, ValueError):
+        volume_ratio = 0.0
+    return (win_probability, confidence, volume_ratio)
+
+
+def _rank_unique_candidates(candidates: list[TradeCandidate]) -> list[TradeCandidate]:
+    ranked = sorted(candidates, key=_candidate_priority_key, reverse=True)
+    output: list[TradeCandidate] = []
+    seen: set[str] = set()
+    for candidate in ranked:
+        if candidate.symbol in seen:
+            continue
+        output.append(candidate)
+        seen.add(candidate.symbol)
+    return output
+
+
+def _wait_slot_queue_meta(record: dict[str, Any]) -> dict[str, Any]:
+    candidate = _candidate_from_record(record)
+    if candidate is None:
+        return {}
+    meta = candidate.decision_metadata.get("wait_slot_queue") if isinstance(candidate.decision_metadata, dict) else {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _recheck_wait_slot_candidate(
+    config: dict[str, Any],
+    record: dict[str, Any],
+    candidates_by_key: dict[tuple[str, str], TradeCandidate],
+    candidates_by_symbol: dict[str, TradeCandidate],
+) -> dict[str, Any]:
+    symbol = str(record.get("symbol") or "")
+    side = str(record.get("side") or "").lower()
+    current_candidate = candidates_by_key.get((symbol, side))
+    if current_candidate is None:
+        replacement = candidates_by_symbol.get(symbol)
+        if replacement is not None:
+            return {
+                "action": "cancel",
+                "reason": (
+                    f"{symbol}: setup hien tai da doi sang {replacement.side.upper()}, "
+                    f"khong con phu hop voi LC mini {side.upper()}"
+                ),
+                "candidate": None,
+                "comparison": {},
+            }
+        return {
+            "action": "cancel",
+            "reason": f"{symbol}: khong con setup hien tai de cap nhat khi tai kiem",
+            "candidate": None,
+            "comparison": {},
+        }
+
+    refreshed = current_candidate
+    latest_scan = latest_lc_pipeline_mini_scan(config) or {}
+    pool_symbols: list[str] = []
+    for raw_symbol in list(latest_scan.get("pool_symbols") or latest_scan.get("approved_symbols") or []):
+        clean = str(raw_symbol or "")
+        if clean and clean not in pool_symbols:
+            pool_symbols.append(clean)
+    selected_symbols = [str(item) for item in list(latest_scan.get("selected_symbols") or []) if str(item)]
+    queue_meta = _wait_slot_queue_meta(record)
+    queued_slot_id = str(queue_meta.get("scan_slot_id") or "")
+    latest_slot_id = str(latest_scan.get("slot_id") or "")
+
+    comparison_candidates: list[TradeCandidate] = []
+    for pool_symbol in pool_symbols:
+        candidate = candidates_by_symbol.get(pool_symbol)
+        if candidate is not None:
+            comparison_candidates.append(candidate)
+    if refreshed.symbol not in {candidate.symbol for candidate in comparison_candidates}:
+        comparison_candidates.append(refreshed)
+    ranked_pool = _rank_unique_candidates(comparison_candidates)
+    current_rank = next(
+        (index for index, candidate in enumerate(ranked_pool, 1) if candidate.symbol == refreshed.symbol),
+        None,
+    )
+    top_candidate = ranked_pool[0] if ranked_pool else None
+    comparison = {
+        "latest_scan_slot_id": latest_slot_id or None,
+        "queued_scan_slot_id": queued_slot_id or None,
+        "pool_symbols": pool_symbols,
+        "selected_symbols": selected_symbols,
+        "top_symbol": top_candidate.symbol if top_candidate else None,
+        "current_rank": current_rank,
+        "ranked_symbols": [candidate.symbol for candidate in ranked_pool],
+    }
+
+    if pool_symbols and refreshed.symbol not in pool_symbols:
+        return {
+            "action": "cancel",
+            "reason": f"{symbol}: khong con nam trong pool 4h moi nhat",
+            "candidate": refreshed,
+            "comparison": comparison,
+        }
+
+    if latest_slot_id and queued_slot_id and latest_slot_id != queued_slot_id and selected_symbols and refreshed.symbol not in selected_symbols:
+        return {
+            "action": "cancel",
+            "reason": f"{symbol}: mini 4h moi nhat khong con chon cap nay",
+            "candidate": refreshed,
+            "comparison": comparison,
+        }
+
+    if top_candidate is not None and top_candidate.symbol != refreshed.symbol:
+        return {
+            "action": "keep",
+            "reason": (
+                f"{symbol}: du lieu moi cho thay {top_candidate.symbol} dang duoc uu tien hon "
+                "trong pool 4h hien tai, tiep tuc cho tai kiem tiep theo"
+            ),
+            "candidate": refreshed,
+            "comparison": comparison,
+        }
+
+    return {
+        "action": "release",
+        "reason": f"{symbol}: setup van phu hop sau tai kiem va dung dau pool 4h hien tai",
+        "candidate": refreshed,
+        "comparison": comparison,
+    }
+
+
 def maintain_pending_orders(
     config: dict[str, Any],
     candidates: list[TradeCandidate],
@@ -484,7 +619,205 @@ def maintain_pending_orders(
             continue
 
         expires_at = _parse_time(str(record.get("expires_at") or ""))
+        record_status = str(record.get("status") or "").upper()
         candidate = candidates_by_key.get(_record_key(record))
+
+        if record_status == "WAIT_SLOT":
+            wait_slot_candidate = _candidate_from_record(record)
+            if wait_slot_candidate is None:
+                reason = "WAIT_SLOT khong con payload hop le"
+                close_pending_order(config, local_id, "CANCELED", reason)
+                events.append(
+                    {
+                        "type": "pending_canceled",
+                        "source": "mini_wait_slot",
+                        "lc_id": lc_id,
+                        "symbol": symbol,
+                        "side": str(record.get("side") or ""),
+                        "reason": reason,
+                    }
+                )
+                canceled += 1
+                continue
+
+            if config.get("mode") != "dry_run" and (exchange is None or position_count is None):
+                warnings.append(f"{symbol}: WAIT_SLOT kept because OKX sync is unavailable")
+                refresh_pending_order(
+                    config,
+                    local_id,
+                    wait_slot_candidate,
+                    status="WAIT_SLOT",
+                    max_age_hours=float(lifecycle["local_max_age_hours"]),
+                )
+                kept += 1
+                continue
+
+            if config.get("mode") != "dry_run" and position_count is not None and position_count >= max_active:
+                refresh_pending_order(
+                    config,
+                    local_id,
+                    wait_slot_candidate,
+                    status="WAIT_SLOT",
+                    max_age_hours=float(lifecycle["local_max_age_hours"]),
+                )
+                kept += 1
+                continue
+
+            recheck = _recheck_wait_slot_candidate(config, record, candidates_by_key, candidates_by_symbol)
+            refreshed_candidate = recheck.get("candidate")
+            comparison = recheck.get("comparison") or {}
+            if refreshed_candidate is None:
+                reason = str(recheck.get("reason") or "WAIT_SLOT khong con du dieu kien sau tai kiem")
+                close_pending_order(config, local_id, "CANCELED", reason)
+                events.append(
+                    {
+                        "type": "pending_canceled",
+                        "source": "mini_wait_slot",
+                        "lc_id": lc_id,
+                        "symbol": symbol,
+                        "side": str(record.get("side") or ""),
+                        "reason": reason,
+                        "comparison": comparison,
+                    }
+                )
+                canceled += 1
+                continue
+
+            refresh_check = evaluate_candidate(
+                config,
+                refreshed_candidate,
+                check_active_trades=False,
+                check_order_limits=False,
+            )
+            refresh_reasons = _pending_review_reasons(config, record, refreshed_candidate, refresh_check, market_layers)
+            if refresh_reasons:
+                reason = "; ".join(refresh_reasons[:3])
+                close_pending_order(config, local_id, "CANCELED", reason)
+                events.append(
+                    {
+                        "type": "pending_canceled",
+                        "source": "mini_wait_slot_recheck",
+                        "lc_id": lc_id,
+                        "symbol": symbol,
+                        "side": str(record.get("side") or ""),
+                        "reason": reason,
+                        "comparison": comparison,
+                    }
+                )
+                canceled += 1
+                continue
+
+            if str(recheck.get("action") or "") == "keep":
+                refresh_pending_order(
+                    config,
+                    local_id,
+                    refreshed_candidate,
+                    status="WAIT_SLOT",
+                    max_age_hours=float(lifecycle["local_max_age_hours"]),
+                )
+                events.append(
+                    {
+                        "type": "pending_wait_slot_kept",
+                        "source": "mini_wait_slot_recheck",
+                        "lc_id": lc_id,
+                        "symbol": symbol,
+                        "side": str(record.get("side") or ""),
+                        "reason": str(recheck.get("reason") or "WAIT_SLOT tiep tuc cho tai kiem"),
+                        "comparison": comparison,
+                    }
+                )
+                kept += 1
+                continue
+
+            if config.get("mode") == "dry_run":
+                refresh_pending_order(
+                    config,
+                    local_id,
+                    refreshed_candidate,
+                    status="OPEN",
+                    max_age_hours=float(lifecycle["local_max_age_hours"]),
+                )
+                events.append(
+                    {
+                        "type": "pending_wait_slot_promoted",
+                        "source": "mini_wait_slot_recheck",
+                        "status": "OPEN",
+                        "lc_id": lc_id,
+                        "symbol": symbol,
+                        "side": str(record.get("side") or ""),
+                        "reason": str(recheck.get("reason") or "WAIT_SLOT promoted to OPEN after recheck"),
+                        "comparison": comparison,
+                    }
+                )
+                kept += 1
+                continue
+
+            submit_check = evaluate_candidate(
+                config,
+                refreshed_candidate,
+                check_active_trades=False,
+                check_order_limits=True,
+            )
+            if not submit_check.passed:
+                refresh_pending_order(
+                    config,
+                    local_id,
+                    refreshed_candidate,
+                    status="WAIT_SLOT",
+                    max_age_hours=float(lifecycle["local_max_age_hours"]),
+                )
+                warnings.append(
+                    f"{symbol}: WAIT_SLOT kept because recheck release gate failed: "
+                    + "; ".join(submit_check.reasons[:3])
+                )
+                kept += 1
+                continue
+
+            execution = execute_candidate(
+                config,
+                refreshed_candidate,
+                order_type_override=str(lifecycle["order_type"]),
+                entry_type="mini_wait_slot_okx",
+                journal_type="LC",
+                journal_id=lc_id,
+            )
+            if not execution.submitted or not execution.order_id:
+                refresh_pending_order(
+                    config,
+                    local_id,
+                    refreshed_candidate,
+                    status="WAIT_SLOT",
+                    max_age_hours=float(lifecycle["local_max_age_hours"]),
+                )
+                warnings.append(f"{symbol}: WAIT_SLOT submit to OKX failed: {execution.message}")
+                kept += 1
+                continue
+
+            set_pending_order_exchange_order(
+                config,
+                local_id,
+                refreshed_candidate,
+                execution.order_id,
+                max_age_days=float(lifecycle["exchange_max_age_days"]),
+            )
+            events.append(
+                {
+                    "type": "pending_submitted",
+                    "source": "mini_wait_slot_release",
+                    "status": "LC_OKX",
+                    "lc_id": lc_id,
+                    "symbol": symbol,
+                    "side": str(record.get("side") or ""),
+                    "exchange_order_id": execution.order_id,
+                    "reason": str(recheck.get("reason") or "WAIT_SLOT released to LC_OKX"),
+                    "comparison": comparison,
+                }
+            )
+            submitted += 1
+            kept += 1
+            active_symbols.add(symbol)
+            continue
+
         check = (
             evaluate_candidate(
                 config,

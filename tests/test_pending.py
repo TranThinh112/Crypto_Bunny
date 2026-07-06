@@ -8,6 +8,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from crypto_trader.config import DEFAULT_CONFIG
+from crypto_trader.lc_pipeline import save_lc_pipeline_mini_scan
 from crypto_trader.models import ExecutionResult, TradeCandidate
 from crypto_trader.pending import maintain_pending_orders
 from crypto_trader.storage import count_pending_orders, list_pending_orders, open_pending_symbols, save_pending_order, state_db_path
@@ -269,6 +270,73 @@ class PendingTest(TestCase):
         self.assertEqual(result["events"][0]["source"], "local_released")
         self.assertEqual(result["events"][0]["exchange_order_id"], "order-2")
         self.assertEqual(len(list_pending_orders(config, status="FILLED")), 1)
+
+    def test_rechecks_wait_slot_and_submits_to_okx_when_slot_opens(self) -> None:
+        class FakeExchange:
+            def load_markets(self) -> None:
+                return None
+
+            def fetch_open_orders(self) -> list[dict]:
+                return []
+
+            def fetch_positions(self) -> list[dict]:
+                return [
+                    {"symbol": f"COIN{index}/USDT:USDT", "contracts": 1}
+                    for index in range(4)
+                ]
+
+        config = self._config(mode="demo")
+        config["risk"]["max_active_trades"] = 5
+        queued = _candidate("LIT/USDT:USDT")
+        queued.decision_metadata = {"wait_slot_queue": {"scan_slot_id": "slot-1"}}
+        save_pending_order(
+            config,
+            queued,
+            None,
+            status="WAIT_SLOT",
+            max_age_hours=6,
+            journal_id=12,
+        )
+        save_lc_pipeline_mini_scan(
+            config,
+            {
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "slot_id": "slot-1",
+                "status": "done",
+                "pool_symbols": ["LIT/USDT:USDT"],
+                "selected_symbols": ["LIT/USDT:USDT"],
+                "approved_symbols": ["LIT/USDT:USDT"],
+            },
+        )
+
+        refreshed = _candidate("LIT/USDT:USDT")
+        refreshed.win_probability_pct = 84.0
+        refreshed.confidence = 85.0
+        refreshed.indicator_summary = {"volume_ratio": 1.8}
+
+        with (
+            patch("crypto_trader.pending.create_exchange", return_value=FakeExchange()),
+            patch(
+                "crypto_trader.pending.execute_candidate",
+                return_value=ExecutionResult(
+                    mode="demo",
+                    submitted=True,
+                    order_id="limit-wait-1",
+                    message="demo: limit order submitted",
+                    journal_type="LC",
+                    journal_id=12,
+                ),
+            ) as execute,
+        ):
+            result = maintain_pending_orders(config, [refreshed])
+
+        execute.assert_called_once()
+        self.assertEqual(result["submitted"], 1)
+        self.assertEqual(result["events"][0]["source"], "mini_wait_slot_release")
+        self.assertEqual(result["events"][0]["status"], "LC_OKX")
+        order = list_pending_orders(config, status="LC_OKX")[0]
+        self.assertEqual(order["status"], "LC_OKX")
+        self.assertEqual(order["exchange_order_id"], "limit-wait-1")
 
     def test_cancels_okx_pending_and_enters_market_when_slot_is_available(self) -> None:
         class FakeExchange:

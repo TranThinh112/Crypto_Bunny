@@ -12,7 +12,7 @@ from .config import project_path
 from .models import Decision, TradeCandidate, to_jsonable
 
 
-ACTIVE_PENDING_STATUSES = ("OPEN", "LC_OKX")
+ACTIVE_PENDING_STATUSES = ("LC_OKX", "WAIT_SLOT", "OPEN")
 DEFAULT_MARKET_SCAN_MAX_JSON_BYTES = 8000
 DEPRECATED_JOURNAL_STATE_KEYS = {
     "ai_internal_market_scan_latest",
@@ -1376,12 +1376,14 @@ def save_pending_order(
     candidate: TradeCandidate,
     exchange_order_id: str | None,
     *,
+    status: str | None = None,
     max_age_days: float = 3,
     max_age_hours: float | None = None,
     journal_id: int | None = None,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     payload = to_jsonable(candidate)
+    normalized_status = str(status or ("LC_OKX" if exchange_order_id else "OPEN")).upper()
     with _connect(config) as connection:
         cursor = connection.execute(
             """
@@ -1411,7 +1413,7 @@ def save_pending_order(
                 now.isoformat(),
                 now.isoformat(),
                 _pending_expiry(now, max_age_days=max_age_days, max_age_hours=max_age_hours).isoformat(),
-                "LC_OKX" if exchange_order_id else "OPEN",
+                normalized_status,
                 candidate.symbol,
                 candidate.base,
                 candidate.side,
@@ -1438,6 +1440,7 @@ def refresh_pending_order(
     order_id: int,
     candidate: TradeCandidate,
     *,
+    status: str | None = None,
     max_age_days: float = 3,
     max_age_hours: float | None = None,
 ) -> None:
@@ -1449,6 +1452,7 @@ def refresh_pending_order(
             UPDATE pending_orders
             SET updated_at = ?,
                 expires_at = ?,
+                status = COALESCE(?, status),
                 entry = ?,
                 stop_loss = ?,
                 take_profit = ?,
@@ -1463,6 +1467,7 @@ def refresh_pending_order(
             (
                 now.isoformat(),
                 _pending_expiry(now, max_age_days=max_age_days, max_age_hours=max_age_hours).isoformat(),
+                str(status).upper() if status else None,
                 candidate.entry,
                 candidate.stop_loss,
                 candidate.take_profit,

@@ -16,10 +16,13 @@ from .storage import (
 
 
 LC_PIPELINE_STATE_KEY = "lc_internal_pipeline_state"
-LC_PIPELINE_STATE_VERSION = 2
+LC_PIPELINE_STATE_VERSION = 3
 DEFAULT_TWO_HOUR_ICON = "🕑"
 ONE_HOUR_ICON = "🕐"
 FOUR_HOUR_ICON = "🕓"
+ONE_HOUR_HISTORY_KEEP_DAYS = 3
+TWO_HOUR_HISTORY_KEEP_DAYS = 3
+FOUR_HOUR_HISTORY_KEEP_DAYS = 7
 
 
 def _parse_time(value: Any) -> datetime | None:
@@ -237,8 +240,14 @@ def _rank_candidates(
     return clean
 
 
-def _candidate_record(candidate: TradeCandidate, *, state: str, first_seen_at: str | None = None) -> dict[str, Any]:
-    now = datetime.now(timezone.utc).isoformat()
+def _candidate_record(
+    candidate: TradeCandidate,
+    *,
+    state: str,
+    first_seen_at: str | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    timestamp = (now or datetime.now(timezone.utc)).isoformat()
     payload = _candidate_payload(candidate)
     indicator = payload.get("indicator_summary") if isinstance(payload, dict) else {}
     return {
@@ -246,8 +255,8 @@ def _candidate_record(candidate: TradeCandidate, *, state: str, first_seen_at: s
         "base": candidate.base,
         "side": candidate.side,
         "state": state,
-        "first_seen_at": first_seen_at or now,
-        "last_seen_at": now,
+        "first_seen_at": first_seen_at or timestamp,
+        "last_seen_at": timestamp,
         "entry": candidate.entry,
         "price": candidate.entry,
         "confidence": candidate.confidence,
@@ -390,20 +399,41 @@ def _load_state(config: dict[str, Any], now: datetime) -> dict[str, Any]:
     day = _day_key(config, now)
     if state.get("day_key") != day:
         state["day_key"] = day
+        state["daily_one_hour_counter"] = 0
         state["daily_two_hour_counter"] = 0
         state["hourly_windows"] = []
         state["two_hour_windows"] = []
         state["telegram_events"] = []
         state["internal_notifications"] = []
+    state.setdefault("one_hour_history", [])
+    state.setdefault("two_hour_history", [])
+    state.setdefault("four_hour_history", [])
     state.setdefault("hourly_windows", [])
     state.setdefault("two_hour_windows", [])
     state.setdefault("undecided", [])
     state.setdefault("internal_lc", [])
     state.setdefault("telegram_events", [])
     state.setdefault("internal_notifications", [])
+    state.setdefault("daily_one_hour_counter", 0)
     state.setdefault("daily_two_hour_counter", 0)
+    state.setdefault("four_hour_counter", 0)
     state.setdefault("latest_mini_scan", {})
     state.setdefault("state_version", LC_PIPELINE_STATE_VERSION)
+    state["one_hour_history"] = _prune_history(
+        state.get("one_hour_history") or [],
+        now=now,
+        keep_days=ONE_HOUR_HISTORY_KEEP_DAYS,
+    )
+    state["two_hour_history"] = _prune_history(
+        state.get("two_hour_history") or [],
+        now=now,
+        keep_days=TWO_HOUR_HISTORY_KEEP_DAYS,
+    )
+    state["four_hour_history"] = _prune_history(
+        state.get("four_hour_history") or [],
+        now=now,
+        keep_days=FOUR_HOUR_HISTORY_KEEP_DAYS,
+    )
     _prune_low_win_state(state, _pipeline_config(config))
     return state
 
@@ -428,6 +458,10 @@ def _compact_saved_row(row: dict[str, Any]) -> dict[str, Any]:
         "source_index",
         "source_time",
         "source_label",
+        "origin_source_slot",
+        "origin_source_index",
+        "origin_source_time",
+        "origin_source_label",
         "revived_at",
         "revived_label",
         "revived_age_hours",
@@ -447,8 +481,11 @@ def _compact_event(event: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(event, dict):
         return {}
     compact = {
+        "frame": event.get("frame"),
         "slot": event.get("slot"),
         "created_at": event.get("created_at"),
+        "index": event.get("index"),
+        "sequence_index": event.get("sequence_index"),
         "daily_index": event.get("daily_index"),
         "date": event.get("date"),
         "time": event.get("time"),
@@ -456,6 +493,19 @@ def _compact_event(event: dict[str, Any]) -> dict[str, Any]:
     compact["approved"] = [_compact_saved_row(row) for row in event.get("approved") or [] if isinstance(row, dict)]
     compact["rejected"] = [_compact_saved_row(row) for row in event.get("rejected") or [] if isinstance(row, dict)]
     return compact
+
+
+def _prune_history(events: list[dict[str, Any]], *, now: datetime, keep_days: int) -> list[dict[str, Any]]:
+    cutoff = now - timedelta(days=max(1, int(keep_days)))
+    kept: list[dict[str, Any]] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        created_at = _parse_time(event.get("created_at"))
+        if created_at is not None and created_at < cutoff:
+            continue
+        kept.append(event)
+    return kept
 
 
 def _compact_mini_candidate(item: dict[str, Any]) -> dict[str, Any]:
@@ -573,6 +623,15 @@ def _compact_mini_scan(scan: dict[str, Any]) -> dict[str, Any]:
 
 def _save_state(config: dict[str, Any], state: dict[str, Any]) -> None:
     state["state_version"] = LC_PIPELINE_STATE_VERSION
+    state["one_hour_history"] = [
+        _compact_event(event) for event in state.get("one_hour_history") or [] if isinstance(event, dict)
+    ]
+    state["two_hour_history"] = [
+        _compact_event(event) for event in state.get("two_hour_history") or [] if isinstance(event, dict)
+    ]
+    state["four_hour_history"] = [
+        _compact_event(event) for event in state.get("four_hour_history") or [] if isinstance(event, dict)
+    ]
     state["internal_lc"] = [_compact_saved_row(row) for row in state.get("internal_lc") or [] if isinstance(row, dict)]
     state["undecided"] = [_compact_saved_row(row) for row in state.get("undecided") or [] if isinstance(row, dict)]
     state["hourly_windows"] = [
@@ -674,6 +733,49 @@ def _trim_undecided(rows: list[dict[str, Any]], settings: dict[str, Any]) -> lis
     return _sort_saved_rows(kept, settings, reverse=True)[:max_rows]
 
 
+def _row_with_source_metadata(
+    row: dict[str, Any],
+    *,
+    state_label: str,
+    source_slot: str,
+    source_index: int | None,
+    now: datetime,
+    local_now: datetime,
+) -> dict[str, Any]:
+    source_time = now.isoformat()
+    source_label = local_now.strftime("%d/%m/%y %H:%M:%S")
+    record = {
+        **row,
+        "state": state_label,
+        "source_slot": source_slot,
+        "source_index": source_index,
+        "source_time": source_time,
+        "source_label": source_label,
+    }
+    if source_slot == "1h":
+        return record
+    origin_slot = row.get("origin_source_slot")
+    origin_index = row.get("origin_source_index")
+    origin_time = row.get("origin_source_time")
+    origin_label = row.get("origin_source_label")
+    if not origin_slot and row.get("source_index") is not None:
+        origin_slot = row.get("source_slot")
+        origin_index = row.get("source_index")
+        origin_time = row.get("source_time")
+        origin_label = row.get("source_label")
+    if not origin_slot and source_index is not None:
+        origin_slot = source_slot
+        origin_index = source_index
+        origin_time = source_time
+        origin_label = source_label
+    if origin_slot:
+        record["origin_source_slot"] = origin_slot
+        record["origin_source_index"] = origin_index
+        record["origin_source_time"] = origin_time
+        record["origin_source_label"] = origin_label
+    return record
+
+
 def _format_pair_line(index: int, row: dict[str, Any]) -> str:
     price = row.get("price") or row.get("entry") or "-"
     volume = row.get("volume_ratio")
@@ -707,14 +809,14 @@ def _build_internal_lc_rows(
         if not isinstance(row, dict):
             continue
         output.append(
-            {
-                **row,
-                "state": "LC_NOI_BO",
-                "source_slot": source_slot,
-                "source_index": source_index,
-                "source_time": now.isoformat(),
-                "source_label": local_now.strftime("%d/%m/%y %H:%M:%S"),
-            }
+            _row_with_source_metadata(
+                row,
+                state_label="LC_NOI_BO",
+                source_slot=source_slot,
+                source_index=source_index,
+                now=now,
+                local_now=local_now,
+            )
         )
     return output
 
@@ -827,23 +929,34 @@ def lc_pipeline_dashboard_payload(config: dict[str, Any]) -> dict[str, Any]:
     internal_lc = _sort_saved_rows([_row_age_payload(row, now) for row in state.get("internal_lc") or []], settings, reverse=True)
     two_hour_windows = state.get("two_hour_windows") or []
     latest_two_hour = two_hour_windows[-1] if two_hour_windows else None
+    one_hour_history = state.get("one_hour_history") or []
+    two_hour_history = state.get("two_hour_history") or []
+    four_hour_history = state.get("four_hour_history") or []
+    latest_four_hour = four_hour_history[-1] if four_hour_history else None
     return {
         "enabled": settings["enabled"],
         "created_at": now.isoformat(),
         "day_key": state.get("day_key"),
+        "daily_one_hour_counter": state.get("daily_one_hour_counter", 0),
         "daily_two_hour_counter": state.get("daily_two_hour_counter", 0),
+        "four_hour_counter": state.get("four_hour_counter", 0),
         "last_hourly_slot": state.get("last_hourly_slot"),
         "last_two_hour_slot": state.get("last_two_hour_slot"),
+        "last_four_hour_slot": state.get("last_four_hour_slot"),
         "last_recheck_at": state.get("last_recheck_at"),
         "settings": settings,
         "counts": {
             "undecided": len(undecided),
             "internal_lc": len(internal_lc),
             "two_hour_windows": len(two_hour_windows),
+            "one_hour_history": len(one_hour_history),
+            "two_hour_history": len(two_hour_history),
+            "four_hour_history": len(four_hour_history),
         },
         "undecided": undecided,
         "internal_lc": internal_lc,
         "latest_two_hour": latest_two_hour,
+        "latest_four_hour": latest_four_hour,
     }
 
 
@@ -979,10 +1092,26 @@ def _promote_survivors(
             and symbol not in blocked_symbols
             and _candidate_is_relaxed_valid(candidate, settings)
         ):
-            record = {
-                **_candidate_record(candidate, state="LC_NOI_BO", first_seen_at=row.get("first_seen_at")),
-                "source_slot": "HS",
+            base_record = {
+                **_candidate_record(candidate, state="LC_NOI_BO", first_seen_at=row.get("first_seen_at"), now=now),
+                "origin_source_slot": row.get("origin_source_slot"),
+                "origin_source_index": row.get("origin_source_index"),
+                "origin_source_time": row.get("origin_source_time"),
+                "origin_source_label": row.get("origin_source_label"),
+                "source_slot": row.get("source_slot"),
                 "source_index": row.get("source_index"),
+                "source_time": row.get("source_time"),
+                "source_label": row.get("source_label"),
+            }
+            record = {
+                **_row_with_source_metadata(
+                    base_record,
+                    state_label="LC_NOI_BO",
+                    source_slot="HS",
+                    source_index=row.get("source_index"),
+                    now=now,
+                    local_now=local_now,
+                ),
                 "revived_at": now.isoformat(),
                 "revived_label": local_now.strftime("%d/%m/%y %H:%M:%S"),
                 "revived_age_hours": round(age_hours, 3),
@@ -1023,24 +1152,48 @@ def update_lc_internal_pipeline(
     candidates_by_symbol = {candidate.symbol: candidate for candidate in candidates}
     hourly_slot = _slot_key(config, now, 1)
     two_hour_slot = _slot_key(config, now, 2)
+    four_hour_slot = _slot_key(config, now, 4)
     result: dict[str, Any] = {
         "enabled": True,
         "hourly_slot": hourly_slot,
         "two_hour_slot": two_hour_slot,
+        "four_hour_slot": four_hour_slot,
         "created_hourly": False,
         "created_two_hour": False,
+        "created_four_hour": False,
         "promoted": [],
         "blocked_symbols": sorted(blocked_symbols),
     }
 
     if candidates and state.get("last_hourly_slot") != hourly_slot:
         local_now = _local_time(config, now)
+        next_hourly_index = int(state.get("daily_one_hour_counter") or 0) + 1
         top = [
-            _candidate_record(candidate, state="HOUR_1")
+            _candidate_record(candidate, state="HOUR_1", now=now)
             for candidate in _rank_candidates(candidates, top_limit, blocked_symbols=blocked_symbols, settings=settings)
         ]
-        state["hourly_windows"].append({"slot": hourly_slot, "created_at": now.isoformat(), "top": top})
+        one_hour_event = {
+            "frame": "1h",
+            "slot": hourly_slot,
+            "created_at": now.isoformat(),
+            "index": next_hourly_index,
+            "daily_index": next_hourly_index,
+            "date": local_now.strftime("%d/%m/%y"),
+            "time": local_now.strftime("%H:%M:%S"),
+            "approved": top[:top_limit],
+            "rejected": [],
+        }
+        state["one_hour_history"].append(one_hour_event)
+        state["hourly_windows"].append(
+            {
+                "slot": hourly_slot,
+                "created_at": now.isoformat(),
+                "daily_index": next_hourly_index,
+                "top": top,
+            }
+        )
         state["hourly_windows"] = state["hourly_windows"][-2:]
+        state["daily_one_hour_counter"] = next_hourly_index
         state["last_hourly_slot"] = hourly_slot
         if top:
             hourly_internal_lc = _build_internal_lc_rows(
@@ -1054,6 +1207,7 @@ def update_lc_internal_pipeline(
                 : int(settings["internal_lc_max"])
             ]
         result["created_hourly"] = True
+        result["one_hour_event"] = one_hour_event
         _append_internal_notification(
             state,
             frame="1h",
@@ -1117,14 +1271,17 @@ def update_lc_internal_pipeline(
         state["internal_lc"] = _sort_saved_rows(approved, settings, reverse=True)[: int(settings["internal_lc_max"])]
         state["daily_two_hour_counter"] = next_daily_index
         event = {
+            "frame": "2h",
             "slot": two_hour_slot,
             "created_at": now.isoformat(),
+            "index": state["daily_two_hour_counter"],
             "daily_index": state["daily_two_hour_counter"],
             "date": local_now.strftime("%d/%m/%y"),
             "time": local_now.strftime("%H:%M:%S"),
             "approved": approved[:top_limit],
             "rejected": rejected,
         }
+        state["two_hour_history"].append(event)
         state["two_hour_windows"].append(event)
         state["two_hour_windows"] = state["two_hour_windows"][-2:]
         state["last_two_hour_slot"] = two_hour_slot
@@ -1142,6 +1299,67 @@ def update_lc_internal_pipeline(
         result["two_hour_event"] = event
         if settings["notify_two_hour_summary"]:
             _notify_two_hour_summary(config, event)
+
+    two_hour_windows = state.get("two_hour_windows") or []
+    recent_two_hour_windows = two_hour_windows[-2:] if len(two_hour_windows) >= 2 else []
+    has_full_four_hour_inputs = (
+        len(recent_two_hour_windows) >= 2
+        and all(list(window.get("approved") or []) for window in recent_two_hour_windows)
+    )
+    if has_full_four_hour_inputs and state.get("last_four_hour_slot") != four_hour_slot:
+        combined_two_hour: list[dict[str, Any]] = []
+        for window in recent_two_hour_windows:
+            combined_two_hour.extend(window.get("approved") or [])
+        ranked_two_hour = _sort_saved_rows(combined_two_hour, settings, reverse=True)
+        next_four_hour_index = int(state.get("four_hour_counter") or 0) + 1
+        local_now = _local_time(config, now)
+        approved_four_hour: list[dict[str, Any]] = []
+        approved_four_hour_keys: set[tuple[str, str]] = set()
+        seen_four_hour: set[str] = set()
+        for row in ranked_two_hour:
+            symbol = str(row.get("symbol") or "")
+            if not symbol or symbol in seen_four_hour or symbol in blocked_symbols:
+                continue
+            approved_row = _build_internal_lc_rows(
+                [row],
+                source_slot="4h",
+                source_index=next_four_hour_index,
+                now=now,
+                local_now=local_now,
+            )[0]
+            approved_four_hour.append(approved_row)
+            approved_four_hour_keys.add(_setup_key(approved_row))
+            seen_four_hour.add(symbol)
+            if len(approved_four_hour) >= top_limit:
+                break
+        rejected_four_hour = [
+            _row_with_source_metadata(
+                row,
+                state_label="CHUA_DUYET",
+                source_slot="4h",
+                source_index=next_four_hour_index,
+                now=now,
+                local_now=local_now,
+            )
+            for row in ranked_two_hour
+            if _setup_key(row) not in approved_four_hour_keys and str(row.get("symbol") or "") not in blocked_symbols
+        ]
+        four_hour_event = {
+            "frame": "4h",
+            "slot": four_hour_slot,
+            "created_at": now.isoformat(),
+            "index": next_four_hour_index,
+            "sequence_index": next_four_hour_index,
+            "date": local_now.strftime("%d/%m/%y"),
+            "time": local_now.strftime("%H:%M:%S"),
+            "approved": approved_four_hour[:top_limit],
+            "rejected": rejected_four_hour,
+        }
+        state["four_hour_history"].append(four_hour_event)
+        state["four_hour_counter"] = next_four_hour_index
+        state["last_four_hour_slot"] = four_hour_slot
+        result["created_four_hour"] = True
+        result["four_hour_event"] = four_hour_event
 
     last_recheck_at = _parse_time(state.get("last_recheck_at"))
     recheck_due = (

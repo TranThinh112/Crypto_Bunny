@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from crypto_trader.config import DEFAULT_CONFIG
 from crypto_trader.engine import _create_pending_from_internal_scan
-from crypto_trader.models import ExecutionResult, TradeCandidate
+from crypto_trader.models import ExecutionResult, RiskCheck, TradeCandidate
 from crypto_trader.storage import list_pending_orders
 
 
@@ -55,6 +55,7 @@ class EngineMiniQueueTest(TestCase):
         scan = {
             "provider": "openai",
             "model": "gpt-5.4-mini",
+            "selected_symbols": ["ETH/USDT:USDT", "BTC/USDT:USDT"],
             "approved_symbols": ["ETH/USDT:USDT", "BTC/USDT:USDT"],
             "ai_review": {"approved_symbols": ["ETH/USDT:USDT", "BTC/USDT:USDT"]},
         }
@@ -78,6 +79,7 @@ class EngineMiniQueueTest(TestCase):
         scan = {
             "provider": "openai",
             "model": "gpt-5.4-mini",
+            "selected_symbols": ["LIT/USDT:USDT"],
             "approved_symbols": ["LIT/USDT:USDT"],
             "ai_review": {"approved_symbols": ["LIT/USDT:USDT"]},
         }
@@ -98,6 +100,7 @@ class EngineMiniQueueTest(TestCase):
         scan = {
             "provider": "openai",
             "model": "gpt-5.4-mini",
+            "selected_symbols": ["BTC/USDT:USDT"],
             "approved_symbols": ["BTC/USDT:USDT"],
             "ai_review": {"approved_symbols": ["BTC/USDT:USDT"]},
         }
@@ -125,11 +128,40 @@ class EngineMiniQueueTest(TestCase):
         self.assertEqual(len(orders), 1)
         self.assertEqual(orders[0]["exchange_order_id"], "limit-123")
 
+    def test_mini_scan_queues_wait_slot_for_recheck_when_only_slot_is_full(self) -> None:
+        config = self._config()
+        candidate = _candidate("LIT/USDT:USDT")
+        scan = {
+            "provider": "openai",
+            "model": "gpt-5.4-mini",
+            "approved_symbols": ["LIT/USDT:USDT"],
+            "selected_symbols": ["LIT/USDT:USDT"],
+            "pool_symbols": ["LIT/USDT:USDT"],
+            "slot_id": "2026-07-06T20:00:00+00:00",
+            "ai_review": {"approved_symbols": ["LIT/USDT:USDT"]},
+        }
+
+        with patch(
+            "crypto_trader.engine.evaluate_candidate",
+            return_value=RiskCheck(False, ["Da het slot: 2/2"], []),
+        ):
+            result = _create_pending_from_internal_scan(config, [candidate], scan, (2, set(), []), set())
+
+        self.assertTrue(result["allowed"])
+        self.assertEqual(result["created"], 0)
+        self.assertEqual(result["wait_slot"], 1)
+        self.assertEqual(result["skipped"], [])
+        orders = list_pending_orders(config, status="WAIT_SLOT")
+        self.assertEqual(len(orders), 1)
+        self.assertEqual(orders[0]["symbol"], "LIT/USDT:USDT")
+        self.assertEqual(orders[0]["status"], "WAIT_SLOT")
+
     def test_mini_scan_fallback_does_not_create_local_lc(self) -> None:
         config = self._config()
         scan = {
             "provider": "openai",
             "model": "gpt-5.4-mini",
+            "selected_symbols": ["BTC/USDT:USDT"],
             "approved_symbols": ["BTC/USDT:USDT"],
             "fallback": "local_policy",
         }

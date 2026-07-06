@@ -293,6 +293,39 @@ def _internal_lc_candidate_cache(
     return {candidate.symbol: candidate for candidate in cached_rows}
 
 
+def _is_wait_slot_only_rejection(reasons: list[str]) -> bool:
+    normalized = [str(reason or "").strip() for reason in reasons if str(reason or "").strip()]
+    if not normalized:
+        return False
+    allowed_prefixes = (
+        "Da het slot:",
+        "Slot ",
+        "Active trade limit reached:",
+    )
+    return all(any(reason.startswith(prefix) for prefix in allowed_prefixes) for reason in normalized)
+
+
+def _with_wait_slot_metadata(
+    candidate: TradeCandidate,
+    *,
+    reason: str,
+    internal_scan: dict[str, Any] | None,
+) -> TradeCandidate:
+    queued = deepcopy(candidate)
+    queued.decision_metadata = {
+        **(queued.decision_metadata or {}),
+        "wait_slot_queue": {
+            "queued_at": datetime.now(timezone.utc).isoformat(),
+            "reason": reason,
+            "scan_created_at": (internal_scan or {}).get("created_at"),
+            "scan_slot_id": (internal_scan or {}).get("slot_id"),
+            "pool_symbols": list((internal_scan or {}).get("pool_symbols") or []),
+            "selected_symbols": list((internal_scan or {}).get("selected_symbols") or []),
+        },
+    }
+    return queued
+
+
 def _create_pending_from_internal_scan(
     config: dict[str, Any],
     candidates: list[Any],
@@ -310,6 +343,8 @@ def _create_pending_from_internal_scan(
         "limit": pending_limit,
         "created": 0,
         "created_orders": [],
+        "wait_slot": 0,
+        "wait_slot_orders": [],
         "skipped": [],
     }
     if not result["enabled"] or not allowed:
@@ -346,11 +381,42 @@ def _create_pending_from_internal_scan(
             extra_active_symbols=created_symbols,
         )
         if not check.passed:
+            check_reason = "; ".join(check.reasons[:3]) or "risk check failed"
+            if _is_wait_slot_only_rejection(check.reasons):
+                journal_id = next_global_counter(config, "LC") if config.get("mode") != "dry_run" else None
+                queued_candidate = _with_wait_slot_metadata(
+                    candidate,
+                    reason=check_reason,
+                    internal_scan=internal_scan,
+                )
+                record = save_pending_order(
+                    config,
+                    queued_candidate,
+                    None,
+                    status="WAIT_SLOT",
+                    max_age_hours=float(config.get("pending_orders", {}).get("local_max_age_hours", 6) or 6),
+                    journal_id=journal_id,
+                )
+                result["wait_slot"] += 1
+                created_symbols.add(candidate.symbol)
+                result["wait_slot_orders"].append(
+                    {
+                        "id": record.get("id"),
+                        "lc_id": journal_id or record.get("id"),
+                        "status": "WAIT_SLOT",
+                        "symbol": candidate.symbol,
+                        "side": candidate.side,
+                        "reason": check_reason,
+                        "win_probability_pct": candidate.win_probability_pct,
+                        "confidence": candidate.confidence,
+                    }
+                )
+                continue
             result["skipped"].append(
                 {
                     "symbol": candidate.symbol,
                     "side": candidate.side,
-                    "reason": "; ".join(check.reasons[:3]) or "risk check failed",
+                    "reason": check_reason,
                 }
             )
             continue
@@ -590,6 +656,7 @@ def run_once(config: dict[str, Any], execute: bool) -> Decision:
                 risk_check = current_check
 
     queued_from_mini = bool((mini_pending_queue or {}).get("created"))
+    waiting_slot_from_mini = bool((mini_pending_queue or {}).get("wait_slot"))
     if queued_from_mini:
         first_created = (mini_pending_queue or {}).get("created_orders", [{}])[0]
         selected = next(
@@ -601,6 +668,21 @@ def run_once(config: dict[str, Any], execute: bool) -> Decision:
             selected,
         )
         risk_check = RiskCheck(True, [], market_warnings + quantity_warnings)
+    elif waiting_slot_from_mini:
+        first_waiting = (mini_pending_queue or {}).get("wait_slot_orders", [{}])[0]
+        selected = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate.symbol == first_waiting.get("symbol") and candidate.side == first_waiting.get("side")
+            ),
+            selected,
+        )
+        risk_check = RiskCheck(
+            False,
+            [str(first_waiting.get("reason") or "Mini setup duoc dua vao hang tai kiem vi da het slot")],
+            market_warnings + quantity_warnings,
+        )
 
     execution_result: ExecutionResult | None = None
     action = "hold"
@@ -617,6 +699,21 @@ def run_once(config: dict[str, Any], execute: bool) -> Decision:
             raw={"lc_okx_pending": True, "mini_pending_queue": mini_pending_queue},
             journal_type="LC",
             journal_id=first_created.get("lc_id"),
+        )
+    elif waiting_slot_from_mini and selected:
+        first_waiting = (mini_pending_queue or {}).get("wait_slot_orders", [{}])[0]
+        action = "hold"
+        execution_result = ExecutionResult(
+            mode=config.get("mode", "dry_run"),
+            submitted=False,
+            order_id=None,
+            message=(
+                "GPT mini da chon setup nhung he thong dang day slot; "
+                "setup duoc dua vao hang tai kiem va se doi cap nhat setup/win rate truoc khi gui tiep"
+            ),
+            raw={"mini_pending_queue": mini_pending_queue, "wait_slot_recheck": True},
+            journal_type="LC",
+            journal_id=first_waiting.get("lc_id"),
         )
     elif selected and risk_check.passed:
         action = f"{selected.side}_{selected.symbol}"

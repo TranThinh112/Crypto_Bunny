@@ -10,12 +10,13 @@ from unittest.mock import patch
 from crypto_trader.config import DEFAULT_CONFIG
 from crypto_trader.lc_pipeline import (
     format_internal_notifications_view,
+    lc_pipeline_dashboard_payload,
     lc_pipeline_mini_pool,
     notify_mini_pool_summary,
     update_lc_internal_pipeline,
 )
 from crypto_trader.models import TradeCandidate
-from crypto_trader.storage import get_journal_state
+from crypto_trader.storage import get_journal_state, set_journal_state
 
 
 def _candidate(
@@ -52,6 +53,7 @@ class LcPipelineTest(TestCase):
         config["state_db_path"] = "state.sqlite"
         config["ai"]["internal"]["lc_pipeline_notify_two_hour_summary"] = False
         config["ai"]["internal"]["lc_pipeline_promote_to_pending"] = False
+        config["ai"]["internal"]["lc_pipeline_min_win_probability_pct"] = 50
         return config
 
     def tearDown(self) -> None:
@@ -121,6 +123,96 @@ class LcPipelineTest(TestCase):
         pool = lc_pipeline_mini_pool(config, current, limit=3)
 
         self.assertEqual([candidate.symbol for candidate in pool], ["DDD/USDT:USDT", "EEE/USDT:USDT", "FFF/USDT:USDT"])
+
+    def test_pipeline_stores_hourly_two_hour_four_hour_history_with_lineage(self) -> None:
+        config = self._config()
+        start = datetime(2026, 7, 6, 0, 5, tzinfo=timezone.utc)
+
+        update_lc_internal_pipeline(
+            config,
+            [_candidate("AAA/USDT:USDT", 63), _candidate("BBB/USDT:USDT", 62), _candidate("CCC/USDT:USDT", 61)],
+            now=start,
+        )
+        update_lc_internal_pipeline(
+            config,
+            [_candidate("DDD/USDT:USDT", 66), _candidate("EEE/USDT:USDT", 65), _candidate("FFF/USDT:USDT", 64)],
+            now=start + timedelta(hours=1),
+        )
+        update_lc_internal_pipeline(
+            config,
+            [_candidate("GGG/USDT:USDT", 69), _candidate("HHH/USDT:USDT", 68), _candidate("III/USDT:USDT", 67)],
+            now=start + timedelta(hours=2),
+        )
+        result = update_lc_internal_pipeline(
+            config,
+            [_candidate("JJJ/USDT:USDT", 72), _candidate("KKK/USDT:USDT", 71), _candidate("LLL/USDT:USDT", 70)],
+            now=start + timedelta(hours=3),
+        )
+
+        self.assertTrue(result["created_two_hour"])
+        self.assertTrue(result["created_four_hour"])
+        raw_state = get_journal_state(config, "lc_internal_pipeline_state")
+        state = json.loads(raw_state or "{}")
+        self.assertEqual(state["daily_one_hour_counter"], 4)
+        self.assertEqual(state["daily_two_hour_counter"], 2)
+        self.assertEqual(state["four_hour_counter"], 1)
+        self.assertEqual([event["daily_index"] for event in state["one_hour_history"]], [1, 2, 3, 4])
+        self.assertEqual([event["daily_index"] for event in state["two_hour_history"]], [1, 2])
+        self.assertEqual(state["four_hour_history"][0]["index"], 1)
+        approved_four_hour = state["four_hour_history"][0]["approved"]
+        self.assertEqual([row["symbol"] for row in approved_four_hour], ["JJJ/USDT:USDT", "KKK/USDT:USDT", "LLL/USDT:USDT"])
+        self.assertEqual(approved_four_hour[0]["source_slot"], "4h")
+        self.assertEqual(approved_four_hour[0]["source_index"], 1)
+        self.assertEqual(approved_four_hour[0]["origin_source_slot"], "2h")
+        self.assertEqual(approved_four_hour[0]["origin_source_index"], 2)
+
+    def test_history_cleanup_keeps_active_internal_state(self) -> None:
+        config = self._config()
+        stale_time = (datetime(2026, 7, 6, 0, 5, tzinfo=timezone.utc) - timedelta(days=8)).isoformat()
+        recent_time = datetime(2026, 7, 6, 0, 5, tzinfo=timezone.utc).isoformat()
+        set_state = {
+            "state_version": 3,
+            "day_key": "2026-07-06",
+            "one_hour_history": [
+                {"frame": "1h", "created_at": stale_time, "daily_index": 1, "approved": []},
+                {"frame": "1h", "created_at": recent_time, "daily_index": 2, "approved": []},
+            ],
+            "two_hour_history": [
+                {"frame": "2h", "created_at": stale_time, "daily_index": 1, "approved": []},
+            ],
+            "four_hour_history": [
+                {"frame": "4h", "created_at": stale_time, "index": 1, "approved": []},
+            ],
+            "internal_lc": [
+                {
+                    "symbol": "ETH/USDT:USDT",
+                    "side": "long",
+                    "state": "LC_NOI_BO",
+                    "first_seen_at": stale_time,
+                    "last_seen_at": stale_time,
+                    "win_probability_pct": 64.11,
+                }
+            ],
+            "undecided": [
+                {
+                    "symbol": "LIT/USDT:USDT",
+                    "side": "long",
+                    "state": "CHUA_DUYET",
+                    "first_seen_at": stale_time,
+                    "last_seen_at": stale_time,
+                    "win_probability_pct": 62.34,
+                }
+            ],
+        }
+        set_journal_state(config, "lc_internal_pipeline_state", json.dumps(set_state, ensure_ascii=False))
+
+        payload = lc_pipeline_dashboard_payload(config)
+
+        self.assertEqual(payload["counts"]["one_hour_history"], 1)
+        self.assertEqual(payload["counts"]["two_hour_history"], 0)
+        self.assertEqual(payload["counts"]["four_hour_history"], 0)
+        self.assertEqual(payload["internal_lc"][0]["symbol"], "ETH/USDT:USDT")
+        self.assertEqual(payload["undecided"][0]["symbol"], "LIT/USDT:USDT")
 
     def test_two_hour_rejected_keeps_opposite_side_duplicate_setup(self) -> None:
         config = self._config()
