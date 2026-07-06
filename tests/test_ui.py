@@ -561,6 +561,45 @@ class UiTest(TestCase):
         self.assertIn("sống", message)
         self.assertIsNone(keyboard)
 
+    def test_telegram_lc_action_formats_internal_lc_state(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text(
+                "mode: dry_run\n"
+                f"state_db_path: {Path(tmpdir, 'state.sqlite').as_posix()}\n",
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            set_journal_state(
+                config,
+                "lc_internal_pipeline_state",
+                json.dumps(
+                    {
+                        "internal_lc": [
+                            {
+                                "symbol": "ETH/USDT:USDT",
+                                "side": "long",
+                                "state": "LC_NOI_BO",
+                                "source_slot": "2h",
+                                "source_index": 3,
+                                "win_probability_pct": 64.11,
+                                "first_seen_at": "2026-07-06T00:00:00+00:00",
+                                "last_seen_at": "2026-07-06T01:00:00+00:00",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+
+            _, message, keyboard = _telegram_action_response(config, "view_lc", config_path)
+
+        self.assertIn("🟡", message)
+        self.assertIn("📊", message)
+        self.assertIn("ETH/USDT:USDT", message)
+        self.assertIn("2h #3", message)
+        self.assertIsNone(keyboard)
+
     def test_lc_pipeline_endpoint_returns_dashboard_state(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             config_path = Path(tmpdir) / "config.yaml"

@@ -59,7 +59,7 @@ from .dashboard_services import (
     timeframe_state_dashboard,
 )
 from .engine import run_once
-from .lc_pipeline import format_internal_notifications_view, lc_pipeline_dashboard_payload
+from .lc_pipeline import format_internal_lc_view, format_internal_notifications_view, lc_pipeline_dashboard_payload
 from .market import create_exchange
 from .market_guard import (
     latest_market_guard_status,
@@ -94,7 +94,6 @@ from .reporting import (
     fetch_balance_snapshot,
     format_market_guard_message,
     format_market_scan_memory_view,
-    format_pending_orders_view,
     format_pending_event_messages,
     format_positions_account_view,
     format_scan_message,
@@ -102,7 +101,6 @@ from .reporting import (
     format_undecided_lc_view,
 )
 from .storage import (
-    count_pending_orders,
     get_journal_state,
     latest_decision_payload,
     list_paper_trades,
@@ -790,9 +788,10 @@ def _telegram_dashboard_message(
     ai_internal = ai_config.get("internal", {}) if isinstance(ai_config.get("internal"), dict) else {}
     ai_okx = ai_config.get("okx", {}) if isinstance(ai_config.get("okx"), dict) else {}
     try:
-        pending_count = count_pending_orders(config)
+        lc_payload = lc_pipeline_dashboard_payload(config)
+        internal_lc_count = int((lc_payload.get("counts") or {}).get("internal_lc", 0))
     except Exception:
-        pending_count = "-"
+        internal_lc_count = 0
     try:
         balance_snapshot = fetch_balance_snapshot(config, use_cache=True)
         balance_label = (
@@ -818,7 +817,7 @@ def _telegram_dashboard_message(
             f"{_telegram_number(leverage, 'x')} | "
             f"vị thế {_telegram_number(notional, ' USDT')}"
         ),
-        f"🟡 LC đang chờ: {pending_count}",
+        f"🟡 LC nội bộ: {internal_lc_count}",
     ]
     lines.insert(3, f"AI: internal {ai_internal.get('model', '-')} | OKX {ai_okx.get('model', '-')}")
     try:
@@ -913,7 +912,7 @@ def _telegram_action_response(
     if action == "view_sd":
         return config, format_balance_view(config), None
     if action == "view_lc":
-        return config, format_pending_orders_view(config), None
+        return config, format_internal_lc_view(config), None
     if action == "view_undecided_lc":
         return config, format_undecided_lc_view(config), None
     if action == "view_internal_notifications":

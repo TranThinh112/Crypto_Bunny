@@ -272,10 +272,10 @@ def _internal_notification_summary_line(item: dict[str, Any], config: dict[str, 
     created_at = _parse_time(item.get("created_at"))
     created_label = _local_time(config, created_at).strftime("%d/%m/%y %H:%M:%S") if created_at else "-"
     details = [str(line).strip() for line in item.get("lines") or [] if str(line).strip()]
-    compact_details = " | ".join(part for part in details[:3] if part)
-    if compact_details:
-        return f"{item.get('icon', '🔔')} {item.get('title', '-')} | {created_label} | {compact_details}"
-    return f"{item.get('icon', '🔔')} {item.get('title', '-')} | {created_label}"
+    header = f"{item.get('icon', '🔔')} {item.get('title', '-')} | {created_label}"
+    if not details:
+        return header
+    return "\n".join([header, *details])
 
 
 def format_internal_notifications_view(config: dict[str, Any], *, limit_per_frame: int = 5) -> str:
@@ -366,6 +366,33 @@ def lc_pipeline_dashboard_payload(config: dict[str, Any]) -> dict[str, Any]:
         "internal_lc": internal_lc,
         "latest_two_hour": latest_two_hour,
     }
+
+
+def format_internal_lc_view(config: dict[str, Any], *, limit: int = 10) -> str:
+    now = datetime.now(timezone.utc)
+    state = _load_state(config, now)
+    rows = sorted(
+        [_row_age_payload(row, now) for row in state.get("internal_lc") or []],
+        key=_candidate_score,
+        reverse=True,
+    )[: max(1, int(limit))]
+    lines = [f"🟡 LC nội bộ { _local_time(config, now).strftime('%d/%m/%Y %H:%M') }", f"📊 Tổng LC: {len(rows)}"]
+    if not rows:
+        lines.append("⚪ Chưa có LC nội bộ")
+        return "\n".join(lines)
+    for index, row in enumerate(rows, 1):
+        side = str(row.get("side") or "-").upper()
+        source_slot = str(row.get("source_slot") or "-")
+        source_index = row.get("source_index")
+        source_label = f"{source_slot} #{source_index}" if source_index else source_slot
+        try:
+            win_label = f"{float(row.get('win_probability_pct') or 0):.2f}%"
+        except (TypeError, ValueError):
+            win_label = "-"
+        lines.append(
+            f"{index}. {row.get('symbol', '-')} | {side} | Win {win_label} | {source_label}"
+        )
+    return "\n".join(lines)
 
 
 def _notify_promoted_lc(config: dict[str, Any], record: dict[str, Any], *, age_hours: float, remaining_count: int) -> None:
