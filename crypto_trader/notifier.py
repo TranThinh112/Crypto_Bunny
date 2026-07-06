@@ -51,10 +51,8 @@ def telegram_command_list() -> list[dict[str, str]]:
     return [
         {"command": "menu", "description": "Mo bang dieu khien"},
         {"command": "setup", "description": "Mo menu setup"},
-        {"command": "scan", "description": "Chay scan thu cong"},
         {"command": "guard", "description": "Xem Market Guard"},
         {"command": "vt", "description": "Xem vi the va PNL"},
-        {"command": "sd", "description": "Xem so du"},
         {"command": "lc", "description": "Xem lenh cho"},
         {"command": "memory", "description": "Xem bo nho scan"},
         {"command": "ai", "description": "Xem lich su goi AI"},
@@ -102,11 +100,7 @@ def telegram_control_keyboard() -> dict[str, Any]:
     return {
         "inline_keyboard": [
             [
-                {"text": "\U0001f50e Scan ngay", "callback_data": "scan_now"},
-            ],
-            [
                 {"text": "\U0001f4ca VT/PNL/SD", "callback_data": "view_positions_account"},
-                {"text": "\U0001f4b5 SD", "callback_data": "view_sd"},
                 {"text": "\U0001f7e1 LC", "callback_data": "view_lc"},
             ],
             [

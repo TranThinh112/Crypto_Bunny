@@ -278,13 +278,16 @@ class UiTest(TestCase):
             for row in keyboard["inline_keyboard"]
             for button in row
         ]
-        self.assertIn("scan_now", callbacks)
         self.assertNotIn("view_menu", callbacks)
+        self.assertIn("view_positions_account", callbacks)
+        self.assertIn("view_lc", callbacks)
         self.assertIn("view_guard", callbacks)
         self.assertIn("view_memory", callbacks)
         self.assertIn("view_undecided_lc", callbacks)
         self.assertIn("view_internal_notifications", callbacks)
         self.assertIn("setup_menu", callbacks)
+        self.assertNotIn("scan_now", callbacks)
+        self.assertNotIn("view_sd", callbacks)
         self.assertNotIn("set_order_usdt", callbacks)
         self.assertNotIn("set_leverage", callbacks)
         self.assertNotIn("set_max_positions", callbacks)

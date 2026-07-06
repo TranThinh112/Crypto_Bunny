@@ -91,6 +91,7 @@ from .reporting import (
     build_periodic_report_messages,
     format_execution_messages,
     format_balance_view,
+    fetch_balance_snapshot,
     format_market_guard_message,
     format_market_scan_memory_view,
     format_pending_orders_view,
@@ -792,6 +793,15 @@ def _telegram_dashboard_message(
         pending_count = count_pending_orders(config)
     except Exception:
         pending_count = "-"
+    try:
+        balance_snapshot = fetch_balance_snapshot(config, use_cache=True)
+        balance_label = (
+            f"{_telegram_number(balance_snapshot.get('balance_usdt'), ' USDT')}"
+            if balance_snapshot.get("ok")
+            else "khong lay duoc"
+        )
+    except Exception:
+        balance_label = "khong lay duoc"
 
     auto_label = "bật" if status.get("enabled") else "tắt"
     execute_label = "có gửi lệnh" if status.get("execute") else "chỉ theo dõi"
@@ -801,6 +811,7 @@ def _telegram_dashboard_message(
         "📲 Bảng điều khiển Telegram",
         f"⚙️ Mode: {config.get('mode', '-')} | Auto: {auto_label} | {execute_label}",
         f"🧪 OKX demo: {okx_label}",
+        f"💵 So du: {balance_label}",
         (
             "💰 Lệnh sau: "
             f"{_telegram_number(margin, ' USDT')} margin | "
@@ -1102,10 +1113,8 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
         "/ui": "view_menu",
         "/dashboard": "view_menu",
         "/setup": "setup_menu",
-        "/scan": "scan_now",
         "/guard": "view_guard",
         "/vt": "view_positions_account",
-        "/sd": "view_sd",
         "/lc": "view_lc",
         "/chuaduyet": "view_undecided_lc",
         "/noibo": "view_internal_notifications",
