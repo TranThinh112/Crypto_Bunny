@@ -273,17 +273,15 @@ def format_internal_notifications_view(config: dict[str, Any], *, limit_per_fram
     items = state.get("internal_notifications") if isinstance(state.get("internal_notifications"), list) else []
     if not items:
         return "🔔 Thông báo nội bộ: chưa có dữ liệu 1h/2h/4h."
-    lines = ["🔔 Thông báo nội bộ", "Mới nhất nằm dưới cùng trong từng khung."]
-    frame_titles = [("1h", "Khung 1h"), ("2h", "Khung 2h"), ("4h", "Khung 4h")]
-    for frame, title in frame_titles:
-        frame_items = [item for item in items if str(item.get("frame")) == frame]
+    timeline_limit = max(3, int(limit_per_frame) * 3)
+    timeline = sorted(items, key=lambda row: str(row.get("created_at") or ""))[-timeline_limit:]
+    lines = [
+        "🔔 Thông báo nội bộ",
+        "Timeline 1h/2h/4h, mới nhất nằm dưới cùng.",
+    ]
+    for item in timeline:
         lines.append("")
-        lines.append(title)
-        if not frame_items:
-            lines.append("- Chưa có thông báo.")
-            continue
-        for item in sorted(frame_items, key=lambda row: str(row.get("created_at") or ""))[-limit_per_frame:]:
-            lines.append(_internal_notification_text(item, config))
+        lines.append(_internal_notification_text(item, config))
     return "\n".join(lines)
 
 

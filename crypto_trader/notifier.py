@@ -6,11 +6,14 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from typing import Any
 
 from dotenv import load_dotenv
 
 from .storage import get_journal_state, set_journal_state
+
+TELEGRAM_COMMANDS_SYNC_KEY = "telegram_commands_last_sync_at"
 
 
 def _env_bool(name: str, default: bool = True) -> bool:
@@ -61,7 +64,24 @@ def telegram_command_list() -> list[dict[str, str]]:
     ]
 
 
-def sync_telegram_commands(config: dict[str, Any]) -> bool:
+def _parse_time(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def sync_telegram_commands(config: dict[str, Any], *, force: bool = False, max_age_seconds: int = 21_600) -> bool:
+    if not telegram_enabled(config):
+        return False
+    if not force:
+        last_synced = _parse_time(get_journal_state(config, TELEGRAM_COMMANDS_SYNC_KEY))
+        if last_synced is not None:
+            age_seconds = (datetime.now(timezone.utc) - last_synced).total_seconds()
+            if age_seconds < max(300, int(max_age_seconds or 21_600)):
+                return True
     response = _telegram_api_request(
         config,
         "setMyCommands",
@@ -74,6 +94,7 @@ def sync_telegram_commands(config: dict[str, Any]) -> bool:
         "setChatMenuButton",
         {"menu_button": json.dumps({"type": "commands"}, ensure_ascii=False)},
     )
+    set_journal_state(config, TELEGRAM_COMMANDS_SYNC_KEY, datetime.now(timezone.utc).isoformat())
     return True
 
 

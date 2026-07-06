@@ -224,7 +224,7 @@ class LcPipelineTest(TestCase):
         self.assertIn("BBB/USDT:USDT | SHORT | HS 06/07/26 14:00:00", message)
 
     @patch("crypto_trader.notifier.send_telegram_message")
-    def test_internal_notifications_view_groups_frames_without_chat_push(self, send_message) -> None:
+    def test_internal_notifications_view_uses_timeline_order_without_chat_push(self, send_message) -> None:
         config = self._config()
         config["ai"]["internal"]["lc_pipeline_notify_two_hour_summary"] = False
         config["ai"]["internal"]["lc_pipeline_notify_mini_pool_summary"] = False
@@ -247,12 +247,12 @@ class LcPipelineTest(TestCase):
 
         message = format_internal_notifications_view(config)
 
-        self.assertIn("Khung 1h", message)
-        self.assertIn("Khung 2h", message)
-        self.assertIn("Khung 4h", message)
+        self.assertIn("Timeline 1h/2h/4h", message)
         self.assertIn("🕐", message)
         self.assertIn("🕑", message)
         self.assertIn("🕓", message)
+        self.assertLess(message.index("🕐 1h top 3 setup"), message.index("🕑 #1 LC nội bộ tổng hợp 2h"))
+        self.assertLess(message.index("🕑 #1 LC nội bộ tổng hợp 2h"), message.index("🕓 Mini pool 4h"))
         send_message.assert_not_called()
 
     @patch("crypto_trader.notifier.send_telegram_message")

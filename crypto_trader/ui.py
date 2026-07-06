@@ -1138,6 +1138,7 @@ def _telegram_button_worker(app: FastAPI) -> None:
     offset_value = None
     try:
         config = load_config(app.state.config_path)
+        sync_telegram_commands(config)
         stored = get_journal_state(config, "telegram_update_offset")
         offset_value = int(stored) if stored else None
     except Exception:
@@ -1146,6 +1147,7 @@ def _telegram_button_worker(app: FastAPI) -> None:
     while not app.state.automation_stop.is_set():
         try:
             config = load_config(app.state.config_path)
+            sync_telegram_commands(config)
             if not _telegram_polling_enabled(config):
                 app.state.automation_stop.wait(5)
                 continue

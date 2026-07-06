@@ -359,7 +359,7 @@ class UiTest(TestCase):
                 response = client.get("/healthz")
 
         self.assertEqual(response.status_code, 200)
-        sync_commands.assert_called_once()
+        self.assertGreaterEqual(sync_commands.call_count, 1)
 
     @patch("crypto_trader.notifier._telegram_api_request")
     def test_edit_telegram_chat_message_uses_edit_message_text(self, api_request) -> None:
