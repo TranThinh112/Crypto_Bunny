@@ -9,6 +9,9 @@ from .storage import get_journal_state, open_pending_symbols, set_journal_state
 
 
 LC_PIPELINE_STATE_KEY = "lc_internal_pipeline_state"
+DEFAULT_TWO_HOUR_ICON = "🕑"
+ONE_HOUR_ICON = "🕐"
+FOUR_HOUR_ICON = "🕓"
 
 
 def _parse_time(value: Any) -> datetime | None:
@@ -33,11 +36,18 @@ def _pipeline_config(config: dict[str, Any]) -> dict[str, Any]:
         "recheck_interval_minutes": max(15, int(internal.get("lc_pipeline_recheck_interval_minutes", 90) or 90)),
         "relaxed_min_win_probability_pct": float(internal.get("lc_pipeline_relaxed_min_win_probability_pct", 50) or 50),
         "relaxed_min_confidence": float(internal.get("lc_pipeline_relaxed_min_confidence", 70) or 70),
-        "notify_two_hour_summary": bool(internal.get("lc_pipeline_notify_two_hour_summary", True)),
+        "notify_two_hour_summary": bool(internal.get("lc_pipeline_notify_two_hour_summary", False)),
+        "notify_mini_pool_summary": bool(internal.get("lc_pipeline_notify_mini_pool_summary", False)),
         "promote_survivors": bool(
             internal.get("lc_pipeline_promote_survivors", internal.get("lc_pipeline_promote_to_pending", True))
         ),
     }
+
+
+def _two_hour_icon(config: dict[str, Any]) -> str:
+    internal = config.get("ai", {}).get("internal", {})
+    icon = str(internal.get("lc_pipeline_two_hour_icon") or DEFAULT_TWO_HOUR_ICON).strip()
+    return icon or DEFAULT_TWO_HOUR_ICON
 
 
 def _local_time(config: dict[str, Any], now: datetime) -> datetime:
@@ -154,11 +164,13 @@ def _load_state(config: dict[str, Any], now: datetime) -> dict[str, Any]:
         state["hourly_windows"] = []
         state["two_hour_windows"] = []
         state["telegram_events"] = []
+        state["internal_notifications"] = []
     state.setdefault("hourly_windows", [])
     state.setdefault("two_hour_windows", [])
     state.setdefault("undecided", [])
     state.setdefault("internal_lc", [])
     state.setdefault("telegram_events", [])
+    state.setdefault("internal_notifications", [])
     state.setdefault("daily_two_hour_counter", 0)
     return state
 
@@ -169,6 +181,17 @@ def _save_state(config: dict[str, Any], state: dict[str, Any]) -> None:
 
 def _upsert_by_symbol(rows: list[dict[str, Any]], record: dict[str, Any]) -> list[dict[str, Any]]:
     output = [row for row in rows if row.get("symbol") != record.get("symbol")]
+    output.append(record)
+    return output
+
+
+def _setup_key(row: dict[str, Any]) -> tuple[str, str]:
+    return (str(row.get("symbol") or ""), str(row.get("side") or "").lower())
+
+
+def _upsert_by_setup(rows: list[dict[str, Any]], record: dict[str, Any]) -> list[dict[str, Any]]:
+    record_key = _setup_key(record)
+    output = [row for row in rows if _setup_key(row) != record_key]
     output.append(record)
     return output
 
@@ -184,23 +207,84 @@ def _trim_undecided(rows: list[dict[str, Any]], settings: dict[str, Any]) -> lis
         return sorted(rows, key=_candidate_score, reverse=True)
     drop_count = min(int(settings["undecided_prune_drop"]), len(rows) - floor)
     ranked_low_first = sorted(rows, key=_candidate_score)
-    dropped_symbols = {str(row.get("symbol") or "") for row in ranked_low_first[:drop_count]}
-    kept = [row for row in rows if str(row.get("symbol") or "") not in dropped_symbols]
+    dropped_keys = {_setup_key(row) for row in ranked_low_first[:drop_count]}
+    kept = [row for row in rows if _setup_key(row) not in dropped_keys]
     return sorted(kept, key=_candidate_score, reverse=True)
 
 
 def _format_pair_line(index: int, row: dict[str, Any]) -> str:
     price = row.get("price") or row.get("entry") or "-"
     volume = row.get("volume_ratio")
+    win_probability = row.get("win_probability_pct")
     try:
         volume_text = f"x{float(volume):.2f}"
     except (TypeError, ValueError):
         volume_text = "-"
     try:
+        win_text = f"{float(win_probability):.2f}%"
+    except (TypeError, ValueError):
+        win_text = "-"
+    try:
         price_text = f"{float(price):.6g}"
     except (TypeError, ValueError):
         price_text = str(price)
-    return f"{index}. {row.get('symbol', '-')} | Giá {price_text} | KLGD {volume_text}"
+    side_text = str(row.get("side") or "-").upper()
+    return f"{index}. {row.get('symbol', '-')} | {side_text} | Win {win_text} | Giá {price_text} | KLGD {volume_text}"
+
+
+def _append_internal_notification(
+    state: dict[str, Any],
+    *,
+    frame: str,
+    icon: str,
+    title: str,
+    lines: list[str],
+    created_at: datetime,
+) -> None:
+    state.setdefault("internal_notifications", [])
+    state["internal_notifications"].append(
+        {
+            "frame": frame,
+            "icon": icon,
+            "title": title,
+            "created_at": created_at.isoformat(),
+            "lines": lines,
+        }
+    )
+    state["internal_notifications"] = sorted(
+        state["internal_notifications"],
+        key=lambda item: str(item.get("created_at") or ""),
+    )[-80:]
+
+
+def _internal_notification_text(item: dict[str, Any], config: dict[str, Any]) -> str:
+    created_at = _parse_time(item.get("created_at"))
+    created_label = _local_time(config, created_at).strftime("%d/%m/%y %H:%M:%S") if created_at else "-"
+    lines = [
+        f"{item.get('icon', '🔔')} {item.get('title', '-')}",
+        created_label,
+    ]
+    lines.extend(str(line) for line in item.get("lines") or [])
+    return "\n".join(lines)
+
+
+def format_internal_notifications_view(config: dict[str, Any], *, limit_per_frame: int = 5) -> str:
+    state = _load_state(config, datetime.now(timezone.utc))
+    items = state.get("internal_notifications") if isinstance(state.get("internal_notifications"), list) else []
+    if not items:
+        return "🔔 Thông báo nội bộ: chưa có dữ liệu 1h/2h/4h."
+    lines = ["🔔 Thông báo nội bộ", "Mới nhất nằm dưới cùng trong từng khung."]
+    frame_titles = [("1h", "Khung 1h"), ("2h", "Khung 2h"), ("4h", "Khung 4h")]
+    for frame, title in frame_titles:
+        frame_items = [item for item in items if str(item.get("frame")) == frame]
+        lines.append("")
+        lines.append(title)
+        if not frame_items:
+            lines.append("- Chưa có thông báo.")
+            continue
+        for item in sorted(frame_items, key=lambda row: str(row.get("created_at") or ""))[-limit_per_frame:]:
+            lines.append(_internal_notification_text(item, config))
+    return "\n".join(lines)
 
 
 def _notify_two_hour_summary(config: dict[str, Any], event: dict[str, Any]) -> None:
@@ -209,8 +293,9 @@ def _notify_two_hour_summary(config: dict[str, Any], event: dict[str, Any]) -> N
     except Exception:
         return
     rows = event.get("approved") or []
+    icon = _two_hour_icon(config)
     lines = [
-        f"LC nội bộ tổng hợp 2h #{event.get('daily_index', '-')}",
+        f"{icon} #{event.get('daily_index', '-')} LC nội bộ tổng hợp 2h",
         f"{event.get('date', '-')} {event.get('time', '-')}",
         "3 cặp duyệt lượt này:",
     ]
@@ -244,8 +329,16 @@ def lc_pipeline_dashboard_payload(config: dict[str, Any]) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     state = _load_state(config, now)
     settings = _pipeline_config(config)
-    undecided = [_row_age_payload(row, now) for row in state.get("undecided") or []]
-    internal_lc = [_row_age_payload(row, now) for row in state.get("internal_lc") or []]
+    undecided = sorted(
+        [_row_age_payload(row, now) for row in state.get("undecided") or []],
+        key=_candidate_score,
+        reverse=True,
+    )
+    internal_lc = sorted(
+        [_row_age_payload(row, now) for row in state.get("internal_lc") or []],
+        key=_candidate_score,
+        reverse=True,
+    )
     two_hour_windows = state.get("two_hour_windows") or []
     latest_two_hour = two_hour_windows[-1] if two_hour_windows else None
     return {
@@ -293,16 +386,12 @@ def _source_label(row: dict[str, Any]) -> str:
 
 
 def notify_mini_pool_summary(config: dict[str, Any], rows: list[dict[str, Any]], *, slot_id: str | None = None) -> None:
-    try:
-        from .notifier import send_telegram_message
-    except Exception:
-        return
     if not rows:
         return
     now = datetime.now(timezone.utc)
     local_now = _local_time(config, now)
+    settings = _pipeline_config(config)
     lines = [
-        f"🤖 Mini pool 4h {local_now.strftime('%d/%m/%y %H:%M:%S')}",
         "3 cặp gửi lên mini:",
     ]
     for index, row in enumerate(rows[:3], 1):
@@ -310,7 +399,28 @@ def notify_mini_pool_summary(config: dict[str, Any], rows: list[dict[str, Any]],
         lines.append(f"{index}. {row.get('symbol', '-')} | {side} | {_source_label(row)}")
     if slot_id:
         lines.append(f"Slot: {slot_id}")
-    send_telegram_message(config, "\n".join(lines), with_buttons=False, replace_previous=False)
+    state = _load_state(config, now)
+    _append_internal_notification(
+        state,
+        frame="4h",
+        icon=FOUR_HOUR_ICON,
+        title=f"Mini pool 4h {local_now.strftime('%d/%m/%y %H:%M:%S')}",
+        lines=lines,
+        created_at=now,
+    )
+    _save_state(config, state)
+    if not settings["notify_mini_pool_summary"]:
+        return
+    try:
+        from .notifier import send_telegram_message
+    except Exception:
+        return
+    send_telegram_message(
+        config,
+        "\n".join([f"{FOUR_HOUR_ICON} Mini pool 4h {local_now.strftime('%d/%m/%y %H:%M:%S')}", *lines]),
+        with_buttons=False,
+        replace_previous=False,
+    )
 
 
 def _candidate_is_relaxed_valid(candidate: TradeCandidate, settings: dict[str, Any]) -> bool:
@@ -407,6 +517,14 @@ def update_lc_internal_pipeline(
         state["hourly_windows"] = state["hourly_windows"][-2:]
         state["last_hourly_slot"] = hourly_slot
         result["created_hourly"] = True
+        _append_internal_notification(
+            state,
+            frame="1h",
+            icon=ONE_HOUR_ICON,
+            title=f"1h top {len(top)} setup",
+            lines=[_format_pair_line(index, row) for index, row in enumerate(top[:3], 1)],
+            created_at=now,
+        )
 
     hourly_windows = state.get("hourly_windows") or []
     if len(hourly_windows) >= 2 and state.get("last_two_hour_slot") != two_hour_slot:
@@ -418,20 +536,21 @@ def update_lc_internal_pipeline(
         local_now = _local_time(config, now)
         approved: list[dict[str, Any]] = []
         seen: set[str] = set()
+        approved_keys: set[tuple[str, str]] = set()
         for row in ranked:
             symbol = str(row.get("symbol") or "")
             if not symbol or symbol in seen:
                 continue
-            approved.append(
-                {
-                    **row,
-                    "state": "LC_NOI_BO",
-                    "source_slot": "2h",
-                    "source_index": next_daily_index,
-                    "source_time": now.isoformat(),
-                    "source_label": local_now.strftime("%d/%m/%y %H:%M:%S"),
-                }
-            )
+            approved_row = {
+                **row,
+                "state": "LC_NOI_BO",
+                "source_slot": "2h",
+                "source_index": next_daily_index,
+                "source_time": now.isoformat(),
+                "source_label": local_now.strftime("%d/%m/%y %H:%M:%S"),
+            }
+            approved.append(approved_row)
+            approved_keys.add(_setup_key(approved_row))
             seen.add(symbol)
             if len(approved) >= top_limit:
                 break
@@ -445,14 +564,14 @@ def update_lc_internal_pipeline(
                 "source_label": local_now.strftime("%d/%m/%y %H:%M:%S"),
             }
             for row in ranked
-            if row.get("symbol") not in seen
+            if _setup_key(row) not in approved_keys
         ]
         existing = list(state.get("undecided") or [])
-        existing_by_symbol = {str(row.get("symbol")): row for row in existing if row.get("symbol")}
+        existing_by_setup = {_setup_key(row): row for row in existing if row.get("symbol")}
         for row in rejected:
-            previous = existing_by_symbol.get(str(row.get("symbol")))
+            previous = existing_by_setup.get(_setup_key(row))
             first_seen = previous.get("first_seen_at") if previous else row.get("first_seen_at")
-            existing = _upsert_by_symbol(existing, {**row, "first_seen_at": first_seen, "last_seen_at": now.isoformat()})
+            existing = _upsert_by_setup(existing, {**row, "first_seen_at": first_seen, "last_seen_at": now.isoformat()})
         state["undecided"] = _trim_undecided(existing, settings)
         state["internal_lc"] = sorted(approved, key=_candidate_score, reverse=True)[: int(settings["internal_lc_max"])]
         state["daily_two_hour_counter"] = next_daily_index
@@ -470,6 +589,14 @@ def update_lc_internal_pipeline(
         state["last_two_hour_slot"] = two_hour_slot
         state["telegram_events"].append(event)
         state["telegram_events"] = state["telegram_events"][-20:]
+        _append_internal_notification(
+            state,
+            frame="2h",
+            icon=_two_hour_icon(config),
+            title=f"#{state['daily_two_hour_counter']} LC nội bộ tổng hợp 2h",
+            lines=[_format_pair_line(index, row) for index, row in enumerate(approved[:top_limit], 1)],
+            created_at=now,
+        )
         result["created_two_hour"] = True
         result["two_hour_event"] = event
         if settings["notify_two_hour_summary"]:
@@ -484,8 +611,12 @@ def update_lc_internal_pipeline(
         state["last_recheck_at"] = now.isoformat()
         result["promoted"] = _promote_survivors(config, state, candidates_by_symbol, settings, now)
 
-    result["undecided"] = state.get("undecided", [])[: int(settings["undecided_max"])]
-    result["internal_lc"] = state.get("internal_lc", [])[: int(settings["internal_lc_max"])]
+    result["undecided"] = sorted(state.get("undecided", []), key=_candidate_score, reverse=True)[
+        : int(settings["undecided_max"])
+    ]
+    result["internal_lc"] = sorted(state.get("internal_lc", []), key=_candidate_score, reverse=True)[
+        : int(settings["internal_lc_max"])
+    ]
     _save_state(config, state)
     return result
 

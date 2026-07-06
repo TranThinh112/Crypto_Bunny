@@ -1888,6 +1888,7 @@ function renderLcPipeline(payload) {
         <div class="lc-pipeline-row">
           <strong>${index + 1}. ${escapeHtml(row.symbol || "-")}</strong>
           <span class="side ${sideBadgeClass(row.side)}">${escapeHtml(String(row.side || "-").toUpperCase())}</span>
+          <span>Win ${row.win_probability_pct === null || row.win_probability_pct === undefined ? "-" : `${fmt(row.win_probability_pct, 2)}%`}</span>
           <small>${timeLabel(row.last_seen_at || row.first_seen_at)} · sống ${escapeHtml(row.age_label || "-")}</small>
         </div>
       `).join("") : '<div class="lc-pipeline-empty">Chưa có dữ liệu.</div>'}

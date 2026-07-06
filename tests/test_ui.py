@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import tempfile
 import json
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -13,7 +15,7 @@ from crypto_trader.config import load_config
 from crypto_trader.codex_features import close_trade_execution, record_trade_candidates, record_trade_execution, try_slot_refill
 from crypto_trader.models import TradeCandidate
 from crypto_trader.storage import connect_state_db, save_market_scan_observations, set_journal_state
-from crypto_trader.ui import _telegram_action_response, create_app
+from crypto_trader.ui import _handle_telegram_update, _run_automation_cycle, _telegram_action_response, create_app
 
 
 class UiTest(TestCase):
@@ -280,6 +282,201 @@ class UiTest(TestCase):
         self.assertIn("view_guard", callbacks)
         self.assertIn("view_memory", callbacks)
         self.assertIn("view_undecided_lc", callbacks)
+        self.assertIn("view_internal_notifications", callbacks)
+        self.assertIn("setup_menu", callbacks)
+        self.assertNotIn("set_order_usdt", callbacks)
+        self.assertNotIn("set_leverage", callbacks)
+        self.assertNotIn("set_max_positions", callbacks)
+
+    def test_telegram_setup_menu_has_three_setup_actions(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text(
+                "mode: dry_run\n"
+                "exchange:\n"
+                "  leverage: 15\n"
+                "position_sizing:\n"
+                "  base_margin_usdt: 2\n"
+                "risk:\n"
+                "  max_active_trades: 3\n",
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+
+            _, message, keyboard = _telegram_action_response(config, "view_setup", config_path)
+
+        callbacks = [
+            button["callback_data"]
+            for row in keyboard["inline_keyboard"]
+            for button in row
+        ]
+        self.assertIn("Setup", message)
+        self.assertEqual(callbacks, ["set_order_usdt", "set_leverage", "set_max_positions", "view_menu"])
+        self.assertEqual([len(row) for row in keyboard["inline_keyboard"]], [2, 2])
+        labels = [
+            button["text"]
+            for row in keyboard["inline_keyboard"]
+            for button in row
+        ]
+        self.assertIn("⬅️ Dashboard", labels)
+
+    @patch("crypto_trader.notifier._telegram_api_request")
+    def test_edit_telegram_chat_message_uses_edit_message_text(self, api_request) -> None:
+        from crypto_trader.notifier import edit_telegram_chat_message
+
+        api_request.return_value = {"ok": True}
+
+        ok = edit_telegram_chat_message(
+            {"notifications": {"telegram": {"enabled": True}}},
+            123,
+            456,
+            "Setup",
+            reply_markup={"inline_keyboard": []},
+        )
+
+        self.assertTrue(ok)
+        method = api_request.call_args.args[1]
+        payload = api_request.call_args.args[2]
+        self.assertEqual(method, "editMessageText")
+        self.assertEqual(payload["chat_id"], 123)
+        self.assertEqual(payload["message_id"], 456)
+        self.assertIn("reply_markup", payload)
+
+    @patch("crypto_trader.ui.answer_callback_query")
+    @patch("crypto_trader.ui.edit_telegram_chat_message")
+    @patch("crypto_trader.ui.send_telegram_chat_message")
+    @patch("crypto_trader.ui.delete_telegram_message")
+    def test_setup_callback_deletes_old_message_and_sends_setup_only(
+        self,
+        delete_message,
+        send_message,
+        edit_message,
+        answer_callback,
+    ) -> None:
+        edit_message.return_value = True
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text("mode: dry_run\n", encoding="utf-8")
+            config = load_config(config_path)
+            update = {
+                "callback_query": {
+                    "id": "cb-1",
+                    "data": "setup_menu",
+                    "message": {
+                        "message_id": 456,
+                        "chat": {"id": 123},
+                    },
+                }
+            }
+
+            with patch.dict("os.environ", {"TELEGRAM_CHAT_ID": "123"}):
+                _handle_telegram_update(config, update, config_path)
+
+        edit_message.assert_called_once()
+        delete_message.assert_not_called()
+        send_message.assert_not_called()
+        sent_text = edit_message.call_args.args[3]
+        sent_keyboard = edit_message.call_args.kwargs["reply_markup"]
+        callbacks = [
+            button["callback_data"]
+            for row in sent_keyboard["inline_keyboard"]
+            for button in row
+        ]
+        self.assertIn("Setup", sent_text)
+        self.assertEqual(callbacks, ["set_order_usdt", "set_leverage", "set_max_positions", "view_menu"])
+
+    @patch("crypto_trader.ui.answer_callback_query")
+    @patch("crypto_trader.ui.edit_telegram_chat_message")
+    @patch("crypto_trader.ui.send_telegram_chat_message")
+    @patch("crypto_trader.ui.delete_telegram_message")
+    def test_dashboard_callback_sends_fresh_dashboard_with_setup_button(
+        self,
+        delete_message,
+        send_message,
+        edit_message,
+        answer_callback,
+    ) -> None:
+        edit_message.return_value = True
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text("mode: dry_run\n", encoding="utf-8")
+            config = load_config(config_path)
+            update = {
+                "callback_query": {
+                    "id": "cb-1",
+                    "data": "view_menu",
+                    "message": {
+                        "message_id": 456,
+                        "chat": {"id": 123},
+                    },
+                }
+            }
+
+            with patch.dict("os.environ", {"TELEGRAM_CHAT_ID": "123"}):
+                _handle_telegram_update(config, update, config_path)
+
+        edit_message.assert_called_once()
+        delete_message.assert_not_called()
+        send_message.assert_not_called()
+        sent_keyboard = edit_message.call_args.kwargs["reply_markup"]
+        callbacks = [
+            button["callback_data"]
+            for row in sent_keyboard["inline_keyboard"]
+            for button in row
+        ]
+        self.assertIn("setup_menu", callbacks)
+        self.assertNotIn("set_leverage", callbacks)
+
+    @patch("crypto_trader.ui.system_health_dashboard")
+    @patch("crypto_trader.ui.replay_dashboard_payload")
+    @patch("crypto_trader.ui.analytics_dashboard")
+    @patch("crypto_trader.ui.scan_memory_dashboard")
+    @patch("crypto_trader.ui.timeframe_state_dashboard")
+    @patch("crypto_trader.ui.refresh_system_checklist_snapshot")
+    @patch("crypto_trader.ui.run_once")
+    @patch("crypto_trader.ui.send_telegram_message")
+    def test_automation_scan_notifications_do_not_attach_control_keyboard(
+        self,
+        send_message,
+        run_once,
+        refresh_checklist,
+        timeframe_dashboard,
+        scan_dashboard,
+        analytics_dashboard_mock,
+        replay_dashboard,
+        health_dashboard,
+    ) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text(
+                "mode: dry_run\n"
+                f"state_db_path: {Path(tmpdir, 'state.sqlite').as_posix()}\n"
+                "notifications:\n"
+                "  telegram:\n"
+                "    notify_scans: true\n",
+                encoding="utf-8",
+            )
+            run_once.return_value = {
+                "action": "hold",
+                "candidates": [],
+                "selected": {},
+                "risk_check": {"passed": False, "reasons": ["test"]},
+                "execution": {},
+            }
+            app = SimpleNamespace(
+                state=SimpleNamespace(
+                    config_path=config_path,
+                    automation_status={},
+                    lock=threading.Lock(),
+                )
+            )
+
+            _run_automation_cycle(app)
+
+        send_message.assert_called()
+        for call in send_message.call_args_list:
+            self.assertFalse(call.kwargs.get("with_buttons"))
+            self.assertFalse(call.kwargs.get("replace_previous"))
 
     def test_telegram_undecided_lc_action_formats_pipeline_state(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
@@ -303,6 +500,7 @@ class UiTest(TestCase):
                                 "last_seen_at": "2026-07-06T03:00:00+00:00",
                                 "state": "CHUA_DUYET",
                                 "source_slot": "2h",
+                                "win_probability_pct": 62.34,
                             }
                         ]
                     },
@@ -314,6 +512,7 @@ class UiTest(TestCase):
 
         self.assertIn("Chưa Duyệt", message)
         self.assertIn("1. LIT/USDT:USDT | LONG", message)
+        self.assertIn("Win 62.34%", message)
         self.assertIn("2h", message)
         self.assertIn("sống", message)
         self.assertIsNone(keyboard)

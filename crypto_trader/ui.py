@@ -59,7 +59,7 @@ from .dashboard_services import (
     timeframe_state_dashboard,
 )
 from .engine import run_once
-from .lc_pipeline import lc_pipeline_dashboard_payload
+from .lc_pipeline import format_internal_notifications_view, lc_pipeline_dashboard_payload
 from .market import create_exchange
 from .market_guard import (
     latest_market_guard_status,
@@ -72,6 +72,8 @@ from .market_guard import (
 from .models import to_jsonable
 from .notifier import (
     answer_callback_query,
+    delete_telegram_message,
+    edit_telegram_chat_message,
     fetch_telegram_updates,
     send_telegram_chat_message,
     send_telegram_message,
@@ -81,6 +83,7 @@ from .notifier import (
     telegram_max_positions_keyboard,
     telegram_notify_scans,
     telegram_order_usdt_keyboard,
+    telegram_setup_keyboard,
 )
 from .paper import simulate_paper_scan
 from .reporting import (
@@ -254,6 +257,20 @@ def _order_usdt_menu_message(config: dict[str, Any]) -> str:
         f"Giá trị vị thế ước tính: {_margin_label(notional)} USDT ({leverage:g}x)\n"
         f"Giới hạn: {_margin_label(MIN_BASE_MARGIN_USDT)}-{_margin_label(max_margin)} USDT margin\n"
         "Chọn nút bên dưới hoặc gửi /usdt 5"
+    )
+
+
+def _setup_menu_message(config: dict[str, Any]) -> str:
+    sizing = config.get("position_sizing", {})
+    margin = float(sizing.get("base_margin_usdt", 2) or 2)
+    leverage = int(float(config.get("exchange", {}).get("leverage", 10) or 10))
+    max_positions = int(float(config.get("risk", {}).get("max_active_trades", 1) or 1))
+    return (
+        "⚙️ Setup giao dịch\n"
+        f"USDT/lệnh: {_margin_label(margin)} USDT\n"
+        f"Đòn bẩy: {leverage}x\n"
+        f"Max VT: {max_positions}\n"
+        "Chọn mục cần chỉnh bên dưới."
     )
 
 
@@ -556,7 +573,7 @@ def _run_automation_cycle(app: FastAPI) -> None:
         messages.extend(format_execution_messages(payload))
     messages.extend(build_periodic_report_messages(config))
     for message in messages:
-        send_telegram_message(config, message)
+        send_telegram_message(config, message, with_buttons=False, replace_previous=False)
 
 
 def _automation_worker(app: FastAPI) -> None:
@@ -887,6 +904,8 @@ def _telegram_action_response(
         return config, format_pending_orders_view(config), None
     if action == "view_undecided_lc":
         return config, format_undecided_lc_view(config), None
+    if action == "view_internal_notifications":
+        return config, format_internal_notifications_view(config), telegram_control_keyboard()
     if action == "view_memory":
         return config, format_market_scan_memory_view(config), None
     if action == "view_ai":
@@ -899,6 +918,8 @@ def _telegram_action_response(
         )
     if action == "view_pnl_sd":
         return config, format_positions_account_view(config), None
+    if action in {"view_setup", "setup_menu"} or "setup" in action.lower():
+        return config, _setup_menu_message(config), telegram_setup_keyboard()
     if action == "set_order_usdt":
         return config, _order_usdt_menu_message(config), telegram_order_usdt_keyboard(config)
     if action.startswith("set_order_usdt:"):
@@ -932,12 +953,64 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
         chat_id = chat.get("id")
         callback_id = str(callback.get("id") or "")
         action = str(callback.get("data") or "view_menu")
+        set_journal_state(
+            config,
+            "telegram_last_callback",
+            json.dumps(
+                {
+                    "action": action,
+                    "message_id": message.get("message_id"),
+                    "text": str(message.get("text") or "")[:120],
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                },
+                ensure_ascii=False,
+            ),
+        )
         if callback_id:
             answer_callback_query(config, callback_id, "Đang chạy scan..." if action == "scan_now" else "Đang lấy dữ liệu...")
         if not _telegram_chat_allowed(config, chat_id):
             return
         thread_id = message.get("message_thread_id")
+        message_id = message.get("message_id")
         response_config, response_text, reply_markup = _telegram_action_response(config, action, config_path, app)
+        if (action in {"view_setup", "setup_menu"} or "setup" in action.lower()) and message_id is not None:
+            edited = edit_telegram_chat_message(
+                response_config,
+                chat_id,
+                message_id,
+                response_text,
+                reply_markup=reply_markup,
+            )
+            if edited:
+                return
+            delete_telegram_message(response_config, chat_id, message_id)
+            send_telegram_chat_message(
+                response_config,
+                chat_id,
+                response_text,
+                message_thread_id=thread_id,
+                reply_markup=reply_markup,
+            )
+            return
+        if action == "view_menu" and message_id is not None:
+            edited = edit_telegram_chat_message(
+                response_config,
+                chat_id,
+                message_id,
+                response_text,
+                reply_markup=reply_markup,
+            )
+            if edited:
+                return
+            delete_telegram_message(response_config, chat_id, message_id)
+            send_telegram_chat_message(
+                response_config,
+                chat_id,
+                response_text,
+                message_thread_id=thread_id,
+                reply_markup=reply_markup,
+            )
+            return
         send_telegram_chat_message(
             response_config,
             chat_id,
@@ -1032,6 +1105,8 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
         "/sd": "view_sd",
         "/lc": "view_lc",
         "/chuaduyet": "view_undecided_lc",
+        "/noibo": "view_internal_notifications",
+        "/thongbao": "view_internal_notifications",
         "/memory": "view_memory",
         "/ai": "view_ai",
         "/pnl": "view_positions_account",

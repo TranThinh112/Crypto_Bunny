@@ -890,7 +890,11 @@ def format_balance_view(config: dict[str, Any]) -> str:
 
 
 def format_pending_orders_view(config: dict[str, Any]) -> str:
-    rows = list_pending_orders(config, status="OPEN", limit=50)
+    rows = sorted(
+        list_pending_orders(config, status="OPEN", limit=50),
+        key=lambda row: _float(row.get("win_probability_pct")) or 0,
+        reverse=True,
+    )
     lines = [f"🟡 LC đang chờ {date_time_label()}", f"📊 Tổng LC: {len(rows)}"]
     if not rows:
         lines.append("⚪ Không có lệnh chờ")
@@ -908,6 +912,7 @@ def format_pending_orders_view(config: dict[str, Any]) -> str:
         lines.append(
             f"   📦 KL: {_fmt_number(row.get('quantity'), 6)} | ⏳ Hết hạn: {date_time_label(expires_at) if expires_at else '-'}"
         )
+        lines.append(f"   📈 Win rate: {_fmt_number(row.get('win_probability_pct'), 2, '%')}")
         status_label = "LC_OKX" if str(row.get("status") or "") == "LC_OKX" or row.get("exchange_order_id") else "LC noi bo"
         if status_label == "LC_OKX":
             lines.append(f"   Status: LC_OKX | OKX ID: {row.get('exchange_order_id') or '-'}")
@@ -957,7 +962,11 @@ def format_undecided_lc_view(config: dict[str, Any]) -> str:
             state = json.loads(raw)
         except json.JSONDecodeError:
             state = {}
-    rows = state.get("undecided") if isinstance(state.get("undecided"), list) else []
+    rows = sorted(
+        state.get("undecided") if isinstance(state.get("undecided"), list) else [],
+        key=lambda row: _float(row.get("win_probability_pct")) or 0,
+        reverse=True,
+    )
     lines = [f"📋 Chưa Duyệt {date_time_label()}", f"📊 Tổng: {len(rows)}"]
     if not rows:
         lines.append("⚪ Chưa có cặp Chưa Duyệt")
@@ -969,7 +978,8 @@ def format_undecided_lc_view(config: dict[str, Any]) -> str:
         first_seen_at = _parse_time(row.get("first_seen_at"))
         source = _lc_pending_source_label(row)
         alive = _duration_label(first_seen_at)
-        lines.append(f"{index}. {symbol} | {side} | {date_time_label(scan_at) if scan_at else '-'} | {source} | sống {alive}")
+        win = _fmt_number(row.get("win_probability_pct"), 2, "%")
+        lines.append(f"{index}. {symbol} | {side} | Win {win} | {date_time_label(scan_at) if scan_at else '-'} | {source} | sống {alive}")
     return "\n".join(lines)
 
 

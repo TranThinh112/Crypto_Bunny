@@ -58,6 +58,7 @@ def telegram_control_keyboard() -> dict[str, Any]:
             ],
             [
                 {"text": "\U0001f4cb Chưa Duyệt", "callback_data": "view_undecided_lc"},
+                {"text": "\U0001f514 Thông báo nội bộ", "callback_data": "view_internal_notifications"},
             ],
             [
                 {"text": "\U0001f6e1 Guard", "callback_data": "view_guard"},
@@ -65,11 +66,22 @@ def telegram_control_keyboard() -> dict[str, Any]:
                 {"text": "\U0001f916 AI", "callback_data": "view_ai"},
             ],
             [
-                {"text": "\U0001f4c8 Max VT", "callback_data": "set_max_positions"},
+                {"text": "\u2699\ufe0f Setup", "callback_data": "setup_menu"},
+            ],
+        ]
+    }
+
+
+def telegram_setup_keyboard() -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
                 {"text": "\U0001f4b0 Set USDT", "callback_data": "set_order_usdt"},
+                {"text": "\u2699\ufe0f Đòn bẩy", "callback_data": "set_leverage"},
             ],
             [
-                {"text": "\u2699\ufe0f Đòn bẩy", "callback_data": "set_leverage"},
+                {"text": "\U0001f4c8 Max VT", "callback_data": "set_max_positions"},
+                {"text": "\u2b05\ufe0f Dashboard", "callback_data": "view_menu"},
             ],
         ]
     }
@@ -109,7 +121,7 @@ def telegram_order_usdt_keyboard(config: dict[str, Any]) -> dict[str, Any]:
             row = []
     if row:
         rows.append(row)
-    rows.append([{"text": "⬅️ Menu", "callback_data": "view_menu"}])
+    rows.append([{"text": "⬅️ Dashboard", "callback_data": "view_menu"}])
     return {"inline_keyboard": rows}
 
 
@@ -142,7 +154,7 @@ def telegram_leverage_keyboard(config: dict[str, Any]) -> dict[str, Any]:
             row = []
     if row:
         rows.append(row)
-    rows.append([{"text": "⬅️ Menu", "callback_data": "view_menu"}])
+    rows.append([{"text": "⬅️ Dashboard", "callback_data": "view_menu"}])
     return {"inline_keyboard": rows}
 
 
@@ -165,7 +177,7 @@ def telegram_max_positions_keyboard(config: dict[str, Any]) -> dict[str, Any]:
             row = []
     if row:
         rows.append(row)
-    rows.append([{"text": "\u2b05\ufe0f Menu", "callback_data": "view_menu"}])
+    rows.append([{"text": "\u2b05\ufe0f Dashboard", "callback_data": "view_menu"}])
     return {"inline_keyboard": rows}
 
 
@@ -215,6 +227,26 @@ def delete_telegram_message(config: dict[str, Any], chat_id: str | int, message_
         "deleteMessage",
         {"chat_id": chat_id, "message_id": message_id},
     )
+    return bool(response and response.get("ok"))
+
+
+def edit_telegram_chat_message(
+    config: dict[str, Any],
+    chat_id: str | int,
+    message_id: str | int,
+    text: str,
+    *,
+    reply_markup: dict[str, Any] | None = None,
+) -> bool:
+    payload: dict[str, Any] = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text[:3900],
+        "disable_web_page_preview": "true",
+    }
+    if reply_markup is not None:
+        payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+    response = _telegram_api_request(config, "editMessageText", payload)
     return bool(response and response.get("ok"))
 
 
