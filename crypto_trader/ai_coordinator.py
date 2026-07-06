@@ -421,9 +421,9 @@ def _local_market_scan_result(config: dict[str, Any], candidates: list[TradeCand
     threshold = float(
         internal_config.get(
             "market_scan_min_win_probability_pct",
-            config.get("strategy", {}).get("min_win_probability_pct", 80),
+            config.get("strategy", {}).get("min_win_probability_pct", 62),
         )
-        or 80
+        or 62
     )
     max_symbols = max(1, min(3, int(internal_config.get("market_scan_max_symbols", 3) or 3)))
     ranked = sorted(
@@ -528,7 +528,7 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
         slot_id=slot_id,
     )
     local_result = _local_market_scan_result(config, candidates, warnings)
-    has_full_mini_pool = len(mini_candidate_symbols) >= max_symbols
+    has_mini_pool = len(mini_candidate_symbols) > 0
     if mini_candidate_symbols:
         local_result = {
             **local_result,
@@ -536,13 +536,13 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
             "approved_count": len(mini_candidate_symbols),
             "selection_source": "lc_internal_pipeline",
         }
-    if not has_full_mini_pool:
+    if not has_mini_pool:
         local_result = {
             **local_result,
             "approved_symbols": [],
             "approved_count": 0,
             "selection_source": "lc_internal_pipeline_waiting",
-            "skip_reason": f"waiting for {max_symbols} internal LC candidates, current={len(mini_candidate_symbols)}",
+            "skip_reason": "waiting for at least 1 internal LC candidate, current=0",
         }
 
     result = {
@@ -569,7 +569,7 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
     }
     save_lc_pipeline_mini_scan(config, result)
 
-    if has_full_mini_pool and result["provider"] == "openai" and bool(internal_config.get("market_scan_use_ai", True)):
+    if has_mini_pool and result["provider"] == "openai" and bool(internal_config.get("market_scan_use_ai", True)):
         try:
             allowed = set(mini_candidate_symbols or local_result.get("approved_symbols") or [])
             ai_review = _openai_internal_market_scan(
@@ -596,7 +596,7 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
             result["fallback"] = "local_policy"
 
     result["approved_symbols"] = list(result.get("selected_symbols") or [])
-    result["status"] = "done" if has_full_mini_pool else "waiting_lc"
+    result["status"] = "done" if has_mini_pool else "waiting_lc"
     return save_lc_pipeline_mini_scan(config, result)
 
 

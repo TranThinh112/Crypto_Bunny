@@ -1864,7 +1864,7 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
         fake_market_snapshot = {
             "provider": "fake_sandbox",
             "decision": "prefilter",
-            "threshold_win_probability_pct": 80,
+            "threshold_win_probability_pct": 62,
             "approved_symbols": [candidate["symbol"] for candidate in fake_candidates],
             "approved_count": len(fake_candidates),
             "candidate_count": len(fake_candidates),

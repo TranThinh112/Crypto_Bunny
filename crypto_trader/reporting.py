@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .ledger import read_events
+from .lc_pipeline import lc_pipeline_dashboard_payload
 from .market import create_exchange
 from .storage import (
     count_pending_orders,
@@ -816,7 +817,7 @@ def format_account_report(snapshot: dict[str, Any], memory_sync: dict[str, Any])
             )
     else:
         lines.append("⚪ Không có vị thế mở")
-    lines.append(f"🟡 LC đang chờ: {snapshot.get('pending_count', 0)}")
+    lines.append(f"🟡 LC pending/OKX: {snapshot.get('pending_count', 0)}")
     new_records = memory_sync.get("new") or []
     if new_records:
         wins = sum(1 for item in new_records if float(item.get("pnl_usdt") or 0) > 0)
@@ -884,7 +885,7 @@ def format_balance_view(config: dict[str, Any]) -> str:
         f"💵 SD tài khoản {date_time_label()}",
         f"💰 Số dư: {_fmt_number(snapshot.get('balance_usdt'), 2)} USDT",
         f"📌 VT đang mở: {len(snapshot.get('positions') or [])}",
-        f"🟡 LC đang chờ: {snapshot.get('pending_count', 0)}",
+        f"🟡 LC pending/OKX: {snapshot.get('pending_count', 0)}",
     ]
     return "\n".join(lines)
 
@@ -895,7 +896,7 @@ def format_pending_orders_view(config: dict[str, Any]) -> str:
         key=lambda row: _float(row.get("win_probability_pct")) or 0,
         reverse=True,
     )
-    lines = [f"🟡 LC đang chờ {date_time_label()}", f"📊 Tổng LC: {len(rows)}"]
+    lines = [f"🟡 LC pending/OKX {date_time_label()}", f"📊 Tổng LC pending: {len(rows)}"]
     if not rows:
         lines.append("⚪ Không có lệnh chờ")
         return "\n".join(lines)
@@ -955,18 +956,8 @@ def _duration_label(started_at: datetime | None, *, now: datetime | None = None)
 
 
 def format_undecided_lc_view(config: dict[str, Any]) -> str:
-    raw = get_journal_state(config, "lc_internal_pipeline_state")
-    state: dict[str, Any] = {}
-    if raw:
-        try:
-            state = json.loads(raw)
-        except json.JSONDecodeError:
-            state = {}
-    rows = sorted(
-        state.get("undecided") if isinstance(state.get("undecided"), list) else [],
-        key=lambda row: _float(row.get("win_probability_pct")) or 0,
-        reverse=True,
-    )
+    payload = lc_pipeline_dashboard_payload(config)
+    rows = payload.get("undecided") if isinstance(payload.get("undecided"), list) else []
     lines = [f"📋 Chưa Duyệt {date_time_label()}", f"📊 Tổng: {len(rows)}"]
     if not rows:
         lines.append("⚪ Chưa có cặp Chưa Duyệt")
@@ -1047,7 +1038,7 @@ def format_positions_account_view(config: dict[str, Any]) -> str:
         f"📊 VT/PNL/SD {date_time_label()}",
         f"💵 SD: {_fmt_number(snapshot.get('balance_usdt'), 2)} USDT",
         f"📌 VT đang mở: {len(positions)}",
-        f"🟡 LC đang chờ: {snapshot.get('pending_count', 0)}",
+        f"🟡 LC pending/OKX: {snapshot.get('pending_count', 0)}",
     ]
     if not positions:
         lines.append("⚪ Không có vị thế mở")
@@ -1127,7 +1118,7 @@ def format_daily_summary(
         lines.append(f"{_pnl_icon(end_balance - start_balance)} Chênh lệch SD: {_fmt_signed(end_balance - start_balance, 4)} USDT")
     lines.append(f"💵 SD cuối ngày: {_fmt_number(end_balance, 2)} USDT")
     lines.append(f"📌 Vị thế đang mở: {len(snapshot.get('positions') or [])}")
-    lines.append(f"🟡 LC đang chờ: {snapshot.get('pending_count', 0)}")
+    lines.append(f"🟡 LC pending/OKX: {snapshot.get('pending_count', 0)}")
     for warning in memory_sync.get("warnings") or []:
         lines.append(f"⚠️ Cảnh báo: {_reason_vi(warning)}")
     return "\n".join(lines)

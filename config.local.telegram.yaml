@@ -65,7 +65,7 @@ ai:
     market_scan_source_symbols: 40
     market_scan_max_symbols: 3
     market_scan_min_approved_symbols: 1
-    market_scan_min_win_probability_pct: 80
+    market_scan_min_win_probability_pct: 62
     market_scan_use_ai: true
     market_scan_use_shortlist: true
     market_scan_to_pending: true
@@ -80,6 +80,7 @@ ai:
     lc_pipeline_internal_lc_max: 3
     lc_pipeline_promote_after_hours: 6
     lc_pipeline_recheck_interval_minutes: 90
+    lc_pipeline_min_win_probability_pct: 62
     lc_pipeline_relaxed_min_win_probability_pct: 50
     lc_pipeline_relaxed_min_confidence: 70
     lc_pipeline_notify_two_hour_summary: true

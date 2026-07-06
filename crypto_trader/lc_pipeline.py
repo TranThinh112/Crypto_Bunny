@@ -42,8 +42,7 @@ def _pipeline_config(config: dict[str, Any]) -> dict[str, Any]:
         "internal_lc_max": max(1, min(3, int(internal.get("lc_pipeline_internal_lc_max", 3) or 3))),
         "promote_after_hours": max(1.0, float(internal.get("lc_pipeline_promote_after_hours", 6) or 6)),
         "recheck_interval_minutes": max(15, int(internal.get("lc_pipeline_recheck_interval_minutes", 90) or 90)),
-        "min_win_probability_pct": float(internal.get("lc_pipeline_min_win_probability_pct", 65) or 65),
-        "priority_win_probability_pct": float(internal.get("lc_pipeline_priority_win_probability_pct", 80) or 80),
+        "min_win_probability_pct": float(internal.get("lc_pipeline_min_win_probability_pct", 62) or 62),
         "relaxed_min_win_probability_pct": float(internal.get("lc_pipeline_relaxed_min_win_probability_pct", 50) or 50),
         "relaxed_min_confidence": float(internal.get("lc_pipeline_relaxed_min_confidence", 70) or 70),
         "notify_two_hour_summary": bool(internal.get("lc_pipeline_notify_two_hour_summary", False)),
@@ -82,12 +81,10 @@ def _slot_key(config: dict[str, Any], now: datetime, hours: int) -> str:
 
 
 def _candidate_score(candidate: TradeCandidate | dict[str, Any]) -> tuple[float, float, float]:
-    priority_threshold = 80.0
     if isinstance(candidate, dict):
         win_probability = candidate.get("win_probability_pct")
         confidence = candidate.get("confidence")
         volume_ratio = ((candidate.get("indicator_summary") or {}).get("volume_ratio"))
-        priority_threshold = float(candidate.get("_priority_win_probability_pct") or priority_threshold)
     else:
         win_probability = candidate.win_probability_pct
         confidence = candidate.confidence
@@ -104,8 +101,7 @@ def _candidate_score(candidate: TradeCandidate | dict[str, Any]) -> tuple[float,
         volume_value = float(volume_ratio or 0)
     except (TypeError, ValueError):
         volume_value = 0.0
-    priority_value = 1.0 if win_value > priority_threshold else 0.0
-    return (priority_value, win_value, confidence_value, volume_value)
+    return (win_value, confidence_value, volume_value)
 
 
 def _candidate_win_probability(candidate: TradeCandidate | dict[str, Any]) -> float:
@@ -117,22 +113,13 @@ def _candidate_win_probability(candidate: TradeCandidate | dict[str, Any]) -> fl
 
 
 def _candidate_passes_lc_threshold(candidate: TradeCandidate | dict[str, Any], settings: dict[str, Any]) -> bool:
-    return _candidate_win_probability(candidate) > float(settings["min_win_probability_pct"])
-
-
-def _annotate_priority_threshold(rows: list[dict[str, Any]], settings: dict[str, Any]) -> list[dict[str, Any]]:
-    threshold = float(settings["priority_win_probability_pct"])
-    output: list[dict[str, Any]] = []
-    for row in rows:
-        if isinstance(row, dict):
-            output.append({**row, "_priority_win_probability_pct": threshold})
-    return output
+    return _candidate_win_probability(candidate) >= float(settings["min_win_probability_pct"])
 
 
 def _sort_saved_rows(rows: list[dict[str, Any]], settings: dict[str, Any], *, reverse: bool = True) -> list[dict[str, Any]]:
-    annotated = _annotate_priority_threshold(rows, settings)
-    ranked = sorted(annotated, key=_candidate_score, reverse=reverse)
-    return [{key: value for key, value in row.items() if key != "_priority_win_probability_pct"} for row in ranked]
+    _ = settings
+    ranked = [row for row in rows if isinstance(row, dict)]
+    return sorted(ranked, key=_candidate_score, reverse=reverse)
 
 
 def _has_clear_candlestick(candidate: TradeCandidate) -> bool:
@@ -186,6 +173,30 @@ def _prune_low_win_state(state: dict[str, Any], settings: dict[str, Any]) -> Non
         top = [row for row in list(window.get("top") or []) if _candidate_passes_lc_threshold(row, settings)]
         hourly_windows.append({**window, "top": top})
     state["hourly_windows"] = hourly_windows
+    two_hour_windows = []
+    for event in state.get("two_hour_windows") or []:
+        if not isinstance(event, dict):
+            continue
+        approved = [
+            row for row in list(event.get("approved") or []) if _candidate_passes_lc_threshold(row, settings)
+        ]
+        rejected = [
+            row for row in list(event.get("rejected") or []) if _candidate_passes_lc_threshold(row, settings)
+        ]
+        two_hour_windows.append({**event, "approved": approved, "rejected": rejected})
+    state["two_hour_windows"] = two_hour_windows
+    telegram_events = []
+    for event in state.get("telegram_events") or []:
+        if not isinstance(event, dict):
+            continue
+        approved = [
+            row for row in list(event.get("approved") or []) if _candidate_passes_lc_threshold(row, settings)
+        ]
+        rejected = [
+            row for row in list(event.get("rejected") or []) if _candidate_passes_lc_threshold(row, settings)
+        ]
+        telegram_events.append({**event, "approved": approved, "rejected": rejected})
+    state["telegram_events"] = telegram_events
 
 
 def _rank_candidates(
@@ -195,7 +206,7 @@ def _rank_candidates(
     blocked_symbols: set[str] | None = None,
     settings: dict[str, Any] | None = None,
 ) -> list[TradeCandidate]:
-    settings = settings or {"min_win_probability_pct": 65, "priority_win_probability_pct": 80}
+    settings = settings or {"min_win_probability_pct": 62}
     blocked_symbols = {str(symbol) for symbol in (blocked_symbols or set()) if str(symbol)}
     eligible = [
         candidate
@@ -203,14 +214,17 @@ def _rank_candidates(
         if candidate.symbol not in blocked_symbols and _candidate_passes_lc_threshold(candidate, settings)
     ]
     clear = [candidate for candidate in eligible if _has_clear_candlestick(candidate)]
-    ranked = sorted(clear or eligible, key=lambda item: _candidate_score(
-        {
-            "win_probability_pct": item.win_probability_pct,
-            "confidence": item.confidence,
-            "indicator_summary": item.indicator_summary or {},
-            "_priority_win_probability_pct": float(settings["priority_win_probability_pct"]),
-        }
-    ), reverse=True)
+    ranked = sorted(
+        clear or eligible,
+        key=lambda item: _candidate_score(
+            {
+                "win_probability_pct": item.win_probability_pct,
+                "confidence": item.confidence,
+                "indicator_summary": item.indicator_summary or {},
+            }
+        ),
+        reverse=True,
+    )
     clean: list[TradeCandidate] = []
     seen: set[str] = set()
     for candidate in ranked:
@@ -390,6 +404,7 @@ def _load_state(config: dict[str, Any], now: datetime) -> dict[str, Any]:
     state.setdefault("daily_two_hour_counter", 0)
     state.setdefault("latest_mini_scan", {})
     state.setdefault("state_version", LC_PIPELINE_STATE_VERSION)
+    _prune_low_win_state(state, _pipeline_config(config))
     return state
 
 
@@ -653,10 +668,10 @@ def _trim_undecided(rows: list[dict[str, Any]], settings: dict[str, Any]) -> lis
     kept = list(rows)
     if len(kept) > floor:
         drop_count = min(int(settings["undecided_prune_drop"]), len(kept) - floor)
-        ranked_low_first = sorted(kept, key=_candidate_score)
+        ranked_low_first = _sort_saved_rows(kept, settings, reverse=False)
         dropped_keys = {_setup_key(row) for row in ranked_low_first[:drop_count]}
         kept = [row for row in kept if _setup_key(row) not in dropped_keys]
-    return _prune_undecided(kept, max_rows)
+    return _sort_saved_rows(kept, settings, reverse=True)[:max_rows]
 
 
 def _format_pair_line(index: int, row: dict[str, Any]) -> str:
@@ -677,6 +692,31 @@ def _format_pair_line(index: int, row: dict[str, Any]) -> str:
         price_text = str(price)
     side_text = str(row.get("side") or "-").upper()
     return f"{index}. {row.get('symbol', '-')} | {side_text} | Win {win_text} | Giá {price_text} | KLGD {volume_text}"
+
+
+def _build_internal_lc_rows(
+    rows: list[dict[str, Any]],
+    *,
+    source_slot: str,
+    source_index: int | None,
+    now: datetime,
+    local_now: datetime,
+) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        output.append(
+            {
+                **row,
+                "state": "LC_NOI_BO",
+                "source_slot": source_slot,
+                "source_index": source_index,
+                "source_time": now.isoformat(),
+                "source_label": local_now.strftime("%d/%m/%y %H:%M:%S"),
+            }
+        )
+    return output
 
 
 def _append_internal_notification(
@@ -783,16 +823,8 @@ def lc_pipeline_dashboard_payload(config: dict[str, Any]) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     state = _load_state(config, now)
     settings = _pipeline_config(config)
-    undecided = sorted(
-        [_row_age_payload(row, now) for row in state.get("undecided") or []],
-        key=_candidate_score,
-        reverse=True,
-    )
-    internal_lc = sorted(
-        [_row_age_payload(row, now) for row in state.get("internal_lc") or []],
-        key=_candidate_score,
-        reverse=True,
-    )
+    undecided = _sort_saved_rows([_row_age_payload(row, now) for row in state.get("undecided") or []], settings, reverse=True)
+    internal_lc = _sort_saved_rows([_row_age_payload(row, now) for row in state.get("internal_lc") or []], settings, reverse=True)
     two_hour_windows = state.get("two_hour_windows") or []
     latest_two_hour = two_hour_windows[-1] if two_hour_windows else None
     return {
@@ -818,11 +850,10 @@ def lc_pipeline_dashboard_payload(config: dict[str, Any]) -> dict[str, Any]:
 def format_internal_lc_view(config: dict[str, Any], *, limit: int = 10) -> str:
     now = datetime.now(timezone.utc)
     state = _load_state(config, now)
-    rows = sorted(
-        [_row_age_payload(row, now) for row in state.get("internal_lc") or []],
-        key=_candidate_score,
-        reverse=True,
-    )[: max(1, int(limit))]
+    settings = _pipeline_config(config)
+    rows = _sort_saved_rows([_row_age_payload(row, now) for row in state.get("internal_lc") or []], settings, reverse=True)[
+        : max(1, int(limit))
+    ]
     lines = [f"🟡 LC nội bộ { _local_time(config, now).strftime('%d/%m/%Y %H:%M') }", f"📊 Tổng LC: {len(rows)}"]
     if not rows:
         lines.append("⚪ Chưa có LC nội bộ")
@@ -872,8 +903,9 @@ def notify_mini_pool_summary(config: dict[str, Any], rows: list[dict[str, Any]],
     now = datetime.now(timezone.utc)
     local_now = _local_time(config, now)
     settings = _pipeline_config(config)
+    pool_count = len(rows[:3])
     lines = [
-        "3 cặp gửi lên mini:",
+        f"Pool mini 4h: {pool_count}/3 cặp",
     ]
     for index, row in enumerate(rows[:3], 1):
         side = str(row.get("side") or "-").upper()
@@ -961,7 +993,7 @@ def _promote_survivors(
             continue
         undecided.append(row)
     state["undecided"] = _trim_undecided(undecided, settings)
-    state["internal_lc"] = sorted(internal_lc, key=_candidate_score, reverse=True)[: int(settings["internal_lc_max"])]
+    state["internal_lc"] = _sort_saved_rows(internal_lc, settings, reverse=True)[: int(settings["internal_lc_max"])]
     survivor_symbols = {str(row.get("symbol") or "") for row in state["internal_lc"]}
     for record, candidate, age_hours in revive_candidates:
         symbol = str(record.get("symbol") or "")
@@ -1002,6 +1034,7 @@ def update_lc_internal_pipeline(
     }
 
     if candidates and state.get("last_hourly_slot") != hourly_slot:
+        local_now = _local_time(config, now)
         top = [
             _candidate_record(candidate, state="HOUR_1")
             for candidate in _rank_candidates(candidates, top_limit, blocked_symbols=blocked_symbols, settings=settings)
@@ -1009,6 +1042,17 @@ def update_lc_internal_pipeline(
         state["hourly_windows"].append({"slot": hourly_slot, "created_at": now.isoformat(), "top": top})
         state["hourly_windows"] = state["hourly_windows"][-2:]
         state["last_hourly_slot"] = hourly_slot
+        if top:
+            hourly_internal_lc = _build_internal_lc_rows(
+                top[:top_limit],
+                source_slot="1h",
+                source_index=None,
+                now=now,
+                local_now=local_now,
+            )
+            state["internal_lc"] = _sort_saved_rows(hourly_internal_lc, settings, reverse=True)[
+                : int(settings["internal_lc_max"])
+            ]
         result["created_hourly"] = True
         _append_internal_notification(
             state,
@@ -1020,9 +1064,14 @@ def update_lc_internal_pipeline(
         )
 
     hourly_windows = state.get("hourly_windows") or []
-    if len(hourly_windows) >= 2 and state.get("last_two_hour_slot") != two_hour_slot:
+    recent_hourly_windows = hourly_windows[-2:] if len(hourly_windows) >= 2 else []
+    has_full_two_hour_inputs = (
+        len(recent_hourly_windows) >= 2
+        and all(list(window.get("top") or []) for window in recent_hourly_windows)
+    )
+    if has_full_two_hour_inputs and state.get("last_two_hour_slot") != two_hour_slot:
         combined: list[dict[str, Any]] = []
-        for window in hourly_windows[-2:]:
+        for window in recent_hourly_windows:
             combined.extend(window.get("top") or [])
         ranked = _sort_saved_rows(combined, settings, reverse=True)
         next_daily_index = int(state.get("daily_two_hour_counter") or 0) + 1
@@ -1034,14 +1083,13 @@ def update_lc_internal_pipeline(
             symbol = str(row.get("symbol") or "")
             if not symbol or symbol in seen or symbol in blocked_symbols:
                 continue
-            approved_row = {
-                **row,
-                "state": "LC_NOI_BO",
-                "source_slot": "2h",
-                "source_index": next_daily_index,
-                "source_time": now.isoformat(),
-                "source_label": local_now.strftime("%d/%m/%y %H:%M:%S"),
-            }
+            approved_row = _build_internal_lc_rows(
+                [row],
+                source_slot="2h",
+                source_index=next_daily_index,
+                now=now,
+                local_now=local_now,
+            )[0]
             approved.append(approved_row)
             approved_keys.add(_setup_key(approved_row))
             seen.add(symbol)
