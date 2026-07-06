@@ -100,10 +100,12 @@ from .reporting import (
     format_undecided_lc_view,
 )
 from .storage import (
+    clear_dashboard_snapshot_cache,
     get_journal_state,
     latest_decision_payload,
     list_paper_trades,
     prune_market_scan_observations,
+    purge_deprecated_journal_state,
     recent_market_scan_memory,
     run_storage_maintenance,
     set_journal_state,
@@ -1434,6 +1436,8 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
     @app.on_event("startup")
     def start_automation() -> None:
         config = load_config(app.state.config_path)
+        purge_deprecated_journal_state(config)
+        clear_dashboard_snapshot_cache(config)
         sync_telegram_commands(config)
         initial_delay = max(0, int(config.get("automation", {}).get("initial_delay_seconds", 5) or 0))
         interval = _automation_interval(config)
@@ -1743,6 +1747,8 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
                     "provider": forced_internal_scan.get("provider"),
                     "model": forced_internal_scan.get("model"),
                     "approved_symbols": forced_internal_scan.get("approved_symbols") or [],
+                    "selected_symbols": forced_internal_scan.get("selected_symbols") or [],
+                    "selection_stale": bool(forced_internal_scan.get("selection_stale")),
                     "candidate_count": forced_internal_scan.get("candidate_count"),
                     "ai_review": forced_internal_scan.get("ai_review"),
                     "ai_review_error": forced_internal_scan.get("ai_review_error"),

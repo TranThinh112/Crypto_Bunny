@@ -84,14 +84,26 @@ def execute_candidate(
     side = _order_side(candidate)
     price = None if order_type == "market" else candidate.entry
     params = _okx_params(config, candidate)
-    order = exchange.create_order(
-        candidate.symbol,
-        order_type,
-        side,
-        candidate.quantity,
-        price,
-        params,
-    )
+    try:
+        order = exchange.create_order(
+            candidate.symbol,
+            order_type,
+            side,
+            candidate.quantity,
+            price,
+            params,
+        )
+    except Exception as exc:
+        return ExecutionResult(
+            mode=mode,
+            submitted=False,
+            order_id=None,
+            message=str(exc),
+            raw={"error": str(exc)},
+            journal_type=journal_type,
+            journal_id=journal_id,
+            linked_journal_id=linked_journal_id,
+        )
     order_id = str(order.get("id") or order.get("clientOrderId") or "")
     result = ExecutionResult(
         mode=mode,
@@ -130,7 +142,15 @@ def execute_candidate(
         },
     )
     try:
-        record_trade_execution(config, candidate, execution=to_jsonable(result))
+        execution_payload = {
+            **to_jsonable(result),
+            "entry_type": entry_type,
+            "order_type": order_type,
+            "journal_type": journal_type,
+            "journal_id": journal_id,
+            "linked_journal_id": linked_journal_id,
+        }
+        record_trade_execution(config, candidate, execution=execution_payload)
     except Exception as exc:
         raw = result.raw if isinstance(result.raw, dict) else {}
         result.raw = {**raw, "trade_execution_record_error": str(exc)}

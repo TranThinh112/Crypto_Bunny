@@ -1,9 +1,10 @@
 from __future__ import annotations
-
+import json
 from datetime import datetime, timezone
 from typing import Any
 
 from .ai_coordinator import okx_ai_approval, prioritize_pending_records
+from .codex_features import record_trade_execution
 from .executor import execute_candidate
 from .ledger import append_event
 from .market import create_exchange
@@ -11,6 +12,7 @@ from .models import RiskCheck, TradeCandidate
 from .risk import evaluate_candidate
 from .storage import (
     close_pending_order,
+    connect_state_db,
     list_pending_orders,
     next_global_counter,
     refresh_pending_order,
@@ -98,6 +100,93 @@ def _fill_missing_quantity(candidate: TradeCandidate, record: dict[str, Any]) ->
     quantity = _float(record.get("quantity"))
     if quantity > 0:
         candidate.quantity = quantity
+
+
+def _candidate_from_record(record: dict[str, Any]) -> TradeCandidate | None:
+    try:
+        payload = json.loads(str(record.get("payload_json") or "{}"))
+    except json.JSONDecodeError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    symbol = str(payload.get("symbol") or record.get("symbol") or "")
+    side = str(payload.get("side") or record.get("side") or "").lower()
+    if not symbol or side not in {"long", "short"}:
+        return None
+    candidate_fields = set(TradeCandidate.__dataclass_fields__.keys())
+    clean_payload = {key: payload.get(key) for key in candidate_fields if key in payload}
+    clean_payload.setdefault("symbol", symbol)
+    clean_payload.setdefault("base", str(payload.get("base") or record.get("base") or symbol.split("/")[0]))
+    clean_payload.setdefault("side", side)
+    clean_payload.setdefault("confidence", _float(payload.get("confidence") or record.get("confidence")))
+    clean_payload.setdefault("entry", _float(payload.get("entry") or record.get("entry")))
+    clean_payload.setdefault("stop_loss", _float(payload.get("stop_loss") or record.get("stop_loss")))
+    clean_payload.setdefault("take_profit", _float(payload.get("take_profit") or record.get("take_profit")))
+    clean_payload.setdefault("risk_reward", _float(payload.get("risk_reward") or record.get("risk_reward")))
+    clean_payload.setdefault("order_usdt", _float(payload.get("order_usdt") or record.get("order_usdt")))
+    clean_payload.setdefault("quantity", _optional_float(payload.get("quantity") or record.get("quantity")))
+    clean_payload.setdefault("spread_pct", _optional_float(payload.get("spread_pct")))
+    clean_payload.setdefault("news_score", _float(payload.get("news_score")))
+    clean_payload.setdefault("news_count", int(payload.get("news_count") or 0))
+    clean_payload.setdefault("higher_timeframes", payload.get("higher_timeframes") or {})
+    clean_payload.setdefault("indicator_summary", payload.get("indicator_summary") or {})
+    clean_payload.setdefault("candlestick_patterns", payload.get("candlestick_patterns") or {})
+    clean_payload.setdefault("reasons", payload.get("reasons") or [])
+    clean_payload.setdefault("warnings", payload.get("warnings") or [])
+    return TradeCandidate(**clean_payload)
+
+
+def _close_latest_lc_trade_execution(
+    config: dict[str, Any],
+    *,
+    symbol: str,
+    side: str,
+    status: str,
+    reason: str | None = None,
+) -> None:
+    normalized_side = str(side or "").upper()
+    if not symbol or not normalized_side:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    with connect_state_db(config) as connection:
+        row = connection.execute(
+            """
+            SELECT id
+            FROM trade_executions
+            WHERE symbol = ? AND side = ? AND status = 'LC_PENDING'
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (symbol, normalized_side),
+        ).fetchone()
+        if row is None:
+            return
+        connection.execute(
+            """
+            UPDATE trade_executions
+            SET status = ?, reject_reason = ?, closed_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (str(status or "CANCELED").upper(), reason, now, now, int(row["id"])),
+        )
+        connection.commit()
+
+
+def _record_vt_from_pending(config: dict[str, Any], record: dict[str, Any], *, vt_id: int, lc_id: int) -> None:
+    candidate = _candidate_from_record(record)
+    if candidate is None:
+        return
+    record_trade_execution(
+        config,
+        candidate,
+        execution={
+            "journal_type": "VT",
+            "journal_id": vt_id,
+            "linked_journal_id": lc_id,
+            "entry_type": "pending_filled",
+            "order_type": "limit",
+        },
+    )
 
 
 def _record_age_hours(record: dict[str, Any], now: datetime) -> float:
@@ -330,6 +419,14 @@ def maintain_pending_orders(
                 vt_id = next_global_counter(config, "VT")
                 reason = f"LC #{lc_id} filled and converted to VT #{vt_id}"
                 close_pending_order(config, local_id, "FILLED", reason)
+                _close_latest_lc_trade_execution(
+                    config,
+                    symbol=symbol,
+                    side=side,
+                    status="FILLED",
+                    reason=reason,
+                )
+                _record_vt_from_pending(config, record, vt_id=vt_id, lc_id=lc_id)
                 append_event(
                     config,
                     {
@@ -367,6 +464,13 @@ def maintain_pending_orders(
             else:
                 reason = "Exchange order is no longer open"
                 close_pending_order(config, local_id, "CANCELED", reason)
+                _close_latest_lc_trade_execution(
+                    config,
+                    symbol=symbol,
+                    side=str(record.get("side") or ""),
+                    status="CANCELED",
+                    reason=reason,
+                )
                 events.append(
                     {
                         "type": "pending_canceled",
@@ -410,6 +514,13 @@ def maintain_pending_orders(
                         kept += 1
                         continue
                     close_pending_order(config, local_id, "CANCELED", reason)
+                    _close_latest_lc_trade_execution(
+                        config,
+                        symbol=symbol,
+                        side=str(record.get("side") or ""),
+                        status="CANCELED",
+                        reason=reason,
+                    )
                     events.append(
                         {
                             "type": "pending_canceled",
@@ -435,6 +546,13 @@ def maintain_pending_orders(
                         kept += 1
                         continue
                     close_pending_order(config, local_id, "CANCELED", reason)
+                    _close_latest_lc_trade_execution(
+                        config,
+                        symbol=symbol,
+                        side=str(record.get("side") or ""),
+                        status="CANCELED",
+                        reason=reason,
+                    )
                     events.append(
                         {
                             "type": "pending_canceled",
@@ -456,6 +574,13 @@ def maintain_pending_orders(
                         kept += 1
                         continue
                     close_pending_order(config, local_id, "CANCELED", reason)
+                    _close_latest_lc_trade_execution(
+                        config,
+                        symbol=symbol,
+                        side=str(record.get("side") or ""),
+                        status="CANCELED",
+                        reason=reason,
+                    )
                     events.append(
                         {
                             "type": "pending_canceled",
@@ -543,6 +668,13 @@ def maintain_pending_orders(
                     if not execution.submitted:
                         reason = f"OKX LC was canceled for direct entry, but market entry failed: {execution.message}"
                         close_pending_order(config, local_id, "CANCELED", reason)
+                        _close_latest_lc_trade_execution(
+                            config,
+                            symbol=symbol,
+                            side=str(record.get("side") or ""),
+                            status="CANCELED",
+                            reason=reason,
+                        )
                         events.append(
                             {
                                 "type": "pending_canceled",
@@ -557,6 +689,13 @@ def maintain_pending_orders(
 
                     reason = f"LC #{lc_id} canceled on OKX and converted to VT #{vt_id}"
                     close_pending_order(config, local_id, "FILLED", reason)
+                    _close_latest_lc_trade_execution(
+                        config,
+                        symbol=symbol,
+                        side=str(record.get("side") or ""),
+                        status="FILLED",
+                        reason=reason,
+                    )
                     events.append(
                         {
                             "type": "pending_converted",
@@ -600,6 +739,13 @@ def maintain_pending_orders(
             if symbol in active_symbols:
                 reason = f"Active OKX position/order already exists for {symbol}"
                 close_pending_order(config, local_id, "CANCELED", reason)
+                _close_latest_lc_trade_execution(
+                    config,
+                    symbol=symbol,
+                    side=str(record.get("side") or ""),
+                    status="CANCELED",
+                    reason=reason,
+                )
                 events.append(
                     {
                         "type": "pending_canceled",

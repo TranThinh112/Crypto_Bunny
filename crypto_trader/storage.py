@@ -14,6 +14,10 @@ from .models import Decision, TradeCandidate, to_jsonable
 
 ACTIVE_PENDING_STATUSES = ("OPEN", "LC_OKX")
 DEFAULT_MARKET_SCAN_MAX_JSON_BYTES = 8000
+DEPRECATED_JOURNAL_STATE_KEYS = {
+    "ai_internal_market_scan_latest",
+}
+DASHBOARD_SNAPSHOT_PREFIX = "dashboard_snapshot:"
 
 
 def state_db_path(config: dict[str, Any]) -> Path:
@@ -488,13 +492,50 @@ def _ensure_column(connection: sqlite3.Connection, table: str, column: str, defi
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
+def _is_deprecated_journal_state_key(key: str) -> bool:
+    return str(key) in DEPRECATED_JOURNAL_STATE_KEYS
+
+
+def delete_journal_state(config: dict[str, Any], key: str) -> None:
+    with _connect(config) as connection:
+        connection.execute("DELETE FROM journal_state WHERE key = ?", (key,))
+        connection.commit()
+
+
+def delete_journal_state_prefix(config: dict[str, Any], prefix: str) -> None:
+    with _connect(config) as connection:
+        connection.execute("DELETE FROM journal_state WHERE key LIKE ?", (f"{prefix}%",))
+        connection.commit()
+
+
+def clear_dashboard_snapshot_cache(config: dict[str, Any]) -> None:
+    delete_journal_state_prefix(config, DASHBOARD_SNAPSHOT_PREFIX)
+
+
+def purge_deprecated_journal_state(config: dict[str, Any]) -> list[str]:
+    removed: list[str] = []
+    with _connect(config) as connection:
+        for key in sorted(DEPRECATED_JOURNAL_STATE_KEYS):
+            cursor = connection.execute("DELETE FROM journal_state WHERE key = ?", (key,))
+            if int(cursor.rowcount or 0) > 0:
+                removed.append(key)
+        connection.commit()
+    return removed
+
+
 def get_journal_state(config: dict[str, Any], key: str) -> str | None:
+    if _is_deprecated_journal_state_key(key):
+        delete_journal_state(config, key)
+        return None
     with _connect(config) as connection:
         row = connection.execute("SELECT value FROM journal_state WHERE key = ?", (key,)).fetchone()
     return str(row["value"]) if row else None
 
 
 def set_journal_state(config: dict[str, Any], key: str, value: str) -> None:
+    if _is_deprecated_journal_state_key(key):
+        delete_journal_state(config, key)
+        return
     now = datetime.now(timezone.utc).isoformat()
     with _connect(config) as connection:
         connection.execute(

@@ -1896,6 +1896,13 @@ def record_trade_execution(
     candidate: TradeCandidate,
     execution: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    execution_meta = execution if isinstance(execution, dict) else {}
+    journal_type = str(execution_meta.get("journal_type") or "").upper()
+    order_type = str(
+        execution_meta.get("order_type")
+        or ((execution_meta.get("raw") or {}).get("type") if isinstance(execution_meta.get("raw"), dict) else "")
+        or ""
+    ).lower()
     validation = validate_entry(
         config,
         {
@@ -1917,11 +1924,14 @@ def record_trade_execution(
     created_at = _iso_now()
     payload = _candidate_payload(candidate)
     allowed = bool(validation.get("allowed"))
+    execution_status = "OPEN" if allowed else "REJECTED"
+    if allowed and journal_type == "LC" and order_type == "limit":
+        execution_status = "LC_PENDING"
     row = {
         "created_at": created_at,
         "updated_at": created_at,
         "symbol": candidate.symbol,
-        "position_slot": validation.get("assignedPositionSlot") if allowed else None,
+        "position_slot": validation.get("assignedPositionSlot") if execution_status == "OPEN" else None,
         "parent_position_id": None,
         "side": candidate.side.upper(),
         "entry_price": candidate.entry,
@@ -1931,10 +1941,10 @@ def record_trade_execution(
         "risk_percent": validation.get("riskPercent") or candidate.risk_percent or 0,
         "rule_score": _candidate_rule_score(candidate),
         "gpt_confidence": candidate.confidence,
-        "status": "OPEN" if allowed else "REJECTED",
+        "status": execution_status,
         "pnl": None,
-        "reject_reason": None if allowed else validation.get("reason"),
-        "closed_at": None if allowed else created_at,
+        "reject_reason": None if execution_status in {"OPEN", "LC_PENDING"} else validation.get("reason"),
+        "closed_at": None if execution_status in {"OPEN", "LC_PENDING"} else created_at,
         "payload_json": json.dumps(payload, ensure_ascii=False),
         "market_regime": candidate.market_regime,
         "regime_confidence": candidate.regime_confidence,

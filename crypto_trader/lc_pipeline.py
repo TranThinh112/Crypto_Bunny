@@ -5,10 +5,18 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .models import TradeCandidate, to_jsonable
-from .storage import get_journal_state, open_pending_symbols, set_journal_state
+from .risk import active_trades_summary
+from .storage import (
+    clear_dashboard_snapshot_cache,
+    get_journal_state,
+    open_pending_symbols,
+    purge_deprecated_journal_state,
+    set_journal_state,
+)
 
 
 LC_PIPELINE_STATE_KEY = "lc_internal_pipeline_state"
+LC_PIPELINE_STATE_VERSION = 2
 DEFAULT_TWO_HOUR_ICON = "🕑"
 ONE_HOUR_ICON = "🕐"
 FOUR_HOUR_ICON = "🕓"
@@ -34,6 +42,8 @@ def _pipeline_config(config: dict[str, Any]) -> dict[str, Any]:
         "internal_lc_max": max(1, min(3, int(internal.get("lc_pipeline_internal_lc_max", 3) or 3))),
         "promote_after_hours": max(1.0, float(internal.get("lc_pipeline_promote_after_hours", 6) or 6)),
         "recheck_interval_minutes": max(15, int(internal.get("lc_pipeline_recheck_interval_minutes", 90) or 90)),
+        "min_win_probability_pct": float(internal.get("lc_pipeline_min_win_probability_pct", 65) or 65),
+        "priority_win_probability_pct": float(internal.get("lc_pipeline_priority_win_probability_pct", 80) or 80),
         "relaxed_min_win_probability_pct": float(internal.get("lc_pipeline_relaxed_min_win_probability_pct", 50) or 50),
         "relaxed_min_confidence": float(internal.get("lc_pipeline_relaxed_min_confidence", 70) or 70),
         "notify_two_hour_summary": bool(internal.get("lc_pipeline_notify_two_hour_summary", False)),
@@ -72,10 +82,12 @@ def _slot_key(config: dict[str, Any], now: datetime, hours: int) -> str:
 
 
 def _candidate_score(candidate: TradeCandidate | dict[str, Any]) -> tuple[float, float, float]:
+    priority_threshold = 80.0
     if isinstance(candidate, dict):
         win_probability = candidate.get("win_probability_pct")
         confidence = candidate.get("confidence")
         volume_ratio = ((candidate.get("indicator_summary") or {}).get("volume_ratio"))
+        priority_threshold = float(candidate.get("_priority_win_probability_pct") or priority_threshold)
     else:
         win_probability = candidate.win_probability_pct
         confidence = candidate.confidence
@@ -92,7 +104,35 @@ def _candidate_score(candidate: TradeCandidate | dict[str, Any]) -> tuple[float,
         volume_value = float(volume_ratio or 0)
     except (TypeError, ValueError):
         volume_value = 0.0
-    return (win_value, confidence_value, volume_value)
+    priority_value = 1.0 if win_value > priority_threshold else 0.0
+    return (priority_value, win_value, confidence_value, volume_value)
+
+
+def _candidate_win_probability(candidate: TradeCandidate | dict[str, Any]) -> float:
+    raw = candidate.get("win_probability_pct") if isinstance(candidate, dict) else candidate.win_probability_pct
+    try:
+        return float(raw or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _candidate_passes_lc_threshold(candidate: TradeCandidate | dict[str, Any], settings: dict[str, Any]) -> bool:
+    return _candidate_win_probability(candidate) > float(settings["min_win_probability_pct"])
+
+
+def _annotate_priority_threshold(rows: list[dict[str, Any]], settings: dict[str, Any]) -> list[dict[str, Any]]:
+    threshold = float(settings["priority_win_probability_pct"])
+    output: list[dict[str, Any]] = []
+    for row in rows:
+        if isinstance(row, dict):
+            output.append({**row, "_priority_win_probability_pct": threshold})
+    return output
+
+
+def _sort_saved_rows(rows: list[dict[str, Any]], settings: dict[str, Any], *, reverse: bool = True) -> list[dict[str, Any]]:
+    annotated = _annotate_priority_threshold(rows, settings)
+    ranked = sorted(annotated, key=_candidate_score, reverse=reverse)
+    return [{key: value for key, value in row.items() if key != "_priority_win_probability_pct"} for row in ranked]
 
 
 def _has_clear_candlestick(candidate: TradeCandidate) -> bool:
@@ -112,9 +152,65 @@ def _has_clear_candlestick(candidate: TradeCandidate) -> bool:
     return False
 
 
-def _rank_candidates(candidates: list[TradeCandidate], limit: int) -> list[TradeCandidate]:
-    clear = [candidate for candidate in candidates if _has_clear_candlestick(candidate)]
-    ranked = sorted(clear or candidates, key=_candidate_score, reverse=True)
+def _active_symbol_blocklist(config: dict[str, Any]) -> set[str]:
+    _count, active_symbols, _warnings = active_trades_summary(config)
+    return {str(symbol) for symbol in active_symbols if str(symbol)}
+
+
+def _strip_blocked_symbols(rows: list[dict[str, Any]], blocked_symbols: set[str]) -> list[dict[str, Any]]:
+    if not blocked_symbols:
+        return list(rows)
+    return [row for row in rows if str(row.get("symbol") or "") not in blocked_symbols]
+
+
+def _prune_blocked_state(state: dict[str, Any], blocked_symbols: set[str]) -> None:
+    if not blocked_symbols:
+        return
+    state["internal_lc"] = _strip_blocked_symbols(list(state.get("internal_lc") or []), blocked_symbols)
+    state["undecided"] = _strip_blocked_symbols(list(state.get("undecided") or []), blocked_symbols)
+    hourly_windows = []
+    for window in state.get("hourly_windows") or []:
+        hourly_windows.append({**window, "top": _strip_blocked_symbols(list(window.get("top") or []), blocked_symbols)})
+    state["hourly_windows"] = hourly_windows
+
+
+def _prune_low_win_state(state: dict[str, Any], settings: dict[str, Any]) -> None:
+    state["internal_lc"] = [
+        row for row in list(state.get("internal_lc") or []) if _candidate_passes_lc_threshold(row, settings)
+    ]
+    state["undecided"] = [
+        row for row in list(state.get("undecided") or []) if _candidate_passes_lc_threshold(row, settings)
+    ]
+    hourly_windows = []
+    for window in state.get("hourly_windows") or []:
+        top = [row for row in list(window.get("top") or []) if _candidate_passes_lc_threshold(row, settings)]
+        hourly_windows.append({**window, "top": top})
+    state["hourly_windows"] = hourly_windows
+
+
+def _rank_candidates(
+    candidates: list[TradeCandidate],
+    limit: int,
+    *,
+    blocked_symbols: set[str] | None = None,
+    settings: dict[str, Any] | None = None,
+) -> list[TradeCandidate]:
+    settings = settings or {"min_win_probability_pct": 65, "priority_win_probability_pct": 80}
+    blocked_symbols = {str(symbol) for symbol in (blocked_symbols or set()) if str(symbol)}
+    eligible = [
+        candidate
+        for candidate in candidates
+        if candidate.symbol not in blocked_symbols and _candidate_passes_lc_threshold(candidate, settings)
+    ]
+    clear = [candidate for candidate in eligible if _has_clear_candlestick(candidate)]
+    ranked = sorted(clear or eligible, key=lambda item: _candidate_score(
+        {
+            "win_probability_pct": item.win_probability_pct,
+            "confidence": item.confidence,
+            "indicator_summary": item.indicator_summary or {},
+            "_priority_win_probability_pct": float(settings["priority_win_probability_pct"]),
+        }
+    ), reverse=True)
     clean: list[TradeCandidate] = []
     seen: set[str] = set()
     for candidate in ranked:
@@ -129,7 +225,7 @@ def _rank_candidates(candidates: list[TradeCandidate], limit: int) -> list[Trade
 
 def _candidate_record(candidate: TradeCandidate, *, state: str, first_seen_at: str | None = None) -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
-    payload = to_jsonable(candidate)
+    payload = _candidate_payload(candidate)
     indicator = payload.get("indicator_summary") if isinstance(payload, dict) else {}
     return {
         "symbol": candidate.symbol,
@@ -148,7 +244,124 @@ def _candidate_record(candidate: TradeCandidate, *, state: str, first_seen_at: s
     }
 
 
+def _compact_patterns(frame: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(frame, dict):
+        return {}
+    patterns = frame.get("candlestick_patterns") or {}
+    if not isinstance(patterns, dict):
+        patterns = {}
+    return {
+        "direction": patterns.get("direction"),
+        "strongest_pattern": patterns.get("strongest_pattern"),
+        "signal_summary": patterns.get("signal_summary"),
+        "patterns": list(patterns.get("patterns") or [])[:4],
+    }
+
+
+def _compact_higher_timeframes(frames: dict[str, Any]) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    if not isinstance(frames, dict):
+        return output
+    for frame, data in frames.items():
+        if not isinstance(data, dict):
+            continue
+        output[str(frame)] = {
+            "timeframe": data.get("timeframe") or frame,
+            "last": data.get("last"),
+            "ema_gap_pct": data.get("ema_gap_pct"),
+            "price_vs_ema_slow_pct": data.get("price_vs_ema_slow_pct"),
+            "rsi": data.get("rsi"),
+            "atr_pct": data.get("atr_pct"),
+            "volume_ratio": data.get("volume_ratio"),
+            "range_position": data.get("range_position"),
+            "trend": data.get("trend"),
+            "candlestick_patterns": _compact_patterns(data),
+        }
+    return output
+
+
+def _compact_payload_dict(payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        "symbol": payload.get("symbol"),
+        "base": payload.get("base"),
+        "side": payload.get("side"),
+        "confidence": payload.get("confidence"),
+        "entry": payload.get("entry"),
+        "stop_loss": payload.get("stop_loss"),
+        "take_profit": payload.get("take_profit"),
+        "risk_reward": payload.get("risk_reward"),
+        "order_usdt": payload.get("order_usdt"),
+        "quantity": payload.get("quantity"),
+        "spread_pct": payload.get("spread_pct"),
+        "news_score": payload.get("news_score"),
+        "news_count": payload.get("news_count"),
+        "higher_timeframes": _compact_higher_timeframes(payload.get("higher_timeframes") or {}),
+        "indicator_summary": to_jsonable(payload.get("indicator_summary") or {}),
+        "candlestick_patterns": to_jsonable(payload.get("candlestick_patterns") or {}),
+        "rule_score": payload.get("rule_score"),
+        "margin_usdt": payload.get("margin_usdt"),
+        "recovery_margin_usdt": payload.get("recovery_margin_usdt"),
+        "recovery_source_key": payload.get("recovery_source_key"),
+        "win_probability_pct": payload.get("win_probability_pct"),
+        "target_mode": payload.get("target_mode"),
+        "take_profit_pct": payload.get("take_profit_pct"),
+        "stop_loss_pct": payload.get("stop_loss_pct"),
+        "price_take_profit_pct": payload.get("price_take_profit_pct"),
+        "price_stop_loss_pct": payload.get("price_stop_loss_pct"),
+        "reasons": list(payload.get("reasons") or [])[:6],
+        "warnings": list(payload.get("warnings") or [])[:4],
+        "scan_source": payload.get("scan_source"),
+        "setup_quality": payload.get("setup_quality"),
+        "position_slot": payload.get("position_slot"),
+        "risk_percent": payload.get("risk_percent"),
+        "market_regime": payload.get("market_regime"),
+        "regime_confidence": payload.get("regime_confidence"),
+    }
+
+
+def _candidate_payload(candidate: TradeCandidate) -> dict[str, Any]:
+    return {
+        "symbol": candidate.symbol,
+        "base": candidate.base,
+        "side": candidate.side,
+        "confidence": candidate.confidence,
+        "entry": candidate.entry,
+        "stop_loss": candidate.stop_loss,
+        "take_profit": candidate.take_profit,
+        "risk_reward": candidate.risk_reward,
+        "order_usdt": candidate.order_usdt,
+        "quantity": candidate.quantity,
+        "spread_pct": candidate.spread_pct,
+        "news_score": candidate.news_score,
+        "news_count": candidate.news_count,
+        "higher_timeframes": _compact_higher_timeframes(candidate.higher_timeframes),
+        "indicator_summary": to_jsonable(candidate.indicator_summary or {}),
+        "candlestick_patterns": to_jsonable(candidate.candlestick_patterns or {}),
+        "rule_score": candidate.rule_score,
+        "margin_usdt": candidate.margin_usdt,
+        "recovery_margin_usdt": candidate.recovery_margin_usdt,
+        "recovery_source_key": candidate.recovery_source_key,
+        "win_probability_pct": candidate.win_probability_pct,
+        "target_mode": candidate.target_mode,
+        "take_profit_pct": candidate.take_profit_pct,
+        "stop_loss_pct": candidate.stop_loss_pct,
+        "price_take_profit_pct": candidate.price_take_profit_pct,
+        "price_stop_loss_pct": candidate.price_stop_loss_pct,
+        "reasons": list(candidate.reasons or [])[:6],
+        "warnings": list(candidate.warnings or [])[:4],
+        "scan_source": candidate.scan_source,
+        "setup_quality": candidate.setup_quality,
+        "position_slot": candidate.position_slot,
+        "risk_percent": candidate.risk_percent,
+        "market_regime": candidate.market_regime,
+        "regime_confidence": candidate.regime_confidence,
+    }
+
+
 def _load_state(config: dict[str, Any], now: datetime) -> dict[str, Any]:
+    purge_deprecated_journal_state(config)
     raw = get_journal_state(config, LC_PIPELINE_STATE_KEY)
     if raw:
         try:
@@ -157,6 +370,9 @@ def _load_state(config: dict[str, Any], now: datetime) -> dict[str, Any]:
             state = {}
     else:
         state = {}
+    if state.get("state_version") != LC_PIPELINE_STATE_VERSION:
+        state["latest_mini_scan"] = {}
+        state["state_version"] = LC_PIPELINE_STATE_VERSION
     day = _day_key(config, now)
     if state.get("day_key") != day:
         state["day_key"] = day
@@ -172,11 +388,241 @@ def _load_state(config: dict[str, Any], now: datetime) -> dict[str, Any]:
     state.setdefault("telegram_events", [])
     state.setdefault("internal_notifications", [])
     state.setdefault("daily_two_hour_counter", 0)
+    state.setdefault("latest_mini_scan", {})
+    state.setdefault("state_version", LC_PIPELINE_STATE_VERSION)
     return state
 
 
+def _compact_saved_row(row: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(row, dict):
+        return {}
+    keep = {
+        "symbol",
+        "base",
+        "side",
+        "state",
+        "first_seen_at",
+        "last_seen_at",
+        "entry",
+        "price",
+        "confidence",
+        "win_probability_pct",
+        "risk_reward",
+        "volume_ratio",
+        "source_slot",
+        "source_index",
+        "source_time",
+        "source_label",
+        "revived_at",
+        "revived_label",
+        "revived_age_hours",
+        "revived_age_label",
+        "mini_index",
+    }
+    compact = {key: row.get(key) for key in keep if key in row}
+    payload = row.get("payload")
+    if isinstance(payload, dict):
+        compact["payload"] = _compact_payload_dict(payload)
+    elif payload is not None:
+        compact["payload"] = payload
+    return compact
+
+
+def _compact_event(event: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(event, dict):
+        return {}
+    compact = {
+        "slot": event.get("slot"),
+        "created_at": event.get("created_at"),
+        "daily_index": event.get("daily_index"),
+        "date": event.get("date"),
+        "time": event.get("time"),
+    }
+    compact["approved"] = [_compact_saved_row(row) for row in event.get("approved") or [] if isinstance(row, dict)]
+    compact["rejected"] = [_compact_saved_row(row) for row in event.get("rejected") or [] if isinstance(row, dict)]
+    return compact
+
+
+def _compact_mini_candidate(item: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        return {}
+    keep = {
+        "symbol",
+        "side",
+        "confidence",
+        "win_probability_pct",
+        "risk_reward",
+        "entry",
+        "stop_loss",
+        "take_profit",
+        "spread_pct",
+        "news_score",
+        "news_count",
+        "indicator_summary",
+        "code_timeframe_analysis",
+        "mini_context_4h",
+        "reasons",
+        "warnings",
+    }
+    return {key: item.get(key) for key in keep if key in item}
+
+
+def _symbol_list(values: Any, *, limit: int = 3) -> list[str]:
+    symbols: list[str] = []
+    if not isinstance(values, list):
+        return symbols
+    for item in values:
+        symbol = str(item or "").strip()
+        if not symbol or symbol in symbols:
+            continue
+        symbols.append(symbol)
+        if len(symbols) >= max(1, int(limit)):
+            break
+    return symbols
+
+
+def _compact_local_policy(policy: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(policy, dict):
+        return {}
+    return {
+        "provider": policy.get("provider"),
+        "decision": policy.get("decision"),
+        "threshold_win_probability_pct": policy.get("threshold_win_probability_pct"),
+        "qualified_symbols": _symbol_list(policy.get("qualified_symbols"), limit=3),
+        "approved_symbols": _symbol_list(policy.get("approved_symbols"), limit=3),
+        "approved_count": policy.get("approved_count"),
+        "candidate_count": policy.get("candidate_count"),
+        "selection_source": policy.get("selection_source"),
+        "skip_reason": policy.get("skip_reason"),
+        "warnings": list(policy.get("warnings") or [])[:8],
+    }
+
+
+def _compact_ai_review(review: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(review, dict):
+        return {}
+    return {
+        "approved_symbols": _symbol_list(review.get("approved_symbols"), limit=3),
+        "decision": review.get("decision"),
+        "confidence": review.get("confidence"),
+        "setup_scores": review.get("setup_scores") if isinstance(review.get("setup_scores"), dict) else {},
+        "reason": review.get("reason"),
+        "model_version": review.get("model_version") or review.get("model"),
+        "prompt_version": review.get("prompt_version"),
+        "prompt_hash": review.get("prompt_hash"),
+        "prompt_tokens": review.get("prompt_tokens"),
+        "completion_tokens": review.get("completion_tokens"),
+        "latency_ms": review.get("latency_ms"),
+    }
+
+
+def _compact_mini_scan(scan: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(scan, dict) or not scan:
+        return {}
+    pool_symbols = _symbol_list(scan.get("pool_symbols"), limit=3)
+    if not pool_symbols:
+        pool_symbols = _symbol_list(((scan.get("local_policy") or {}).get("approved_symbols")), limit=3)
+    selected_symbols = _symbol_list(scan.get("selected_symbols"), limit=3)
+    if not selected_symbols:
+        selected_symbols = _symbol_list(scan.get("approved_symbols"), limit=3)
+    compact = {
+        "enabled": bool(scan.get("enabled", True)),
+        "agent": scan.get("agent"),
+        "created_at": scan.get("created_at"),
+        "slot_id": scan.get("slot_id"),
+        "slot_start": scan.get("slot_start"),
+        "status": scan.get("status"),
+        "interval_seconds": scan.get("interval_seconds"),
+        "provider": scan.get("provider"),
+        "model": scan.get("model"),
+        "source": scan.get("source"),
+        "source_symbols": list(scan.get("source_symbols") or [])[:20],
+        "candidate_count": scan.get("candidate_count"),
+        "local_policy": _compact_local_policy(scan.get("local_policy") or {}),
+        "pool_symbols": pool_symbols,
+        "selected_symbols": selected_symbols,
+        "compact_ai_payload": bool(scan.get("compact_ai_payload", True)),
+        "warnings": list(scan.get("warnings") or [])[:20],
+        "ai_review": _compact_ai_review(scan.get("ai_review") or {}),
+        "ai_review_error": scan.get("ai_review_error"),
+        "fallback": scan.get("fallback"),
+        "skip_reason": scan.get("skip_reason"),
+    }
+    compact["candidates"] = [
+        _compact_mini_candidate(item)
+        for item in scan.get("candidates") or []
+        if isinstance(item, dict)
+    ][:3]
+    return compact
+
+
 def _save_state(config: dict[str, Any], state: dict[str, Any]) -> None:
+    state["state_version"] = LC_PIPELINE_STATE_VERSION
+    state["internal_lc"] = [_compact_saved_row(row) for row in state.get("internal_lc") or [] if isinstance(row, dict)]
+    state["undecided"] = [_compact_saved_row(row) for row in state.get("undecided") or [] if isinstance(row, dict)]
+    state["hourly_windows"] = [
+        {
+            **window,
+            "top": [_compact_saved_row(row) for row in window.get("top") or [] if isinstance(row, dict)],
+        }
+        for window in state.get("hourly_windows") or []
+        if isinstance(window, dict)
+    ]
+    state["two_hour_windows"] = [_compact_event(event) for event in state.get("two_hour_windows") or [] if isinstance(event, dict)]
+    state["telegram_events"] = [_compact_event(event) for event in state.get("telegram_events") or [] if isinstance(event, dict)]
+    state["latest_mini_scan"] = _compact_mini_scan(state.get("latest_mini_scan") or {})
     set_journal_state(config, LC_PIPELINE_STATE_KEY, json.dumps(state, ensure_ascii=False))
+    clear_dashboard_snapshot_cache(config)
+
+
+def lc_pipeline_internal_symbols(config: dict[str, Any], *, limit: int | None = None) -> list[str]:
+    state = _load_state(config, datetime.now(timezone.utc))
+    symbols: list[str] = []
+    for row in state.get("internal_lc") or []:
+        symbol = str(row.get("symbol") or "")
+        if symbol and symbol not in symbols:
+            symbols.append(symbol)
+    if limit is None:
+        return symbols
+    return symbols[: max(1, int(limit))]
+
+
+def latest_lc_pipeline_mini_scan(config: dict[str, Any]) -> dict[str, Any] | None:
+    state = _load_state(config, datetime.now(timezone.utc))
+    scan = state.get("latest_mini_scan") if isinstance(state.get("latest_mini_scan"), dict) else {}
+    if not scan:
+        return None
+    current_symbols = lc_pipeline_internal_symbols(config, limit=10)
+    original_selected_symbols = _symbol_list(
+        scan.get("selected_symbols") if isinstance(scan.get("selected_symbols"), list) else scan.get("approved_symbols"),
+        limit=10,
+    )
+    selected_symbols = [symbol for symbol in original_selected_symbols if symbol in current_symbols]
+    selection_stale = bool(original_selected_symbols and selected_symbols != original_selected_symbols)
+    status = "stale_selection" if selection_stale else scan.get("status")
+    skip_reason = scan.get("skip_reason")
+    if selection_stale and not selected_symbols:
+        skip_reason = "Mini selection is stale because the current LC noi bo pool has changed"
+    return {
+        **scan,
+        "status": status,
+        "pool_symbols": current_symbols,
+        "pool_count": len(current_symbols),
+        "approved_symbols": current_symbols,
+        "approved_count": len(current_symbols),
+        "selected_symbols": selected_symbols,
+        "selected_count": len(selected_symbols),
+        "selected_original_symbols": original_selected_symbols,
+        "selection_stale": selection_stale,
+        "skip_reason": skip_reason,
+    }
+
+
+def save_lc_pipeline_mini_scan(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    state = _load_state(config, datetime.now(timezone.utc))
+    state["latest_mini_scan"] = _compact_mini_scan(payload)
+    _save_state(config, state)
+    return latest_lc_pipeline_mini_scan(config) or {}
 
 
 def _upsert_by_symbol(rows: list[dict[str, Any]], record: dict[str, Any]) -> list[dict[str, Any]]:
@@ -462,7 +908,10 @@ def _candidate_is_relaxed_valid(candidate: TradeCandidate, settings: dict[str, A
     win_probability = float(candidate.win_probability_pct or 0)
     confidence = float(candidate.confidence or 0)
     return (
-        win_probability >= float(settings["relaxed_min_win_probability_pct"])
+        win_probability > max(
+            float(settings["relaxed_min_win_probability_pct"]),
+            float(settings["min_win_probability_pct"]),
+        )
         and confidence >= float(settings["relaxed_min_confidence"])
         and float(candidate.risk_reward or 0) >= 1.5
     )
@@ -474,11 +923,12 @@ def _promote_survivors(
     candidates_by_symbol: dict[str, TradeCandidate],
     settings: dict[str, Any],
     now: datetime,
+    blocked_symbols: set[str],
 ) -> list[dict[str, Any]]:
     if not settings["promote_survivors"]:
         return []
     promoted: list[dict[str, Any]] = []
-    active_symbols = open_pending_symbols(config)
+    active_symbols = open_pending_symbols(config) | set(blocked_symbols)
     internal_lc = list(state.get("internal_lc") or [])
     undecided: list[dict[str, Any]] = []
     local_now = _local_time(config, now)
@@ -494,6 +944,7 @@ def _promote_survivors(
         if (
             age_hours >= float(settings["promote_after_hours"])
             and symbol not in active_symbols
+            and symbol not in blocked_symbols
             and _candidate_is_relaxed_valid(candidate, settings)
         ):
             record = {
@@ -533,6 +984,9 @@ def update_lc_internal_pipeline(
     if not settings["enabled"]:
         return {"enabled": False}
     state = _load_state(config, now)
+    blocked_symbols = _active_symbol_blocklist(config)
+    _prune_blocked_state(state, blocked_symbols)
+    _prune_low_win_state(state, settings)
     top_limit = int(settings["top_limit"])
     candidates_by_symbol = {candidate.symbol: candidate for candidate in candidates}
     hourly_slot = _slot_key(config, now, 1)
@@ -544,10 +998,14 @@ def update_lc_internal_pipeline(
         "created_hourly": False,
         "created_two_hour": False,
         "promoted": [],
+        "blocked_symbols": sorted(blocked_symbols),
     }
 
     if candidates and state.get("last_hourly_slot") != hourly_slot:
-        top = [_candidate_record(candidate, state="HOUR_1") for candidate in _rank_candidates(candidates, top_limit)]
+        top = [
+            _candidate_record(candidate, state="HOUR_1")
+            for candidate in _rank_candidates(candidates, top_limit, blocked_symbols=blocked_symbols, settings=settings)
+        ]
         state["hourly_windows"].append({"slot": hourly_slot, "created_at": now.isoformat(), "top": top})
         state["hourly_windows"] = state["hourly_windows"][-2:]
         state["last_hourly_slot"] = hourly_slot
@@ -566,7 +1024,7 @@ def update_lc_internal_pipeline(
         combined: list[dict[str, Any]] = []
         for window in hourly_windows[-2:]:
             combined.extend(window.get("top") or [])
-        ranked = sorted(combined, key=_candidate_score, reverse=True)
+        ranked = _sort_saved_rows(combined, settings, reverse=True)
         next_daily_index = int(state.get("daily_two_hour_counter") or 0) + 1
         local_now = _local_time(config, now)
         approved: list[dict[str, Any]] = []
@@ -574,7 +1032,7 @@ def update_lc_internal_pipeline(
         approved_keys: set[tuple[str, str]] = set()
         for row in ranked:
             symbol = str(row.get("symbol") or "")
-            if not symbol or symbol in seen:
+            if not symbol or symbol in seen or symbol in blocked_symbols:
                 continue
             approved_row = {
                 **row,
@@ -599,7 +1057,7 @@ def update_lc_internal_pipeline(
                 "source_label": local_now.strftime("%d/%m/%y %H:%M:%S"),
             }
             for row in ranked
-            if _setup_key(row) not in approved_keys
+            if _setup_key(row) not in approved_keys and str(row.get("symbol") or "") not in blocked_symbols
         ]
         existing = list(state.get("undecided") or [])
         existing_by_setup = {_setup_key(row): row for row in existing if row.get("symbol")}
@@ -608,7 +1066,7 @@ def update_lc_internal_pipeline(
             first_seen = previous.get("first_seen_at") if previous else row.get("first_seen_at")
             existing = _upsert_by_setup(existing, {**row, "first_seen_at": first_seen, "last_seen_at": now.isoformat()})
         state["undecided"] = _trim_undecided(existing, settings)
-        state["internal_lc"] = sorted(approved, key=_candidate_score, reverse=True)[: int(settings["internal_lc_max"])]
+        state["internal_lc"] = _sort_saved_rows(approved, settings, reverse=True)[: int(settings["internal_lc_max"])]
         state["daily_two_hour_counter"] = next_daily_index
         event = {
             "slot": two_hour_slot,
@@ -644,12 +1102,12 @@ def update_lc_internal_pipeline(
     )
     if recheck_due:
         state["last_recheck_at"] = now.isoformat()
-        result["promoted"] = _promote_survivors(config, state, candidates_by_symbol, settings, now)
+        result["promoted"] = _promote_survivors(config, state, candidates_by_symbol, settings, now, blocked_symbols)
 
-    result["undecided"] = sorted(state.get("undecided", []), key=_candidate_score, reverse=True)[
+    result["undecided"] = _sort_saved_rows(state.get("undecided", []), settings, reverse=True)[
         : int(settings["undecided_max"])
     ]
-    result["internal_lc"] = sorted(state.get("internal_lc", []), key=_candidate_score, reverse=True)[
+    result["internal_lc"] = _sort_saved_rows(state.get("internal_lc", []), settings, reverse=True)[
         : int(settings["internal_lc_max"])
     ]
     _save_state(config, state)
@@ -659,16 +1117,17 @@ def update_lc_internal_pipeline(
 def lc_pipeline_mini_pool(config: dict[str, Any], candidates: list[TradeCandidate], *, limit: int = 3) -> list[TradeCandidate]:
     settings = _pipeline_config(config)
     if not settings["enabled"]:
-        return _rank_candidates(candidates, limit)
+        return _rank_candidates(candidates, limit, settings=settings)
     state = _load_state(config, datetime.now(timezone.utc))
+    blocked_symbols = _active_symbol_blocklist(config)
     candidates_by_symbol = {candidate.symbol: candidate for candidate in candidates}
     desired_symbols: list[str] = []
     for row in state.get("internal_lc") or []:
         symbol = str(row.get("symbol") or "")
-        if symbol and symbol not in desired_symbols:
+        if symbol and symbol not in desired_symbols and symbol not in blocked_symbols:
             desired_symbols.append(symbol)
     pool = [candidates_by_symbol[symbol] for symbol in desired_symbols if symbol in candidates_by_symbol]
-    return _rank_candidates(pool, limit)
+    return _rank_candidates(pool, limit, blocked_symbols=blocked_symbols, settings=settings)
 
 
 def lc_pipeline_pool_rows(config: dict[str, Any], symbols: list[str]) -> list[dict[str, Any]]:

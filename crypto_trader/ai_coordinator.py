@@ -12,13 +12,20 @@ from .codex_features import (
     get_bunny_health_state,
     get_trading_system_state,
 )
-from .lc_pipeline import lc_pipeline_mini_pool, lc_pipeline_pool_rows, notify_mini_pool_summary
+from .lc_pipeline import (
+    lc_pipeline_internal_symbols,
+    lc_pipeline_mini_pool,
+    lc_pipeline_pool_rows,
+    latest_lc_pipeline_mini_scan,
+    notify_mini_pool_summary,
+    save_lc_pipeline_mini_scan,
+)
 from .market import fetch_market_snapshots, fetch_top_volume_symbols
 from .market_guard import market_guard_symbol_layers
 from .models import RiskCheck, TradeCandidate
 from .news import collect_news
 from .sizing import apply_position_sizing
-from .storage import get_journal_state, list_pending_orders, recent_market_scan_memory, set_journal_state
+from .storage import list_pending_orders, recent_market_scan_memory
 from .strategy import build_candidates, enrich_quantities
 
 
@@ -26,9 +33,6 @@ _PENDING_STATUS_PRIORITY = {
     "LC_OKX": 0,
     "OPEN": 1,
 }
-INTERNAL_MARKET_SCAN_STATE_KEY = "ai_internal_market_scan_latest"
-
-
 def ai_config(config: dict[str, Any]) -> dict[str, Any]:
     return config.get("ai", {})
 
@@ -316,13 +320,7 @@ def next_internal_market_scan_at(config: dict[str, Any], now: datetime | None = 
 
 
 def latest_internal_market_scan(config: dict[str, Any]) -> dict[str, Any] | None:
-    raw = get_journal_state(config, INTERNAL_MARKET_SCAN_STATE_KEY)
-    if not raw:
-        return None
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        return None
+    return latest_lc_pipeline_mini_scan(config)
 
 
 def internal_market_scan_due(config: dict[str, Any], now: datetime | None = None) -> bool:
@@ -561,13 +559,15 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
         "source_symbols": source_symbols,
         "candidate_count": len(candidates),
         "local_policy": local_result,
+        "pool_symbols": list(mini_candidate_symbols or []),
+        "selected_symbols": list(local_result.get("approved_symbols") or []),
         "approved_symbols": list(local_result.get("approved_symbols") or []),
         "candidates": candidate_summaries[:max_symbols],
         "scan_memory": scan_memory if not compact_payload else {},
         "compact_ai_payload": compact_payload,
         "warnings": warnings[:20],
     }
-    set_journal_state(config, INTERNAL_MARKET_SCAN_STATE_KEY, json.dumps(result, ensure_ascii=False))
+    save_lc_pipeline_mini_scan(config, result)
 
     if has_full_mini_pool and result["provider"] == "openai" and bool(internal_config.get("market_scan_use_ai", True)):
         try:
@@ -578,7 +578,7 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
                 local_result,
             )
             result["ai_review"] = ai_review
-            result["approved_symbols"] = _validated_ai_symbols(
+            result["selected_symbols"] = _validated_ai_symbols(
                 ai_review,
                 allowed,
                 list(mini_candidate_symbols or local_result.get("approved_symbols") or []),
@@ -588,16 +588,16 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
             if isinstance(scores, dict):
                 result["setup_scores"] = {
                     str(symbol): scores.get(symbol)
-                    for symbol in result["approved_symbols"]
+                    for symbol in result["selected_symbols"]
                     if symbol in scores
                 }
         except (RuntimeError, urllib.error.URLError, urllib.error.HTTPError, KeyError, json.JSONDecodeError) as exc:
             result["ai_review_error"] = str(exc)
             result["fallback"] = "local_policy"
 
+    result["approved_symbols"] = list(result.get("selected_symbols") or [])
     result["status"] = "done" if has_full_mini_pool else "waiting_lc"
-    set_journal_state(config, INTERNAL_MARKET_SCAN_STATE_KEY, json.dumps(result, ensure_ascii=False))
-    return result
+    return save_lc_pipeline_mini_scan(config, result)
 
 
 def run_internal_market_scan_if_due(config: dict[str, Any]) -> dict[str, Any] | None:
@@ -611,15 +611,18 @@ def internal_market_shortlist(config: dict[str, Any]) -> tuple[list[str], dict[s
     if not ai_enabled(config) or not bool(internal_config.get("market_scan_use_shortlist", True)):
         return [], None
     latest = latest_internal_market_scan(config)
+    symbols = lc_pipeline_internal_symbols(
+        config,
+        limit=max(1, min(3, int(internal_config.get("market_scan_max_symbols", 3) or 3))),
+    )
     if not latest:
-        return [], None
+        return symbols, None
     created_at = _parse_time(latest.get("created_at"))
     if not created_at:
-        return [], None
+        return symbols, None
     max_age = internal_market_scan_interval(config) * 1.5
     if (datetime.now(timezone.utc) - created_at).total_seconds() > max_age:
-        return [], {**latest, "stale": True}
-    symbols = [str(symbol) for symbol in latest.get("approved_symbols") or [] if str(symbol)]
+        return symbols, {**latest, "stale": True}
     return symbols, {**latest, "stale": False}
 
 

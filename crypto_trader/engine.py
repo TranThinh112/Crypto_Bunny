@@ -21,10 +21,10 @@ from .codex_features import (
     select_runtime_config,
 )
 from .executor import execute_candidate
-from .lc_pipeline import update_lc_internal_pipeline
+from .lc_pipeline import lc_pipeline_pool_rows, update_lc_internal_pipeline
 from .market import fetch_market_snapshots, fetch_top_volume_symbols
 from .market_guard import market_guard_symbol_layers, market_guard_top_risk
-from .models import Decision, ExecutionResult, RiskCheck, to_jsonable
+from .models import Decision, ExecutionResult, RiskCheck, TradeCandidate, to_jsonable
 from .news import collect_news
 from .pending import maintain_pending_orders
 from .risk import active_trades_summary, evaluate_candidate
@@ -213,9 +213,11 @@ def _internal_scan_allows_pending(config: dict[str, Any], scan: dict[str, Any] |
     internal_config = config.get("ai", {}).get("internal", {})
     if not bool(internal_config.get("market_scan_to_pending", True)):
         return False, "Mini scan pending queue is disabled"
-    approved_symbols = [str(symbol) for symbol in scan.get("approved_symbols") or [] if str(symbol)]
-    if not approved_symbols:
-        return False, "Mini scan has no approved symbols"
+    selected_symbols = [str(symbol) for symbol in scan.get("selected_symbols") or [] if str(symbol)]
+    if not selected_symbols:
+        if scan.get("selection_stale"):
+            return False, "Mini selection is stale because the current LC noi bo pool has changed"
+        return False, "Mini scan has no selected symbols"
     if bool(internal_config.get("market_scan_require_ai_for_pending", True)):
         if scan.get("fallback") or scan.get("ai_review_error"):
             return False, "Mini scan did not finish with external AI approval"
@@ -245,6 +247,52 @@ def _mini_pending_risk_config(config: dict[str, Any]) -> dict[str, Any]:
     return risk_config
 
 
+def _candidate_from_payload(payload: dict[str, Any]) -> TradeCandidate | None:
+    if not isinstance(payload, dict):
+        return None
+    symbol = str(payload.get("symbol") or "")
+    side = str(payload.get("side") or "").lower()
+    if not symbol or side not in {"long", "short"}:
+        return None
+    fields = set(TradeCandidate.__dataclass_fields__.keys())
+    clean = {key: payload.get(key) for key in fields if key in payload}
+    clean.setdefault("symbol", symbol)
+    clean.setdefault("base", str(payload.get("base") or symbol.split("/")[0]))
+    clean.setdefault("side", side)
+    clean.setdefault("confidence", float(payload.get("confidence") or 0))
+    clean.setdefault("entry", float(payload.get("entry") or 0))
+    clean.setdefault("stop_loss", float(payload.get("stop_loss") or 0))
+    clean.setdefault("take_profit", float(payload.get("take_profit") or 0))
+    clean.setdefault("risk_reward", float(payload.get("risk_reward") or 0))
+    clean.setdefault("order_usdt", float(payload.get("order_usdt") or 0))
+    clean.setdefault("quantity", payload.get("quantity"))
+    clean.setdefault("spread_pct", payload.get("spread_pct"))
+    clean.setdefault("news_score", float(payload.get("news_score") or 0))
+    clean.setdefault("news_count", int(payload.get("news_count") or 0))
+    clean.setdefault("higher_timeframes", payload.get("higher_timeframes") or {})
+    clean.setdefault("indicator_summary", payload.get("indicator_summary") or {})
+    clean.setdefault("candlestick_patterns", payload.get("candlestick_patterns") or {})
+    clean.setdefault("reasons", payload.get("reasons") or [])
+    clean.setdefault("warnings", payload.get("warnings") or [])
+    return TradeCandidate(**clean)
+
+
+def _internal_lc_candidate_cache(
+    config: dict[str, Any],
+    symbols: list[str],
+) -> dict[str, TradeCandidate]:
+    cached_rows: list[TradeCandidate] = []
+    for row in lc_pipeline_pool_rows(config, symbols):
+        candidate = _candidate_from_payload((row or {}).get("payload") or {})
+        if candidate is None:
+            continue
+        cached_rows.append(candidate)
+    if cached_rows:
+        apply_position_sizing(config, cached_rows)
+        enrich_quantities(config, cached_rows)
+    return {candidate.symbol: candidate for candidate in cached_rows}
+
+
 def _create_pending_from_internal_scan(
     config: dict[str, Any],
     candidates: list[Any],
@@ -267,15 +315,24 @@ def _create_pending_from_internal_scan(
     if not result["enabled"] or not allowed:
         return result
 
-    approved = [str(symbol) for symbol in (internal_scan or {}).get("approved_symbols") or [] if str(symbol)]
-    candidates_by_symbol = {candidate.symbol: candidate for candidate in candidates}
+    approved = [str(symbol) for symbol in (internal_scan or {}).get("selected_symbols") or [] if str(symbol)]
+    current_candidates_by_symbol = {candidate.symbol: candidate for candidate in candidates}
+    cached_candidates_by_symbol = _internal_lc_candidate_cache(config, approved)
     created_symbols = set(pending_symbols)
     for symbol in approved:
         if result["created"] >= pending_limit:
             break
-        candidate = candidates_by_symbol.get(symbol)
+        candidate = (
+            cached_candidates_by_symbol.get(symbol)
+            or current_candidates_by_symbol.get(symbol)
+        )
         if candidate is None:
-            result["skipped"].append({"symbol": symbol, "reason": "approved symbol not found in current candidates"})
+            result["skipped"].append(
+                {
+                    "symbol": symbol,
+                    "reason": "approved symbol not available in saved internal LC setup",
+                }
+            )
             continue
         if candidate.symbol in created_symbols:
             result["skipped"].append({"symbol": candidate.symbol, "reason": "already pending or active in LC memory"})
@@ -401,6 +458,8 @@ def run_once(config: dict[str, Any], execute: bool) -> Decision:
         limit=None,
         market_layers=market_layers,
     )
+    apply_position_sizing(config, all_new_candidates)
+    enrich_quantities(config, all_new_candidates)
     market_regime = detect_market_regime(config, new_scan_snapshots or snapshots)
     for candidate in all_new_candidates:
         candidate.market_regime = market_regime.get("regime")

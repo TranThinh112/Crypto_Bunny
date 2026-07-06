@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import tempfile
-import json
 from copy import deepcopy
 from datetime import datetime, timezone
 from unittest import TestCase
 
 from crypto_trader.ai_coordinator import (
-    INTERNAL_MARKET_SCAN_STATE_KEY,
     _candidate_market_summary,
     _local_market_scan_result,
     _validated_ai_symbols,
@@ -16,8 +14,9 @@ from crypto_trader.ai_coordinator import (
     okx_ai_approval,
 )
 from crypto_trader.config import DEFAULT_CONFIG
+from crypto_trader.lc_pipeline import save_lc_pipeline_mini_scan
 from crypto_trader.models import RiskCheck, TradeCandidate
-from crypto_trader.storage import recent_market_scan_memory, save_market_scan_observations, save_pending_order, set_journal_state
+from crypto_trader.storage import recent_market_scan_memory, save_market_scan_observations, save_pending_order
 
 
 def _candidate(symbol: str = "BTC/USDT:USDT", side: str = "long", win: float = 82.0) -> TradeCandidate:
@@ -90,10 +89,9 @@ class AiCoordinatorTest(TestCase):
         config["ai"]["internal"]["market_scan_interval_seconds"] = 14400
         now = datetime(2026, 7, 4, 13, 30, tzinfo=timezone.utc)
         slot_id = datetime(2026, 7, 4, 13, 0, tzinfo=timezone.utc).isoformat()
-        set_journal_state(
+        save_lc_pipeline_mini_scan(
             config,
-            INTERNAL_MARKET_SCAN_STATE_KEY,
-            json.dumps({"created_at": now.isoformat(), "slot_id": slot_id}, ensure_ascii=False),
+            {"created_at": now.isoformat(), "slot_id": slot_id, "status": "done", "approved_symbols": []},
         )
 
         self.assertFalse(internal_market_scan_due(config, now=now))
