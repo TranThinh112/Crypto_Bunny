@@ -279,6 +279,7 @@ class UiTest(TestCase):
             for button in row
         ]
         self.assertIn("scan_now", callbacks)
+        self.assertNotIn("view_menu", callbacks)
         self.assertIn("view_guard", callbacks)
         self.assertIn("view_memory", callbacks)
         self.assertIn("view_undecided_lc", callbacks)

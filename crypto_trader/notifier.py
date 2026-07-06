@@ -48,7 +48,6 @@ def telegram_control_keyboard() -> dict[str, Any]:
     return {
         "inline_keyboard": [
             [
-                {"text": "\U0001f4f2 Dashboard", "callback_data": "view_menu"},
                 {"text": "\U0001f50e Scan ngay", "callback_data": "scan_now"},
             ],
             [
