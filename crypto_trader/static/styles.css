@@ -312,9 +312,15 @@ h2 {
 
 .pulse-grid {
   display: grid;
-  grid-template-columns: minmax(220px, 0.28fr) minmax(320px, 1fr) minmax(280px, 0.36fr);
+  grid-template-columns: minmax(220px, 0.28fr) minmax(440px, 1fr) minmax(300px, 0.4fr);
   gap: 12px;
   align-items: stretch;
+}
+
+.pulse-side-column {
+  display: grid;
+  gap: 12px;
+  align-content: start;
 }
 
 .pair-cell {
@@ -572,7 +578,8 @@ tr.selected-row td {
 .pulse-feed {
   display: grid;
   gap: 6px;
-  max-height: 112px;
+  align-content: start;
+  max-height: 124px;
   overflow-y: auto;
 }
 
@@ -581,17 +588,23 @@ tr.selected-row td {
   grid-template-columns: 92px minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
-  min-height: 36px;
-  padding: 7px 10px;
-  font-size: 12px;
+  min-height: 58px;
+  padding: 10px 14px;
+  font-size: 14px;
 }
 
 .pulse-feed-item span {
   color: var(--muted);
+  font-size: 13px;
+}
+
+.pulse-feed-item div {
+  overflow-wrap: anywhere;
 }
 
 .pulse-feed-item strong {
   text-align: right;
+  font-size: 13px;
 }
 
 .panel {
@@ -971,8 +984,9 @@ tr:last-child td {
 
 .pulse-lc-card {
   padding: 10px;
-  max-height: 148px;
-  overflow: auto;
+  min-height: 246px;
+  max-height: 246px;
+  overflow: hidden;
 }
 
 .pulse-lc-card h3 {
@@ -981,13 +995,9 @@ tr:last-child td {
 
 .pulse-lc-card .health-lines {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 2px 8px;
-  font-size: 11px;
-}
-
-.pulse-lc-card .health-lines div:nth-child(n + 4) {
-  display: none;
+  font-size: 12px;
 }
 
 .pulse-lc-card .lc-pipeline-rows {
@@ -995,16 +1005,28 @@ tr:last-child td {
   margin-top: 8px;
 }
 
-.pulse-lc-card .lc-pipeline-section:last-child {
-  display: none;
-}
-
 .pulse-lc-card .lc-pipeline-row {
   padding: 6px 7px;
+  min-height: 52px;
 }
 
-.pulse-lc-card .lc-pipeline-row:nth-of-type(n + 5) {
-  display: none;
+.pulse-lc-card .lc-pipeline-scroll {
+  display: grid;
+  gap: 6px;
+  max-height: 168px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.pulse-lc-detail-card {
+  padding: 12px;
+}
+
+.pulse-lc-detail-card .health-lines {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 4px;
+  font-size: 12px;
 }
 
 .lc-pipeline-rows {
@@ -1066,6 +1088,32 @@ tr:last-child td {
   color: var(--muted);
   font-size: 12px;
   font-weight: 700;
+}
+
+.lc-telegram-rows {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.lc-telegram-row {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.lc-telegram-row strong {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.lc-telegram-row small {
+  color: var(--muted);
+  font-weight: 700;
+  line-height: 1.45;
 }
 
 .module-grid {

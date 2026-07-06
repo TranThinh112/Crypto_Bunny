@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 import yaml
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import DEFAULT_CONFIG, load_config, project_path
@@ -72,7 +72,6 @@ from .market_guard import (
 from .models import to_jsonable
 from .notifier import (
     answer_callback_query,
-    delete_telegram_message,
     edit_telegram_chat_message,
     fetch_telegram_updates,
     send_telegram_chat_message,
@@ -567,7 +566,12 @@ def _run_automation_cycle(app: FastAPI) -> None:
     messages: list[str] = []
     should_notify_scan = status.get("last_result") == "error" or telegram_notify_scans(config)
     if should_notify_scan:
-        messages.append(format_scan_message(config, payload, status))
+        send_telegram_message(
+            config,
+            format_scan_message(config, payload, status),
+            with_buttons=False,
+            replace_previous=True,
+        )
     if payload:
         messages.extend(format_pending_event_messages(payload))
         messages.extend(format_execution_messages(payload))
@@ -984,6 +988,38 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
         thread_id = message.get("message_thread_id")
         message_id = message.get("message_id")
         response_config, response_text, reply_markup = _telegram_action_response(config, action, config_path, app)
+        inline_view_actions = {
+            "view_menu",
+            "view_guard",
+            "view_lc",
+            "view_undecided_lc",
+            "view_internal_notifications",
+            "view_memory",
+            "view_ai",
+            "view_ai_more",
+            "view_positions_account",
+            "view_vt",
+            "view_pnl_sd",
+        }
+        if action in inline_view_actions and message_id is not None:
+            edited = edit_telegram_chat_message(
+                response_config,
+                chat_id,
+                message_id,
+                response_text,
+                reply_markup=reply_markup,
+            )
+            if edited:
+                return
+            send_telegram_chat_message(
+                response_config,
+                chat_id,
+                response_text,
+                message_thread_id=thread_id,
+                with_buttons=reply_markup is None,
+                reply_markup=reply_markup,
+            )
+            return
         if (action in {"view_setup", "setup_menu"} or "setup" in action.lower()) and message_id is not None:
             edited = edit_telegram_chat_message(
                 response_config,
@@ -994,31 +1030,12 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
             )
             if edited:
                 return
-            delete_telegram_message(response_config, chat_id, message_id)
             send_telegram_chat_message(
                 response_config,
                 chat_id,
                 response_text,
                 message_thread_id=thread_id,
-                reply_markup=reply_markup,
-            )
-            return
-        if action == "view_menu" and message_id is not None:
-            edited = edit_telegram_chat_message(
-                response_config,
-                chat_id,
-                message_id,
-                response_text,
-                reply_markup=reply_markup,
-            )
-            if edited:
-                return
-            delete_telegram_message(response_config, chat_id, message_id)
-            send_telegram_chat_message(
-                response_config,
-                chat_id,
-                response_text,
-                message_thread_id=thread_id,
+                with_buttons=reply_markup is None,
                 reply_markup=reply_markup,
             )
             return
@@ -1027,6 +1044,7 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
             chat_id,
             response_text,
             message_thread_id=thread_id,
+            with_buttons=reply_markup is None,
             reply_markup=reply_markup,
         )
         return
@@ -1213,7 +1231,7 @@ def _market_guard_worker(app: FastAPI) -> None:
             app.state.market_guard_status = status
             now = datetime.now(timezone.utc)
             if (status.get("alerts") or []) and _market_guard_notify_due(config, now):
-                send_telegram_message(config, format_market_guard_message(status))
+                send_telegram_message(config, format_market_guard_message(status), replace_previous=False)
                 _mark_market_guard_notified(config, now)
         except Exception as exc:
             app.state.market_guard_status = {
@@ -1574,7 +1592,11 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
     @app.get("/api/lc-pipeline")
     def lc_pipeline_endpoint() -> dict[str, Any]:
         config = load_config(app.state.config_path)
-        return lc_pipeline_dashboard_payload(config)
+        response = JSONResponse(lc_pipeline_dashboard_payload(config))
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
 
     @app.post("/api/market-scan-memory/prune")
     def market_scan_memory_prune() -> dict[str, Any]:

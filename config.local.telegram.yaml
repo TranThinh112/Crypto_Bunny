@@ -199,7 +199,7 @@ notifications:
     timeout_seconds: 8
     retry_count: 2
     buttons_enabled: true
-    replace_previous_message: true
+    replace_previous_message: false
     polling_enabled: true
     poll_timeout_seconds: 1
     button_cache_ttl_seconds: 15

@@ -324,7 +324,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "timeout_seconds": 8,
             "retry_count": 2,
             "buttons_enabled": True,
-            "replace_previous_message": True,
+            "replace_previous_message": False,
             "polling_enabled": True,
             "poll_timeout_seconds": 1,
             "button_cache_ttl_seconds": 15,

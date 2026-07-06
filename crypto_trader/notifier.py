@@ -43,8 +43,9 @@ def telegram_buttons_enabled(config: dict[str, Any]) -> bool:
 
 
 def telegram_replace_previous_enabled(config: dict[str, Any]) -> bool:
-    telegram_config = config.get("notifications", {}).get("telegram", {})
-    return bool(telegram_config.get("replace_previous_message", True))
+    # Chỉ cho phép thay thế message ở những luồng gọi explicit `replace_previous=True`
+    # như SC định kỳ. Mọi tin nhắn Telegram khác giữ nguyên, không tự xóa.
+    return False
 
 
 def telegram_command_list() -> list[dict[str, str]]:

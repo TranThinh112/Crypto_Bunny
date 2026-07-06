@@ -1,5 +1,6 @@
 const state = {
   autoTimer: null,
+  lcPipelineTimer: null,
   priceTimer: null,
   paperTimer: null,
   paperIntervalSeconds: 60,
@@ -76,6 +77,8 @@ const refs = {
   scanMemorySummary: el("scanMemorySummary"),
   lcPipelineSummary: el("lcPipelineSummary"),
   lcPipelineRows: el("lcPipelineRows"),
+  lcInternalSummary: el("lcInternalSummary"),
+  lcInternalRows: el("lcInternalRows"),
   storageMaintenanceBtn: el("storageMaintenanceBtn"),
   planTag: el("planTag"),
   planCanvas: el("planCanvas"),
@@ -1864,6 +1867,51 @@ function sideBadgeClass(side) {
   return "";
 }
 
+function lcSourceLabel(row) {
+  if (!row) return "-";
+  if (row.revived_at) return row.revived_label ? `HS ${row.revived_label}` : "HS";
+  const slot = String(row.source_slot || row.state || "-");
+  const index = row.source_index;
+  return index ? `${slot} #${index}` : slot;
+}
+
+function lcWinText(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+  return `${fmt(value, 2)}%`;
+}
+
+function lcRowMeta(row) {
+  const scanTime = timeLabel(row?.source_time || row?.last_seen_at || row?.first_seen_at);
+  const source = lcSourceLabel(row);
+  const age = row?.age_label || "-";
+  return `${scanTime} | ${source} | sống ${escapeHtml(age)}`;
+}
+
+function lcCompactSection(title, rows, emptyText = "Chưa có dữ liệu.") {
+  return `
+    <div class="lc-pipeline-section">
+      <div class="lc-pipeline-title">${escapeHtml(title)} <span>${fmt(rows.length, 0)}</span></div>
+      ${rows.length ? rows.map((row, index) => `
+        <div class="lc-pipeline-row">
+          <strong>${index + 1}. ${escapeHtml(row.symbol || "-")}</strong>
+          <span class="side ${sideBadgeClass(row.side)}">${escapeHtml(String(row.side || "-").toUpperCase())}</span>
+          <span>Win ${lcWinText(row.win_probability_pct)}</span>
+          <small>${lcRowMeta(row)}</small>
+        </div>
+      `).join("") : `<div class="lc-pipeline-empty">${escapeHtml(emptyText)}</div>`}
+    </div>
+  `;
+}
+
+function lcTelegramSection(rows, emptyText = "Chưa có LC nội bộ.") {
+  return rows.length ? rows.map((row, index) => `
+    <div class="lc-telegram-row">
+      <strong>${index + 1}. ${escapeHtml(row.symbol || "-")} | ${escapeHtml(String(row.side || "-").toUpperCase())} | Win ${lcWinText(row.win_probability_pct)}</strong>
+      <small>${lcRowMeta(row)}</small>
+    </div>
+  `).join("") : `<div class="lc-pipeline-empty">${escapeHtml(emptyText)}</div>`;
+}
+
 function renderLcPipeline(payload) {
   const data = payload || {};
   const counts = data.counts || {};
@@ -1896,6 +1944,267 @@ function renderLcPipeline(payload) {
   `;
   refs.lcPipelineRows.innerHTML = section("Chưa Duyệt", undecided) + section("LC nội bộ", internalLc);
   normalizeVietnameseUi(refs.lcPipelineRows);
+}
+
+function renderLcPipelineEnhanced(payload) {
+  const data = payload || {};
+  const counts = data.counts || {};
+  const settings = data.settings || {};
+  const undecided = (Array.isArray(data.undecided) ? data.undecided : []).slice(0, Math.max(1, Number(settings.undecided_max || 6)));
+  const internalLc = Array.isArray(data.internal_lc) ? data.internal_lc : [];
+
+  if (refs.lcPipelineSummary) {
+    refs.lcPipelineSummary.innerHTML = `
+      <div>Chưa Duyệt: <strong>${fmt(counts.undecided, 0)}</strong> / tối đa ${fmt(settings.undecided_max, 0)}</div>
+      <div>Cắt lọc: bỏ ${fmt(settings.undecided_prune_drop, 0)} win rate thấp nhất khi vượt ${fmt(settings.undecided_prune_floor, 0)}</div>
+      <div>LC nội bộ: <strong>${fmt(counts.internal_lc, 0)}</strong> / tối đa ${fmt(settings.internal_lc_max, 0)}</div>
+      <div>Tổng hợp 2h hôm nay: <strong>${fmt(data.daily_two_hour_counter, 0)}</strong></div>
+      <div>Recheck: mỗi <strong>${fmt(settings.recheck_interval_minutes, 0)} phút</strong> · Promote sau <strong>${fmt(settings.promote_after_hours, 1)}h</strong></div>
+      <div>Lần 2h gần nhất: ${timeLabel(data.last_two_hour_slot)}</div>
+    `;
+  }
+
+  if (refs.lcPipelineRows) {
+    refs.lcPipelineRows.innerHTML = lcCompactSection("Chưa Duyệt", undecided, "Chưa có cặp Chưa Duyệt.");
+    normalizeVietnameseUi(refs.lcPipelineRows);
+  }
+
+  if (refs.lcInternalSummary) {
+    refs.lcInternalSummary.innerHTML = `
+      <div>Tổng LC: <strong>${fmt(counts.internal_lc, 0)}</strong> / tối đa ${fmt(settings.internal_lc_max, 0)}</div>
+      <div>Tổng hợp 2h hôm nay: <strong>${fmt(data.daily_two_hour_counter, 0)}</strong></div>
+      <div>Lần 2h gần nhất: ${timeLabel(data.last_two_hour_slot)}</div>
+    `;
+  }
+
+  if (refs.lcInternalRows) {
+    refs.lcInternalRows.innerHTML = lcTelegramSection(internalLc);
+    normalizeVietnameseUi(refs.lcInternalRows);
+  }
+}
+
+// Override text rendering with clean Vietnamese strings for LC and pulse feed.
+function lcRowMeta(row) {
+  const scanTime = timeLabel(row?.source_time || row?.last_seen_at || row?.first_seen_at);
+  const source = lcSourceLabel(row);
+  const age = row?.age_label || "-";
+  return `${scanTime} | ${source} | sống ${escapeHtml(age)}`;
+}
+
+function lcCompactSection(title, rows, emptyText = "Chưa có dữ liệu.") {
+  return `
+    <div class="lc-pipeline-section">
+      <div class="lc-pipeline-title">${escapeHtml(title)} <span>${fmt(rows.length, 0)}</span></div>
+      ${rows.length ? rows.map((row, index) => `
+        <div class="lc-pipeline-row">
+          <strong>${index + 1}. ${escapeHtml(row.symbol || "-")}</strong>
+          <span class="side ${sideBadgeClass(row.side)}">${escapeHtml(String(row.side || "-").toUpperCase())}</span>
+          <span>Win ${lcWinText(row.win_probability_pct)}</span>
+          <small>${lcRowMeta(row)}</small>
+        </div>
+      `).join("") : `<div class="lc-pipeline-empty">${escapeHtml(emptyText)}</div>`}
+    </div>
+  `;
+}
+
+function lcTelegramSection(rows, emptyText = "Chưa có LC nội bộ.") {
+  return rows.length ? rows.map((row, index) => `
+    <div class="lc-telegram-row">
+      <strong>${index + 1}. ${escapeHtml(row.symbol || "-")} | ${escapeHtml(String(row.side || "-").toUpperCase())} | Win ${lcWinText(row.win_probability_pct)}</strong>
+      <small>${lcRowMeta(row)}</small>
+    </div>
+  `).join("") : `<div class="lc-pipeline-empty">${escapeHtml(emptyText)}</div>`;
+}
+
+function renderLcPipelineEnhanced(payload) {
+  const data = payload || {};
+  const counts = data.counts || {};
+  const settings = data.settings || {};
+  const undecided = (Array.isArray(data.undecided) ? data.undecided : []).slice(0, Math.max(1, Number(settings.undecided_max || 6)));
+  const internalLc = Array.isArray(data.internal_lc) ? data.internal_lc : [];
+
+  if (refs.lcPipelineSummary) {
+    refs.lcPipelineSummary.innerHTML = `
+      <div>Chưa Duyệt: <strong>${fmt(counts.undecided, 0)}</strong> / tối đa ${fmt(settings.undecided_max, 0)}</div>
+      <div>Cắt lọc: bỏ ${fmt(settings.undecided_prune_drop, 0)} win rate thấp nhất khi vượt ${fmt(settings.undecided_prune_floor, 0)}</div>
+      <div>LC nội bộ: <strong>${fmt(counts.internal_lc, 0)}</strong> / tối đa ${fmt(settings.internal_lc_max, 0)}</div>
+      <div>Tổng hợp 2h hôm nay: <strong>${fmt(data.daily_two_hour_counter, 0)}</strong></div>
+      <div>Recheck: mỗi <strong>${fmt(settings.recheck_interval_minutes, 0)} phút</strong> · Promote sau <strong>${fmt(settings.promote_after_hours, 1)}h</strong></div>
+      <div>Lần 2h gần nhất: ${timeLabel(data.last_two_hour_slot)}</div>
+    `;
+  }
+
+  if (refs.lcPipelineRows) {
+    refs.lcPipelineRows.innerHTML = lcCompactSection("Chưa Duyệt", undecided, "Chưa có cặp Chưa Duyệt.");
+    normalizeVietnameseUi(refs.lcPipelineRows);
+  }
+
+  if (refs.lcInternalSummary) {
+    refs.lcInternalSummary.innerHTML = `
+      <div>Tổng LC: <strong>${fmt(counts.internal_lc, 0)}</strong> / tối đa ${fmt(settings.internal_lc_max, 0)}</div>
+      <div>Tổng hợp 2h hôm nay: <strong>${fmt(data.daily_two_hour_counter, 0)}</strong></div>
+      <div>Lần 2h gần nhất: ${timeLabel(data.last_two_hour_slot)}</div>
+    `;
+  }
+
+  if (refs.lcInternalRows) {
+    refs.lcInternalRows.innerHTML = lcTelegramSection(internalLc);
+    normalizeVietnameseUi(refs.lcInternalRows);
+  }
+}
+
+// Final LC UI override: keep exactly 3 visible rows, rest scroll below.
+function lcRowMeta(row) {
+  const scanTime = timeLabel(row?.source_time || row?.last_seen_at || row?.first_seen_at);
+  const source = lcSourceLabel(row);
+  const age = row?.age_label || "-";
+  return `${scanTime} | ${source} | sống ${escapeHtml(age)}`;
+}
+
+function lcCompactSection(title, rows, emptyText = "Chưa có dữ liệu.") {
+  return `
+    <div class="lc-pipeline-section">
+      <div class="lc-pipeline-title">${escapeHtml(title)} <span>${fmt(rows.length, 0)}</span></div>
+      ${rows.length ? `
+        <div class="lc-pipeline-scroll">
+          ${rows.map((row, index) => `
+            <div class="lc-pipeline-row">
+              <strong>${index + 1}. ${escapeHtml(row.symbol || "-")}</strong>
+              <span class="side ${sideBadgeClass(row.side)}">${escapeHtml(String(row.side || "-").toUpperCase())}</span>
+              <span>Win ${lcWinText(row.win_probability_pct)}</span>
+              <small>${lcRowMeta(row)}</small>
+            </div>
+          `).join("")}
+        </div>
+      ` : `<div class="lc-pipeline-empty">${escapeHtml(emptyText)}</div>`}
+    </div>
+  `;
+}
+
+function lcTelegramSection(rows, emptyText = "Chưa có LC nội bộ.") {
+  return rows.length ? rows.map((row, index) => `
+    <div class="lc-telegram-row">
+      <strong>${index + 1}. ${escapeHtml(row.symbol || "-")} | ${escapeHtml(String(row.side || "-").toUpperCase())} | Win ${lcWinText(row.win_probability_pct)}</strong>
+      <small>${lcRowMeta(row)}</small>
+    </div>
+  `).join("") : `<div class="lc-pipeline-empty">${escapeHtml(emptyText)}</div>`;
+}
+
+function renderLcPipelineEnhanced(payload) {
+  const data = payload || {};
+  const counts = data.counts || {};
+  const settings = data.settings || {};
+  const undecided = (Array.isArray(data.undecided) ? data.undecided : []).slice(0, Math.max(1, Number(settings.undecided_max || 6)));
+  const internalLc = Array.isArray(data.internal_lc) ? data.internal_lc : [];
+
+  if (refs.lcPipelineSummary) {
+    refs.lcPipelineSummary.innerHTML = `
+      <div>Chưa Duyệt: <strong>${fmt(counts.undecided, 0)}</strong> / tối đa ${fmt(settings.undecided_max, 0)}</div>
+      <div>Cắt lọc: bỏ ${fmt(settings.undecided_prune_drop, 0)} win rate thấp nhất khi vượt ${fmt(settings.undecided_prune_floor, 0)}</div>
+      <div>LC nội bộ: <strong>${fmt(counts.internal_lc, 0)}</strong> / tối đa ${fmt(settings.internal_lc_max, 0)}</div>
+      <div>Tổng hợp 2h hôm nay: <strong>${fmt(data.daily_two_hour_counter, 0)}</strong></div>
+      <div>Recheck: mỗi <strong>${fmt(settings.recheck_interval_minutes, 0)} phút</strong> · Promote sau <strong>${fmt(settings.promote_after_hours, 1)}h</strong></div>
+      <div>Lần 2h gần nhất: ${timeLabel(data.last_two_hour_slot)}</div>
+    `;
+  }
+
+  if (refs.lcPipelineRows) {
+    refs.lcPipelineRows.innerHTML = lcCompactSection("Chưa Duyệt", undecided, "Chưa có cặp Chưa Duyệt.");
+    normalizeVietnameseUi(refs.lcPipelineRows);
+  }
+
+  if (refs.lcInternalSummary) {
+    refs.lcInternalSummary.innerHTML = `
+      <div>Tổng LC: <strong>${fmt(counts.internal_lc, 0)}</strong> / tối đa ${fmt(settings.internal_lc_max, 0)}</div>
+      <div>Tổng hợp 2h hôm nay: <strong>${fmt(data.daily_two_hour_counter, 0)}</strong></div>
+      <div>Lần 2h gần nhất: ${timeLabel(data.last_two_hour_slot)}</div>
+    `;
+  }
+
+  if (refs.lcInternalRows) {
+    refs.lcInternalRows.innerHTML = lcTelegramSection(internalLc);
+    normalizeVietnameseUi(refs.lcInternalRows);
+  }
+}
+
+function movementText(delta) {
+  if (delta > 0) return "TĂNG";
+  if (delta < 0) return "GIẢM";
+  return "KHÔNG ĐỔI";
+}
+
+function appendPulseLog({ symbol, last, previous, createdAt }) {
+  if (!previous || !Number.isFinite(last) || !Number.isFinite(previous)) return;
+  const delta = last - previous;
+  const deltaPct = previous ? (delta / previous) * 100 : 0;
+  const cls = movementClass(delta);
+  const node = document.createElement("div");
+  node.className = `pulse-feed-item ${cls}`;
+  node.innerHTML = `
+    <span>${new Date(createdAt).toLocaleTimeString("en-US")}</span>
+    <div>${escapeHtml(symbol)} ${movementText(delta)} từ ${fmt(previous, 2)} đến ${fmt(last, 2)}</div>
+    <strong>${signed(delta, 2)} (${signed(deltaPct, 3)}%)</strong>
+  `;
+  refs.pulseFeed.prepend(node);
+  while (refs.pulseFeed.children.length > 12) refs.pulseFeed.removeChild(refs.pulseFeed.lastElementChild);
+}
+
+function renderPricePulse(payload) {
+  const prices = payload.prices || [];
+  prices.forEach((item) => {
+    const last = nullableNumber(item.last);
+    if (last !== null) state.currentPrices.set(item.symbol, last);
+  });
+
+  const viewCandidate = state.currentDecision ? selectedCandidate(state.currentDecision) : null;
+  const focusSymbol = viewCandidate?.symbol || payload.focus?.symbol || prices[0]?.symbol;
+  const focus = prices.find((item) => item.symbol === focusSymbol) || prices[0];
+  const warnings = payload.warnings || [];
+  const sourceLabel = payload.cached ? "Cache" : warnings.length ? "Cảnh báo giá" : "Mới 60 giây";
+  refs.pulseUpdated.textContent = `${sourceLabel} - ${timeLabel(payload.created_at)}`;
+
+  if (!focus) {
+    refs.pulseSymbol.textContent = "-";
+    refs.pulseMove.textContent = warnings[0] || "Không có dữ liệu giá";
+    refs.pulseMove.className = "flat";
+    return;
+  }
+
+  const current = nullableNumber(focus.last);
+  if (current === null) {
+    refs.pulseSymbol.textContent = focus.symbol || "-";
+    refs.pulseMove.className = "flat";
+    refs.pulseMove.textContent = focus.error || warnings[0] || "Không có dữ liệu giá";
+    return;
+  }
+
+  if (focus.stale) {
+    refs.pulseSymbol.textContent = `${focus.symbol} ${fmt(current, 2)}`;
+    refs.pulseMove.className = "flat";
+    refs.pulseMove.textContent = "Đang dùng giá gần nhất vì OKX tạm thời lỗi";
+    if (state.currentDecision) renderSelected(state.currentDecision);
+    return;
+  }
+
+  const previous = state.lastPrices.get(focus.symbol);
+  refs.pulseSymbol.textContent = `${focus.symbol} ${fmt(current, 2)}`;
+  if (previous) {
+    const delta = current - previous;
+    const deltaPct = previous ? (delta / previous) * 100 : 0;
+    refs.pulseMove.className = movementClass(delta);
+    refs.pulseMove.textContent = `${movementText(delta)} ${signed(delta, 2)} (${signed(deltaPct, 3)}%) trong 1 phút`;
+    appendPulseLog({ symbol: focus.symbol, last: current, previous, createdAt: payload.created_at });
+  } else {
+    refs.pulseMove.className = "flat";
+    refs.pulseMove.textContent = `Mốc ban đầu ${fmt(current, 2)}. Sẽ so sánh sau 1 phút.`;
+  }
+
+  prices.forEach((item) => {
+    const last = nullableNumber(item.last);
+    if (last !== null && !item.stale) state.lastPrices.set(item.symbol, last);
+  });
+
+  if (state.currentDecision) renderSelected(state.currentDecision);
 }
 
 function renderSystemSummaryChart(payload) {
@@ -2102,13 +2411,21 @@ async function loadSystemChecklist(date = "") {
   state.lastSystemChecklistPayload = payload;
   renderSystemChecklist(payload);
   if (refs.systemChecklistDate && payload.date) refs.systemChecklistDate.value = payload.date;
-  loadLcPipeline().catch((err) => setStatus(`Lỗi LC pipeline: ${err.message}`));
 }
 
 async function loadLcPipeline() {
-  const res = await fetch("/api/lc-pipeline");
+  const res = await fetch(`/api/lc-pipeline?_=${Date.now()}`, { cache: "no-store" });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  renderLcPipeline(await res.json());
+  renderLcPipelineEnhanced(await res.json());
+}
+
+function startLcPipelineRefresh() {
+  if (state.lcPipelineTimer) clearInterval(state.lcPipelineTimer);
+  loadLcPipeline().catch((err) => setStatus(`Lỗi LC pipeline: ${err.message}`));
+  state.lcPipelineTimer = setInterval(
+    () => loadLcPipeline().catch((err) => setStatus(`Lỗi LC pipeline: ${err.message}`)),
+    60000,
+  );
 }
 
 async function loadSystemSummary(period) {
@@ -2542,6 +2859,7 @@ function startPaperAutoScan() {
     loadDecision().catch((err) => setStatus(`Lỗi: ${err.message}`));
     loadAutomationStatus().catch((err) => setStatus(`Lỗi auto server: ${err.message}`));
     loadOkxPositions().catch((err) => setStatus(`Lỗi vi the OKX: ${err.message}`));
+    loadLcPipeline().catch((err) => setStatus(`Lỗi LC pipeline: ${err.message}`));
     loadSystemChecklist().catch((err) => setStatus(`Lỗi system health: ${err.message}`));
     loadPrices().catch((err) => setStatus(`Lỗi gia: ${err.message}`));
   };
@@ -2562,6 +2880,7 @@ function resetAutoTimer() {
 refs.refreshBtn.addEventListener("click", () => {
   loadDecision().catch((err) => setStatus(`Lỗi: ${err.message}`));
   loadOkxPositions().catch((err) => setStatus(`Lỗi vi the OKX: ${err.message}`));
+  loadLcPipeline().catch((err) => setStatus(`Lỗi LC pipeline: ${err.message}`));
   loadSystemChecklist().catch((err) => setStatus(`Lỗi system health: ${err.message}`));
 });
 refs.analyzeBtn.addEventListener("click", runAnalysis);
@@ -2629,6 +2948,7 @@ loadConfigSummary().catch((err) => {
   setLeverageStatus(`Lỗi: ${err.message}`, "warn");
   setOrderMarginStatus(`Lỗi: ${err.message}`, "warn");
 });
+startLcPipelineRefresh();
 loadDecision()
   .then((exists) => {
     if (!exists) runAnalysis();

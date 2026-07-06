@@ -202,14 +202,15 @@ def _prune_undecided(rows: list[dict[str, Any]], limit: int) -> list[dict[str, A
 
 
 def _trim_undecided(rows: list[dict[str, Any]], settings: dict[str, Any]) -> list[dict[str, Any]]:
+    max_rows = int(settings["undecided_max"])
     floor = int(settings["undecided_prune_floor"])
-    if len(rows) <= floor:
-        return sorted(rows, key=_candidate_score, reverse=True)
-    drop_count = min(int(settings["undecided_prune_drop"]), len(rows) - floor)
-    ranked_low_first = sorted(rows, key=_candidate_score)
-    dropped_keys = {_setup_key(row) for row in ranked_low_first[:drop_count]}
-    kept = [row for row in rows if _setup_key(row) not in dropped_keys]
-    return sorted(kept, key=_candidate_score, reverse=True)
+    kept = list(rows)
+    if len(kept) > floor:
+        drop_count = min(int(settings["undecided_prune_drop"]), len(kept) - floor)
+        ranked_low_first = sorted(kept, key=_candidate_score)
+        dropped_keys = {_setup_key(row) for row in ranked_low_first[:drop_count]}
+        kept = [row for row in kept if _setup_key(row) not in dropped_keys]
+    return _prune_undecided(kept, max_rows)
 
 
 def _format_pair_line(index: int, row: dict[str, Any]) -> str:
