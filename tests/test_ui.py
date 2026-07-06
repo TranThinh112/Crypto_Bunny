@@ -321,6 +321,46 @@ class UiTest(TestCase):
         ]
         self.assertIn("⬅️ Dashboard", labels)
 
+    @patch("crypto_trader.ui.send_telegram_chat_message")
+    def test_setup_text_command_opens_setup_keyboard(self, send_message) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text("mode: dry_run\n", encoding="utf-8")
+            config = load_config(config_path)
+            update = {
+                "message": {
+                    "chat": {"id": 123},
+                    "text": "/setup",
+                }
+            }
+
+            with patch.dict("os.environ", {"TELEGRAM_CHAT_ID": "123"}):
+                _handle_telegram_update(config, update, config_path)
+
+        send_message.assert_called_once()
+        sent_text = send_message.call_args.args[2]
+        sent_keyboard = send_message.call_args.kwargs["reply_markup"]
+        callbacks = [
+            button["callback_data"]
+            for row in sent_keyboard["inline_keyboard"]
+            for button in row
+        ]
+        self.assertIn("Setup", sent_text)
+        self.assertEqual(callbacks, ["set_order_usdt", "set_leverage", "set_max_positions", "view_menu"])
+
+    @patch("crypto_trader.ui.send_telegram_message")
+    @patch("crypto_trader.ui.sync_telegram_commands")
+    def test_app_startup_syncs_native_telegram_commands(self, sync_commands, send_message) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text("mode: dry_run\n", encoding="utf-8")
+
+            with TestClient(create_app(str(config_path))) as client:
+                response = client.get("/healthz")
+
+        self.assertEqual(response.status_code, 200)
+        sync_commands.assert_called_once()
+
     @patch("crypto_trader.notifier._telegram_api_request")
     def test_edit_telegram_chat_message_uses_edit_message_text(self, api_request) -> None:
         from crypto_trader.notifier import edit_telegram_chat_message

@@ -78,6 +78,7 @@ from .notifier import (
     send_telegram_chat_message,
     send_telegram_message,
     telegram_buttons_enabled,
+    sync_telegram_commands,
     telegram_control_keyboard,
     telegram_leverage_keyboard,
     telegram_max_positions_keyboard,
@@ -270,7 +271,7 @@ def _setup_menu_message(config: dict[str, Any]) -> str:
         f"USDT/lệnh: {_margin_label(margin)} USDT\n"
         f"Đòn bẩy: {leverage}x\n"
         f"Max VT: {max_positions}\n"
-        "Chọn mục cần chỉnh bên dưới."
+        "Chon nut ben duoi hoac go /setup."
     )
 
 
@@ -832,7 +833,7 @@ def _telegram_dashboard_message(
         lines.append(f"🕒 Scan gần nhất: {_telegram_vn_time(config, status.get('last_finished_at'))}")
     if status.get("next_scan_at"):
         lines.append(f"⏭ Scan tự động tiếp: {_telegram_vn_time(config, status.get('next_scan_at'))}")
-    lines.append("Bấm nút bên dưới để thao tác trực tiếp trong Telegram.")
+    lines.append("Bam nut ben duoi hoac go /menu, /setup trong Telegram.")
     return "\n".join(lines)
 
 
@@ -1029,7 +1030,8 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
         return
     text = str(message.get("text") or "").strip().lower()
     parts = text.split()
-    if parts and parts[0] == "/usdt":
+    command = parts[0].split("@", 1)[0] if parts else ""
+    if command == "/usdt":
         if len(parts) == 1:
             response_config, response_text, reply_markup = _telegram_action_response(config, "set_order_usdt", config_path, app)
             send_telegram_chat_message(
@@ -1050,7 +1052,7 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
             reply_markup=reply_markup,
         )
         return
-    if parts and parts[0] in {"/lev", "/leverage", "/donbay"}:
+    if command in {"/lev", "/leverage", "/donbay"}:
         if len(parts) == 1:
             response_config, response_text, reply_markup = _telegram_action_response(config, "set_leverage", config_path, app)
             send_telegram_chat_message(
@@ -1071,7 +1073,7 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
             reply_markup=reply_markup,
         )
         return
-    if parts and parts[0] in {"/maxvt", "/maxpos", "/maxpositions"}:
+    if command in {"/maxvt", "/maxpos", "/maxpositions"}:
         if len(parts) == 1:
             response_config, response_text, reply_markup = _telegram_action_response(
                 config, "set_max_positions", config_path, app
@@ -1099,6 +1101,7 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
         "/menu": "view_menu",
         "/ui": "view_menu",
         "/dashboard": "view_menu",
+        "/setup": "setup_menu",
         "/scan": "scan_now",
         "/guard": "view_guard",
         "/vt": "view_positions_account",
@@ -1118,7 +1121,7 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
         "/maxpos": "set_max_positions",
         "/maxpositions": "set_max_positions",
     }
-    action = command_map.get(parts[0] if parts else "")
+    action = command_map.get(command)
     if not action:
         return
     response_config, response_text, reply_markup = _telegram_action_response(config, action, config_path, app)
@@ -1403,6 +1406,7 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
     @app.on_event("startup")
     def start_automation() -> None:
         config = load_config(app.state.config_path)
+        sync_telegram_commands(config)
         initial_delay = max(0, int(config.get("automation", {}).get("initial_delay_seconds", 5) or 0))
         interval = _automation_interval(config)
         enabled = _automation_enabled(config)

@@ -171,6 +171,7 @@ Text commands also work:
 ```text
 /ui
 /dashboard
+/setup
 /scan
 /guard
 /vt

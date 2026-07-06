@@ -168,12 +168,13 @@ Healthcheck Railway dung `/healthz`.
 
 Huong dan day du nam o `docs/RAILWAY_TELEGRAM_SETUP.md`.
 
-Telegram co UI bang nut inline ngay trong bot. Gui `/menu` hoac `/ui` de mo dashboard, bam `🔎 Scan ngay` de chay mot lan phan tich thu cong, `🛡 Guard` de xem Market Guard, va cac nut `VT`, `SD`, `LC`, `PNL/SD` de xem nhanh du lieu hien tai.
+Telegram co UI bang nut inline ngay trong bot. Gui `/menu` hoac `/ui` de mo dashboard, gui `/setup` de mo nhanh phan cau hinh lenh, bam `🔎 Scan ngay` de chay mot lan phan tich thu cong, `🛡 Guard` de xem Market Guard, va cac nut `VT`, `SD`, `LC`, `PNL/SD` de xem nhanh du lieu hien tai.
 
 Telegram co nut `💰 Set USDT` de chinh margin USDT moi lenh va nut `⚙️ Đòn bẩy` de chinh leverage cho lenh sau. Text command tuong ung:
 
 ```text
 /menu
+/setup
 /scan
 /guard
 /usdt

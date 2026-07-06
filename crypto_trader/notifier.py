@@ -44,6 +44,39 @@ def telegram_replace_previous_enabled(config: dict[str, Any]) -> bool:
     return bool(telegram_config.get("replace_previous_message", True))
 
 
+def telegram_command_list() -> list[dict[str, str]]:
+    return [
+        {"command": "menu", "description": "Mo bang dieu khien"},
+        {"command": "setup", "description": "Mo menu setup"},
+        {"command": "scan", "description": "Chay scan thu cong"},
+        {"command": "guard", "description": "Xem Market Guard"},
+        {"command": "vt", "description": "Xem vi the va PNL"},
+        {"command": "sd", "description": "Xem so du"},
+        {"command": "lc", "description": "Xem lenh cho"},
+        {"command": "memory", "description": "Xem bo nho scan"},
+        {"command": "ai", "description": "Xem lich su goi AI"},
+        {"command": "usdt", "description": "Chinh USDT cho lenh sau"},
+        {"command": "lev", "description": "Chinh don bay cho lenh sau"},
+        {"command": "maxvt", "description": "Chinh so vi the toi da"},
+    ]
+
+
+def sync_telegram_commands(config: dict[str, Any]) -> bool:
+    response = _telegram_api_request(
+        config,
+        "setMyCommands",
+        {"commands": json.dumps(telegram_command_list(), ensure_ascii=False)},
+    )
+    if not response or not response.get("ok"):
+        return False
+    _telegram_api_request(
+        config,
+        "setChatMenuButton",
+        {"menu_button": json.dumps({"type": "commands"}, ensure_ascii=False)},
+    )
+    return True
+
+
 def telegram_control_keyboard() -> dict[str, Any]:
     return {
         "inline_keyboard": [
