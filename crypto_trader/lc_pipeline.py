@@ -268,6 +268,16 @@ def _internal_notification_text(item: dict[str, Any], config: dict[str, Any]) ->
     return "\n".join(lines)
 
 
+def _internal_notification_summary_line(item: dict[str, Any], config: dict[str, Any]) -> str:
+    created_at = _parse_time(item.get("created_at"))
+    created_label = _local_time(config, created_at).strftime("%d/%m/%y %H:%M:%S") if created_at else "-"
+    details = [str(line).strip() for line in item.get("lines") or [] if str(line).strip()]
+    compact_details = " | ".join(part for part in details[:3] if part)
+    if compact_details:
+        return f"{item.get('icon', '🔔')} {item.get('title', '-')} | {created_label} | {compact_details}"
+    return f"{item.get('icon', '🔔')} {item.get('title', '-')} | {created_label}"
+
+
 def format_internal_notifications_view(config: dict[str, Any], *, limit_per_frame: int = 5) -> str:
     state = _load_state(config, datetime.now(timezone.utc))
     items = state.get("internal_notifications") if isinstance(state.get("internal_notifications"), list) else []
@@ -277,11 +287,10 @@ def format_internal_notifications_view(config: dict[str, Any], *, limit_per_fram
     timeline = sorted(items, key=lambda row: str(row.get("created_at") or ""))[-timeline_limit:]
     lines = [
         "🔔 Thông báo nội bộ",
-        "Timeline 1h/2h/4h, mới nhất nằm dưới cùng.",
+        "Timeline 1h/2h/4h, mỗi dòng là 1 thông báo, mới nhất nằm dưới cùng.",
     ]
     for item in timeline:
-        lines.append("")
-        lines.append(_internal_notification_text(item, config))
+        lines.append(_internal_notification_summary_line(item, config))
     return "\n".join(lines)
 
 
