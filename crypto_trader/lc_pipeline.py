@@ -28,6 +28,7 @@ FOUR_HOUR_ICON = "🕓"
 ONE_HOUR_HISTORY_KEEP_DAYS = 3
 TWO_HOUR_HISTORY_KEEP_DAYS = 3
 FOUR_HOUR_HISTORY_KEEP_DAYS = 7
+RECHECK_STABLE_DELTA_PCT = 1.0
 
 
 def _parse_time(value: Any) -> datetime | None:
@@ -41,6 +42,7 @@ def _parse_time(value: Any) -> datetime | None:
 
 def _pipeline_config(config: dict[str, Any]) -> dict[str, Any]:
     internal = config.get("ai", {}).get("internal", {})
+    shared_min_win = float(internal.get("lc_pipeline_min_win_probability_pct", 62) or 62)
     return {
         "enabled": bool(internal.get("lc_pipeline_enabled", True)),
         "top_limit": max(1, min(3, int(internal.get("lc_pipeline_top_limit", 3) or 3))),
@@ -50,7 +52,16 @@ def _pipeline_config(config: dict[str, Any]) -> dict[str, Any]:
         "internal_lc_max": max(1, min(3, int(internal.get("lc_pipeline_internal_lc_max", 3) or 3))),
         "promote_after_hours": max(1.0, float(internal.get("lc_pipeline_promote_after_hours", 6) or 6)),
         "recheck_interval_minutes": max(15, int(internal.get("lc_pipeline_recheck_interval_minutes", 90) or 90)),
-        "min_win_probability_pct": float(internal.get("lc_pipeline_min_win_probability_pct", 62) or 62),
+        "min_win_probability_pct": shared_min_win,
+        "one_hour_min_win_probability_pct": float(
+            internal.get("lc_pipeline_one_hour_min_win_probability_pct", 61) or 61
+        ),
+        "two_hour_min_win_probability_pct": float(
+            internal.get("lc_pipeline_two_hour_min_win_probability_pct", shared_min_win) or shared_min_win
+        ),
+        "four_hour_min_win_probability_pct": float(
+            internal.get("lc_pipeline_four_hour_min_win_probability_pct", 63) or 63
+        ),
         "relaxed_min_win_probability_pct": float(internal.get("lc_pipeline_relaxed_min_win_probability_pct", 50) or 50),
         "relaxed_min_confidence": float(internal.get("lc_pipeline_relaxed_min_confidence", 70) or 70),
         "notify_two_hour_summary": bool(internal.get("lc_pipeline_notify_two_hour_summary", False)),
@@ -120,12 +131,58 @@ def _candidate_win_probability(candidate: TradeCandidate | dict[str, Any]) -> fl
         return 0.0
 
 
-def _candidate_passes_lc_threshold(candidate: TradeCandidate | dict[str, Any], settings: dict[str, Any]) -> bool:
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _peak_win_probability(*values: Any) -> float:
+    valid = [_safe_float(value, float("-inf")) for value in values]
+    valid = [value for value in valid if value != float("-inf")]
+    if not valid:
+        return 0.0
+    return max(valid)
+
+
+def _recheck_strength(previous_win_probability: Any, current_win_probability: Any) -> tuple[str, str]:
+    previous = _safe_float(previous_win_probability)
+    current = _safe_float(current_win_probability)
+    delta = current - previous
+    if abs(delta) <= RECHECK_STABLE_DELTA_PCT:
+        return "stable", "->"
+    if delta > 0:
+        return "stronger", "up"
+    return "weaker", "down"
+
+
+def _phase_min_win_probability(settings: dict[str, Any], phase: str) -> float:
+    phase_key = str(phase or "2h").lower()
+    if phase_key == "1h":
+        return float(settings.get("one_hour_min_win_probability_pct", settings.get("min_win_probability_pct", 61)) or 61)
+    if phase_key == "4h":
+        return float(settings.get("four_hour_min_win_probability_pct", settings.get("min_win_probability_pct", 63)) or 63)
+    return float(settings.get("two_hour_min_win_probability_pct", settings.get("min_win_probability_pct", 62)) or 62)
+
+
+def _phase_settings(settings: dict[str, Any], phase: str) -> dict[str, Any]:
+    output = dict(settings)
+    output["min_win_probability_pct"] = _phase_min_win_probability(settings, phase)
+    return output
+
+
+def _candidate_passes_lc_threshold(
+    candidate: TradeCandidate | dict[str, Any],
+    settings: dict[str, Any],
+    *,
+    phase: str = "2h",
+) -> bool:
     raw = candidate.get("win_probability_pct") if isinstance(candidate, dict) else candidate.win_probability_pct
     if raw in (None, ""):
         return True
     try:
-        return float(raw) >= float(settings["min_win_probability_pct"])
+        return float(raw) >= _phase_min_win_probability(settings, phase)
     except (TypeError, ValueError):
         return True
 
@@ -177,14 +234,11 @@ def _prune_blocked_state(state: dict[str, Any], blocked_symbols: set[str]) -> No
 
 def _prune_low_win_state(state: dict[str, Any], settings: dict[str, Any]) -> None:
     state["internal_lc"] = [
-        row for row in list(state.get("internal_lc") or []) if _candidate_passes_lc_threshold(row, settings)
-    ]
-    state["undecided"] = [
-        row for row in list(state.get("undecided") or []) if _candidate_passes_lc_threshold(row, settings)
+        row for row in list(state.get("internal_lc") or []) if _candidate_passes_lc_threshold(row, settings, phase="2h")
     ]
     hourly_windows = []
     for window in state.get("hourly_windows") or []:
-        top = [row for row in list(window.get("top") or []) if _candidate_passes_lc_threshold(row, settings)]
+        top = [row for row in list(window.get("top") or []) if _candidate_passes_lc_threshold(row, settings, phase="1h")]
         hourly_windows.append({**window, "top": top})
     state["hourly_windows"] = hourly_windows
     two_hour_windows = []
@@ -192,22 +246,34 @@ def _prune_low_win_state(state: dict[str, Any], settings: dict[str, Any]) -> Non
         if not isinstance(event, dict):
             continue
         approved = [
-            row for row in list(event.get("approved") or []) if _candidate_passes_lc_threshold(row, settings)
+            row for row in list(event.get("approved") or []) if _candidate_passes_lc_threshold(row, settings, phase="2h")
         ]
         rejected = [
-            row for row in list(event.get("rejected") or []) if _candidate_passes_lc_threshold(row, settings)
+            row for row in list(event.get("rejected") or []) if _candidate_passes_lc_threshold(row, settings, phase="2h")
         ]
         two_hour_windows.append({**event, "approved": approved, "rejected": rejected})
     state["two_hour_windows"] = two_hour_windows
+    four_hour_history = []
+    for event in state.get("four_hour_history") or []:
+        if not isinstance(event, dict):
+            continue
+        approved = [
+            row for row in list(event.get("approved") or []) if _candidate_passes_lc_threshold(row, settings, phase="4h")
+        ]
+        rejected = [
+            row for row in list(event.get("rejected") or []) if _candidate_passes_lc_threshold(row, settings, phase="4h")
+        ]
+        four_hour_history.append({**event, "approved": approved, "rejected": rejected})
+    state["four_hour_history"] = four_hour_history
     telegram_events = []
     for event in state.get("telegram_events") or []:
         if not isinstance(event, dict):
             continue
         approved = [
-            row for row in list(event.get("approved") or []) if _candidate_passes_lc_threshold(row, settings)
+            row for row in list(event.get("approved") or []) if _candidate_passes_lc_threshold(row, settings, phase="2h")
         ]
         rejected = [
-            row for row in list(event.get("rejected") or []) if _candidate_passes_lc_threshold(row, settings)
+            row for row in list(event.get("rejected") or []) if _candidate_passes_lc_threshold(row, settings, phase="2h")
         ]
         telegram_events.append({**event, "approved": approved, "rejected": rejected})
     state["telegram_events"] = telegram_events
@@ -219,13 +285,14 @@ def _rank_candidates(
     *,
     blocked_symbols: set[str] | None = None,
     settings: dict[str, Any] | None = None,
+    phase: str = "1h",
 ) -> list[TradeCandidate]:
     settings = settings or {"min_win_probability_pct": 62}
     blocked_symbols = {str(symbol) for symbol in (blocked_symbols or set()) if str(symbol)}
     eligible = [
         candidate
         for candidate in candidates
-        if candidate.symbol not in blocked_symbols and _candidate_passes_lc_threshold(candidate, settings)
+        if candidate.symbol not in blocked_symbols and _candidate_passes_lc_threshold(candidate, settings, phase=phase)
     ]
     clear = [candidate for candidate in eligible if _has_clear_candlestick(candidate)]
     ranked = sorted(
@@ -272,6 +339,10 @@ def _candidate_record(
         "price": candidate.entry,
         "confidence": candidate.confidence,
         "win_probability_pct": candidate.win_probability_pct,
+        "current_win_probability_pct": candidate.win_probability_pct,
+        "peak_win_probability_pct": candidate.win_probability_pct,
+        "win_rate_trend": "->",
+        "recheck_state": "initial",
         "risk_reward": candidate.risk_reward,
         "volume_ratio": (indicator or {}).get("volume_ratio"),
         "payload": payload,
@@ -284,6 +355,9 @@ def _refresh_row_from_candidate(
     *,
     now: datetime,
 ) -> dict[str, Any]:
+    previous_win_probability = row.get("current_win_probability_pct", row.get("win_probability_pct"))
+    current_win_probability = candidate.win_probability_pct
+    recheck_state, win_rate_trend = _recheck_strength(previous_win_probability, current_win_probability)
     refreshed = _candidate_record(
         candidate,
         state=str(row.get("state") or "HOUR_1"),
@@ -311,6 +385,16 @@ def _refresh_row_from_candidate(
         refreshed["previous_scan_win_probability_pct"] = float(row.get("win_probability_pct") or 0)
     except (TypeError, ValueError):
         refreshed["previous_scan_win_probability_pct"] = row.get("win_probability_pct")
+    refreshed["current_win_probability_pct"] = _safe_float(current_win_probability)
+    refreshed["peak_win_probability_pct"] = _peak_win_probability(
+        row.get("peak_win_probability_pct"),
+        row.get("current_win_probability_pct"),
+        row.get("win_probability_pct"),
+        current_win_probability,
+    )
+    refreshed["win_rate_trend"] = win_rate_trend
+    refreshed["recheck_state"] = recheck_state
+    refreshed["last_recheck_at"] = now.isoformat()
     return refreshed
 
 
@@ -321,6 +405,34 @@ def _dropped_setup_keys(dropped: list[dict[str, Any]]) -> set[tuple[str, str]]:
             continue
         keys.add((str(item.get("symbol") or ""), str(item.get("old_side") or "").lower()))
     return keys
+
+
+def _merge_rechecked_row(existing_row: dict[str, Any], refreshed_row: dict[str, Any]) -> dict[str, Any]:
+    merged = {**existing_row, **refreshed_row}
+    previous_win_probability = existing_row.get("current_win_probability_pct", existing_row.get("win_probability_pct"))
+    current_win_probability = refreshed_row.get(
+        "current_win_probability_pct",
+        refreshed_row.get("win_probability_pct", merged.get("current_win_probability_pct", merged.get("win_probability_pct"))),
+    )
+    if "previous_scan_win_probability_pct" not in refreshed_row:
+        if "win_probability_pct" in existing_row:
+            merged["previous_scan_win_probability_pct"] = existing_row.get("win_probability_pct")
+        elif "previous_scan_win_probability_pct" in existing_row:
+            merged["previous_scan_win_probability_pct"] = existing_row.get("previous_scan_win_probability_pct")
+    merged["current_win_probability_pct"] = _safe_float(current_win_probability)
+    merged["peak_win_probability_pct"] = _peak_win_probability(
+        refreshed_row.get("peak_win_probability_pct"),
+        existing_row.get("peak_win_probability_pct"),
+        existing_row.get("current_win_probability_pct"),
+        existing_row.get("win_probability_pct"),
+        current_win_probability,
+    )
+    if "win_rate_trend" not in refreshed_row or "recheck_state" not in refreshed_row:
+        recheck_state, win_rate_trend = _recheck_strength(previous_win_probability, current_win_probability)
+        merged["win_rate_trend"] = win_rate_trend
+        merged["recheck_state"] = recheck_state
+    merged.setdefault("last_recheck_at", refreshed_row.get("last_seen_at", existing_row.get("last_recheck_at")))
+    return merged
 
 
 def _sync_rows_with_recheck(
@@ -336,12 +448,35 @@ def _sync_rows_with_recheck(
             continue
         key = _setup_key(row)
         if key in refreshed_by_key:
-            synced.append(refreshed_by_key[key])
+            synced.append(_merge_rechecked_row(row, refreshed_by_key[key]))
             continue
         if key in dropped_keys:
             continue
         synced.append(row)
     return synced
+
+
+def _merge_undecided_rows(
+    existing_rows: list[dict[str, Any]],
+    incoming_rows: list[dict[str, Any]],
+    *,
+    now: datetime,
+) -> list[dict[str, Any]]:
+    merged = list(existing_rows)
+    existing_by_setup = {_setup_key(row): row for row in merged if isinstance(row, dict) and row.get("symbol")}
+    for row in incoming_rows:
+        if not isinstance(row, dict):
+            continue
+        previous = existing_by_setup.get(_setup_key(row))
+        first_seen = row.get("first_seen_at")
+        if previous and previous.get("first_seen_at"):
+            first_seen = previous.get("first_seen_at")
+        if not first_seen:
+            first_seen = now.isoformat()
+        updated = {**row, "first_seen_at": first_seen, "last_seen_at": now.isoformat()}
+        merged = _upsert_by_setup(merged, updated)
+        existing_by_setup[_setup_key(updated)] = updated
+    return merged
 
 
 def _sync_events_with_recheck(
@@ -476,95 +611,7 @@ def _recheck_rows_with_latest_market_data(
                 "reason": "không còn setup hợp lệ trong dữ liệu mới nhất",
             }
         )
-    if not refreshed_rows and valid_rows:
-        warnings.append("LC recheck fallback: không lấy được setup mới, tạm dùng dữ liệu win rate cũ của nhóm hiện tại")
-        return list(valid_rows), {"refreshed_count": 0, "dropped": dropped, "warnings": warnings, "fallback": True}
     return refreshed_rows, {"refreshed_count": len(refreshed_rows), "dropped": dropped, "warnings": warnings, "fallback": False}
-
-
-def _recheck_rows_with_latest_market_data(
-    config: dict[str, Any],
-    rows: list[dict[str, Any]],
-    *,
-    now: datetime,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    valid_rows = [row for row in rows if isinstance(row, dict) and str(row.get("symbol") or "")]
-    symbols: list[str] = []
-    for row in valid_rows:
-        symbol = str(row.get("symbol") or "")
-        if symbol and symbol not in symbols:
-            symbols.append(symbol)
-    if not symbols:
-        return [], {
-            "input_count": 0,
-            "refreshed_count": 0,
-            "dropped": [],
-            "dropped_count": 0,
-            "warnings": [],
-            "sync_complete": True,
-            "synchronized_count": 0,
-        }
-
-    warnings: list[str] = []
-    digest = collect_news(config)
-    snapshots, market_warnings = fetch_market_snapshots(config, symbols)
-    warnings.extend(market_warnings)
-    market_layers: dict[str, dict[str, Any]] = {}
-    if config.get("market_guard", {}).get("use_memory_in_strategy", True):
-        try:
-            market_layers = market_guard_symbol_layers(config, symbols)
-        except Exception as exc:
-            warnings.append(f"Market guard memory unavailable during LC recheck: {exc}")
-    refreshed_candidates = build_candidates(
-        config,
-        snapshots,
-        digest,
-        limit=None,
-        market_layers=market_layers,
-    )
-    apply_position_sizing(config, refreshed_candidates)
-    enrich_quantities(config, refreshed_candidates)
-    candidates_by_key = {(candidate.symbol, candidate.side.lower()): candidate for candidate in refreshed_candidates}
-    candidates_by_symbol = {candidate.symbol: candidate for candidate in refreshed_candidates}
-
-    refreshed_rows: list[dict[str, Any]] = []
-    dropped: list[dict[str, Any]] = []
-    for row in valid_rows:
-        symbol = str(row.get("symbol") or "")
-        side = str(row.get("side") or "").lower()
-        candidate = candidates_by_key.get((symbol, side))
-        if candidate is not None:
-            refreshed_rows.append(_refresh_row_from_candidate(row, candidate, now=now))
-            continue
-        replacement = candidates_by_symbol.get(symbol)
-        if replacement is not None:
-            dropped.append(
-                {
-                    "symbol": symbol,
-                    "old_side": side,
-                    "reason": f"setup hien tai da doi sang {replacement.side.upper()}",
-                    "current_side": replacement.side,
-                    "current_win_probability_pct": replacement.win_probability_pct,
-                }
-            )
-            continue
-        dropped.append(
-            {
-                "symbol": symbol,
-                "old_side": side,
-                "reason": "khong con setup hop le trong du lieu moi nhat",
-            }
-        )
-    synchronized_count = len(refreshed_rows) + len(dropped)
-    return refreshed_rows, {
-        "input_count": len(valid_rows),
-        "refreshed_count": len(refreshed_rows),
-        "dropped": dropped,
-        "dropped_count": len(dropped),
-        "warnings": warnings,
-        "sync_complete": synchronized_count == len(valid_rows),
-        "synchronized_count": synchronized_count,
-    }
 
 
 def _compact_patterns(frame: dict[str, Any]) -> dict[str, Any]:
@@ -734,6 +781,7 @@ def _load_state(config: dict[str, Any], now: datetime, *, reset_for_new_day: boo
         now=now,
         keep_days=FOUR_HOUR_HISTORY_KEEP_DAYS,
     )
+    _backfill_one_hour_source_metadata(state)
     _prune_low_win_state(state, _pipeline_config(config))
     return state
 
@@ -752,7 +800,11 @@ def _compact_saved_row(row: dict[str, Any]) -> dict[str, Any]:
         "price",
         "confidence",
         "win_probability_pct",
+        "current_win_probability_pct",
+        "peak_win_probability_pct",
         "previous_scan_win_probability_pct",
+        "win_rate_trend",
+        "recheck_state",
         "risk_reward",
         "volume_ratio",
         "source_slot",
@@ -767,6 +819,9 @@ def _compact_saved_row(row: dict[str, Any]) -> dict[str, Any]:
         "revived_label",
         "revived_age_hours",
         "revived_age_label",
+        "undecided_status",
+        "undecided_reason",
+        "last_recheck_at",
         "mini_index",
     }
     compact = {key: row.get(key) for key in keep if key in row}
@@ -1025,14 +1080,10 @@ def _prune_undecided(rows: list[dict[str, Any]], limit: int) -> list[dict[str, A
 
 def _trim_undecided(rows: list[dict[str, Any]], settings: dict[str, Any]) -> list[dict[str, Any]]:
     max_rows = int(settings["undecided_max"])
-    floor = int(settings["undecided_prune_floor"])
-    kept = list(rows)
-    if len(kept) > floor:
-        drop_count = min(int(settings["undecided_prune_drop"]), len(kept) - floor)
-        ranked_low_first = _sort_saved_rows(kept, settings, reverse=False)
-        dropped_keys = {_setup_key(row) for row in ranked_low_first[:drop_count]}
-        kept = [row for row in kept if _setup_key(row) not in dropped_keys]
-    return _sort_saved_rows(kept, settings, reverse=True)[:max_rows]
+    kept = _sort_saved_rows(list(rows), settings, reverse=True)
+    if len(kept) <= max_rows:
+        return kept
+    return kept[:max_rows]
 
 
 def _row_with_source_metadata(
@@ -1076,6 +1127,77 @@ def _row_with_source_metadata(
         record["origin_source_time"] = origin_time
         record["origin_source_label"] = origin_label
     return record
+
+
+def _backfill_one_hour_source_metadata(state: dict[str, Any]) -> None:
+    metadata_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for event in state.get("one_hour_history") or []:
+        if not isinstance(event, dict):
+            continue
+        source_slot = str(event.get("frame") or "1h")
+        source_index = event.get("daily_index")
+        source_time = event.get("created_at")
+        source_label = None
+        created_at = _parse_time(source_time)
+        if created_at is not None:
+            source_label = _local_time({"timezone": "Asia/Ho_Chi_Minh"}, created_at).strftime("%d/%m/%y %H:%M:%S")
+        elif event.get("date") and event.get("time"):
+            source_label = f"{event.get('date')} {event.get('time')}"
+        for row in event.get("approved") or []:
+            if not isinstance(row, dict):
+                continue
+            metadata_by_key[_setup_key(row)] = {
+                "source_slot": source_slot,
+                "source_index": source_index,
+                "source_time": source_time,
+                "source_label": source_label,
+            }
+
+    def _apply(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        output: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("source_slot") or "") != "1h" or row.get("source_index") is not None:
+                output.append(row)
+                continue
+            metadata = metadata_by_key.get(_setup_key(row))
+            if not metadata:
+                output.append(row)
+                continue
+            output.append(
+                {
+                    **row,
+                    "source_slot": metadata.get("source_slot"),
+                    "source_index": metadata.get("source_index"),
+                    "source_time": metadata.get("source_time"),
+                    "source_label": metadata.get("source_label"),
+                }
+            )
+        return output
+
+    state["internal_lc"] = _apply(list(state.get("internal_lc") or []))
+    state["undecided"] = _apply(list(state.get("undecided") or []))
+    state["hourly_windows"] = [
+        {**window, "top": _apply(list(window.get("top") or []))}
+        for window in state.get("hourly_windows") or []
+        if isinstance(window, dict)
+    ]
+    state["one_hour_history"] = [
+        {**event, "approved": _apply(list(event.get("approved") or []))}
+        for event in state.get("one_hour_history") or []
+        if isinstance(event, dict)
+    ]
+
+
+def _latest_four_hour_rows(state: dict[str, Any]) -> list[dict[str, Any]]:
+    four_hour_history = state.get("four_hour_history") or []
+    if not four_hour_history:
+        return []
+    latest_event = four_hour_history[-1]
+    if not isinstance(latest_event, dict):
+        return []
+    return [row for row in latest_event.get("approved") or [] if isinstance(row, dict)]
 
 
 def _format_pair_line(index: int, row: dict[str, Any]) -> str:
@@ -1275,9 +1397,7 @@ def format_internal_lc_view(config: dict[str, Any], *, limit: int = 10) -> str:
         return "\n".join(lines)
     for index, row in enumerate(rows, 1):
         side = str(row.get("side") or "-").upper()
-        source_slot = str(row.get("source_slot") or "-")
-        source_index = row.get("source_index")
-        source_label = f"{source_slot} #{source_index}" if source_index else source_slot
+        source_label = _source_label(row)
         try:
             win_label = f"{float(row.get('win_probability_pct') or 0):.2f}%"
         except (TypeError, ValueError):
@@ -1307,8 +1427,16 @@ def _source_label(row: dict[str, Any]) -> str:
         return f"HS {row.get('revived_label') or row.get('revived_at')}"
     source_slot = row.get("source_slot") or row.get("state") or "-"
     source_index = row.get("source_index")
+    raw_label = str(row.get("source_label") or "").strip()
+    source_clock = None
+    if raw_label:
+        parts = raw_label.split()
+        source_clock = parts[-1] if parts else None
+    if not source_clock:
+        source_time = _parse_time(row.get("source_time"))
+        source_clock = source_time.strftime("%H:%M:%S") if source_time else None
     if source_index:
-        return f"{source_slot} #{source_index}"
+        return f"{source_slot} #{source_index} ({source_clock})" if source_clock else f"{source_slot} #{source_index}"
     return str(source_slot)
 
 
@@ -1361,13 +1489,136 @@ def _candidate_is_relaxed_valid(candidate: TradeCandidate, settings: dict[str, A
     win_probability = float(candidate.win_probability_pct or 0)
     confidence = float(candidate.confidence or 0)
     return (
-        win_probability > max(
-            float(settings["relaxed_min_win_probability_pct"]),
-            float(settings["min_win_probability_pct"]),
-        )
+        win_probability > float(settings["relaxed_min_win_probability_pct"])
         and confidence >= float(settings["relaxed_min_confidence"])
         and float(candidate.risk_reward or 0) >= 1.5
     )
+
+
+def _row_is_relaxed_valid(row: dict[str, Any], settings: dict[str, Any]) -> bool:
+    try:
+        win_probability = float(row.get("win_probability_pct") or 0)
+    except (TypeError, ValueError):
+        win_probability = 0.0
+    try:
+        confidence = float(row.get("confidence") or 0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    try:
+        risk_reward = float(row.get("risk_reward") or 0)
+    except (TypeError, ValueError):
+        risk_reward = 0.0
+    return (
+        win_probability > float(settings["relaxed_min_win_probability_pct"])
+        and confidence >= float(settings["relaxed_min_confidence"])
+        and risk_reward >= 1.5
+    )
+
+
+def _mark_undecided_row(
+    row: dict[str, Any],
+    *,
+    now: datetime,
+    settings: dict[str, Any],
+    status: str,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    record = {
+        **row,
+        "state": "CHUA_DUYET",
+        "last_seen_at": now.isoformat(),
+        "last_recheck_at": now.isoformat(),
+        "undecided_status": status,
+    }
+    record.setdefault("current_win_probability_pct", row.get("win_probability_pct"))
+    record["peak_win_probability_pct"] = _peak_win_probability(
+        row.get("peak_win_probability_pct"),
+        row.get("current_win_probability_pct"),
+        row.get("win_probability_pct"),
+    )
+    if reason:
+        record["undecided_reason"] = reason
+    elif "undecided_reason" in record:
+        record.pop("undecided_reason", None)
+    return record
+
+
+def _mark_missing_undecided_row(
+    row: dict[str, Any],
+    *,
+    now: datetime,
+    reason: str,
+) -> dict[str, Any]:
+    record = {**row}
+    if "previous_scan_win_probability_pct" not in record:
+        record["previous_scan_win_probability_pct"] = record.get("win_probability_pct")
+    record["win_probability_pct"] = 0.0
+    record["current_win_probability_pct"] = 0.0
+    record["peak_win_probability_pct"] = _peak_win_probability(
+        row.get("peak_win_probability_pct"),
+        row.get("current_win_probability_pct"),
+        row.get("win_probability_pct"),
+    )
+    record["win_rate_trend"] = "down"
+    record["recheck_state"] = "invalid"
+    return _mark_undecided_row(record, now=now, settings={}, status="missing_setup", reason=reason)
+
+
+def _recheck_undecided_pool(
+    config: dict[str, Any],
+    rows: list[dict[str, Any]],
+    *,
+    now: datetime,
+    settings: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    undecided_rows = [row for row in rows if isinstance(row, dict) and str(row.get("symbol") or "")]
+    if not undecided_rows:
+        return [], {"input_count": 0, "refreshed_count": 0, "dropped_count": 0, "kept_count": 0, "warnings": []}
+    refreshed_rows, recheck_meta = _recheck_rows_with_latest_market_data(config, undecided_rows, now=now)
+    refreshed_by_key = {_setup_key(row): row for row in refreshed_rows if isinstance(row, dict)}
+    dropped_by_key = {
+        (str(item.get("symbol") or ""), str(item.get("old_side") or "").lower()): item
+        for item in list(recheck_meta.get("dropped") or [])
+        if isinstance(item, dict)
+    }
+    output: list[dict[str, Any]] = []
+    for row in undecided_rows:
+        key = _setup_key(row)
+        if key in refreshed_by_key:
+            merged = _merge_rechecked_row(row, refreshed_by_key[key])
+            status = "soft_valid" if _row_is_relaxed_valid(merged, settings) else "soft_invalid"
+            output.append(_mark_undecided_row(merged, now=now, settings=settings, status=status))
+            continue
+        dropped_item = dropped_by_key.get(key)
+        if dropped_item:
+            output.append(
+                _mark_missing_undecided_row(
+                    row,
+                    now=now,
+                    reason=str(dropped_item.get("reason") or "khong con setup hop le trong du lieu moi nhat"),
+                )
+            )
+            continue
+        stale_row = {
+            **row,
+            "recheck_state": "invalid",
+            "win_rate_trend": "down",
+        }
+        output.append(_mark_undecided_row(stale_row, now=now, settings=settings, status="stale"))
+    kept_rows = list(output)
+    trimmed = False
+    if len(kept_rows) > int(settings["undecided_max"]):
+        kept_rows = _trim_undecided(kept_rows, settings)
+        trimmed = len(kept_rows) < len(output)
+    return kept_rows, {
+        "input_count": len(undecided_rows),
+        "refreshed_count": len(refreshed_rows),
+        "dropped_count": len(dropped_by_key),
+        "kept_count": len(kept_rows),
+        "trimmed": trimmed,
+        "warnings": list(recheck_meta.get("warnings") or []),
+        "dropped": list(recheck_meta.get("dropped") or []),
+    }
 
 
 def _promote_survivors(
@@ -1477,8 +1728,21 @@ def update_lc_internal_pipeline(
         local_now = _local_time(config, now)
         next_hourly_index = int(state.get("daily_one_hour_counter") or 0) + 1
         top = [
-            _candidate_record(candidate, state="HOUR_1", now=now)
-            for candidate in _rank_candidates(candidates, top_limit, blocked_symbols=blocked_symbols, settings=settings)
+            _row_with_source_metadata(
+                _candidate_record(candidate, state="HOUR_1", now=now),
+                state_label="HOUR_1",
+                source_slot="1h",
+                source_index=next_hourly_index,
+                now=now,
+                local_now=local_now,
+            )
+            for candidate in _rank_candidates(
+                candidates,
+                top_limit,
+                blocked_symbols=blocked_symbols,
+                settings=settings,
+                phase="1h",
+            )
         ]
         one_hour_event = {
             "frame": "1h",
@@ -1507,7 +1771,7 @@ def update_lc_internal_pipeline(
             hourly_internal_lc = _build_internal_lc_rows(
                 top[:top_limit],
                 source_slot="1h",
-                source_index=None,
+                source_index=next_hourly_index,
                 now=now,
                 local_now=local_now,
             )
@@ -1543,7 +1807,10 @@ def update_lc_internal_pipeline(
             dropped=list(two_hour_recheck.get("dropped") or []),
         )
         result["two_hour_recheck"] = two_hour_recheck
-        ranked = _sort_saved_rows(refreshed_combined, settings, reverse=True)
+        eligible_two_hour = [
+            row for row in refreshed_combined if _candidate_passes_lc_threshold(row, settings, phase="2h")
+        ]
+        ranked = _sort_saved_rows(eligible_two_hour, settings, reverse=True)
         next_daily_index = int(state.get("daily_two_hour_counter") or 0) + 1
         local_now = _local_time(config, now)
         approved: list[dict[str, Any]] = []
@@ -1566,24 +1833,20 @@ def update_lc_internal_pipeline(
             if len(approved) >= top_limit:
                 break
         rejected = [
-            {
-                **row,
-                "state": "CHUA_DUYET",
-                "source_slot": "2h",
-                "source_index": next_daily_index,
-                "source_time": now.isoformat(),
-                "source_label": local_now.strftime("%d/%m/%y %H:%M:%S"),
-            }
+            _row_with_source_metadata(
+                row,
+                state_label="CHUA_DUYET",
+                source_slot="2h",
+                source_index=next_daily_index,
+                now=now,
+                local_now=local_now,
+            )
             for row in ranked
             if _setup_key(row) not in approved_keys and str(row.get("symbol") or "") not in blocked_symbols
         ]
         existing = list(state.get("undecided") or [])
-        existing_by_setup = {_setup_key(row): row for row in existing if row.get("symbol")}
-        for row in rejected:
-            previous = existing_by_setup.get(_setup_key(row))
-            first_seen = previous.get("first_seen_at") if previous else row.get("first_seen_at")
-            existing = _upsert_by_setup(existing, {**row, "first_seen_at": first_seen, "last_seen_at": now.isoformat()})
-        state["undecided"] = _trim_undecided(existing, settings)
+        existing = _merge_undecided_rows(existing, rejected, now=now)
+        state["undecided"] = _sort_saved_rows(existing, settings, reverse=True)
         state["internal_lc"] = _sort_saved_rows(approved, settings, reverse=True)[: int(settings["internal_lc_max"])]
         state["daily_two_hour_counter"] = next_daily_index
         event = {
@@ -1636,7 +1899,10 @@ def update_lc_internal_pipeline(
             dropped=list(four_hour_recheck.get("dropped") or []),
         )
         result["four_hour_recheck"] = four_hour_recheck
-        ranked_two_hour = _sort_saved_rows(refreshed_two_hour, settings, reverse=True)
+        eligible_four_hour = [
+            row for row in refreshed_two_hour if _candidate_passes_lc_threshold(row, settings, phase="4h")
+        ]
+        ranked_two_hour = _sort_saved_rows(eligible_four_hour, settings, reverse=True)
         next_four_hour_index = int(state.get("four_hour_counter") or 0) + 1
         local_now = _local_time(config, now)
         approved_four_hour: list[dict[str, Any]] = []
@@ -1670,6 +1936,9 @@ def update_lc_internal_pipeline(
             for row in ranked_two_hour
             if _setup_key(row) not in approved_four_hour_keys and str(row.get("symbol") or "") not in blocked_symbols
         ]
+        existing = list(state.get("undecided") or [])
+        existing = _merge_undecided_rows(existing, rejected_four_hour, now=now)
+        state["undecided"] = _sort_saved_rows(existing, settings, reverse=True)
         four_hour_event = {
             "frame": "4h",
             "slot": four_hour_slot,
@@ -1696,6 +1965,12 @@ def update_lc_internal_pipeline(
     )
     if recheck_due:
         state["last_recheck_at"] = now.isoformat()
+        state["undecided"], result["undecided_recheck"] = _recheck_undecided_pool(
+            config,
+            list(state.get("undecided") or []),
+            now=now,
+            settings=settings,
+        )
         result["promoted"] = _promote_survivors(config, state, candidates_by_symbol, settings, now, blocked_symbols)
 
     result["undecided"] = _sort_saved_rows(state.get("undecided", []), settings, reverse=True)[
@@ -1711,24 +1986,24 @@ def update_lc_internal_pipeline(
 def lc_pipeline_mini_pool(config: dict[str, Any], candidates: list[TradeCandidate], *, limit: int = 3) -> list[TradeCandidate]:
     settings = _pipeline_config(config)
     if not settings["enabled"]:
-        return _rank_candidates(candidates, limit, settings=settings)
+        return _rank_candidates(candidates, limit, settings=_phase_settings(settings, "4h"), phase="4h")
     state = _load_state(config, datetime.now(timezone.utc), reset_for_new_day=False)
     blocked_symbols = _active_symbol_blocklist(config)
     candidates_by_symbol = {candidate.symbol: candidate for candidate in candidates}
     desired_symbols: list[str] = []
-    for row in state.get("internal_lc") or []:
+    for row in _latest_four_hour_rows(state):
         symbol = str(row.get("symbol") or "")
         if symbol and symbol not in desired_symbols and symbol not in blocked_symbols:
             desired_symbols.append(symbol)
     pool = [candidates_by_symbol[symbol] for symbol in desired_symbols if symbol in candidates_by_symbol]
-    return _rank_candidates(pool, limit, blocked_symbols=blocked_symbols, settings=settings)
+    return _rank_candidates(pool, limit, blocked_symbols=blocked_symbols, settings=_phase_settings(settings, "4h"), phase="4h")
 
 
 def lc_pipeline_pool_rows(config: dict[str, Any], symbols: list[str]) -> list[dict[str, Any]]:
     state = _load_state(config, datetime.now(timezone.utc), reset_for_new_day=False)
     rows_by_symbol = {
         str(row.get("symbol") or ""): row
-        for row in state.get("internal_lc") or []
+        for row in _latest_four_hour_rows(state)
         if row.get("symbol")
     }
     output: list[dict[str, Any]] = []

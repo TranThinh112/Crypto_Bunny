@@ -207,6 +207,83 @@ def _compact_indicator_summary(summary: dict[str, Any] | None) -> dict[str, Any]
     return {key: value for key, value in compact.items() if value not in (None, {}, [])}
 
 
+def _side_matches_trend(side: str, trend: Any) -> bool:
+    direction = str(trend or "").lower()
+    return (side == "long" and direction == "up") or (side == "short" and direction == "down")
+
+
+def _mini_pattern_alignment(candidate: TradeCandidate) -> int:
+    aligned = 0
+    side = str(candidate.side or "").lower()
+    frames: list[dict[str, Any]] = []
+    for pattern_data in (candidate.candlestick_patterns or {}).values():
+        if isinstance(pattern_data, dict):
+            frames.append(pattern_data)
+    for frame_data in (candidate.higher_timeframes or {}).values():
+        patterns = frame_data.get("candlestick_patterns") if isinstance(frame_data, dict) else None
+        if isinstance(patterns, dict):
+            frames.append(patterns)
+    for frame in frames:
+        direction = str(frame.get("direction") or "").lower()
+        has_signal = bool(frame.get("strongest_pattern") or frame.get("patterns"))
+        if has_signal and ((side == "long" and direction == "bullish") or (side == "short" and direction == "bearish")):
+            aligned += 1
+    return aligned
+
+
+def _mini_trend_alignment(candidate: TradeCandidate) -> int:
+    aligned = 0
+    side = str(candidate.side or "").lower()
+    if _side_matches_trend(side, (candidate.indicator_summary or {}).get("trend")):
+        aligned += 1
+    for frame_data in (candidate.higher_timeframes or {}).values():
+        if isinstance(frame_data, dict) and _side_matches_trend(side, frame_data.get("trend")):
+            aligned += 1
+    return aligned
+
+
+def _mini_indicator_score(candidate: TradeCandidate) -> float:
+    indicator = candidate.indicator_summary or {}
+    score = 0.0
+    score += min(4.0, max(0.0, float(candidate.risk_reward or 0.0))) * 1.8
+    score += min(4.0, max(0.0, float(indicator.get("volume_ratio") or 0.0))) * 1.4
+    score += min(120.0, max(0.0, float(candidate.rule_score or candidate.confidence or 0.0))) * 0.08
+    spread_pct = float(indicator.get("spread_pct") or candidate.spread_pct or 0.0)
+    score -= max(0.0, spread_pct) * 25.0
+    rsi = indicator.get("rsi")
+    try:
+        rsi_value = float(rsi)
+    except (TypeError, ValueError):
+        rsi_value = None
+    if rsi_value is not None:
+        if candidate.side == "long" and 45.0 <= rsi_value <= 72.0:
+            score += 3.0
+        elif candidate.side == "short" and 28.0 <= rsi_value <= 55.0:
+            score += 3.0
+    return score
+
+
+def _mini_candidate_priority(candidate: TradeCandidate) -> tuple[float, float, float, float, float]:
+    trend_alignment = float(_mini_trend_alignment(candidate))
+    pattern_alignment = float(_mini_pattern_alignment(candidate))
+    win_probability = float(candidate.win_probability_pct or 0.0)
+    confidence = float(candidate.confidence or 0.0)
+    composite = (
+        win_probability * 0.45
+        + confidence * 0.12
+        + _mini_indicator_score(candidate)
+        + trend_alignment * 6.0
+        + pattern_alignment * 7.0
+    )
+    return (
+        composite,
+        win_probability,
+        float(candidate.rule_score or 0.0),
+        trend_alignment,
+        pattern_alignment,
+    )
+
+
 def _openai_internal_market_scan(
     config: dict[str, Any],
     candidates: list[dict[str, Any]],
@@ -431,7 +508,7 @@ def _local_market_scan_result(config: dict[str, Any], candidates: list[TradeCand
     max_symbols = max(1, min(3, int(internal_config.get("market_scan_max_symbols", 3) or 3)))
     ranked = sorted(
         candidates,
-        key=lambda item: (float(item.win_probability_pct or 0), float(item.confidence or 0)),
+        key=_mini_candidate_priority,
         reverse=True,
     )
     qualified = [
@@ -446,6 +523,7 @@ def _local_market_scan_result(config: dict[str, Any], candidates: list[TradeCand
         "provider": "local_policy",
         "decision": "prefilter",
         "threshold_win_probability_pct": threshold,
+        "selection_checks": ["win_rate", "setup_quality", "trend_alignment", "indicator_strength"],
         "qualified_symbols": [candidate.symbol for candidate in qualified],
         "approved_symbols": [candidate.symbol for candidate in eligible],
         "approved_count": len(eligible),

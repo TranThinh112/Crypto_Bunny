@@ -101,6 +101,7 @@ from .reporting import (
     format_telegram_menu,
     format_undecided_lc_view,
 )
+from .runtime_sync import sync_runtime_state
 from .storage import (
     clear_dashboard_snapshot_cache,
     get_journal_state,
@@ -517,6 +518,10 @@ def _run_automation_cycle(app: FastAPI) -> None:
         return
 
     try:
+        try:
+            sync_runtime_state(config)
+        except Exception as sync_exc:
+            status["runtime_sync_error"] = str(sync_exc)
         decision_result = run_once(config, execute=execute)
         payload = to_jsonable(decision_result)
         execution = payload.get("execution") or {}
@@ -1446,6 +1451,10 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
         config = load_config(app.state.config_path)
         purge_deprecated_journal_state(config)
         clear_dashboard_snapshot_cache(config)
+        try:
+            sync_runtime_state(config)
+        except Exception:
+            pass
         sync_telegram_commands(config)
         initial_delay = max(0, int(config.get("automation", {}).get("initial_delay_seconds", 5) or 0))
         interval = _automation_interval(config)

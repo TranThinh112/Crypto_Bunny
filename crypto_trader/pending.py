@@ -16,6 +16,7 @@ from .storage import (
     close_pending_order,
     list_pending_orders,
     next_global_counter,
+    prune_pending_orders,
     refresh_pending_order,
     set_pending_order_exchange_order,
 )
@@ -480,6 +481,7 @@ def maintain_pending_orders(
             "warnings": [],
         }
 
+    prune_pending_orders(config)
     open_records = prioritize_pending_records(list_pending_orders(config, status="OPEN", limit=200))
     if not open_records:
         return {

@@ -1,0 +1,342 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+from .codex_features import ensure_prompt_version, prompt_status, refresh_bunny_health_state, refresh_trading_system_state
+from .market import create_exchange
+from .models import TradeCandidate, to_jsonable
+from .storage import (
+    ensure_ai_model_version,
+    get_prompt_metric,
+    insert_trade_execution_row,
+    list_pending_orders,
+    list_trade_execution_rows,
+    refresh_pending_order,
+    save_pending_order,
+    save_prompt_metric_snapshot,
+    update_trade_execution,
+)
+
+
+def _float(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    number = _float(value)
+    return default if number is None else number
+
+
+def _parse_time(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def _position_side(position: dict[str, Any]) -> str:
+    info = position.get("info", {}) if isinstance(position.get("info"), dict) else {}
+    side = position.get("side") or info.get("posSide")
+    if side and side != "net":
+        return str(side).lower()
+    contracts = _float(position.get("contracts") or info.get("pos")) or 0
+    if contracts > 0:
+        return "long"
+    if contracts < 0:
+        return "short"
+    return "long"
+
+
+def _order_side(order: dict[str, Any]) -> str:
+    raw_side = str(order.get("side") or "").lower()
+    return "long" if raw_side == "buy" else "short" if raw_side == "sell" else raw_side
+
+
+def _base_symbol(symbol: str) -> str:
+    return str(symbol or "").split("/")[0].split("-")[0].upper()
+
+
+def _tp_sl_from_order(order: dict[str, Any]) -> tuple[float | None, float | None]:
+    raw = order.get("raw") if isinstance(order.get("raw"), dict) else {}
+    stop_loss = None
+    take_profit = None
+    attach_orders = raw.get("attachAlgoOrds")
+    if isinstance(attach_orders, str):
+        try:
+            attach_orders = json.loads(attach_orders)
+        except json.JSONDecodeError:
+            attach_orders = []
+    if isinstance(attach_orders, list):
+        for item in attach_orders:
+            if not isinstance(item, dict):
+                continue
+            if stop_loss is None:
+                stop_loss = _float(item.get("slTriggerPx") or item.get("slOrdPx"))
+            if take_profit is None:
+                take_profit = _float(item.get("tpTriggerPx") or item.get("tpOrdPx"))
+    return stop_loss, take_profit
+
+
+def _fallback_take_profit(entry: float, side: str, pct: float) -> float:
+    move = entry * max(0.0, pct) / 100.0
+    return entry + move if side == "long" else entry - move
+
+
+def _fallback_stop_loss(entry: float, side: str, pct: float) -> float:
+    move = entry * max(0.0, pct) / 100.0
+    return entry - move if side == "long" else entry + move
+
+
+def _candidate_from_open_order(config: dict[str, Any], order: dict[str, Any]) -> TradeCandidate:
+    symbol = str(order.get("symbol") or "")
+    side = _order_side(order) or "long"
+    price = _safe_float(order.get("price") or order.get("triggerPrice") or order.get("last"), 0.0)
+    amount = _safe_float(order.get("remaining") or order.get("amount"), 0.0)
+    stop_loss, take_profit = _tp_sl_from_order(order)
+    stop_loss = stop_loss if stop_loss is not None else _fallback_stop_loss(price, side, 2.0)
+    take_profit = take_profit if take_profit is not None else _fallback_take_profit(price, side, 3.0)
+    leverage = max(1.0, _safe_float(config.get("exchange", {}).get("leverage"), 1.0))
+    notional = price * amount
+    order_usdt = notional / leverage if leverage else notional
+    return TradeCandidate(
+        symbol=symbol,
+        base=_base_symbol(symbol),
+        side=side,  # type: ignore[arg-type]
+        confidence=0.0,
+        entry=price,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+        risk_reward=0.0,
+        order_usdt=order_usdt,
+        quantity=amount,
+        spread_pct=None,
+        news_score=0.0,
+        news_count=0,
+        scan_source="okx_runtime_sync",
+        decision_metadata={"source": "okx_open_order_sync"},
+    )
+
+
+def _fetch_account_snapshot(config: dict[str, Any]) -> dict[str, Any]:
+    exchange = create_exchange(config, authenticated=True)
+    exchange.load_markets()
+    return {
+        "enabled": True,
+        "mode": config.get("mode"),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "positions": list(exchange.fetch_positions() or []),
+        "open_orders": list(exchange.fetch_open_orders() or []),
+    }
+
+
+def sync_ai_runtime_metadata(config: dict[str, Any]) -> dict[str, Any]:
+    prompt_row = ensure_prompt_version(config)
+    prompt_version = str(prompt_row.get("version") or "prompt-v1")
+    prompt_hash = str(prompt_row.get("prompt_hash") or "")
+    seeded_models: list[str] = []
+    internal_model = str(config.get("ai", {}).get("internal", {}).get("model") or "").strip()
+    okx_model = str(config.get("ai", {}).get("okx", {}).get("model") or "").strip()
+    now = datetime.now(timezone.utc).isoformat()
+    for model_name in [internal_model, okx_model]:
+        if not model_name:
+            continue
+        ensure_ai_model_version(
+            config,
+            model_name=model_name,
+            model_version=model_name,
+            prompt_version=prompt_version,
+            prompt_hash=prompt_hash,
+            created_at=now,
+        )
+        seeded_models.append(model_name)
+    prompt_metric = get_prompt_metric(config, prompt_version)
+    seeded_prompt_metric = False
+    if prompt_metric is None:
+        status = prompt_status(config)
+        save_prompt_metric_snapshot(
+            config,
+            {
+                "prompt_version": prompt_version,
+                "prompt_hash": prompt_hash,
+                "total_requests": 0,
+                "average_prompt_tokens": 0,
+                "average_completion_tokens": 0,
+                "average_latency": 0,
+                "estimated_cached_tokens": status.get("estimatedStaticTokens") or 0,
+                "estimated_dynamic_tokens": status.get("estimatedDynamicTokens") or 0,
+                "cache_hit_percent": status.get("estimatedCacheHit") or 0,
+                "updated_at": now,
+                "source": "config_seed",
+                "notes": "No successful OpenAI usage recorded yet; seeded from current prompt configuration.",
+            },
+        )
+        seeded_prompt_metric = True
+    return {
+        "prompt_version": prompt_version,
+        "models_seeded": seeded_models,
+        "seeded_prompt_metric": seeded_prompt_metric,
+    }
+
+
+def sync_exchange_runtime_state(
+    config: dict[str, Any],
+    *,
+    account_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if config.get("mode") == "dry_run":
+        return {"enabled": False, "reason": "dry_run", "positions_synced": 0, "orders_synced": 0}
+    snapshot = account_snapshot or _fetch_account_snapshot(config)
+    created_at = str(snapshot.get("created_at") or datetime.now(timezone.utc).isoformat())
+    position_rows = [item for item in (snapshot.get("positions") or []) if isinstance(item, dict)]
+    open_orders = [item for item in (snapshot.get("open_orders") or []) if isinstance(item, dict)]
+    active_pending = list_pending_orders(config, status="ACTIVE", limit=1000)
+    pending_by_exchange_id = {
+        str(row.get("exchange_order_id") or ""): row
+        for row in active_pending
+        if str(row.get("exchange_order_id") or "")
+    }
+    orders_synced = 0
+    for order in open_orders:
+        exchange_order_id = str(order.get("id") or order.get("clientOrderId") or "")
+        if not exchange_order_id:
+            continue
+        candidate = _candidate_from_open_order(config, order)
+        existing = pending_by_exchange_id.get(exchange_order_id)
+        if existing:
+            refresh_pending_order(
+                config,
+                int(existing["id"]),
+                candidate,
+                status="LC_OKX",
+                max_age_days=float(config.get("pending_orders", {}).get("exchange_max_age_days", 1.5) or 1.5),
+            )
+        else:
+            save_pending_order(
+                config,
+                candidate,
+                exchange_order_id,
+                status="LC_OKX",
+                max_age_days=float(config.get("pending_orders", {}).get("exchange_max_age_days", 1.5) or 1.5),
+            )
+        orders_synced += 1
+
+    open_execution_rows = list_trade_execution_rows(config, statuses=["OPEN", "LC_PENDING"], limit=1000)
+    positions_synced = 0
+    next_slot = 1
+    for position in position_rows:
+        info = position.get("info", {}) if isinstance(position.get("info"), dict) else {}
+        contracts = abs(_safe_float(position.get("contracts") or info.get("pos"), 0.0))
+        if contracts <= 0:
+            continue
+        symbol = str(position.get("symbol") or info.get("instId") or "")
+        side = _position_side(position)
+        if not symbol or side not in {"long", "short"}:
+            continue
+        entry_price = _float(position.get("entry_price") or position.get("entryPrice") or info.get("avgPx"))
+        mark_price = _float(position.get("mark_price") or position.get("markPrice") or info.get("markPx"))
+        leverage = _safe_float(position.get("leverage") or info.get("lever"), _safe_float(config.get("exchange", {}).get("leverage"), 1.0))
+        stop_loss = _float(position.get("stop_loss"))
+        take_profit = _float(position.get("take_profit"))
+        payload = {
+            "source": "okx_position_sync",
+            "position": to_jsonable(position),
+            "snapshot_created_at": created_at,
+        }
+        matched = next(
+            (
+                row for row in open_execution_rows
+                if str(row.get("symbol") or "") == symbol and str(row.get("side") or "").upper() == side.upper()
+            ),
+            None,
+        )
+        updates = {
+            "updated_at": created_at,
+            "status": "OPEN",
+            "entry_price": entry_price,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "pnl": _float(position.get("unrealized_pnl") or position.get("unrealizedPnl") or info.get("upl")),
+            "snapshot_json": json.dumps(payload, ensure_ascii=False),
+        }
+        if matched:
+            update_trade_execution(config, int(matched["id"]), updates)
+        else:
+            prompt_row = ensure_prompt_version(config)
+            insert_trade_execution_row(
+                config,
+                {
+                    "created_at": created_at,
+                    "updated_at": created_at,
+                    "symbol": symbol,
+                    "position_slot": next_slot,
+                    "parent_position_id": None,
+                    "side": side.upper(),
+                    "entry_price": entry_price,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "risk_reward": None,
+                    "risk_percent": 0,
+                    "rule_score": None,
+                    "gpt_confidence": None,
+                    "status": "OPEN",
+                    "pnl": _float(position.get("unrealized_pnl") or position.get("unrealizedPnl") or info.get("upl")),
+                    "reject_reason": None,
+                    "closed_at": None,
+                    "payload_json": json.dumps(payload, ensure_ascii=False),
+                    "market_regime": None,
+                    "regime_confidence": None,
+                    "strategy_version": str(config.get("selected_strategy_version") or config.get("strategy_versioning", {}).get("default_version", "strategy-v1")),
+                    "rule_engine_version": str(config.get("strategy_versioning", {}).get("rule_engine_version", "rule-engine-v1")),
+                    "validator_version": str(config.get("strategy_versioning", {}).get("validator_version", "validator-v1")),
+                    "recovery_version": str(config.get("strategy_versioning", {}).get("recovery_version", "recovery-v1")),
+                    "health_version": str(config.get("strategy_versioning", {}).get("health_version", "health-v1")),
+                    "prompt_version": str(prompt_row.get("version") or "prompt-v1"),
+                    "prompt_hash": str(prompt_row.get("prompt_hash") or ""),
+                    "model_name": str(config.get("ai", {}).get("okx", {}).get("model", "gpt-5.5")),
+                    "model_version": str(config.get("ai", {}).get("okx", {}).get("model", "gpt-5.5")),
+                    "system_version": str(config.get("prompt_engine", {}).get("system_version", "system-v1")),
+                    "decision_engine_version": str(config.get("prompt_engine", {}).get("decision_engine_version", "decision-engine-v1")),
+                    "bunny_version": str(config.get("prompt_engine", {}).get("bunny_version", "bunny-v1")),
+                    "health_monitor_version": str(config.get("prompt_engine", {}).get("health_version", "health-v1")),
+                    "slot_refill_version": str(config.get("prompt_engine", {}).get("slot_refill_version", "slot-refill-v1")),
+                    "experiment_name": None,
+                    "prompt_tokens": None,
+                    "completion_tokens": None,
+                    "latency_ms": None,
+                    "snapshot_json": json.dumps(payload, ensure_ascii=False),
+                    "entry_mode": config.get("mode"),
+                    "exchange_leverage": leverage,
+                },
+            )
+            next_slot += 1
+        positions_synced += 1
+    refresh_trading_system_state(config)
+    refresh_bunny_health_state(config)
+    return {
+        "enabled": True,
+        "created_at": created_at,
+        "positions_seen": len(position_rows),
+        "open_orders_seen": len(open_orders),
+        "positions_synced": positions_synced,
+        "orders_synced": orders_synced,
+    }
+
+
+def sync_runtime_state(
+    config: dict[str, Any],
+    *,
+    account_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "ai": sync_ai_runtime_metadata(config),
+        "exchange": sync_exchange_runtime_state(config, account_snapshot=account_snapshot),
+    }

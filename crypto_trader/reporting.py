@@ -936,14 +936,30 @@ def _lc_pending_source_label(row: dict[str, Any]) -> str:
         source = row.get("source") or row.get("slot")
         index = row.get("source_index")
     source_text = str(source or "").lower()
+    source_time = None
+    raw_label = str(row.get("source_label") or "").strip()
+    if raw_label:
+        parts = raw_label.split()
+        source_time = parts[-1] if parts else None
+    if not source_time:
+        raw_source_time = row.get("source_time")
+        if raw_source_time:
+            try:
+                source_time = datetime.fromisoformat(str(raw_source_time).replace("Z", "+00:00")).strftime("%H:%M:%S")
+            except ValueError:
+                source_time = None
+
+    def _fmt(label: str) -> str:
+        return f"{label} ({source_time})" if source_time else label
+
     if "four" in source_text or "4h" in source_text:
-        return f"4h #{index}" if index else "4h"
+        return _fmt(f"4h #{index}") if index else "4h"
     if "two" in source_text or "2h" in source_text:
-        return f"2h #{index}" if index else "2h"
+        return _fmt(f"2h #{index}") if index else "2h"
     if "hour" in source_text or "1h" in source_text:
-        return f"1h #{index}" if index else "1h"
+        return _fmt(f"1h #{index}") if index else "1h"
     if state == "CHUA_DUYET":
-        return f"2h #{index}" if index else "2h"
+        return _fmt(f"2h #{index}") if index else "2h"
     return "-"
 
 

@@ -171,6 +171,38 @@ class AiCoordinatorTest(TestCase):
 
         self.assertEqual(result["qualified_symbols"], [])
         self.assertEqual(result["approved_symbols"], ["ETH/USDT:USDT"])
+        self.assertEqual(
+            result["selection_checks"],
+            ["win_rate", "setup_quality", "trend_alignment", "indicator_strength"],
+        )
+
+    def test_local_market_scan_ranks_by_setup_trend_and_indicators_not_only_win_rate(self) -> None:
+        config = self._config()
+        config["ai"]["internal"]["market_scan_max_symbols"] = 1
+        config["ai"]["internal"]["market_scan_min_approved_symbols"] = 1
+        config["ai"]["internal"]["market_scan_min_win_probability_pct"] = 60
+
+        weak_high_win = _candidate("BTC/USDT:USDT", win=72.0)
+        weak_high_win.rule_score = 70.0
+        weak_high_win.indicator_summary = {"volume_ratio": 0.6, "rsi": 79.0, "spread_pct": 0.05, "trend": "down"}
+        weak_high_win.higher_timeframes = {
+            "1h": {"trend": "down", "candlestick_patterns": {"direction": "bearish", "patterns": ["shooting_star"]}},
+            "4h": {"trend": "down", "candlestick_patterns": {"direction": "bearish", "patterns": ["engulfing"]}},
+        }
+        weak_high_win.candlestick_patterns = {"1m": {"direction": "bearish", "patterns": ["doji"]}}
+
+        strong_lower_win = _candidate("ETH/USDT:USDT", win=69.0)
+        strong_lower_win.rule_score = 96.0
+        strong_lower_win.indicator_summary = {"volume_ratio": 2.4, "rsi": 58.0, "spread_pct": 0.01, "trend": "up"}
+        strong_lower_win.higher_timeframes = {
+            "1h": {"trend": "up", "candlestick_patterns": {"direction": "bullish", "patterns": ["morning_star"]}},
+            "4h": {"trend": "up", "candlestick_patterns": {"direction": "bullish", "patterns": ["hammer"]}},
+        }
+        strong_lower_win.candlestick_patterns = {"1m": {"direction": "bullish", "patterns": ["bullish_engulfing"]}}
+
+        result = _local_market_scan_result(config, [weak_high_win, strong_lower_win], [])
+
+        self.assertEqual(result["approved_symbols"], ["ETH/USDT:USDT"])
 
     def test_validated_ai_symbols_respects_single_pending_limit(self) -> None:
         symbols = _validated_ai_symbols(

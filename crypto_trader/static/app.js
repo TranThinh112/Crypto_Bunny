@@ -1872,7 +1872,16 @@ function lcSourceLabel(row) {
   if (row.revived_at) return row.revived_label ? `HS ${row.revived_label}` : "HS";
   const slot = String(row.source_slot || row.state || "-");
   const index = row.source_index;
-  return index ? `${slot} #${index}` : slot;
+  let sourceClock = "";
+  if (row.source_label) {
+    const parts = String(row.source_label).trim().split(" ");
+    sourceClock = parts.length ? parts[parts.length - 1] : "";
+  }
+  if (!sourceClock && row.source_time) {
+    const stamp = timeLabel(row.source_time);
+    sourceClock = stamp ? stamp.split(" ").pop() : "";
+  }
+  return index ? `${slot} #${index}${sourceClock ? ` (${sourceClock})` : ""}` : slot;
 }
 
 function lcWinText(value) {

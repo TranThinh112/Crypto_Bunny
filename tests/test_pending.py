@@ -38,19 +38,27 @@ def _age_pending_order(config: dict, order_id: int, hours: float) -> None:
     now = datetime.now(timezone.utc)
     created_at = now - timedelta(hours=hours)
     expires_at = now - timedelta(minutes=1)
-    atlas_database(config)["pending_orders"].update_one(
-        {"id": order_id},
-        {
-            "$set": {
-                "created_at": created_at.isoformat(),
-                "updated_at": created_at.isoformat(),
-                "expires_at": expires_at.isoformat(),
-            }
-        },
-    )
+    database = atlas_database(config)
+    for name in ("pending_orders", "internal_pending_orders"):
+        result = database[name].update_one(
+            {"id": order_id},
+            {
+                "$set": {
+                    "created_at": created_at.isoformat(),
+                    "updated_at": created_at.isoformat(),
+                    "expires_at": expires_at.isoformat(),
+                }
+            },
+        )
+        if int(result.matched_count or 0) > 0:
+            break
 
 
 class PendingTest(TestCase):
+    def _pending_record_total(self, config: dict) -> int:
+        database = atlas_database(config)
+        return database["pending_orders"].count_documents({}) + database["internal_pending_orders"].count_documents({})
+
     def _config(self, mode: str = "dry_run") -> dict:
         self.tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         config = deepcopy(DEFAULT_CONFIG)
@@ -78,7 +86,8 @@ class PendingTest(TestCase):
         self.assertEqual(result["canceled"], 1)
         self.assertEqual(result["events"][0]["lc_id"], 12)
         self.assertEqual(list_pending_orders(config, status="OPEN"), [])
-        self.assertEqual(len(list_pending_orders(config, status="CANCELED")), 1)
+        self.assertEqual(len(list_pending_orders(config, status="CANCELED")), 0)
+        self.assertEqual(self._pending_record_total(config), 0)
 
     def test_cancels_local_pending_when_scan_quality_degrades(self) -> None:
         config = self._config()
@@ -142,7 +151,8 @@ class PendingTest(TestCase):
         self.assertEqual(result["events"][0]["lc_id"], 12)
         self.assertEqual(result["events"][0]["vt_id"], 1)
         self.assertEqual(result["events"][0]["source"], "lc_okx_filled")
-        self.assertEqual(len(list_pending_orders(config, status="FILLED")), 1)
+        self.assertEqual(len(list_pending_orders(config, status="FILLED")), 0)
+        self.assertEqual(self._pending_record_total(config), 0)
 
     def test_keeps_local_pending_when_active_limit_is_full(self) -> None:
         class FakeExchange:
@@ -267,7 +277,8 @@ class PendingTest(TestCase):
         self.assertEqual(result["events"][0]["vt_id"], 1)
         self.assertEqual(result["events"][0]["source"], "local_released")
         self.assertEqual(result["events"][0]["exchange_order_id"], "order-2")
-        self.assertEqual(len(list_pending_orders(config, status="FILLED")), 1)
+        self.assertEqual(len(list_pending_orders(config, status="FILLED")), 0)
+        self.assertEqual(self._pending_record_total(config), 0)
 
     def test_rechecks_wait_slot_and_submits_to_okx_when_slot_opens(self) -> None:
         class FakeExchange:
@@ -384,7 +395,8 @@ class PendingTest(TestCase):
         self.assertEqual(result["converted"], 1)
         self.assertEqual(result["events"][0]["source"], "lc_okx_released")
         self.assertEqual(result["events"][0]["exchange_order_id"], "market-1")
-        self.assertEqual(len(list_pending_orders(config, status="FILLED")), 1)
+        self.assertEqual(len(list_pending_orders(config, status="FILLED")), 0)
+        self.assertEqual(self._pending_record_total(config), 0)
 
     def test_prioritizes_lc_okx_before_local_lc_when_slot_is_available(self) -> None:
         class FakeExchange:
