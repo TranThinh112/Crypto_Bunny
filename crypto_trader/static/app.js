@@ -1065,7 +1065,7 @@ function healthEvidenceMeaning(label, criterionName) {
   if (text.includes("interval")) return "Khoảng cách giữa hai lần scan tự động.";
   if (text.includes("ai")) return "Trạng thái policy AI; biến này cần đặc biệt chú ý để tránh gọi AI ngoài setup.";
   if (text.includes("kill") || text.includes("guard")) return "Lớp chặn an toàn khi thị trường hoặc cấu hình không đạt điều kiện.";
-  if (text.includes("storage") || text.includes("sqlite") || text.includes("disk")) return "Sức khỏe lưu trữ và dung lượng còn trống.";
+  if (text.includes("storage") || text.includes("atlas") || text.includes("disk")) return "Sức khỏe lưu trữ và dung lượng còn trống.";
   if (text.includes("rows") || text.includes("bytes")) return "Số dòng/kích thước dữ liệu đang được lưu.";
   if (criterionName) return `Bằng chứng dùng để đánh giá tiêu chí "${criterionName}".`;
   return "Bằng chứng dùng để đánh giá sức khỏe hệ thống.";

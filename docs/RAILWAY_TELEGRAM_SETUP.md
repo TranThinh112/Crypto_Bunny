@@ -5,7 +5,7 @@ This repo is prepared so the bot can run 24/7 on Railway. Do not commit real key
 ## Files already prepared
 
 - `railway.json` starts the FastAPI UI with `0.0.0.0:$PORT` and checks `/healthz`.
-- `config.railway.yaml` runs demo mode, scans every 5 minutes, keeps max 5 active trades, and stores state under `/data`.
+- `config.railway.yaml` runs demo mode, scans every 5 minutes, keeps max 5 active trades, uses MongoDB Atlas as the primary state store, and keeps only a local cache under `/tmp`.
 - `.env.railway.example` lists the variables to copy into Railway.
 - `crypto_trader/notifier.py` sends Telegram messages for startup, scans, submitted orders, and errors.
 - `python -m crypto_trader deploy-check --config config.railway.yaml` validates the deploy environment without printing secrets.
@@ -21,15 +21,7 @@ This repo is prepared so the bot can run 24/7 on Railway. Do not commit real key
 python -m crypto_trader ui --config config.railway.yaml --host 0.0.0.0 --port $PORT
 ```
 
-5. Add a Railway Volume and mount it at:
-
-```text
-/data
-```
-
-This keeps `bot_state.sqlite`, `trades.jsonl`, and `latest_decision.json` across redeploys.
-
-6. Add Railway Variables from `.env.railway.example`:
+5. Add Railway Variables from `.env.railway.example`:
 
 ```dotenv
 OKX_API_KEY=
@@ -39,11 +31,15 @@ TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 TELEGRAM_NOTIFY_SCANS=true
 TELEGRAM_MESSAGE_THREAD_ID=
+MONGODB_URI=
+MONGODB_DATABASE=
 ```
 
 Leave `TELEGRAM_MESSAGE_THREAD_ID` empty unless sending into a Telegram forum topic.
 
 Do not set `PORT`; Railway provides it.
+
+6. Keep a single Railway replica only. Atlas is the primary state store, and Railway should be the only runtime allowed to write.
 
 7. Generate a public Railway domain, then open:
 
@@ -249,4 +245,4 @@ ai:
     ask_internal_before_entry: true
 ```
 
-The bot continuously scans top-volume crypto USDT swaps on 1m/5m/1h, stores indicators, candlestick patterns, and scores in SQLite, then lets the internal role summarize the market every 4 hours. `gpt-5.4-mini` can save only 1-3 best setups as local LC. `gpt-5.5` is called only when a pending LC is about to reach OKX or become VT, and code validators still run after the model approval. LC memory is ranked by hard policy as `LC_OKX` first, then local LC, then new mini setups.
+The bot continuously scans top-volume crypto USDT swaps on 1m/5m/1h, stores indicators, candlestick patterns, and scores in MongoDB Atlas, then lets the internal role summarize the market every 4 hours. `gpt-5.4-mini` can save only 1-3 best setups as local LC. `gpt-5.5` is called only when a pending LC is about to reach OKX or become VT, and code validators still run after the model approval. LC memory is ranked by hard policy as `LC_OKX` first, then local LC, then new mini setups.

@@ -1,4 +1,4 @@
-Hãy tạo module Capital Sync + Capital Reserve Manager cho bot AI trading crypto.
+﻿Hãy tạo module Capital Sync + Capital Reserve Manager cho bot AI trading crypto.
 
 Tên tiếng Việt:
 - Capital Sync Service: Đồng bộ vốn thực
@@ -17,7 +17,7 @@ Mục tiêu:
 
 Tech stack:
 - Python 3.11+
-- SQLite
+- MongoDB Atlas
 - SQLAlchemy
 - FastAPI
 - Pydantic
@@ -44,7 +44,7 @@ Cấu hình:
   }
 }
 
-Database SQLite:
+Database MongoDB Atlas:
 
 1. Tạo bảng capital_snapshots:
    - id

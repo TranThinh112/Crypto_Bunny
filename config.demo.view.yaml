@@ -1,7 +1,9 @@
 mode: demo
 report_path: reports/latest_decision.json
 ledger_path: data/trades.jsonl
-state_db_path: data/bot_state.sqlite
+
+runtime:
+  instance_role: secondary
 exchange:
   leverage: 25
   leverage_presets:

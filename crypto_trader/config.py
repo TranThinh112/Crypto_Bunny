@@ -11,9 +11,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "mode": "dry_run",
     "report_path": "reports/latest_decision.json",
     "ledger_path": "data/trades.jsonl",
-    "state_db_path": "data/bot_state.sqlite",
     "runtime": {
         "interval_seconds": 60,
+        "instance_role": "primary",
+    },
+    "database": {
+        "backend": "atlas",
+        "atlas": {
+            "uri": "mongodb+srv://ttthinh2005_db_user:abc123456789@cluster0.58iwirh.mongodb.net/crypto_bunny?appName=Cluster0",
+            "database": "crypto_bunny",
+            "uri_env": "MONGODB_URI",
+            "database_env": "MONGODB_DATABASE",
+            "app_name": "Crypto_Bunny",
+            "server_selection_timeout_ms": 10000,
+            "connect_timeout_ms": 10000,
+        },
     },
     "automation": {
         "enabled": True,

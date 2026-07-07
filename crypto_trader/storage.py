@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import json
-import shutil
-import sqlite3
-from contextlib import contextmanager
+import re
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
 
-from .config import project_path
+from .atlas_mirror import (
+    atlas_database,
+    atlas_runtime_is_primary,
+)
 from .models import Decision, TradeCandidate, to_jsonable
 
 
@@ -20,476 +20,458 @@ DEPRECATED_JOURNAL_STATE_KEYS = {
 DASHBOARD_SNAPSHOT_PREFIX = "dashboard_snapshot:"
 
 
-def state_db_path(config: dict[str, Any]) -> Path:
-    return project_path(config, config.get("state_db_path", "data/bot_state.sqlite"))
+def _mongo_collection(config: dict[str, Any], table: str) -> Any:
+    return atlas_database(config)[table]
 
 
-def _connect(config: dict[str, Any]) -> sqlite3.Connection:
-    path = state_db_path(config)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(path)
-    connection.row_factory = sqlite3.Row
-    _ensure_schema(connection)
-    return connection
+def _mongo_meta_collection(config: dict[str, Any]) -> Any:
+    return atlas_database(config)["_meta_counters"]
 
 
-@contextmanager
-def connect_state_db(config: dict[str, Any]) -> Any:
-    connection = _connect(config)
-    try:
-        yield connection
-    finally:
-        connection.close()
+def _ensure_mongo_write_allowed(config: dict[str, Any]) -> None:
+    if not atlas_runtime_is_primary(config):
+        raise RuntimeError("This runtime is read-only. Only Railway primary may write Atlas state.")
 
 
-def _ensure_schema(connection: sqlite3.Connection) -> None:
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS decisions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at TEXT NOT NULL,
-            action TEXT NOT NULL,
-            selected_symbol TEXT,
-            selected_side TEXT,
-            selected_win_probability_pct REAL,
-            payload_json TEXT NOT NULL
-        )
-        """
+def _mongo_next_id(config: dict[str, Any], table: str) -> int:
+    from pymongo import ReturnDocument
+
+    now = datetime.now(timezone.utc).isoformat()
+    row = _mongo_meta_collection(config).find_one_and_update(
+        {"_id": f"{table}:id"},
+        {"$inc": {"value": 1}, "$set": {"updated_at": now}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
     )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS paper_trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            status TEXT NOT NULL,
-            symbol TEXT NOT NULL,
-            base TEXT NOT NULL,
-            side TEXT NOT NULL,
-            entry REAL NOT NULL,
-            stop_loss REAL NOT NULL,
-            take_profit REAL NOT NULL,
-            quantity REAL,
-            order_usdt REAL NOT NULL,
-            confidence REAL NOT NULL,
-            win_probability_pct REAL,
-            risk_reward REAL NOT NULL,
-            leverage REAL NOT NULL,
-            close_price REAL,
-            close_reason TEXT,
-            pnl_pct REAL,
-            payload_json TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS pending_orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            expires_at TEXT NOT NULL,
-            status TEXT NOT NULL,
-            symbol TEXT NOT NULL,
-            base TEXT NOT NULL,
-            side TEXT NOT NULL,
-            exchange_order_id TEXT,
-            entry REAL NOT NULL,
-            stop_loss REAL NOT NULL,
-            take_profit REAL NOT NULL,
-            quantity REAL,
-            order_usdt REAL NOT NULL,
-            confidence REAL NOT NULL,
-            win_probability_pct REAL,
-            risk_reward REAL NOT NULL,
-            payload_json TEXT NOT NULL,
-            close_reason TEXT
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS journal_state (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS trade_memory (
-            key TEXT PRIMARY KEY,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            symbol TEXT NOT NULL,
-            side TEXT,
-            opened_at TEXT,
-            closed_at TEXT,
-            pnl_usdt REAL,
-            pnl_pct REAL,
-            outcome TEXT NOT NULL,
-            source TEXT NOT NULL,
-            payload_json TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS market_guard_observations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at TEXT NOT NULL,
-            observed_at TEXT NOT NULL,
-            symbol TEXT NOT NULL,
-            last REAL,
-            move_pct REAL,
-            candle_range_pct REAL,
-            wick_pct REAL,
-            wick_body_ratio REAL,
-            volume_ratio REAL,
-            severity TEXT NOT NULL,
-            alert_reasons_json TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS market_scan_observations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at TEXT NOT NULL,
-            source TEXT NOT NULL,
-            symbol TEXT NOT NULL,
-            side TEXT NOT NULL,
-            timeframe TEXT,
-            confidence REAL NOT NULL,
-            win_probability_pct REAL,
-            risk_reward REAL NOT NULL,
-            score REAL NOT NULL,
-            indicator_json TEXT NOT NULL,
-            payload_json TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_market_scan_observed
-        ON market_scan_observations(created_at, symbol)
-        """
-    )
-    connection.execute(
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_market_guard_symbol_observed
-        ON market_guard_observations(symbol, observed_at)
-        """
-    )
-    connection.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_market_guard_observed
-        ON market_guard_observations(observed_at)
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS ai_trade_decisions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at TEXT NOT NULL,
-            symbol TEXT,
-            timeframe TEXT,
-            decision TEXT NOT NULL,
-            confidence REAL,
-            rule_score REAL,
-            side TEXT NOT NULL,
-            entry_price REAL,
-            stop_loss REAL,
-            take_profit1 REAL,
-            take_profit2 REAL,
-            risk_reward REAL,
-            funding_rate REAL,
-            open_interest_change REAL,
-            rsi REAL,
-            macd_signal REAL,
-            trend TEXT,
-            volume_change REAL,
-            news_score REAL,
-            reason_json TEXT NOT NULL,
-            raw_prompt TEXT,
-            raw_response TEXT,
-            order_id TEXT,
-            trade_status TEXT,
-            pnl REAL,
-            closed_at TEXT,
-            prompt_version TEXT,
-            prompt_hash TEXT,
-            model_name TEXT,
-            model_version TEXT,
-            strategy_version TEXT,
-            validator_version TEXT,
-            recovery_version TEXT,
-            health_version TEXT,
-            experiment_name TEXT,
-            market_regime TEXT,
-            regime_confidence REAL,
-            snapshot_json TEXT,
-            payload_json TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_ai_trade_decisions_created
-        ON ai_trade_decisions(created_at DESC)
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS trade_executions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            symbol TEXT NOT NULL,
-            position_slot INTEGER,
-            parent_position_id INTEGER,
-            side TEXT NOT NULL,
-            entry_price REAL NOT NULL,
-            stop_loss REAL NOT NULL,
-            take_profit REAL NOT NULL,
-            risk_reward REAL NOT NULL,
-            risk_percent REAL NOT NULL,
-            rule_score REAL,
-            gpt_confidence REAL,
-            status TEXT NOT NULL,
-            pnl REAL,
-            reject_reason TEXT,
-            closed_at TEXT,
-            payload_json TEXT NOT NULL,
-            market_regime TEXT,
-            regime_confidence REAL,
-            strategy_version TEXT,
-            rule_engine_version TEXT,
-            validator_version TEXT,
-            recovery_version TEXT,
-            health_version TEXT,
-            prompt_version TEXT,
-            prompt_hash TEXT,
-            model_name TEXT,
-            model_version TEXT,
-            system_version TEXT,
-            decision_engine_version TEXT,
-            bunny_version TEXT,
-            health_monitor_version TEXT,
-            slot_refill_version TEXT,
-            experiment_name TEXT,
-            prompt_tokens INTEGER,
-            completion_tokens INTEGER,
-            latency_ms REAL,
-            snapshot_json TEXT
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_trade_executions_status_created
-        ON trade_executions(status, created_at DESC)
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS trading_system_state (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            mechanism_name TEXT NOT NULL,
-            is_recovery_mode INTEGER NOT NULL,
-            global_loss_streak INTEGER NOT NULL,
-            is_paused INTEGER NOT NULL,
-            paused_until TEXT,
-            current_normal_min_rule_score REAL NOT NULL,
-            current_normal_min_gpt_confidence REAL NOT NULL,
-            updated_at TEXT NOT NULL,
-            payload_json TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS trading_health_state (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            mechanism_name TEXT NOT NULL,
-            is_healthy INTEGER NOT NULL,
-            is_warning INTEGER NOT NULL,
-            is_critical INTEGER NOT NULL,
-            total_trades INTEGER NOT NULL,
-            win_count INTEGER NOT NULL,
-            loss_count INTEGER NOT NULL,
-            breakeven_count INTEGER NOT NULL,
-            win_rate REAL NOT NULL,
-            gross_profit REAL NOT NULL,
-            gross_loss REAL NOT NULL,
-            profit_factor REAL NOT NULL,
-            total_pnl REAL NOT NULL,
-            max_drawdown_percent REAL NOT NULL,
-            risk_multiplier REAL NOT NULL,
-            score_adjustment REAL NOT NULL,
-            confidence_adjustment REAL NOT NULL,
-            is_paused INTEGER NOT NULL,
-            paused_until TEXT,
-            reason TEXT,
-            updated_at TEXT NOT NULL,
-            payload_json TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS trade_candidates (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at TEXT NOT NULL,
-            symbol TEXT NOT NULL,
-            side TEXT NOT NULL,
-            rule_score REAL,
-            gpt_confidence REAL,
-            risk_reward REAL NOT NULL,
-            entry_price REAL,
-            stop_loss REAL,
-            take_profit REAL,
-            is_used INTEGER NOT NULL DEFAULT 0,
-            used_at TEXT,
-            payload_json TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_trade_candidates_recent
-        ON trade_candidates(created_at DESC, is_used, rule_score DESC)
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS market_regime_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at TEXT NOT NULL,
-            regime TEXT NOT NULL,
-            confidence REAL NOT NULL,
-            indicators_json TEXT NOT NULL,
-            reason TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_market_regime_created
-        ON market_regime_history(created_at DESC)
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS strategy_versions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            version TEXT NOT NULL UNIQUE,
-            name TEXT NOT NULL,
-            description TEXT,
-            created_at TEXT NOT NULL,
-            is_active INTEGER NOT NULL,
-            traffic_percent REAL NOT NULL DEFAULT 100,
-            indicators_json TEXT NOT NULL,
-            rules_json TEXT NOT NULL,
-            risk_config_json TEXT NOT NULL,
-            payload_json TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS prompt_versions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            version TEXT NOT NULL UNIQUE,
-            hash TEXT NOT NULL,
-            description TEXT,
-            created_at TEXT NOT NULL,
-            is_active INTEGER NOT NULL,
-            files_json TEXT NOT NULL,
-            prompt_hash TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS ai_model_versions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            model_name TEXT NOT NULL,
-            model_version TEXT NOT NULL,
-            prompt_version TEXT NOT NULL,
-            prompt_hash TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS ai_experiments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
-            description TEXT,
-            prompt_version TEXT NOT NULL,
-            traffic_percent REAL NOT NULL,
-            enabled INTEGER NOT NULL,
-            created_at TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS prompt_metrics (
-            prompt_version TEXT PRIMARY KEY,
-            prompt_hash TEXT NOT NULL,
-            total_requests INTEGER NOT NULL,
-            average_prompt_tokens REAL NOT NULL,
-            average_completion_tokens REAL NOT NULL,
-            average_latency REAL NOT NULL,
-            estimated_cached_tokens REAL NOT NULL,
-            estimated_dynamic_tokens REAL NOT NULL,
-            cache_hit_percent REAL NOT NULL,
-            updated_at TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS replay_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            trade_execution_id INTEGER NOT NULL,
-            prompt_version TEXT,
-            strategy_version TEXT,
-            model_version TEXT,
-            old_decision TEXT NOT NULL,
-            new_decision TEXT NOT NULL,
-            old_confidence REAL,
-            new_confidence REAL,
-            latency REAL,
-            replay_at TEXT NOT NULL,
-            decision_changed INTEGER NOT NULL,
-            confidence_changed INTEGER NOT NULL,
-            reason_changed INTEGER NOT NULL,
-            old_reason_json TEXT NOT NULL,
-            new_reason_json TEXT NOT NULL,
-            payload_json TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_replay_history_trade
-        ON replay_history(trade_execution_id, replay_at DESC)
-        """
-    )
-    _ensure_column(connection, "pending_orders", "journal_id", "INTEGER")
-    connection.commit()
+    return int((row or {}).get("value") or 1)
 
 
-def _ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
-    rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
-    existing = {str(row[1]) for row in rows}
-    if column not in existing:
-        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+def _mongo_upsert_by_pk(config: dict[str, Any], table: str, pk_field: str, payload: dict[str, Any]) -> dict[str, Any]:
+    document = dict(payload)
+    document["_id"] = document[pk_field]
+    _mongo_collection(config, table).replace_one({pk_field: document[pk_field]}, document, upsert=True)
+    return document
+
+
+def _mongo_find_many(
+    config: dict[str, Any],
+    table: str,
+    *,
+    query: dict[str, Any] | None = None,
+    sort: list[tuple[str, int]] | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    cursor = _mongo_collection(config, table).find(query or {}, {"_id": 0})
+    if sort:
+        cursor = cursor.sort(sort)
+    if limit is not None:
+        cursor = cursor.limit(max(0, int(limit)))
+    return [dict(row) for row in cursor]
+
+
+def _mongo_find_one(
+    config: dict[str, Any],
+    table: str,
+    *,
+    query: dict[str, Any] | None = None,
+    sort: list[tuple[str, int]] | None = None,
+) -> dict[str, Any] | None:
+    rows = _mongo_find_many(config, table, query=query, sort=sort, limit=1)
+    return rows[0] if rows else None
+
+
+def list_journal_state_prefix(config: dict[str, Any], prefix: str, *, limit: int = 100) -> list[dict[str, Any]]:
+    safe_limit = max(1, int(limit))
+    return _mongo_find_many(
+        config,
+        "journal_state",
+        query={"key": {"$regex": f"^{re.escape(prefix)}"}},
+        sort=[("key", -1)],
+        limit=safe_limit,
+    )
+def ensure_ai_model_version(
+    config: dict[str, Any],
+    *,
+    model_name: str,
+    model_version: str,
+    prompt_version: str,
+    prompt_hash: str,
+    created_at: str | None = None,
+) -> None:
+    filters = {
+        "model_name": model_name,
+        "model_version": model_version,
+        "prompt_version": prompt_version,
+        "prompt_hash": prompt_hash,
+    }
+    if _mongo_find_one(config, "ai_model_versions", query=filters):
+        return
+    _ensure_mongo_write_allowed(config)
+    row = dict(filters)
+    row["id"] = _mongo_next_id(config, "ai_model_versions")
+    row["created_at"] = str(created_at or datetime.now(timezone.utc).isoformat())
+    _mongo_upsert_by_pk(config, "ai_model_versions", "id", row)
+    return
+def get_prompt_version(config: dict[str, Any], version: str) -> dict[str, Any] | None:
+    return _mongo_find_one(config, "prompt_versions", query={"version": version})
+def save_prompt_version(config: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+    existing = get_prompt_version(config, str(row["version"]))
+    payload = {
+        "version": str(row["version"]),
+        "hash": row.get("hash"),
+        "description": row.get("description"),
+        "created_at": row.get("created_at") or (existing or {}).get("created_at") or datetime.now(timezone.utc).isoformat(),
+        "is_active": int(row.get("is_active", 0) or 0),
+        "files_json": row.get("files_json") or "{}",
+        "prompt_hash": row.get("prompt_hash") or row.get("hash"),
+    }
+    _ensure_mongo_write_allowed(config)
+    payload["id"] = int((existing or {}).get("id") or _mongo_next_id(config, "prompt_versions"))
+    _mongo_upsert_by_pk(config, "prompt_versions", "version", payload)
+    return payload
+def list_prompt_versions(config: dict[str, Any]) -> list[dict[str, Any]]:
+    return _mongo_find_many(config, "prompt_versions", sort=[("created_at", -1), ("id", -1)])
+def get_prompt_metric(config: dict[str, Any], prompt_version: str) -> dict[str, Any] | None:
+    return _mongo_find_one(config, "prompt_metrics", query={"prompt_version": prompt_version})
+def merge_prompt_metric(config: dict[str, Any], metric: dict[str, Any]) -> None:
+    prompt_version = str(metric.get("prompt_version") or "")
+    if not prompt_version:
+        return
+    prompt_tokens = float(metric.get("prompt_tokens") or 0)
+    completion_tokens = float(metric.get("completion_tokens") or 0)
+    latency_ms = float(metric.get("latency_ms") or 0)
+    cached_tokens = float(metric.get("estimated_cached_tokens") or 0)
+    dynamic_tokens = float(metric.get("estimated_dynamic_tokens") or 0)
+    cache_hit_percent = float(metric.get("cache_hit_percent") or 0)
+    existing = get_prompt_metric(config, prompt_version)
+    if existing is None:
+        payload = {
+            "prompt_version": prompt_version,
+            "prompt_hash": str(metric.get("prompt_hash") or ""),
+            "total_requests": 1,
+            "average_prompt_tokens": prompt_tokens,
+            "average_completion_tokens": completion_tokens,
+            "average_latency": latency_ms,
+            "estimated_cached_tokens": cached_tokens,
+            "estimated_dynamic_tokens": dynamic_tokens,
+            "cache_hit_percent": cache_hit_percent,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    else:
+        total = int(existing.get("total_requests") or 0)
+        new_total = total + 1
+        payload = {
+            "prompt_version": prompt_version,
+            "prompt_hash": str(metric.get("prompt_hash") or existing.get("prompt_hash") or ""),
+            "total_requests": new_total,
+            "average_prompt_tokens": ((float(existing.get("average_prompt_tokens") or 0) * total) + prompt_tokens) / new_total,
+            "average_completion_tokens": ((float(existing.get("average_completion_tokens") or 0) * total) + completion_tokens) / new_total,
+            "average_latency": ((float(existing.get("average_latency") or 0) * total) + latency_ms) / new_total,
+            "estimated_cached_tokens": ((float(existing.get("estimated_cached_tokens") or 0) * total) + cached_tokens) / new_total,
+            "estimated_dynamic_tokens": ((float(existing.get("estimated_dynamic_tokens") or 0) * total) + dynamic_tokens) / new_total,
+            "cache_hit_percent": ((float(existing.get("cache_hit_percent") or 0) * total) + cache_hit_percent) / new_total,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    _ensure_mongo_write_allowed(config)
+    _mongo_upsert_by_pk(config, "prompt_metrics", "prompt_version", payload)
+    return
+def save_ai_experiment(config: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+    name = str(row["name"])
+    _ensure_mongo_write_allowed(config)
+    existing = _mongo_find_one(config, "ai_experiments", query={"name": name})
+    payload = {
+        "id": int((existing or {}).get("id") or _mongo_next_id(config, "ai_experiments")),
+        "name": name,
+        "description": str(row.get("description") or ""),
+        "prompt_version": str(row.get("prompt_version") or ""),
+        "traffic_percent": float(row.get("traffic_percent") or 0),
+        "enabled": int(row.get("enabled", 0) or 0),
+        "created_at": str((existing or {}).get("created_at") or row.get("created_at") or datetime.now(timezone.utc).isoformat()),
+    }
+    _mongo_upsert_by_pk(config, "ai_experiments", "name", payload)
+    return payload
+def list_ai_experiment_rows(config: dict[str, Any], *, enabled_only: bool = False) -> list[dict[str, Any]]:
+    query = {"enabled": 1} if enabled_only else None
+    return _mongo_find_many(config, "ai_experiments", query=query, sort=[("created_at", -1), ("id", -1)])
+def get_strategy_version(config: dict[str, Any], version: str) -> dict[str, Any] | None:
+    return _mongo_find_one(config, "strategy_versions", query={"version": version})
+def ensure_strategy_version(config: dict[str, Any], row: dict[str, Any]) -> None:
+    if get_strategy_version(config, str(row["version"])) is not None:
+        return
+    save_strategy_version(config, row, deactivate_others=False)
+
+
+def save_strategy_version(config: dict[str, Any], row: dict[str, Any], *, deactivate_others: bool = False) -> dict[str, Any]:
+    version = str(row["version"])
+    existing = get_strategy_version(config, version)
+    payload = {
+        "version": version,
+        "name": str(row.get("name") or version.upper()),
+        "description": str(row.get("description") or ""),
+        "created_at": str((existing or {}).get("created_at") or row.get("created_at") or datetime.now(timezone.utc).isoformat()),
+        "is_active": int(row.get("is_active", 0) or 0),
+        "traffic_percent": float(row.get("traffic_percent") or 0),
+        "indicators_json": row.get("indicators_json") or "{}",
+        "rules_json": row.get("rules_json") or "{}",
+        "risk_config_json": row.get("risk_config_json") or "{}",
+        "payload_json": row.get("payload_json") or "{}",
+    }
+    _ensure_mongo_write_allowed(config)
+    collection = _mongo_collection(config, "strategy_versions")
+    if deactivate_others and payload["is_active"]:
+        collection.update_many({}, {"$set": {"is_active": 0}})
+    payload["id"] = int((existing or {}).get("id") or _mongo_next_id(config, "strategy_versions"))
+    _mongo_upsert_by_pk(config, "strategy_versions", "version", payload)
+    return payload
+def activate_strategy_version_record(config: dict[str, Any], version: str) -> dict[str, Any] | None:
+    row = get_strategy_version(config, version)
+    if row is None:
+        return None
+    _ensure_mongo_write_allowed(config)
+    collection = _mongo_collection(config, "strategy_versions")
+    collection.update_many({}, {"$set": {"is_active": 0}})
+    collection.update_one({"version": version}, {"$set": {"is_active": 1}})
+    return _mongo_find_one(config, "strategy_versions", query={"version": version})
+def list_strategy_versions(
+    config: dict[str, Any],
+    *,
+    active_only: bool | None = None,
+    order: str = "created_desc",
+) -> list[dict[str, Any]]:
+    if order == "id_asc":
+        sort = [("id", 1)]
+    elif order == "created_asc":
+        sort = [("created_at", 1), ("id", 1)]
+    else:
+        sort = [("created_at", -1), ("id", -1)]
+    query: dict[str, Any] | None = None
+    if active_only is True:
+        query = {"is_active": 1}
+    elif active_only is False:
+        query = None
+    return _mongo_find_many(config, "strategy_versions", query=query, sort=sort)
+def insert_market_regime_history(config: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "created_at": row.get("created_at") or datetime.now(timezone.utc).isoformat(),
+        "regime": row.get("regime") or "UNKNOWN",
+        "confidence": row.get("confidence") or 0,
+        "indicators_json": row.get("indicators_json") or "{}",
+        "reason": row.get("reason") or "",
+    }
+    _ensure_mongo_write_allowed(config)
+    payload["id"] = _mongo_next_id(config, "market_regime_history")
+    _mongo_upsert_by_pk(config, "market_regime_history", "id", payload)
+    return payload
+def latest_market_regime_history(config: dict[str, Any]) -> dict[str, Any] | None:
+    return _mongo_find_one(config, "market_regime_history", sort=[("created_at", -1), ("id", -1)])
+def list_market_regime_rows(config: dict[str, Any], *, limit: int = 100) -> list[dict[str, Any]]:
+    safe_limit = max(1, int(limit))
+    return _mongo_find_many(
+        config,
+        "market_regime_history",
+        sort=[("created_at", -1), ("id", -1)],
+        limit=safe_limit,
+    )
+def insert_trade_candidate_rows(config: dict[str, Any], rows: list[dict[str, Any]]) -> int:
+    if not rows:
+        return 0
+    _ensure_mongo_write_allowed(config)
+    collection = _mongo_collection(config, "trade_candidates")
+    documents: list[dict[str, Any]] = []
+    for row in rows:
+        payload = dict(row)
+        payload["id"] = _mongo_next_id(config, "trade_candidates")
+        payload["is_used"] = int(payload.get("is_used", 0) or 0)
+        documents.append(payload)
+    if documents:
+        collection.insert_many([{**doc, "_id": doc["id"]} for doc in documents], ordered=True)
+    return len(documents)
+def list_trade_candidate_rows(
+    config: dict[str, Any],
+    *,
+    min_created_at: str | None = None,
+    unused_only: bool = False,
+    min_rule_score: float | None = None,
+    limit: int | None = None,
+    order: str = "recent",
+) -> list[dict[str, Any]]:
+    query: dict[str, Any] = {}
+    if min_created_at:
+        query["created_at"] = {"$gte": min_created_at}
+    if unused_only:
+        query["is_used"] = 0
+    if min_rule_score is not None:
+        query["rule_score"] = {"$gte": float(min_rule_score)}
+    if order == "refill":
+        sort = [("rule_score", -1), ("gpt_confidence", -1), ("risk_reward", -1), ("id", 1)]
+    else:
+        sort = [("created_at", -1), ("id", -1)]
+    return _mongo_find_many(config, "trade_candidates", query=query or None, sort=sort, limit=limit)
+def mark_trade_candidate_used(config: dict[str, Any], candidate_id: int, *, used_at: str | None = None) -> None:
+    now = str(used_at or datetime.now(timezone.utc).isoformat())
+    _ensure_mongo_write_allowed(config)
+    _mongo_collection(config, "trade_candidates").update_one(
+        {"id": int(candidate_id)},
+        {"$set": {"is_used": 1, "used_at": now}},
+    )
+    return
+def claim_trade_candidate(config: dict[str, Any], candidate_id: int, *, used_at: str | None = None) -> bool:
+    now = str(used_at or datetime.now(timezone.utc).isoformat())
+    _ensure_mongo_write_allowed(config)
+    result = _mongo_collection(config, "trade_candidates").update_one(
+        {"id": int(candidate_id), "is_used": 0},
+        {"$set": {"is_used": 1, "used_at": now}},
+    )
+    return int(result.modified_count or 0) == 1
+def insert_ai_trade_decision_row(config: dict[str, Any], row: dict[str, Any]) -> int:
+    _ensure_mongo_write_allowed(config)
+    payload = dict(row)
+    payload["id"] = _mongo_next_id(config, "ai_trade_decisions")
+    _mongo_upsert_by_pk(config, "ai_trade_decisions", "id", payload)
+    return int(payload["id"])
+def list_ai_trade_decision_rows(config: dict[str, Any], *, limit: int = 50) -> list[dict[str, Any]]:
+    safe_limit = max(1, int(limit))
+    return _mongo_find_many(config, "ai_trade_decisions", sort=[("created_at", -1), ("id", -1)], limit=safe_limit)
+def mark_ai_trade_decisions_closed(
+    config: dict[str, Any],
+    *,
+    symbol: str,
+    side: str,
+    trade_status: str,
+    pnl: float | None,
+    closed_at: str | None,
+) -> None:
+    updates = {
+        "trade_status": trade_status,
+        "pnl": pnl,
+        "closed_at": closed_at,
+    }
+    _ensure_mongo_write_allowed(config)
+    _mongo_collection(config, "ai_trade_decisions").update_many(
+        {"symbol": symbol, "side": side, "trade_status": None},
+        {"$set": updates},
+    )
+    return
+def insert_trade_execution_row(config: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+    _ensure_mongo_write_allowed(config)
+    payload = dict(row)
+    payload["id"] = _mongo_next_id(config, "trade_executions")
+    _mongo_upsert_by_pk(config, "trade_executions", "id", payload)
+    return payload
+def get_trade_execution(config: dict[str, Any], trade_execution_id: int) -> dict[str, Any] | None:
+    return _mongo_find_one(config, "trade_executions", query={"id": int(trade_execution_id)})
+def list_trade_execution_rows(
+    config: dict[str, Any],
+    *,
+    statuses: list[str] | tuple[str, ...] | None = None,
+    strategy_version: str | None = None,
+    ids: list[int] | None = None,
+    limit: int | None = None,
+    order: str = "created_desc",
+) -> list[dict[str, Any]]:
+    query: dict[str, Any] = {}
+    if statuses:
+        query["status"] = {"$in": [str(status) for status in statuses]}
+    if strategy_version:
+        query["strategy_version"] = strategy_version
+    if ids:
+        query["id"] = {"$in": [int(value) for value in ids]}
+    if order == "created_asc":
+        sort = [("created_at", 1), ("id", 1)]
+    elif order == "closed_desc":
+        sort = [("closed_at", -1), ("updated_at", -1), ("created_at", -1), ("id", -1)]
+    else:
+        sort = [("created_at", -1), ("id", -1)]
+    return _mongo_find_many(config, "trade_executions", query=query or None, sort=sort, limit=limit)
+def update_trade_execution(config: dict[str, Any], trade_execution_id: int, updates: dict[str, Any]) -> dict[str, Any] | None:
+    if not updates:
+        return get_trade_execution(config, trade_execution_id)
+    _ensure_mongo_write_allowed(config)
+    _mongo_collection(config, "trade_executions").update_one({"id": int(trade_execution_id)}, {"$set": dict(updates)})
+    return get_trade_execution(config, trade_execution_id)
+def close_latest_trade_execution_by_status(
+    config: dict[str, Any],
+    *,
+    symbol: str,
+    side: str,
+    source_status: str,
+    target_status: str,
+    reason: str | None = None,
+    closed_at: str | None = None,
+) -> dict[str, Any] | None:
+    when = str(closed_at or datetime.now(timezone.utc).isoformat())
+    row = _mongo_find_one(
+        config,
+        "trade_executions",
+        query={"symbol": symbol, "side": side, "status": source_status},
+        sort=[("created_at", -1), ("id", -1)],
+    )
+    if row is None:
+        return None
+    return update_trade_execution(
+        config,
+        int(row["id"]),
+        {
+            "status": target_status,
+            "reject_reason": reason,
+            "closed_at": when,
+            "updated_at": when,
+        },
+    )
+def list_trade_execution_ids(config: dict[str, Any], *, limit: int) -> list[int]:
+    rows = list_trade_execution_rows(config, limit=limit, order="created_desc")
+    return [int(row["id"]) for row in rows if row.get("id") is not None]
+
+
+def get_trading_system_state_row(config: dict[str, Any]) -> dict[str, Any] | None:
+    return _mongo_find_one(config, "trading_system_state", query={"id": 1})
+def upsert_trading_system_state_row(config: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(row)
+    payload["id"] = 1
+    _ensure_mongo_write_allowed(config)
+    _mongo_upsert_by_pk(config, "trading_system_state", "id", payload)
+    return payload
+def upsert_trading_health_state_row(config: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(row)
+    payload["id"] = 1
+    _ensure_mongo_write_allowed(config)
+    _mongo_upsert_by_pk(config, "trading_health_state", "id", payload)
+    return payload
+def insert_replay_history_row(config: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+    _ensure_mongo_write_allowed(config)
+    payload = dict(row)
+    payload["id"] = _mongo_next_id(config, "replay_history")
+    _mongo_upsert_by_pk(config, "replay_history", "id", payload)
+    return payload
+def list_replay_history_rows(
+    config: dict[str, Any],
+    *,
+    limit: int | None = None,
+    include_trade_execution: bool = False,
+) -> list[dict[str, Any]]:
+    safe_limit = max(1, int(limit)) if limit is not None else None
+    rows = _mongo_find_many(config, "replay_history", sort=[("replay_at", -1), ("id", -1)], limit=safe_limit)
+    if not include_trade_execution or not rows:
+        return rows
+    execution_ids = [int(row["trade_execution_id"]) for row in rows if row.get("trade_execution_id") is not None]
+    executions = {
+        int(item["id"]): item
+        for item in list_trade_execution_rows(config, ids=execution_ids, limit=None, order="created_desc")
+    }
+    merged: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        execution = executions.get(int(row["trade_execution_id"])) if row.get("trade_execution_id") is not None else None
+        item["trade_status"] = execution.get("status") if execution else None
+        item["trade_pnl"] = execution.get("pnl") if execution else None
+        item["risk_reward"] = execution.get("risk_reward") if execution else None
+        item["gpt_confidence"] = execution.get("gpt_confidence") if execution else None
+        item["trade_created_at"] = execution.get("created_at") if execution else None
+        item["trade_closed_at"] = execution.get("closed_at") if execution else None
+        item["symbol"] = execution.get("symbol") if execution else None
+        item["side"] = execution.get("side") if execution else None
+        merged.append(item)
+    return merged
 
 
 def _is_deprecated_journal_state_key(key: str) -> bool:
@@ -497,100 +479,92 @@ def _is_deprecated_journal_state_key(key: str) -> bool:
 
 
 def delete_journal_state(config: dict[str, Any], key: str) -> None:
-    with _connect(config) as connection:
-        connection.execute("DELETE FROM journal_state WHERE key = ?", (key,))
-        connection.commit()
-
-
+    _ensure_mongo_write_allowed(config)
+    _mongo_collection(config, "journal_state").delete_one({"key": key})
+    return
 def delete_journal_state_prefix(config: dict[str, Any], prefix: str) -> None:
-    with _connect(config) as connection:
-        connection.execute("DELETE FROM journal_state WHERE key LIKE ?", (f"{prefix}%",))
-        connection.commit()
-
-
+    _ensure_mongo_write_allowed(config)
+    _mongo_collection(config, "journal_state").delete_many({"key": {"$regex": f"^{prefix}"}})
+    return
 def clear_dashboard_snapshot_cache(config: dict[str, Any]) -> None:
     delete_journal_state_prefix(config, DASHBOARD_SNAPSHOT_PREFIX)
 
 
 def purge_deprecated_journal_state(config: dict[str, Any]) -> list[str]:
     removed: list[str] = []
-    with _connect(config) as connection:
-        for key in sorted(DEPRECATED_JOURNAL_STATE_KEYS):
-            cursor = connection.execute("DELETE FROM journal_state WHERE key = ?", (key,))
-            if int(cursor.rowcount or 0) > 0:
-                removed.append(key)
-        connection.commit()
+    _ensure_mongo_write_allowed(config)
+    for key in sorted(DEPRECATED_JOURNAL_STATE_KEYS):
+        result = _mongo_collection(config, "journal_state").delete_one({"key": key})
+        if int(result.deleted_count or 0) > 0:
+            removed.append(key)
     return removed
-
-
 def get_journal_state(config: dict[str, Any], key: str) -> str | None:
     if _is_deprecated_journal_state_key(key):
         delete_journal_state(config, key)
         return None
-    with _connect(config) as connection:
-        row = connection.execute("SELECT value FROM journal_state WHERE key = ?", (key,)).fetchone()
+    row = _mongo_find_one(config, "journal_state", query={"key": key})
     return str(row["value"]) if row else None
-
-
 def set_journal_state(config: dict[str, Any], key: str, value: str) -> None:
     if _is_deprecated_journal_state_key(key):
         delete_journal_state(config, key)
         return
     now = datetime.now(timezone.utc).isoformat()
-    with _connect(config) as connection:
-        connection.execute(
-            """
-            INSERT INTO journal_state (key, value, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(key) DO UPDATE SET
-                value = excluded.value,
-                updated_at = excluded.updated_at
-            """,
-            (key, value, now),
-        )
-        connection.commit()
-
-
+    _ensure_mongo_write_allowed(config)
+    _mongo_upsert_by_pk(
+        config,
+        "journal_state",
+        "key",
+        {
+            "key": key,
+            "value": value,
+            "updated_at": now,
+        },
+    )
+    return
 def next_global_counter(config: dict[str, Any], name: str) -> int:
     key = f"counter:{name}"
-    with _connect(config) as connection:
-        row = connection.execute("SELECT value FROM journal_state WHERE key = ?", (key,)).fetchone()
-        value = int(row["value"]) + 1 if row else 1
-        now = datetime.now(timezone.utc).isoformat()
-        connection.execute(
-            """
-            INSERT INTO journal_state (key, value, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(key) DO UPDATE SET
-                value = excluded.value,
-                updated_at = excluded.updated_at
-            """,
-            (key, str(value), now),
-        )
-        connection.commit()
-    return value
+    _ensure_mongo_write_allowed(config)
+    from pymongo import ReturnDocument
 
-
+    now = datetime.now(timezone.utc).isoformat()
+    row = _mongo_collection(config, "journal_state").find_one_and_update(
+        {"key": key},
+        [
+            {
+                "$set": {
+                    "key": key,
+                    "counter_value": {"$add": [{"$ifNull": ["$counter_value", 0]}, 1]},
+                    "updated_at": now,
+                }
+            },
+            {"$set": {"value": {"$toString": "$counter_value"}}},
+        ],
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    return int((row or {}).get("counter_value") or 1)
 def next_daily_counter(config: dict[str, Any], name: str, date_key: str) -> int:
     key = f"counter:{name}:{date_key}"
-    with _connect(config) as connection:
-        row = connection.execute("SELECT value FROM journal_state WHERE key = ?", (key,)).fetchone()
-        value = int(row["value"]) + 1 if row else 1
-        now = datetime.now(timezone.utc).isoformat()
-        connection.execute(
-            """
-            INSERT INTO journal_state (key, value, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(key) DO UPDATE SET
-                value = excluded.value,
-                updated_at = excluded.updated_at
-            """,
-            (key, str(value), now),
-        )
-        connection.commit()
-    return value
+    _ensure_mongo_write_allowed(config)
+    from pymongo import ReturnDocument
 
-
+    now = datetime.now(timezone.utc).isoformat()
+    row = _mongo_collection(config, "journal_state").find_one_and_update(
+        {"key": key},
+        [
+            {
+                "$set": {
+                    "key": key,
+                    "counter_value": {"$add": [{"$ifNull": ["$counter_value", 0]}, 1]},
+                    "updated_at": now,
+                }
+            },
+            {"$set": {"value": {"$toString": "$counter_value"}}},
+        ],
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    return int((row or {}).get("counter_value") or 1)
 def _round_float(value: Any, digits: int = 6) -> Any:
     if isinstance(value, bool):
         return value
@@ -755,13 +729,7 @@ def save_decision(config: dict[str, Any], decision: Decision) -> int:
     payload = to_jsonable(decision)
     selected = decision.selected
     prune_decision_history(config)
-    try:
-        return _insert_decision_payload(config, decision, payload, selected)
-    except sqlite3.OperationalError as exc:
-        if "disk" not in str(exc).lower() and "full" not in str(exc).lower():
-            raise
-        run_storage_maintenance(config, emergency=True)
-        return _insert_decision_payload(config, decision, payload, selected)
+    return _insert_decision_payload(config, decision, payload, selected)
 
 
 def _insert_decision_payload(
@@ -770,32 +738,23 @@ def _insert_decision_payload(
     payload: dict[str, Any],
     selected: TradeCandidate | None,
 ) -> int:
-    with _connect(config) as connection:
-        cursor = connection.execute(
-            """
-            INSERT INTO decisions (
-                created_at,
-                action,
-                selected_symbol,
-                selected_side,
-                selected_win_probability_pct,
-                payload_json
-            )
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                payload["created_at"],
-                decision.action,
-                selected.symbol if selected else None,
-                selected.side if selected else None,
-                selected.win_probability_pct if selected else None,
-                json.dumps(payload, ensure_ascii=False),
-            ),
-        )
-        connection.commit()
-        return int(cursor.lastrowid)
-
-
+    _ensure_mongo_write_allowed(config)
+    row_id = _mongo_next_id(config, "decisions")
+    _mongo_upsert_by_pk(
+        config,
+        "decisions",
+        "id",
+        {
+            "id": row_id,
+            "created_at": payload["created_at"],
+            "action": decision.action,
+            "selected_symbol": selected.symbol if selected else None,
+            "selected_side": selected.side if selected else None,
+            "selected_win_probability_pct": selected.win_probability_pct if selected else None,
+            "payload_json": json.dumps(payload, ensure_ascii=False),
+        },
+    )
+    return row_id
 def prune_decision_history(
     config: dict[str, Any],
     *,
@@ -808,35 +767,19 @@ def prune_decision_history(
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=max(1, keep_hours))).isoformat()
     deleted_old = 0
     deleted_over_limit = 0
-    with _connect(config) as connection:
-        cursor = connection.execute(
-            """
-            DELETE FROM decisions
-            WHERE created_at < ?
-              AND id NOT IN (SELECT id FROM decisions ORDER BY id DESC LIMIT 1)
-            """,
-            (cutoff,),
+    _ensure_mongo_write_allowed(config)
+    rows = _mongo_find_many(config, "decisions", sort=[("created_at", -1), ("id", -1)])
+    latest_id = rows[0]["id"] if rows else None
+    stale_ids = [row["id"] for row in rows if row.get("created_at", "") < cutoff and row.get("id") != latest_id]
+    if stale_ids:
+        deleted_old = int(_mongo_collection(config, "decisions").delete_many({"id": {"$in": stale_ids}}).deleted_count or 0)
+    rows = _mongo_find_many(config, "decisions", sort=[("created_at", -1), ("id", -1)])
+    overflow_ids = [row["id"] for row in rows[max(1, max_rows) :]]
+    if overflow_ids:
+        deleted_over_limit = int(
+            _mongo_collection(config, "decisions").delete_many({"id": {"$in": overflow_ids}}).deleted_count or 0
         )
-        deleted_old = int(cursor.rowcount or 0)
-        cursor = connection.execute(
-            """
-            DELETE FROM decisions
-            WHERE id IN (
-                SELECT id
-                FROM (
-                    SELECT id, ROW_NUMBER() OVER (ORDER BY created_at DESC, id DESC) AS row_number
-                    FROM decisions
-                )
-                WHERE row_number > ?
-            )
-            """,
-            (max(1, max_rows),),
-        )
-        deleted_over_limit = int(cursor.rowcount or 0)
-        connection.commit()
     return {"deleted_old": deleted_old, "deleted_over_limit": deleted_over_limit}
-
-
 def save_market_scan_observations(
     config: dict[str, Any],
     candidates: list[TradeCandidate],
@@ -903,41 +846,35 @@ def save_market_scan_observations(
                     )
                 )
     prune_market_scan_observations(config)
-    try:
-        _insert_market_scan_rows(config, rows)
-    except sqlite3.OperationalError as exc:
-        if "disk" not in str(exc).lower() and "full" not in str(exc).lower():
-            raise
-        run_storage_maintenance(config, emergency=True)
-        _insert_market_scan_rows(config, rows)
+    _insert_market_scan_rows(config, rows)
     run_storage_maintenance(config, vacuum=False)
     return len(rows)
 
 
 def _insert_market_scan_rows(config: dict[str, Any], rows: list[tuple[Any, ...]]) -> None:
-    with _connect(config) as connection:
-        connection.executemany(
-            """
-            INSERT INTO market_scan_observations (
-                created_at,
-                source,
-                symbol,
-                side,
-                timeframe,
-                confidence,
-                win_probability_pct,
-                risk_reward,
-                score,
-                indicator_json,
-                payload_json
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            rows,
+    _ensure_mongo_write_allowed(config)
+    for row in rows:
+        row_id = _mongo_next_id(config, "market_scan_observations")
+        _mongo_upsert_by_pk(
+            config,
+            "market_scan_observations",
+            "id",
+            {
+                "id": row_id,
+                "created_at": row[0],
+                "source": row[1],
+                "symbol": row[2],
+                "side": row[3],
+                "timeframe": row[4],
+                "confidence": row[5],
+                "win_probability_pct": row[6],
+                "risk_reward": row[7],
+                "score": row[8],
+                "indicator_json": row[9],
+                "payload_json": row[10],
+            },
         )
-        connection.commit()
-
-
+    return
 def prune_market_scan_observations(
     config: dict[str, Any],
     *,
@@ -954,151 +891,61 @@ def prune_market_scan_observations(
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=max(1, keep_hours))).isoformat()
     deleted_old = 0
     deleted_over_limit = 0
-    with _connect(config) as connection:
-        cursor = connection.execute(
-            "DELETE FROM market_scan_observations WHERE created_at < ?",
-            (cutoff,),
+    _ensure_mongo_write_allowed(config)
+    deleted_old = int(
+        _mongo_collection(config, "market_scan_observations").delete_many({"created_at": {"$lt": cutoff}}).deleted_count
+        or 0
+    )
+    rows = _mongo_find_many(
+        config,
+        "market_scan_observations",
+        sort=[("symbol", 1), ("timeframe", 1), ("created_at", -1), ("id", -1)],
+    )
+    counters: dict[tuple[str, str], int] = {}
+    overflow_ids: list[int] = []
+    for row in rows:
+        key = (str(row.get("symbol") or ""), str(row.get("timeframe") or ""))
+        counters[key] = counters.get(key, 0) + 1
+        if counters[key] > max(1, max_rows):
+            overflow_ids.append(int(row["id"]))
+    if overflow_ids:
+        deleted_over_limit = int(
+            _mongo_collection(config, "market_scan_observations").delete_many({"id": {"$in": overflow_ids}}).deleted_count
+            or 0
         )
-        deleted_old = int(cursor.rowcount or 0)
-        cursor = connection.execute(
-            """
-            DELETE FROM market_scan_observations
-            WHERE id IN (
-                SELECT id
-                FROM (
-                    SELECT
-                        id,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY symbol, timeframe
-                            ORDER BY created_at DESC, id DESC
-                        ) AS row_number
-                    FROM market_scan_observations
-                )
-                WHERE row_number > ?
-            )
-            """,
-            (max(1, max_rows),),
-        )
-        deleted_over_limit = int(cursor.rowcount or 0)
-        connection.commit()
-        try:
-            connection.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_market_scan_timeframe_symbol_created
-                ON market_scan_observations(timeframe, symbol, created_at DESC)
-                """
-            )
-            connection.commit()
-        except sqlite3.OperationalError:
-            pass
     return {
         "deleted_old": deleted_old,
         "deleted_over_limit": deleted_over_limit,
     }
-
-
 def compact_market_scan_observations(config: dict[str, Any], *, batch_limit: int = 5000) -> dict[str, int]:
     memory_config = config.get("market_scan_memory", {})
     max_json_bytes = int(memory_config.get("max_json_bytes", DEFAULT_MARKET_SCAN_MAX_JSON_BYTES) or DEFAULT_MARKET_SCAN_MAX_JSON_BYTES)
     checked = 0
     compacted = 0
-    with _connect(config) as connection:
-        rows = connection.execute(
-            """
-            SELECT id, indicator_json, payload_json
-            FROM market_scan_observations
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (max(1, int(batch_limit or 5000)),),
-        ).fetchall()
-        for row in rows:
-            checked += 1
-            try:
-                indicator = json.loads(str(row["indicator_json"] or "{}"))
-            except json.JSONDecodeError:
-                indicator = {}
-            try:
-                payload = json.loads(str(row["payload_json"] or "{}"))
-            except json.JSONDecodeError:
-                payload = {}
-            compact_indicator = _compact_market_indicator(indicator)
-            compact_payload: dict[str, Any] = {}
-            if isinstance(payload, dict):
-                for key in (
-                    "symbol",
-                    "base",
-                    "side",
-                    "timeframe",
-                    "confidence",
-                    "win_probability_pct",
-                    "risk_reward",
-                    "entry",
-                    "stop_loss",
-                    "take_profit",
-                    "order_usdt",
-                    "quantity",
-                    "spread_pct",
-                    "news_score",
-                    "news_count",
-                    "target_mode",
-                    "take_profit_pct",
-                    "stop_loss_pct",
-                    "price_take_profit_pct",
-                    "price_stop_loss_pct",
-                    "setup_quality",
-                    "market_regime",
-                    "regime_confidence",
-                    "scan_source",
-                    "source",
-                ):
-                    if payload.get(key) not in (None, "", [], {}):
-                        compact_payload[key] = _round_float(payload.get(key))
-                if isinstance(payload.get("indicator_summary"), dict):
-                    compact_payload["indicator_summary"] = _compact_market_indicator(payload.get("indicator_summary"))
-                if isinstance(payload.get("frame_summary"), dict):
-                    compact_payload["frame_summary"] = _compact_market_indicator(payload.get("frame_summary"))
-                compact_payload["reasons"] = _trim_list(payload.get("reasons"), 4)
-                compact_payload["warnings"] = _trim_list(payload.get("warnings"), 3)
-            compact_indicator_json = _json_limited(compact_indicator, max_json_bytes)
-            compact_payload_json = _json_limited(compact_payload, max_json_bytes)
-            old_indicator_json = str(row["indicator_json"] or "{}")
-            old_payload_json = str(row["payload_json"] or "{}")
-            if (
-                compact_indicator_json != old_indicator_json
-                or compact_payload_json != old_payload_json
-                or len(old_indicator_json.encode("utf-8")) > max_json_bytes
-                or len(old_payload_json.encode("utf-8")) > max_json_bytes
-            ):
-                connection.execute(
-                    """
-                    UPDATE market_scan_observations
-                    SET indicator_json = ?, payload_json = ?
-                    WHERE id = ?
-                    """,
-                    (compact_indicator_json, compact_payload_json, row["id"]),
-                )
-                compacted += 1
-        connection.commit()
+    _ensure_mongo_write_allowed(config)
+    rows = _mongo_find_many(config, "market_scan_observations", sort=[("id", -1)], limit=max(1, int(batch_limit or 5000)))
+    for row in rows:
+        checked += 1
+        try:
+            indicator = json.loads(str(row.get("indicator_json") or "{}"))
+        except json.JSONDecodeError:
+            indicator = {}
+        try:
+            payload = json.loads(str(row.get("payload_json") or "{}"))
+        except json.JSONDecodeError:
+            payload = {}
+        compact_indicator_json = _json_limited(_compact_market_indicator(indicator), max_json_bytes)
+        compact_payload_json = _json_limited(payload if isinstance(payload, dict) else {}, max_json_bytes)
+        if compact_indicator_json != str(row.get("indicator_json") or "") or compact_payload_json != str(
+            row.get("payload_json") or ""
+        ):
+            _mongo_collection(config, "market_scan_observations").update_one(
+                {"id": row["id"]},
+                {"$set": {"indicator_json": compact_indicator_json, "payload_json": compact_payload_json}},
+            )
+            compacted += 1
     return {"checked": checked, "compacted": compacted}
-
-
-def _file_size(path: Path) -> int:
-    try:
-        return int(path.stat().st_size)
-    except OSError:
-        return 0
-
-
 def storage_stats(config: dict[str, Any]) -> dict[str, Any]:
-    db_path = state_db_path(config)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    usage = shutil.disk_usage(db_path.parent)
-    files = {
-        "db": {"path": str(db_path), "bytes": _file_size(db_path)},
-        "wal": {"path": str(db_path) + "-wal", "bytes": _file_size(Path(str(db_path) + "-wal"))},
-        "shm": {"path": str(db_path) + "-shm", "bytes": _file_size(Path(str(db_path) + "-shm"))},
-    }
     tables = [
         "decisions",
         "paper_trades",
@@ -1119,48 +966,46 @@ def storage_stats(config: dict[str, Any]) -> dict[str, Any]:
     ]
     row_counts: dict[str, int] = {}
     payload_bytes: dict[str, int] = {}
-    market_scan_by_timeframe: list[dict[str, Any]] = []
-    with _connect(config) as connection:
-        for table in tables:
-            try:
-                row = connection.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()
-                row_counts[table] = int(row["count"] if row else 0)
-            except sqlite3.Error:
-                row_counts[table] = 0
-            try:
-                row = connection.execute(f"SELECT COALESCE(SUM(LENGTH(payload_json)), 0) AS bytes FROM {table}").fetchone()
-                payload_bytes[table] = int(row["bytes"] if row else 0)
-            except sqlite3.Error:
-                payload_bytes[table] = 0
-        try:
-            rows = connection.execute(
-                """
-                SELECT timeframe, COUNT(*) AS rows, COUNT(DISTINCT symbol) AS symbols, MAX(created_at) AS latest_at
-                FROM market_scan_observations
-                GROUP BY timeframe
-                ORDER BY timeframe
-                """
-            ).fetchall()
-            market_scan_by_timeframe = [dict(row) for row in rows]
-        except sqlite3.Error:
-            market_scan_by_timeframe = []
+    for table in tables:
+        row_counts[table] = int(_mongo_collection(config, table).count_documents({}))
+        payload_bytes[table] = sum(
+            len(str(row.get("payload_json") or "").encode("utf-8"))
+            for row in _mongo_find_many(config, table)
+            if "payload_json" in row
+        )
+    timeframe_rows = _mongo_collection(config, "market_scan_observations").aggregate(
+        [
+            {
+                "$group": {
+                    "_id": "$timeframe",
+                    "rows": {"$sum": 1},
+                    "symbols": {"$addToSet": "$symbol"},
+                    "latest_at": {"$max": "$created_at"},
+                }
+            },
+            {"$sort": {"_id": 1}},
+        ]
+    )
+    market_scan_by_timeframe = [
+        {
+            "timeframe": row.get("_id"),
+            "rows": int(row.get("rows") or 0),
+            "symbols": len(row.get("symbols") or []),
+            "latest_at": row.get("latest_at"),
+        }
+        for row in timeframe_rows
+    ]
     return {
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "db_path": str(db_path),
-        "files": files,
-        "disk": {
-            "total_bytes": usage.total,
-            "used_bytes": usage.used,
-            "free_bytes": usage.free,
-            "free_percent": round((usage.free / usage.total) * 100, 2) if usage.total else 0,
-        },
+        "db_path": f"atlas:{atlas_database(config).name}",
+        "backend": "atlas",
+        "files": {},
+        "disk": {},
         "row_counts": row_counts,
         "payload_bytes": payload_bytes,
         "market_scan_by_timeframe": market_scan_by_timeframe,
         "retention": config.get("market_scan_memory", {}),
     }
-
-
 def run_storage_maintenance(
     config: dict[str, Any],
     *,
@@ -1188,32 +1033,14 @@ def run_storage_maintenance(
     optimized = False
     vacuumed = False
     errors: list[str] = []
+    _ensure_mongo_write_allowed(config)
     try:
         compact_result = compact_market_scan_observations(
             config,
             batch_limit=int(memory_config.get("compact_batch_limit", 5000) or 5000),
         )
-    except sqlite3.Error as exc:
+    except Exception as exc:
         errors.append(f"compact_market_scan: {exc}")
-    try:
-        with _connect(config) as connection:
-            try:
-                checkpoint = [tuple(row) for row in connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()]
-            except sqlite3.Error as exc:
-                errors.append(f"wal_checkpoint: {exc}")
-            try:
-                connection.execute("PRAGMA optimize")
-                optimized = True
-            except sqlite3.Error as exc:
-                errors.append(f"optimize: {exc}")
-            if vacuum:
-                try:
-                    connection.execute("VACUUM")
-                    vacuumed = True
-                except sqlite3.Error as exc:
-                    errors.append(f"vacuum: {exc}")
-    except sqlite3.Error as exc:
-        errors.append(f"maintenance: {exc}")
     return {
         "ok": not errors,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -1222,13 +1049,11 @@ def run_storage_maintenance(
         "compact": compact_result,
         "emergency": emergency,
         "checkpoint": checkpoint,
-        "optimized": optimized,
-        "vacuumed": vacuumed,
+        "optimized": True,
+        "vacuumed": False,
         "errors": errors,
         "stats": storage_stats(config),
     }
-
-
 def recent_market_scan_memory(
     config: dict[str, Any],
     *,
@@ -1238,38 +1063,27 @@ def recent_market_scan_memory(
     per_symbol_timeframe_limit: int = 3,
     total_limit: int = 1000,
 ) -> dict[str, dict[str, list[dict[str, Any]]]]:
-    clauses = ["created_at >= ?"]
-    params: list[Any] = [
-        (datetime.now(timezone.utc) - timedelta(hours=max(1, int(lookback_hours)))).isoformat()
-    ]
+    query: dict[str, Any] = {
+        "created_at": {
+            "$gte": (datetime.now(timezone.utc) - timedelta(hours=max(1, int(lookback_hours)))).isoformat()
+        }
+    }
     symbol_list = [str(item) for item in (symbols or []) if str(item)]
     timeframe_list = [str(item) for item in (timeframes or []) if str(item)]
     if symbol_list:
-        placeholders = ", ".join("?" for _ in symbol_list)
-        clauses.append(f"symbol IN ({placeholders})")
-        params.extend(symbol_list)
+        query["symbol"] = {"$in": symbol_list}
     if timeframe_list:
-        placeholders = ", ".join("?" for _ in timeframe_list)
-        clauses.append(f"timeframe IN ({placeholders})")
-        params.extend(timeframe_list)
-    params.append(max(10, int(total_limit)))
-    where = " AND ".join(clauses)
-    with _connect(config) as connection:
-        rows = connection.execute(
-            f"""
-            SELECT *
-            FROM market_scan_observations
-            WHERE {where}
-            ORDER BY created_at DESC, id DESC
-            LIMIT ?
-            """,
-            tuple(params),
-        ).fetchall()
-
+        query["timeframe"] = {"$in": timeframe_list}
+    rows = _mongo_find_many(
+        config,
+        "market_scan_observations",
+        query=query,
+        sort=[("created_at", -1), ("id", -1)],
+        limit=max(10, int(total_limit)),
+    )
     grouped: dict[str, dict[str, list[dict[str, Any]]]] = {}
     counters: dict[tuple[str, str], int] = {}
-    for row in rows:
-        item = dict(row)
+    for item in rows:
         symbol = str(item.get("symbol") or "")
         timeframe = str(item.get("timeframe") or "")
         if not symbol or not timeframe:
@@ -1294,73 +1108,18 @@ def recent_market_scan_memory(
         )
         counters[key] = counters.get(key, 0) + 1
     return grouped
-
-
 def latest_decision_payload(config: dict[str, Any]) -> dict[str, Any] | None:
-    with _connect(config) as connection:
-        row = connection.execute(
-            "SELECT payload_json FROM decisions ORDER BY id DESC LIMIT 1"
-        ).fetchone()
+    row = _mongo_find_one(config, "decisions", sort=[("id", -1)])
     if not row:
         return None
     return json.loads(str(row["payload_json"]))
-
-
 def list_paper_trades(config: dict[str, Any], limit: int = 20) -> list[dict[str, Any]]:
-    with _connect(config) as connection:
-        rows = connection.execute(
-            """
-            SELECT *
-            FROM paper_trades
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-    return [dict(row) for row in rows]
-
-
+    return _mongo_find_many(config, "paper_trades", sort=[("id", -1)], limit=limit)
 def active_paper_trades(config: dict[str, Any]) -> list[dict[str, Any]]:
-    with _connect(config) as connection:
-        rows = connection.execute(
-            """
-            SELECT *
-            FROM paper_trades
-            WHERE status = 'OPEN'
-            ORDER BY id ASC
-            """
-        ).fetchall()
-    return [dict(row) for row in rows]
-
-
+    return _mongo_find_many(config, "paper_trades", query={"status": "OPEN"}, sort=[("id", 1)])
 def list_pending_orders(config: dict[str, Any], status: str = "OPEN", limit: int = 100) -> list[dict[str, Any]]:
-    with _connect(config) as connection:
-        if status in {"OPEN", "ACTIVE"}:
-            placeholders = ", ".join("?" for _ in ACTIVE_PENDING_STATUSES)
-            rows = connection.execute(
-                f"""
-                SELECT *
-                FROM pending_orders
-                WHERE status IN ({placeholders})
-                ORDER BY id DESC
-                LIMIT ?
-                """,
-                (*ACTIVE_PENDING_STATUSES, limit),
-            ).fetchall()
-        else:
-            rows = connection.execute(
-                """
-                SELECT *
-                FROM pending_orders
-                WHERE status = ?
-                ORDER BY id DESC
-                LIMIT ?
-                """,
-                (status, limit),
-            ).fetchall()
-    return [dict(row) for row in rows]
-
-
+    query = {"status": {"$in": list(ACTIVE_PENDING_STATUSES)}} if status in {"OPEN", "ACTIVE"} else {"status": status}
+    return _mongo_find_many(config, "pending_orders", query=query, sort=[("id", -1)], limit=limit)
 def open_pending_symbols(config: dict[str, Any]) -> set[str]:
     return {str(order["symbol"]) for order in list_pending_orders(config, status="OPEN")}
 
@@ -1384,57 +1143,32 @@ def save_pending_order(
     now = datetime.now(timezone.utc)
     payload = to_jsonable(candidate)
     normalized_status = str(status or ("LC_OKX" if exchange_order_id else "OPEN")).upper()
-    with _connect(config) as connection:
-        cursor = connection.execute(
-            """
-            INSERT INTO pending_orders (
-                created_at,
-                updated_at,
-                expires_at,
-                status,
-                symbol,
-                base,
-                side,
-                exchange_order_id,
-                entry,
-                stop_loss,
-                take_profit,
-                quantity,
-                order_usdt,
-                confidence,
-                win_probability_pct,
-                risk_reward,
-                payload_json
-                , journal_id
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                now.isoformat(),
-                now.isoformat(),
-                _pending_expiry(now, max_age_days=max_age_days, max_age_hours=max_age_hours).isoformat(),
-                normalized_status,
-                candidate.symbol,
-                candidate.base,
-                candidate.side,
-                exchange_order_id,
-                candidate.entry,
-                candidate.stop_loss,
-                candidate.take_profit,
-                candidate.quantity,
-                candidate.order_usdt,
-                candidate.confidence,
-                candidate.win_probability_pct,
-                candidate.risk_reward,
-                json.dumps(payload, ensure_ascii=False),
-                journal_id,
-            ),
-        )
-        connection.commit()
-        order_id = int(cursor.lastrowid)
-    return [order for order in list_pending_orders(config, limit=100) if int(order["id"]) == order_id][0]
-
-
+    _ensure_mongo_write_allowed(config)
+    order_id = _mongo_next_id(config, "pending_orders")
+    row = {
+        "id": order_id,
+        "created_at": now.isoformat(),
+        "updated_at": now.isoformat(),
+        "expires_at": _pending_expiry(now, max_age_days=max_age_days, max_age_hours=max_age_hours).isoformat(),
+        "status": normalized_status,
+        "symbol": candidate.symbol,
+        "base": candidate.base,
+        "side": candidate.side,
+        "exchange_order_id": exchange_order_id,
+        "entry": candidate.entry,
+        "stop_loss": candidate.stop_loss,
+        "take_profit": candidate.take_profit,
+        "quantity": candidate.quantity,
+        "order_usdt": candidate.order_usdt,
+        "confidence": candidate.confidence,
+        "win_probability_pct": candidate.win_probability_pct,
+        "risk_reward": candidate.risk_reward,
+        "payload_json": json.dumps(payload, ensure_ascii=False),
+        "journal_id": journal_id,
+        "close_reason": None,
+    }
+    _mongo_upsert_by_pk(config, "pending_orders", "id", row)
+    return row
 def refresh_pending_order(
     config: dict[str, Any],
     order_id: int,
@@ -1446,43 +1180,24 @@ def refresh_pending_order(
 ) -> None:
     now = datetime.now(timezone.utc)
     payload = to_jsonable(candidate)
-    with _connect(config) as connection:
-        connection.execute(
-            """
-            UPDATE pending_orders
-            SET updated_at = ?,
-                expires_at = ?,
-                status = COALESCE(?, status),
-                entry = ?,
-                stop_loss = ?,
-                take_profit = ?,
-                quantity = ?,
-                order_usdt = ?,
-                confidence = ?,
-                win_probability_pct = ?,
-                risk_reward = ?,
-                payload_json = ?
-            WHERE id = ?
-            """,
-            (
-                now.isoformat(),
-                _pending_expiry(now, max_age_days=max_age_days, max_age_hours=max_age_hours).isoformat(),
-                str(status).upper() if status else None,
-                candidate.entry,
-                candidate.stop_loss,
-                candidate.take_profit,
-                candidate.quantity,
-                candidate.order_usdt,
-                candidate.confidence,
-                candidate.win_probability_pct,
-                candidate.risk_reward,
-                json.dumps(payload, ensure_ascii=False),
-                order_id,
-            ),
-        )
-        connection.commit()
-
-
+    _ensure_mongo_write_allowed(config)
+    updates = {
+        "updated_at": now.isoformat(),
+        "expires_at": _pending_expiry(now, max_age_days=max_age_days, max_age_hours=max_age_hours).isoformat(),
+        "entry": candidate.entry,
+        "stop_loss": candidate.stop_loss,
+        "take_profit": candidate.take_profit,
+        "quantity": candidate.quantity,
+        "order_usdt": candidate.order_usdt,
+        "confidence": candidate.confidence,
+        "win_probability_pct": candidate.win_probability_pct,
+        "risk_reward": candidate.risk_reward,
+        "payload_json": json.dumps(payload, ensure_ascii=False),
+    }
+    if status:
+        updates["status"] = str(status).upper()
+    _mongo_collection(config, "pending_orders").update_one({"id": order_id}, {"$set": updates})
+    return
 def set_pending_order_exchange_order(
     config: dict[str, Any],
     order_id: int,
@@ -1493,76 +1208,39 @@ def set_pending_order_exchange_order(
 ) -> None:
     now = datetime.now(timezone.utc)
     payload = to_jsonable(candidate)
-    with _connect(config) as connection:
-        connection.execute(
-            """
-            UPDATE pending_orders
-            SET updated_at = ?,
-                expires_at = ?,
-                status = 'LC_OKX',
-                exchange_order_id = ?,
-                entry = ?,
-                stop_loss = ?,
-                take_profit = ?,
-                quantity = ?,
-                order_usdt = ?,
-                confidence = ?,
-                win_probability_pct = ?,
-                risk_reward = ?,
-                payload_json = ?
-            WHERE id = ?
-            """,
-            (
-                now.isoformat(),
-                _pending_expiry(now, max_age_days=max_age_days).isoformat(),
-                exchange_order_id,
-                candidate.entry,
-                candidate.stop_loss,
-                candidate.take_profit,
-                candidate.quantity,
-                candidate.order_usdt,
-                candidate.confidence,
-                candidate.win_probability_pct,
-                candidate.risk_reward,
-                json.dumps(payload, ensure_ascii=False),
-                order_id,
-            ),
-        )
-        connection.commit()
-
-
+    _ensure_mongo_write_allowed(config)
+    _mongo_collection(config, "pending_orders").update_one(
+        {"id": order_id},
+        {
+            "$set": {
+                "updated_at": now.isoformat(),
+                "expires_at": _pending_expiry(now, max_age_days=max_age_days).isoformat(),
+                "status": "LC_OKX",
+                "exchange_order_id": exchange_order_id,
+                "entry": candidate.entry,
+                "stop_loss": candidate.stop_loss,
+                "take_profit": candidate.take_profit,
+                "quantity": candidate.quantity,
+                "order_usdt": candidate.order_usdt,
+                "confidence": candidate.confidence,
+                "win_probability_pct": candidate.win_probability_pct,
+                "risk_reward": candidate.risk_reward,
+                "payload_json": json.dumps(payload, ensure_ascii=False),
+            }
+        },
+    )
+    return
 def close_pending_order(config: dict[str, Any], order_id: int, status: str, reason: str) -> None:
     now = datetime.now(timezone.utc).isoformat()
-    with _connect(config) as connection:
-        connection.execute(
-            """
-            UPDATE pending_orders
-            SET status = ?,
-                updated_at = ?,
-                close_reason = ?
-            WHERE id = ?
-            """,
-            (status, now, reason, order_id),
-        )
-        connection.commit()
-
-
+    _ensure_mongo_write_allowed(config)
+    _mongo_collection(config, "pending_orders").update_one(
+        {"id": order_id},
+        {"$set": {"status": status, "updated_at": now, "close_reason": reason}},
+    )
+    return
 def count_pending_orders(config: dict[str, Any], status: str = "OPEN") -> int:
-    with _connect(config) as connection:
-        if status in {"OPEN", "ACTIVE"}:
-            placeholders = ", ".join("?" for _ in ACTIVE_PENDING_STATUSES)
-            row = connection.execute(
-                f"SELECT COUNT(*) AS count FROM pending_orders WHERE status IN ({placeholders})",
-                ACTIVE_PENDING_STATUSES,
-            ).fetchone()
-        else:
-            row = connection.execute(
-                "SELECT COUNT(*) AS count FROM pending_orders WHERE status = ?",
-                (status,),
-            ).fetchone()
-    return int(row["count"] if row else 0)
-
-
+    query = {"status": {"$in": list(ACTIVE_PENDING_STATUSES)}} if status in {"OPEN", "ACTIVE"} else {"status": status}
+    return int(_mongo_collection(config, "pending_orders").count_documents(query))
 def save_market_guard_observation(config: dict[str, Any], observation: dict[str, Any]) -> None:
     now = datetime.now(timezone.utc).isoformat()
     created_at = str(observation.get("created_at") or now)
@@ -1571,51 +1249,34 @@ def save_market_guard_observation(config: dict[str, Any], observation: dict[str,
     if not symbol:
         return
     reasons = observation.get("reasons") or []
-    with _connect(config) as connection:
-        connection.execute(
-            """
-            INSERT INTO market_guard_observations (
-                created_at,
-                observed_at,
-                symbol,
-                last,
-                move_pct,
-                candle_range_pct,
-                wick_pct,
-                wick_body_ratio,
-                volume_ratio,
-                severity,
-                alert_reasons_json
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(symbol, observed_at) DO UPDATE SET
-                created_at = excluded.created_at,
-                last = excluded.last,
-                move_pct = excluded.move_pct,
-                candle_range_pct = excluded.candle_range_pct,
-                wick_pct = excluded.wick_pct,
-                wick_body_ratio = excluded.wick_body_ratio,
-                volume_ratio = excluded.volume_ratio,
-                severity = excluded.severity,
-                alert_reasons_json = excluded.alert_reasons_json
-            """,
-            (
-                created_at,
-                observed_at,
-                symbol,
-                observation.get("last"),
-                observation.get("move_pct"),
-                observation.get("candle_range_pct"),
-                observation.get("wick_pct"),
-                observation.get("wick_body_ratio"),
-                observation.get("volume_ratio"),
-                str(observation.get("severity") or "normal"),
-                json.dumps(reasons, ensure_ascii=False),
-            ),
-        )
-        connection.commit()
-
-
+    _ensure_mongo_write_allowed(config)
+    existing = _mongo_find_one(
+        config,
+        "market_guard_observations",
+        query={"symbol": symbol, "observed_at": observed_at},
+        sort=[("id", -1)],
+    )
+    row_id = int(existing["id"]) if existing else _mongo_next_id(config, "market_guard_observations")
+    _mongo_upsert_by_pk(
+        config,
+        "market_guard_observations",
+        "id",
+        {
+            "id": row_id,
+            "created_at": created_at,
+            "observed_at": observed_at,
+            "symbol": symbol,
+            "last": observation.get("last"),
+            "move_pct": observation.get("move_pct"),
+            "candle_range_pct": observation.get("candle_range_pct"),
+            "wick_pct": observation.get("wick_pct"),
+            "wick_body_ratio": observation.get("wick_body_ratio"),
+            "volume_ratio": observation.get("volume_ratio"),
+            "severity": str(observation.get("severity") or "normal"),
+            "alert_reasons_json": json.dumps(reasons, ensure_ascii=False),
+        },
+    )
+    return
 def list_market_guard_observations(
     config: dict[str, Any],
     *,
@@ -1623,48 +1284,25 @@ def list_market_guard_observations(
     limit: int = 200,
     since: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    clauses: list[str] = []
-    params: list[Any] = []
+    query: dict[str, Any] = {}
     if symbol:
-        clauses.append("symbol = ?")
-        params.append(symbol)
+        query["symbol"] = symbol
     if since:
-        clauses.append("observed_at >= ?")
-        params.append(since.isoformat())
-    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    params.append(limit)
-    with _connect(config) as connection:
-        rows = connection.execute(
-            f"""
-            SELECT *
-            FROM market_guard_observations
-            {where}
-            ORDER BY observed_at DESC, id DESC
-            LIMIT ?
-            """,
-            tuple(params),
-        ).fetchall()
+        query["observed_at"] = {"$gte": since.isoformat()}
+    rows = _mongo_find_many(config, "market_guard_observations", query=query, sort=[("observed_at", -1), ("id", -1)], limit=limit)
     result: list[dict[str, Any]] = []
-    for row in rows:
-        item = dict(row)
+    for item in rows:
         try:
             item["reasons"] = json.loads(str(item.get("alert_reasons_json") or "[]"))
         except json.JSONDecodeError:
             item["reasons"] = []
         result.append(item)
     return result
-
-
 def prune_market_guard_observations(config: dict[str, Any], *, keep_hours: int = 24) -> None:
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=max(1, keep_hours))).isoformat()
-    with _connect(config) as connection:
-        connection.execute(
-            "DELETE FROM market_guard_observations WHERE observed_at < ?",
-            (cutoff,),
-        )
-        connection.commit()
-
-
+    _ensure_mongo_write_allowed(config)
+    _mongo_collection(config, "market_guard_observations").delete_many({"observed_at": {"$lt": cutoff}})
+    return
 def save_trade_memory(config: dict[str, Any], record: dict[str, Any], *, limit: int = 100) -> bool:
     key = str(record.get("key") or "")
     symbol = str(record.get("symbol") or "")
@@ -1674,123 +1312,66 @@ def save_trade_memory(config: dict[str, Any], record: dict[str, Any], *, limit: 
     now = datetime.now(timezone.utc).isoformat()
     pnl_usdt = record.get("pnl_usdt")
     outcome = "win" if float(pnl_usdt or 0) > 0 else "loss" if float(pnl_usdt or 0) < 0 else "flat"
-    with _connect(config) as connection:
-        existing = connection.execute("SELECT key FROM trade_memory WHERE key = ?", (key,)).fetchone()
-        if existing:
-            return False
-        connection.execute(
-            """
-            INSERT INTO trade_memory (
-                key,
-                created_at,
-                updated_at,
-                symbol,
-                side,
-                opened_at,
-                closed_at,
-                pnl_usdt,
-                pnl_pct,
-                outcome,
-                source,
-                payload_json
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                key,
-                now,
-                now,
-                symbol,
-                record.get("side"),
-                record.get("opened_at"),
-                record.get("closed_at"),
-                pnl_usdt,
-                record.get("pnl_pct"),
-                outcome,
-                str(record.get("source") or "okx"),
-                json.dumps(record.get("payload") or record, ensure_ascii=False),
-            ),
-        )
-        connection.execute(
-            """
-            DELETE FROM trade_memory
-            WHERE key NOT IN (
-                SELECT key
-                FROM trade_memory
-                ORDER BY COALESCE(closed_at, updated_at) DESC
-                LIMIT ?
-            )
-            """,
-            (limit,),
-        )
-        connection.commit()
+    _ensure_mongo_write_allowed(config)
+    existing = _mongo_find_one(config, "trade_memory", query={"key": key})
+    if existing:
+        return False
+    _mongo_upsert_by_pk(
+        config,
+        "trade_memory",
+        "key",
+        {
+            "key": key,
+            "created_at": now,
+            "updated_at": now,
+            "symbol": symbol,
+            "side": record.get("side"),
+            "opened_at": record.get("opened_at"),
+            "closed_at": record.get("closed_at"),
+            "pnl_usdt": pnl_usdt,
+            "pnl_pct": record.get("pnl_pct"),
+            "outcome": outcome,
+            "source": str(record.get("source") or "okx"),
+            "payload_json": json.dumps(record.get("payload") or record, ensure_ascii=False),
+        },
+    )
+    rows = _mongo_find_many(config, "trade_memory", sort=[("closed_at", -1), ("updated_at", -1)], limit=None)
+    overflow_keys = [row["key"] for row in rows[max(1, limit) :]]
+    if overflow_keys:
+        _mongo_collection(config, "trade_memory").delete_many({"key": {"$in": overflow_keys}})
     return True
-
-
 def list_trade_memory(config: dict[str, Any], limit: int = 100) -> list[dict[str, Any]]:
-    with _connect(config) as connection:
-        rows = connection.execute(
-            """
-            SELECT *
-            FROM trade_memory
-            ORDER BY COALESCE(closed_at, updated_at) DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-    return [dict(row) for row in rows]
-
-
+    return _mongo_find_many(config, "trade_memory", sort=[("closed_at", -1), ("updated_at", -1)], limit=limit)
 def open_paper_trade(config: dict[str, Any], candidate: TradeCandidate) -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     leverage = float(config.get("exchange", {}).get("leverage", 1) or 1)
     payload = to_jsonable(candidate)
-    with _connect(config) as connection:
-        cursor = connection.execute(
-            """
-            INSERT INTO paper_trades (
-                created_at,
-                updated_at,
-                status,
-                symbol,
-                base,
-                side,
-                entry,
-                stop_loss,
-                take_profit,
-                quantity,
-                order_usdt,
-                confidence,
-                win_probability_pct,
-                risk_reward,
-                leverage,
-                payload_json
-            )
-            VALUES (?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                now,
-                now,
-                candidate.symbol,
-                candidate.base,
-                candidate.side,
-                candidate.entry,
-                candidate.stop_loss,
-                candidate.take_profit,
-                candidate.quantity,
-                candidate.order_usdt,
-                candidate.confidence,
-                candidate.win_probability_pct,
-                candidate.risk_reward,
-                leverage,
-                json.dumps(payload, ensure_ascii=False),
-            ),
-        )
-        connection.commit()
-        trade_id = int(cursor.lastrowid)
-    return {"id": trade_id, **list_paper_trades(config, limit=1)[0]}
-
-
+    _ensure_mongo_write_allowed(config)
+    trade_id = _mongo_next_id(config, "paper_trades")
+    row = {
+        "id": trade_id,
+        "created_at": now,
+        "updated_at": now,
+        "status": "OPEN",
+        "symbol": candidate.symbol,
+        "base": candidate.base,
+        "side": candidate.side,
+        "entry": candidate.entry,
+        "stop_loss": candidate.stop_loss,
+        "take_profit": candidate.take_profit,
+        "quantity": candidate.quantity,
+        "order_usdt": candidate.order_usdt,
+        "confidence": candidate.confidence,
+        "win_probability_pct": candidate.win_probability_pct,
+        "risk_reward": candidate.risk_reward,
+        "leverage": leverage,
+        "close_price": None,
+        "close_reason": None,
+        "pnl_pct": None,
+        "payload_json": json.dumps(payload, ensure_ascii=False),
+    }
+    _mongo_upsert_by_pk(config, "paper_trades", "id", row)
+    return row
 def close_paper_trade(config: dict[str, Any], trade_id: int, close_price: float, reason: str) -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     active = [trade for trade in active_paper_trades(config) if int(trade["id"]) == trade_id]
@@ -1803,18 +1384,18 @@ def close_paper_trade(config: dict[str, Any], trade_id: int, close_price: float,
         pnl_pct = ((close_price - entry) / entry) * 100 * leverage
     else:
         pnl_pct = ((entry - close_price) / entry) * 100 * leverage
-    with _connect(config) as connection:
-        connection.execute(
-            """
-            UPDATE paper_trades
-            SET status = 'CLOSED',
-                updated_at = ?,
-                close_price = ?,
-                close_reason = ?,
-                pnl_pct = ?
-            WHERE id = ?
-            """,
-            (now, close_price, reason, round(pnl_pct, 4), trade_id),
-        )
-        connection.commit()
-    return [trade for trade in list_paper_trades(config, limit=50) if int(trade["id"]) == trade_id][0]
+    _ensure_mongo_write_allowed(config)
+    _mongo_collection(config, "paper_trades").update_one(
+        {"id": trade_id},
+        {
+            "$set": {
+                "status": "CLOSED",
+                "updated_at": now,
+                "close_price": close_price,
+                "close_reason": reason,
+                "pnl_pct": round(pnl_pct, 4),
+            }
+        },
+    )
+    updated = _mongo_find_one(config, "paper_trades", query={"id": trade_id})
+    return updated or {}

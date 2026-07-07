@@ -6,6 +6,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from .atlas_mirror import atlas_backend_enabled, atlas_env_requirements
 from .config import load_config, project_path
 
 
@@ -59,14 +60,24 @@ def check_deploy(config_path: str, require_secrets: bool = True) -> tuple[bool, 
             else:
                 warnings.append(message + " (local policy fallback will be used)")
 
-    for key in ("report_path", "ledger_path", "state_db_path"):
+    if atlas_backend_enabled(config):
+        atlas_config = config.get("database", {}).get("atlas", {})
+        uri_env, database_env = atlas_env_requirements(config)
+        uri_present = _present(uri_env) or bool(str(atlas_config.get("uri", "") or "").strip())
+        database_present = _present(database_env) or bool(str(atlas_config.get("database", "") or "").strip())
+        if not uri_present:
+            errors.append(f"Missing required Atlas variable or config value: {uri_env}")
+        if not database_present:
+            errors.append(f"Missing required Atlas variable or config value: {database_env}")
+
+    for key in ("report_path", "ledger_path"):
         value = config.get(key)
         if not value:
             warnings.append(f"Config path {key} is not set")
             continue
         ok, message = _parent_status(project_path(config, str(value)))
         if not ok:
-            warnings.append(f"{key}: {message}. On Railway, mount a volume at /data.")
+            warnings.append(f"{key}: {message}. Atlas will continue to hold the primary state.")
 
     if "PORT" not in os.environ:
         warnings.append("PORT is not set. This is normal locally; Railway injects PORT during deploy.")

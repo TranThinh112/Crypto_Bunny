@@ -12,8 +12,8 @@ from .market import create_exchange
 from .models import RiskCheck, TradeCandidate
 from .risk import evaluate_candidate
 from .storage import (
+    close_latest_trade_execution_by_status,
     close_pending_order,
-    connect_state_db,
     list_pending_orders,
     next_global_counter,
     refresh_pending_order,
@@ -148,29 +148,15 @@ def _close_latest_lc_trade_execution(
     normalized_side = str(side or "").upper()
     if not symbol or not normalized_side:
         return
-    now = datetime.now(timezone.utc).isoformat()
-    with connect_state_db(config) as connection:
-        row = connection.execute(
-            """
-            SELECT id
-            FROM trade_executions
-            WHERE symbol = ? AND side = ? AND status = 'LC_PENDING'
-            ORDER BY created_at DESC, id DESC
-            LIMIT 1
-            """,
-            (symbol, normalized_side),
-        ).fetchone()
-        if row is None:
-            return
-        connection.execute(
-            """
-            UPDATE trade_executions
-            SET status = ?, reject_reason = ?, closed_at = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (str(status or "CANCELED").upper(), reason, now, now, int(row["id"])),
-        )
-        connection.commit()
+    close_latest_trade_execution_by_status(
+        config,
+        symbol=symbol,
+        side=normalized_side,
+        source_status="LC_PENDING",
+        target_status=str(status or "CANCELED").upper(),
+        reason=reason,
+        closed_at=datetime.now(timezone.utc).isoformat(),
+    )
 
 
 def _record_vt_from_pending(config: dict[str, Any], record: dict[str, Any], *, vt_id: int, lc_id: int) -> None:

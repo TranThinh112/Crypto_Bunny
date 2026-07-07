@@ -1,4 +1,4 @@
-Hãy tạo module Recovery Chain Manager cho bot AI trading crypto.
+﻿Hãy tạo module Recovery Chain Manager cho bot AI trading crypto.
 
 Mục tiêu:
 - Quản lý từng chuỗi recovery riêng biệt.
@@ -10,7 +10,7 @@ Mục tiêu:
 
 Tech stack:
 - Python 3.11+
-- SQLite
+- MongoDB Atlas
 - SQLAlchemy
 - FastAPI
 - Pydantic
@@ -26,7 +26,7 @@ Cấu hình:
   }
 }
 
-Yêu cầu database SQLite:
+Yêu cầu database MongoDB Atlas:
 
 1. Tạo bảng trade_executions:
    - id
@@ -200,7 +200,7 @@ Status đầy đủ:
    - Không tính floating PnL của lệnh OPEN.
    - Không dùng unrealized PnL để completed chain.
 
-5. Thêm SQLite indexes:
+5. Thêm MongoDB Atlas indexes:
    - trade_executions(chain_id)
    - trade_executions(status)
    - trade_executions(closed_at)

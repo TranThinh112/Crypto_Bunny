@@ -31,7 +31,7 @@ def _cache_ttl(config: dict[str, Any]) -> int:
 
 
 def _cache_key(config: dict[str, Any], name: str) -> str:
-    return f"{name}:{config.get('mode', 'dry_run')}:{config.get('state_db_path', '')}"
+    return f"{name}:{config.get('mode', 'dry_run')}:{config.get('runtime', {}).get('instance_role', 'primary')}"
 
 
 def _cache_get(config: dict[str, Any], name: str) -> dict[str, Any] | None:

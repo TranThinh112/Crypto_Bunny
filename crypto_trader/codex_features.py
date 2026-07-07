@@ -17,7 +17,43 @@ from dotenv import load_dotenv
 
 from .config import deep_merge, project_path
 from .models import Decision, RiskCheck, TradeCandidate, to_jsonable
-from .storage import connect_state_db, get_journal_state, set_journal_state
+from .storage import (
+    activate_strategy_version_record,
+    claim_trade_candidate,
+    ensure_ai_model_version,
+    ensure_strategy_version,
+    get_journal_state,
+    get_prompt_metric,
+    get_prompt_version,
+    get_strategy_version,
+    get_trade_execution,
+    get_trading_system_state_row,
+    insert_ai_trade_decision_row,
+    insert_market_regime_history,
+    insert_replay_history_row,
+    insert_trade_candidate_rows,
+    insert_trade_execution_row,
+    latest_market_regime_history,
+    list_ai_experiment_rows,
+    list_ai_trade_decision_rows,
+    list_market_regime_rows,
+    list_prompt_versions,
+    list_replay_history_rows,
+    list_strategy_versions,
+    list_trade_candidate_rows,
+    list_trade_execution_ids,
+    list_trade_execution_rows,
+    mark_ai_trade_decisions_closed,
+    mark_trade_candidate_used,
+    merge_prompt_metric,
+    save_ai_experiment,
+    save_prompt_version,
+    save_strategy_version,
+    set_journal_state,
+    update_trade_execution,
+    upsert_trading_health_state_row,
+    upsert_trading_system_state_row,
+)
 
 
 PROMPT_FILE_ORDER = (
@@ -206,34 +242,19 @@ def ensure_prompt_version(config: dict[str, Any]) -> dict[str, Any]:
     version = str(prompt_config.get("default_prompt_version", "prompt-v1") or "prompt-v1")
     description = "Dong bo tu file prompt trong workspace"
     files_json = json.dumps(templates, ensure_ascii=False)
-    with connect_state_db(config) as connection:
-        row = connection.execute(
-            "SELECT * FROM prompt_versions WHERE version = ?",
-            (version,),
-        ).fetchone()
-        if row is None:
-            connection.execute(
-                """
-                INSERT INTO prompt_versions (version, hash, description, created_at, is_active, files_json, prompt_hash)
-                VALUES (?, ?, ?, ?, 1, ?, ?)
-                """,
-                (version, prompt_hash, description, _iso_now(), files_json, prompt_hash),
-            )
-        else:
-            connection.execute(
-                """
-                UPDATE prompt_versions
-                SET hash = ?, description = ?, is_active = 1, files_json = ?, prompt_hash = ?
-                WHERE version = ?
-                """,
-                (prompt_hash, description, files_json, prompt_hash, version),
-            )
-        connection.commit()
-        stored = connection.execute(
-            "SELECT * FROM prompt_versions WHERE version = ?",
-            (version,),
-        ).fetchone()
-    return dict(stored) if stored else {
+    stored = save_prompt_version(
+        config,
+        {
+            "version": version,
+            "hash": prompt_hash,
+            "description": description,
+            "created_at": _iso_now(),
+            "is_active": 1,
+            "files_json": files_json,
+            "prompt_hash": prompt_hash,
+        },
+    )
+    return stored if stored else {
         "version": version,
         "hash": prompt_hash,
         "prompt_hash": prompt_hash,
@@ -241,18 +262,10 @@ def ensure_prompt_version(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _select_prompt_experiment(config: dict[str, Any]) -> dict[str, Any] | None:
-    with connect_state_db(config) as connection:
-        rows = connection.execute(
-            """
-            SELECT *
-            FROM ai_experiments
-            WHERE enabled = 1
-            ORDER BY created_at ASC, id ASC
-            """
-        ).fetchall()
+    rows = list_ai_experiment_rows(config, enabled_only=True)
     if not rows:
         return None
-    experiments = [dict(row) for row in rows]
+    experiments = sorted(rows, key=lambda item: (str(item.get("created_at") or ""), _safe_int(item.get("id"))))
     total = sum(max(0.0, _safe_float(item.get("traffic_percent"), 0.0)) for item in experiments)
     if total <= 0:
         return experiments[0]
@@ -661,94 +674,21 @@ def register_model_version(
     prompt_version: str,
     prompt_hash: str,
 ) -> None:
-    with connect_state_db(config) as connection:
-        existing = connection.execute(
-            """
-            SELECT id
-            FROM ai_model_versions
-            WHERE model_name = ? AND model_version = ? AND prompt_version = ? AND prompt_hash = ?
-            """,
-            (model_name, model_version, prompt_version, prompt_hash),
-        ).fetchone()
-        if existing is None:
-            connection.execute(
-                """
-                INSERT INTO ai_model_versions (model_name, model_version, prompt_version, prompt_hash, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (model_name, model_version, prompt_version, prompt_hash, _iso_now()),
-            )
-            connection.commit()
+    ensure_ai_model_version(
+        config,
+        model_name=model_name,
+        model_version=model_version,
+        prompt_version=prompt_version,
+        prompt_hash=prompt_hash,
+        created_at=_iso_now(),
+    )
 
 
 def register_prompt_metric(config: dict[str, Any], metric: dict[str, Any]) -> None:
     key = str(metric.get("prompt_version") or "")
     if not key:
         return
-    prompt_tokens = _safe_float(metric.get("prompt_tokens"))
-    completion_tokens = _safe_float(metric.get("completion_tokens"))
-    latency_ms = _safe_float(metric.get("latency_ms"))
-    cached_tokens = _safe_float(metric.get("estimated_cached_tokens"))
-    dynamic_tokens = _safe_float(metric.get("estimated_dynamic_tokens"))
-    cache_hit_percent = _safe_float(metric.get("cache_hit_percent"))
-    with connect_state_db(config) as connection:
-        row = connection.execute(
-            "SELECT * FROM prompt_metrics WHERE prompt_version = ?",
-            (key,),
-        ).fetchone()
-        if row is None:
-            connection.execute(
-                """
-                INSERT INTO prompt_metrics (
-                    prompt_version, prompt_hash, total_requests, average_prompt_tokens,
-                    average_completion_tokens, average_latency, estimated_cached_tokens,
-                    estimated_dynamic_tokens, cache_hit_percent, updated_at
-                )
-                VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    key,
-                    str(metric.get("prompt_hash") or ""),
-                    prompt_tokens,
-                    completion_tokens,
-                    latency_ms,
-                    cached_tokens,
-                    dynamic_tokens,
-                    cache_hit_percent,
-                    _iso_now(),
-                ),
-            )
-        else:
-            total = _safe_int(row["total_requests"], 0)
-            new_total = total + 1
-            connection.execute(
-                """
-                UPDATE prompt_metrics
-                SET prompt_hash = ?,
-                    total_requests = ?,
-                    average_prompt_tokens = ?,
-                    average_completion_tokens = ?,
-                    average_latency = ?,
-                    estimated_cached_tokens = ?,
-                    estimated_dynamic_tokens = ?,
-                    cache_hit_percent = ?,
-                    updated_at = ?
-                WHERE prompt_version = ?
-                """,
-                (
-                    str(metric.get("prompt_hash") or row["prompt_hash"]),
-                    new_total,
-                    ((float(row["average_prompt_tokens"]) * total) + prompt_tokens) / new_total,
-                    ((float(row["average_completion_tokens"]) * total) + completion_tokens) / new_total,
-                    ((float(row["average_latency"]) * total) + latency_ms) / new_total,
-                    ((float(row["estimated_cached_tokens"]) * total) + cached_tokens) / new_total,
-                    ((float(row["estimated_dynamic_tokens"]) * total) + dynamic_tokens) / new_total,
-                    ((float(row["cache_hit_percent"]) * total) + cache_hit_percent) / new_total,
-                    _iso_now(),
-                    key,
-                ),
-            )
-        connection.commit()
+    merge_prompt_metric(config, metric)
 
 
 def prompt_status(config: dict[str, Any], dynamic_payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -756,11 +696,7 @@ def prompt_status(config: dict[str, Any], dynamic_payload: dict[str, Any] | None
     templates = load_prompt_templates(config)
     market_json = json.dumps(dynamic_payload or {"scanTime": _iso_now()}, ensure_ascii=False, separators=(",", ":"))
     estimator = estimate_prompt_cache(templates, market_json)
-    with connect_state_db(config) as connection:
-        metrics = connection.execute(
-            "SELECT * FROM prompt_metrics WHERE prompt_version = ?",
-            (str(version_row["version"]),),
-        ).fetchone()
+    metrics = get_prompt_metric(config, str(version_row["version"]))
     payload = {
         "promptVersion": version_row["version"],
         "promptHash": version_row["prompt_hash"],
@@ -769,21 +705,23 @@ def prompt_status(config: dict[str, Any], dynamic_payload: dict[str, Any] | None
         "estimatedCacheHit": estimator["estimated_cache_hit"],
     }
     if metrics:
-        payload["metrics"] = dict(metrics)
+        payload["metrics"] = metrics
     return payload
 
 
 def prompt_history(config: dict[str, Any]) -> list[dict[str, Any]]:
     ensure_prompt_version(config)
-    with connect_state_db(config) as connection:
-        rows = connection.execute(
-            """
-            SELECT version, created_at, description, prompt_hash AS hash, is_active
-            FROM prompt_versions
-            ORDER BY created_at DESC, id DESC
-            """
-        ).fetchall()
-    return [dict(row) for row in rows]
+    rows = list_prompt_versions(config)
+    return [
+        {
+            "version": row.get("version"),
+            "created_at": row.get("created_at"),
+            "description": row.get("description"),
+            "hash": row.get("prompt_hash"),
+            "is_active": row.get("is_active"),
+        }
+        for row in rows
+    ]
 
 
 def create_ai_experiment(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
@@ -796,37 +734,17 @@ def create_ai_experiment(config: dict[str, Any], payload: dict[str, Any]) -> dic
         "enabled": bool(payload.get("enabled", True)),
         "created_at": _iso_now(),
     }
-    with connect_state_db(config) as connection:
-        connection.execute(
-            """
-            INSERT INTO ai_experiments (name, description, prompt_version, traffic_percent, enabled, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(name) DO UPDATE SET
-                description = excluded.description,
-                prompt_version = excluded.prompt_version,
-                traffic_percent = excluded.traffic_percent,
-                enabled = excluded.enabled
-            """,
-            (
-                record["name"],
-                record["description"],
-                record["prompt_version"],
-                record["traffic_percent"],
-                _bool_int(record["enabled"]),
-                record["created_at"],
-            ),
-        )
-        connection.commit()
-        row = connection.execute("SELECT * FROM ai_experiments WHERE name = ?", (record["name"],)).fetchone()
-    return dict(row) if row else record
+    return save_ai_experiment(
+        config,
+        {
+            **record,
+            "enabled": _bool_int(record["enabled"]),
+        },
+    )
 
 
 def list_ai_experiments(config: dict[str, Any]) -> list[dict[str, Any]]:
-    with connect_state_db(config) as connection:
-        rows = connection.execute(
-            "SELECT * FROM ai_experiments ORDER BY created_at DESC, id DESC"
-        ).fetchall()
-    return [dict(row) for row in rows]
+    return list_ai_experiment_rows(config)
 
 
 def ensure_strategy_versions(config: dict[str, Any]) -> None:
@@ -851,34 +769,7 @@ def ensure_strategy_versions(config: dict[str, Any]) -> None:
         "risk_config_json": json.dumps(config.get("risk", {}), ensure_ascii=False),
         "payload_json": json.dumps(payload, ensure_ascii=False),
     }
-    with connect_state_db(config) as connection:
-        row = connection.execute(
-            "SELECT id FROM strategy_versions WHERE version = ?",
-            (version,),
-        ).fetchone()
-        if row is None:
-            connection.execute(
-                """
-                INSERT INTO strategy_versions (
-                    version, name, description, created_at, is_active, traffic_percent,
-                    indicators_json, rules_json, risk_config_json, payload_json
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    record["version"],
-                    record["name"],
-                    record["description"],
-                    record["created_at"],
-                    record["is_active"],
-                    record["traffic_percent"],
-                    record["indicators_json"],
-                    record["rules_json"],
-                    record["risk_config_json"],
-                    record["payload_json"],
-                ),
-            )
-            connection.commit()
+    ensure_strategy_version(config, record)
 
 
 def create_strategy_version(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
@@ -896,53 +787,14 @@ def create_strategy_version(config: dict[str, Any], payload: dict[str, Any]) -> 
         "risk_config_json": json.dumps(payload.get("risk_config") or payload.get("risk") or {}, ensure_ascii=False),
         "payload_json": json.dumps(payload.get("payload") or payload.get("overrides") or {}, ensure_ascii=False),
     }
-    with connect_state_db(config) as connection:
-        if record["is_active"]:
-            connection.execute("UPDATE strategy_versions SET is_active = 0")
-        connection.execute(
-            """
-            INSERT INTO strategy_versions (
-                version, name, description, created_at, is_active, traffic_percent,
-                indicators_json, rules_json, risk_config_json, payload_json
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(version) DO UPDATE SET
-                name = excluded.name,
-                description = excluded.description,
-                is_active = excluded.is_active,
-                traffic_percent = excluded.traffic_percent,
-                indicators_json = excluded.indicators_json,
-                rules_json = excluded.rules_json,
-                risk_config_json = excluded.risk_config_json,
-                payload_json = excluded.payload_json
-            """,
-            (
-                record["version"],
-                record["name"],
-                record["description"],
-                record["created_at"],
-                record["is_active"],
-                record["traffic_percent"],
-                record["indicators_json"],
-                record["rules_json"],
-                record["risk_config_json"],
-                record["payload_json"],
-            ),
-        )
-        connection.commit()
-        row = connection.execute("SELECT * FROM strategy_versions WHERE version = ?", (version,)).fetchone()
-    result = dict(row) if row else record
+    result = save_strategy_version(config, record, deactivate_others=bool(record["is_active"]))
     result["performance"] = _strategy_performance_stats(config, version)
     return result
 
 
 def activate_strategy_version(config: dict[str, Any], version: str) -> dict[str, Any]:
     ensure_strategy_versions(config)
-    with connect_state_db(config) as connection:
-        connection.execute("UPDATE strategy_versions SET is_active = 0")
-        connection.execute("UPDATE strategy_versions SET is_active = 1 WHERE version = ?", (version,))
-        connection.commit()
-        row = connection.execute("SELECT * FROM strategy_versions WHERE version = ?", (version,)).fetchone()
+    row = activate_strategy_version_record(config, version)
     if row is None:
         raise ValueError(f"Strategy version not found: {version}")
     result = dict(row)
@@ -952,11 +804,7 @@ def activate_strategy_version(config: dict[str, Any], version: str) -> dict[str,
 
 def strategy_history(config: dict[str, Any]) -> list[dict[str, Any]]:
     ensure_strategy_versions(config)
-    with connect_state_db(config) as connection:
-        rows = connection.execute(
-            "SELECT * FROM strategy_versions ORDER BY created_at DESC, id DESC"
-        ).fetchall()
-    items = [dict(row) for row in rows]
+    items = list_strategy_versions(config)
     for item in items:
         item["performance"] = _strategy_performance_stats(config, str(item.get("version") or ""))
     return items
@@ -964,11 +812,7 @@ def strategy_history(config: dict[str, Any]) -> list[dict[str, Any]]:
 
 def current_strategy_state(config: dict[str, Any]) -> dict[str, Any]:
     ensure_strategy_versions(config)
-    with connect_state_db(config) as connection:
-        rows = connection.execute(
-            "SELECT * FROM strategy_versions WHERE is_active = 1 ORDER BY id ASC"
-        ).fetchall()
-    active = [dict(row) for row in rows]
+    active = list_strategy_versions(config, active_only=True, order="id_asc")
     for item in active:
         item["performance"] = _strategy_performance_stats(config, str(item.get("version") or ""))
     return {
@@ -980,11 +824,7 @@ def current_strategy_state(config: dict[str, Any]) -> dict[str, Any]:
 def select_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
     ensure_strategy_versions(config)
     runtime = deepcopy(config)
-    with connect_state_db(config) as connection:
-        rows = connection.execute(
-            "SELECT * FROM strategy_versions WHERE is_active = 1 ORDER BY created_at ASC, id ASC"
-        ).fetchall()
-    active = [dict(row) for row in rows]
+    active = list_strategy_versions(config, active_only=True, order="created_asc")
     if not active:
         runtime["selected_strategy_version"] = config.get("strategy_versioning", {}).get("default_version", "strategy-v1")
         return runtime
@@ -1050,29 +890,21 @@ def detect_market_regime(config: dict[str, Any], snapshots: list[Any]) -> dict[s
             "indicators": indicator,
             "reason": reason,
         }
-    with connect_state_db(config) as connection:
-        connection.execute(
-            """
-            INSERT INTO market_regime_history (created_at, regime, confidence, indicators_json, reason)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                result["created_at"],
-                result["regime"],
-                result["confidence"],
-                json.dumps(result["indicators"], ensure_ascii=False),
-                result["reason"],
-            ),
-        )
-        connection.commit()
+    insert_market_regime_history(
+        config,
+        {
+            "created_at": result["created_at"],
+            "regime": result["regime"],
+            "confidence": result["confidence"],
+            "indicators_json": json.dumps(result["indicators"], ensure_ascii=False),
+            "reason": result["reason"],
+        },
+    )
     return result
 
 
 def current_market_regime(config: dict[str, Any]) -> dict[str, Any]:
-    with connect_state_db(config) as connection:
-        row = connection.execute(
-            "SELECT * FROM market_regime_history ORDER BY created_at DESC, id DESC LIMIT 1"
-        ).fetchone()
+    row = latest_market_regime_history(config)
     if row is None:
         return {
             "created_at": None,
@@ -1087,16 +919,7 @@ def current_market_regime(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def market_regime_history(config: dict[str, Any], limit: int = 100) -> list[dict[str, Any]]:
-    with connect_state_db(config) as connection:
-        rows = connection.execute(
-            """
-            SELECT *
-            FROM market_regime_history
-            ORDER BY created_at DESC, id DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
+    rows = list_market_regime_rows(config, limit=limit)
     result: list[dict[str, Any]] = []
     for row in rows:
         payload = dict(row)
@@ -1109,36 +932,26 @@ def record_trade_candidates(config: dict[str, Any], candidates: list[TradeCandid
     if not candidates:
         return 0
     now = _iso_now()
-    rows: list[tuple[Any, ...]] = []
+    rows: list[dict[str, Any]] = []
     for candidate in candidates:
         payload = _candidate_payload(candidate)
         rows.append(
-            (
-                now,
-                candidate.symbol,
-                candidate.side.upper(),
-                _candidate_rule_score(candidate),
-                float(candidate.confidence or 0),
-                float(candidate.risk_reward or 0),
-                candidate.entry,
-                candidate.stop_loss,
-                candidate.take_profit,
-                json.dumps(payload, ensure_ascii=False),
-            )
+            {
+                "created_at": now,
+                "symbol": candidate.symbol,
+                "side": candidate.side.upper(),
+                "rule_score": _candidate_rule_score(candidate),
+                "gpt_confidence": float(candidate.confidence or 0),
+                "risk_reward": float(candidate.risk_reward or 0),
+                "entry_price": candidate.entry,
+                "stop_loss": candidate.stop_loss,
+                "take_profit": candidate.take_profit,
+                "is_used": 0,
+                "used_at": None,
+                "payload_json": json.dumps(payload, ensure_ascii=False),
+            }
         )
-    with connect_state_db(config) as connection:
-        connection.executemany(
-            """
-            INSERT INTO trade_candidates (
-                created_at, symbol, side, rule_score, gpt_confidence, risk_reward,
-                entry_price, stop_loss, take_profit, payload_json
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            rows,
-        )
-        connection.commit()
-    return len(rows)
+    return insert_trade_candidate_rows(config, rows)
 
 
 def _side_label(candidate: TradeCandidate | None) -> str:
@@ -1172,72 +985,58 @@ def record_ai_trade_decision(config: dict[str, Any], decision: Decision) -> int:
     execution = decision.execution or None
     market_regime = ((scan.get("market_regime") or {}) if isinstance(scan.get("market_regime"), dict) else {}) or {}
     payload_json = json.dumps(to_jsonable(decision), ensure_ascii=False)
-    with connect_state_db(config) as connection:
-        cursor = connection.execute(
-            """
-            INSERT INTO ai_trade_decisions (
-                created_at, symbol, timeframe, decision, confidence, rule_score, side,
-                entry_price, stop_loss, take_profit1, take_profit2, risk_reward, funding_rate,
-                open_interest_change, rsi, macd_signal, trend, volume_change, news_score,
-                reason_json, raw_prompt, raw_response, order_id, trade_status, pnl, closed_at,
-                prompt_version, prompt_hash, model_name, model_version, strategy_version,
-                validator_version, recovery_version, health_version, experiment_name,
-                market_regime, regime_confidence, snapshot_json, payload_json
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                to_jsonable(decision.created_at),
-                selected.symbol if selected else None,
-                str(config.get("strategy", {}).get("timeframe", "")),
-                _decision_label(decision),
-                float(selected.confidence) if selected else None,
-                _candidate_rule_score(selected),
-                _side_label(selected),
-                entry,
-                selected.stop_loss if selected else None,
-                selected.take_profit if selected else None,
-                None,
-                selected.risk_reward if selected else None,
-                _safe_float(indicator.get("funding_rate")) if isinstance(indicator, dict) else None,
-                _safe_float(indicator.get("open_interest_change")) if isinstance(indicator, dict) else None,
-                _safe_float(indicator.get("rsi")) if isinstance(indicator, dict) else None,
-                _safe_float(indicator.get("macd_signal")) if isinstance(indicator, dict) else None,
-                indicator.get("trend") if isinstance(indicator, dict) else None,
-                _safe_float(indicator.get("volume_ratio")) if isinstance(indicator, dict) else None,
-                float(selected.news_score) if selected else None,
-                json.dumps(
-                    {
-                        "risk_reasons": decision.risk_check.reasons,
-                        "risk_warnings": decision.risk_check.warnings,
-                        "candidate_reasons": selected.reasons if selected else [],
-                        "candidate_warnings": selected.warnings if selected else [],
-                    },
-                    ensure_ascii=False,
-                ),
-                metadata.get("raw_prompt"),
-                metadata.get("raw_response"),
-                execution.order_id if execution else None,
-                None,
-                None,
-                None,
-                str(metadata.get("prompt_version") or config.get("prompt_engine", {}).get("default_prompt_version", "prompt-v1")),
-                str(metadata.get("prompt_hash") or ensure_prompt_version(config)["prompt_hash"]),
-                str(metadata.get("model") or config.get("ai", {}).get("okx", {}).get("model", "gpt-5.5")),
-                str(metadata.get("model_version") or metadata.get("model") or config.get("ai", {}).get("okx", {}).get("model", "gpt-5.5")),
-                str(config.get("selected_strategy_version") or config.get("strategy_versioning", {}).get("default_version", "strategy-v1")),
-                str(config.get("strategy_versioning", {}).get("validator_version", "validator-v1")),
-                str(config.get("strategy_versioning", {}).get("recovery_version", "recovery-v1")),
-                str(config.get("strategy_versioning", {}).get("health_version", "health-v1")),
-                metadata.get("experiment_name"),
-                market_regime.get("regime") or selected.market_regime if selected else None,
-                market_regime.get("confidence") or (selected.regime_confidence if selected else None),
-                json.dumps(candidate_payload, ensure_ascii=False),
-                payload_json,
+    return insert_ai_trade_decision_row(
+        config,
+        {
+            "created_at": to_jsonable(decision.created_at),
+            "symbol": selected.symbol if selected else None,
+            "timeframe": str(config.get("strategy", {}).get("timeframe", "")),
+            "decision": _decision_label(decision),
+            "confidence": float(selected.confidence) if selected else None,
+            "rule_score": _candidate_rule_score(selected),
+            "side": _side_label(selected),
+            "entry_price": entry,
+            "stop_loss": selected.stop_loss if selected else None,
+            "take_profit1": selected.take_profit if selected else None,
+            "take_profit2": None,
+            "risk_reward": selected.risk_reward if selected else None,
+            "funding_rate": _safe_float(indicator.get("funding_rate")) if isinstance(indicator, dict) else None,
+            "open_interest_change": _safe_float(indicator.get("open_interest_change")) if isinstance(indicator, dict) else None,
+            "rsi": _safe_float(indicator.get("rsi")) if isinstance(indicator, dict) else None,
+            "macd_signal": _safe_float(indicator.get("macd_signal")) if isinstance(indicator, dict) else None,
+            "trend": indicator.get("trend") if isinstance(indicator, dict) else None,
+            "volume_change": _safe_float(indicator.get("volume_ratio")) if isinstance(indicator, dict) else None,
+            "news_score": float(selected.news_score) if selected else None,
+            "reason_json": json.dumps(
+                {
+                    "risk_reasons": decision.risk_check.reasons,
+                    "risk_warnings": decision.risk_check.warnings,
+                    "candidate_reasons": selected.reasons if selected else [],
+                    "candidate_warnings": selected.warnings if selected else [],
+                },
+                ensure_ascii=False,
             ),
-        )
-        connection.commit()
-        return int(cursor.lastrowid)
+            "raw_prompt": metadata.get("raw_prompt"),
+            "raw_response": metadata.get("raw_response"),
+            "order_id": execution.order_id if execution else None,
+            "trade_status": None,
+            "pnl": None,
+            "closed_at": None,
+            "prompt_version": str(metadata.get("prompt_version") or config.get("prompt_engine", {}).get("default_prompt_version", "prompt-v1")),
+            "prompt_hash": str(metadata.get("prompt_hash") or ensure_prompt_version(config)["prompt_hash"]),
+            "model_name": str(metadata.get("model") or config.get("ai", {}).get("okx", {}).get("model", "gpt-5.5")),
+            "model_version": str(metadata.get("model_version") or metadata.get("model") or config.get("ai", {}).get("okx", {}).get("model", "gpt-5.5")),
+            "strategy_version": str(config.get("selected_strategy_version") or config.get("strategy_versioning", {}).get("default_version", "strategy-v1")),
+            "validator_version": str(config.get("strategy_versioning", {}).get("validator_version", "validator-v1")),
+            "recovery_version": str(config.get("strategy_versioning", {}).get("recovery_version", "recovery-v1")),
+            "health_version": str(config.get("strategy_versioning", {}).get("health_version", "health-v1")),
+            "experiment_name": metadata.get("experiment_name"),
+            "market_regime": market_regime.get("regime") or selected.market_regime if selected else None,
+            "regime_confidence": market_regime.get("confidence") or (selected.regime_confidence if selected else None),
+            "snapshot_json": json.dumps(candidate_payload, ensure_ascii=False),
+            "payload_json": payload_json,
+        },
+    )
 
 
 def create_ai_trade_decision(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
@@ -1282,38 +1081,12 @@ def create_ai_trade_decision(config: dict[str, Any], payload: dict[str, Any]) ->
         "snapshot_json": json.dumps(payload.get("snapshot_json") or {}, ensure_ascii=False),
         "payload_json": json.dumps(payload, ensure_ascii=False),
     }
-    with connect_state_db(config) as connection:
-        cursor = connection.execute(
-            """
-            INSERT INTO ai_trade_decisions (
-                created_at, symbol, timeframe, decision, confidence, rule_score, side,
-                entry_price, stop_loss, take_profit1, take_profit2, risk_reward, funding_rate,
-                open_interest_change, rsi, macd_signal, trend, volume_change, news_score,
-                reason_json, raw_prompt, raw_response, order_id, trade_status, pnl, closed_at,
-                prompt_version, prompt_hash, model_name, model_version, strategy_version,
-                validator_version, recovery_version, health_version, experiment_name,
-                market_regime, regime_confidence, snapshot_json, payload_json
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            tuple(row.values()),
-        )
-        connection.commit()
-        row["id"] = int(cursor.lastrowid)
+    row["id"] = insert_ai_trade_decision_row(config, row)
     return row
 
 
 def recent_ai_trade_decisions(config: dict[str, Any], limit: int = 50) -> list[dict[str, Any]]:
-    with connect_state_db(config) as connection:
-        rows = connection.execute(
-            """
-            SELECT *
-            FROM ai_trade_decisions
-            ORDER BY created_at DESC, id DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
+    rows = list_ai_trade_decision_rows(config, limit=limit)
     result: list[dict[str, Any]] = []
     for row in rows:
         payload = dict(row)
@@ -1371,31 +1144,16 @@ def ai_trade_decision_stats(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _open_trade_executions(config: dict[str, Any]) -> list[dict[str, Any]]:
-    with connect_state_db(config) as connection:
-        rows = connection.execute(
-            """
-            SELECT *
-            FROM trade_executions
-            WHERE status IN ('OPEN')
-            ORDER BY created_at ASC, id ASC
-            """
-        ).fetchall()
-    return [dict(row) for row in rows]
+    return list_trade_execution_rows(config, statuses=["OPEN"], order="created_asc")
 
 
 def _closed_trade_executions(config: dict[str, Any], *, limit: int = 5000) -> list[dict[str, Any]]:
-    with connect_state_db(config) as connection:
-        rows = connection.execute(
-            """
-            SELECT *
-            FROM trade_executions
-            WHERE status IN ('WIN', 'LOSS', 'BREAKEVEN', 'CLOSED')
-            ORDER BY COALESCE(closed_at, updated_at, created_at) DESC, id DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-    return [dict(row) for row in rows]
+    return list_trade_execution_rows(
+        config,
+        statuses=["WIN", "LOSS", "BREAKEVEN", "CLOSED"],
+        limit=limit,
+        order="closed_desc",
+    )
 
 
 def _trade_performance_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1437,17 +1195,13 @@ def _trade_performance_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _strategy_performance_stats(config: dict[str, Any], version: str) -> dict[str, Any]:
-    with connect_state_db(config) as connection:
-        rows = connection.execute(
-            """
-            SELECT *
-            FROM trade_executions
-            WHERE strategy_version = ? AND status IN ('WIN', 'LOSS', 'BREAKEVEN', 'CLOSED')
-            ORDER BY COALESCE(closed_at, updated_at, created_at) DESC, id DESC
-            """,
-            (version,),
-        ).fetchall()
-    return _trade_performance_stats([dict(row) for row in rows])
+    rows = list_trade_execution_rows(
+        config,
+        statuses=["WIN", "LOSS", "BREAKEVEN", "CLOSED"],
+        strategy_version=version,
+        order="closed_desc",
+    )
+    return _trade_performance_stats(rows)
 
 
 def _trading_risk_settings(config: dict[str, Any]) -> dict[str, Any]:
@@ -1530,10 +1284,9 @@ def refresh_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
     global_loss_streak = get_global_loss_streak(config)
     current_rule_score, current_confidence = _adaptive_thresholds(config)
     paused_until: datetime | None = None
-    with connect_state_db(config) as connection:
-        existing = connection.execute("SELECT * FROM trading_system_state WHERE id = 1").fetchone()
-        if existing:
-            paused_until = _parse_time(existing["paused_until"])
+    existing = get_trading_system_state_row(config)
+    if existing:
+        paused_until = _parse_time(existing.get("paused_until"))
     if paused_until and paused_until <= _utcnow():
         paused_until = None
     if global_loss_streak >= _safe_int(settings.get("pause_trading_loss_streak"), 4):
@@ -1550,39 +1303,20 @@ def refresh_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
         "currentNormalMinGptConfidence": current_confidence,
         "updatedAt": _iso_now(),
     }
-    with connect_state_db(config) as connection:
-        connection.execute(
-            """
-            INSERT INTO trading_system_state (
-                id, mechanism_name, is_recovery_mode, global_loss_streak, is_paused,
-                paused_until, current_normal_min_rule_score, current_normal_min_gpt_confidence,
-                updated_at, payload_json
-            )
-            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                mechanism_name = excluded.mechanism_name,
-                is_recovery_mode = excluded.is_recovery_mode,
-                global_loss_streak = excluded.global_loss_streak,
-                is_paused = excluded.is_paused,
-                paused_until = excluded.paused_until,
-                current_normal_min_rule_score = excluded.current_normal_min_rule_score,
-                current_normal_min_gpt_confidence = excluded.current_normal_min_gpt_confidence,
-                updated_at = excluded.updated_at,
-                payload_json = excluded.payload_json
-            """,
-            (
-                payload["mechanismName"],
-                _bool_int(payload["isRecoveryMode"]),
-                payload["globalLossStreak"],
-                _bool_int(payload["isPaused"]),
-                payload["pausedUntil"],
-                payload["currentNormalMinRuleScore"],
-                payload["currentNormalMinGptConfidence"],
-                payload["updatedAt"],
-                json.dumps(payload, ensure_ascii=False),
-            ),
-        )
-        connection.commit()
+    upsert_trading_system_state_row(
+        config,
+        {
+            "mechanism_name": payload["mechanismName"],
+            "is_recovery_mode": _bool_int(payload["isRecoveryMode"]),
+            "global_loss_streak": payload["globalLossStreak"],
+            "is_paused": _bool_int(payload["isPaused"]),
+            "paused_until": payload["pausedUntil"],
+            "current_normal_min_rule_score": payload["currentNormalMinRuleScore"],
+            "current_normal_min_gpt_confidence": payload["currentNormalMinGptConfidence"],
+            "updated_at": payload["updatedAt"],
+            "payload_json": json.dumps(payload, ensure_ascii=False),
+        },
+    )
     return payload
 
 
@@ -1698,67 +1432,33 @@ def refresh_bunny_health_state(config: dict[str, Any]) -> dict[str, Any]:
             "reason": reason,
             "updatedAt": _iso_now(),
         }
-    with connect_state_db(config) as connection:
-        connection.execute(
-            """
-            INSERT INTO trading_health_state (
-                id, mechanism_name, is_healthy, is_warning, is_critical, total_trades,
-                win_count, loss_count, breakeven_count, win_rate, gross_profit, gross_loss,
-                profit_factor, total_pnl, max_drawdown_percent, risk_multiplier,
-                score_adjustment, confidence_adjustment, is_paused, paused_until, reason,
-                updated_at, payload_json
-            )
-            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                mechanism_name = excluded.mechanism_name,
-                is_healthy = excluded.is_healthy,
-                is_warning = excluded.is_warning,
-                is_critical = excluded.is_critical,
-                total_trades = excluded.total_trades,
-                win_count = excluded.win_count,
-                loss_count = excluded.loss_count,
-                breakeven_count = excluded.breakeven_count,
-                win_rate = excluded.win_rate,
-                gross_profit = excluded.gross_profit,
-                gross_loss = excluded.gross_loss,
-                profit_factor = excluded.profit_factor,
-                total_pnl = excluded.total_pnl,
-                max_drawdown_percent = excluded.max_drawdown_percent,
-                risk_multiplier = excluded.risk_multiplier,
-                score_adjustment = excluded.score_adjustment,
-                confidence_adjustment = excluded.confidence_adjustment,
-                is_paused = excluded.is_paused,
-                paused_until = excluded.paused_until,
-                reason = excluded.reason,
-                updated_at = excluded.updated_at,
-                payload_json = excluded.payload_json
-            """,
-            (
-                "Bunny Health Monitor",
-                _bool_int(payload["isHealthy"]),
-                _bool_int(payload["isWarning"]),
-                _bool_int(payload["isCritical"]),
-                payload["totalTrades"],
-                payload["winCount"],
-                payload["lossCount"],
-                payload["breakevenCount"],
-                payload["winRate"],
-                payload["grossProfit"],
-                payload["grossLoss"],
-                payload["profitFactor"],
-                payload["totalPnl"],
-                payload["maxDrawdownPercent"],
-                payload["riskMultiplier"],
-                payload["scoreAdjustment"],
-                payload["confidenceAdjustment"],
-                _bool_int(payload["isPaused"]),
-                payload["pausedUntil"],
-                payload["reason"],
-                payload["updatedAt"],
-                json.dumps(payload, ensure_ascii=False),
-            ),
-        )
-        connection.commit()
+    upsert_trading_health_state_row(
+        config,
+        {
+            "mechanism_name": "Bunny Health Monitor",
+            "is_healthy": _bool_int(payload["isHealthy"]),
+            "is_warning": _bool_int(payload["isWarning"]),
+            "is_critical": _bool_int(payload["isCritical"]),
+            "total_trades": payload["totalTrades"],
+            "win_count": payload["winCount"],
+            "loss_count": payload["lossCount"],
+            "breakeven_count": payload["breakevenCount"],
+            "win_rate": payload["winRate"],
+            "gross_profit": payload["grossProfit"],
+            "gross_loss": payload["grossLoss"],
+            "profit_factor": payload["profitFactor"],
+            "total_pnl": payload["totalPnl"],
+            "max_drawdown_percent": payload["maxDrawdownPercent"],
+            "risk_multiplier": payload["riskMultiplier"],
+            "score_adjustment": payload["scoreAdjustment"],
+            "confidence_adjustment": payload["confidenceAdjustment"],
+            "is_paused": _bool_int(payload["isPaused"]),
+            "paused_until": payload["pausedUntil"],
+            "reason": payload["reason"],
+            "updated_at": payload["updatedAt"],
+            "payload_json": json.dumps(payload, ensure_ascii=False),
+        },
+    )
     return payload
 
 
@@ -1970,24 +1670,7 @@ def record_trade_execution(
         "latency_ms": metadata.get("latency_ms"),
         "snapshot_json": json.dumps(payload, ensure_ascii=False),
     }
-    with connect_state_db(config) as connection:
-        cursor = connection.execute(
-            """
-            INSERT INTO trade_executions (
-                created_at, updated_at, symbol, position_slot, parent_position_id, side, entry_price,
-                stop_loss, take_profit, risk_reward, risk_percent, rule_score, gpt_confidence, status, pnl,
-                reject_reason, closed_at, payload_json, market_regime, regime_confidence, strategy_version,
-                rule_engine_version, validator_version, recovery_version, health_version, prompt_version,
-                prompt_hash, model_name, model_version, system_version, decision_engine_version, bunny_version,
-                health_monitor_version, slot_refill_version, experiment_name, prompt_tokens, completion_tokens,
-                latency_ms, snapshot_json
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            tuple(row.values()),
-        )
-        connection.commit()
-        row["id"] = int(cursor.lastrowid)
+    row = insert_trade_execution_row(config, row)
     row["validation"] = validation
     refresh_trading_system_state(config)
     refresh_bunny_health_state(config)
@@ -1995,41 +1678,22 @@ def record_trade_execution(
 
 
 def _mark_recent_ai_decisions_closed(config: dict[str, Any], execution_row: dict[str, Any]) -> None:
-    with connect_state_db(config) as connection:
-        connection.execute(
-            """
-            UPDATE ai_trade_decisions
-            SET trade_status = ?, pnl = ?, closed_at = ?
-            WHERE symbol = ? AND side = ? AND trade_status IS NULL
-            """,
-            (
-                execution_row["status"],
-                execution_row["pnl"],
-                execution_row["closed_at"],
-                execution_row["symbol"],
-                execution_row["side"],
-            ),
-        )
-        connection.commit()
+    mark_ai_trade_decisions_closed(
+        config,
+        symbol=str(execution_row.get("symbol") or ""),
+        side=str(execution_row.get("side") or ""),
+        trade_status=str(execution_row.get("status") or ""),
+        pnl=execution_row.get("pnl"),
+        closed_at=execution_row.get("closed_at"),
+    )
 
 
 def _mark_trade_candidate_used(config: dict[str, Any], candidate_id: int) -> None:
-    with connect_state_db(config) as connection:
-        connection.execute(
-            "UPDATE trade_candidates SET is_used = 1, used_at = ? WHERE id = ?",
-            (_iso_now(), candidate_id),
-        )
-        connection.commit()
+    mark_trade_candidate_used(config, candidate_id, used_at=_iso_now())
 
 
 def _claim_trade_candidate(config: dict[str, Any], candidate_id: int) -> bool:
-    with connect_state_db(config) as connection:
-        cursor = connection.execute(
-            "UPDATE trade_candidates SET is_used = 1, used_at = ? WHERE id = ? AND is_used = 0",
-            (_iso_now(), candidate_id),
-        )
-        connection.commit()
-    return cursor.rowcount == 1
+    return claim_trade_candidate(config, candidate_id, used_at=_iso_now())
 
 
 def _slot_refill_settings(config: dict[str, Any]) -> dict[str, Any]:
@@ -2052,23 +1716,16 @@ def try_slot_refill(config: dict[str, Any], position_slot: int) -> dict[str, Any
     if open_count >= _safe_int(_trading_risk_settings(config).get("max_concurrent_positions"), 3):
         return {"refilled": False, "reason": "Max concurrent positions reached"}
     cutoff = (_utcnow() - timedelta(minutes=_safe_int(settings.get("candidate_lookback_minutes"), 240))).isoformat()
-    with connect_state_db(config) as connection:
-        rows = connection.execute(
-            """
-            SELECT *
-            FROM trade_candidates
-            WHERE created_at >= ? AND is_used = 0 AND COALESCE(rule_score, 0) >= ?
-            ORDER BY rule_score DESC, gpt_confidence DESC, risk_reward DESC, id ASC
-            LIMIT ?
-            """,
-            (
-                cutoff,
-                _safe_float(settings.get("min_candidate_rule_score"), 78),
-                max(1, _safe_int(settings.get("max_refill_attempts_per_slot"), 3)),
-            ),
-        ).fetchall()
+    rows = list_trade_candidate_rows(
+        config,
+        min_created_at=cutoff,
+        unused_only=True,
+        min_rule_score=_safe_float(settings.get("min_candidate_rule_score"), 78),
+        limit=max(1, _safe_int(settings.get("max_refill_attempts_per_slot"), 3)),
+        order="refill",
+    )
     for row in rows:
-        payload = _json_loads(row["payload_json"], {})
+        payload = _json_loads(row.get("payload_json"), {})
         candidate = _candidate_from_payload(payload)
         validation = validate_entry(
             config,
@@ -2106,27 +1763,19 @@ def try_slot_refill(config: dict[str, Any], position_slot: int) -> dict[str, Any
 def close_trade_execution(config: dict[str, Any], trade_execution_id: int, status: str, pnl: float) -> dict[str, Any]:
     closed_at = _iso_now()
     normalized_status = str(status or "CLOSED").upper()
-    with connect_state_db(config) as connection:
-        row = connection.execute(
-            "SELECT * FROM trade_executions WHERE id = ?",
-            (trade_execution_id,),
-        ).fetchone()
-        if row is None:
-            raise ValueError(f"Trade execution not found: {trade_execution_id}")
-        connection.execute(
-            """
-            UPDATE trade_executions
-            SET status = ?, pnl = ?, closed_at = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (normalized_status, pnl, closed_at, closed_at, trade_execution_id),
-        )
-        connection.commit()
-        updated = connection.execute(
-            "SELECT * FROM trade_executions WHERE id = ?",
-            (trade_execution_id,),
-        ).fetchone()
-    payload = dict(updated) if updated else {}
+    row = get_trade_execution(config, trade_execution_id)
+    if row is None:
+        raise ValueError(f"Trade execution not found: {trade_execution_id}")
+    payload = update_trade_execution(
+        config,
+        trade_execution_id,
+        {
+            "status": normalized_status,
+            "pnl": pnl,
+            "closed_at": closed_at,
+            "updated_at": closed_at,
+        },
+    ) or {}
     _mark_recent_ai_decisions_closed(config, payload)
     refresh_trading_system_state(config)
     refresh_bunny_health_state(config)
@@ -2160,11 +1809,7 @@ def build_market_prompt_dto(
 
 
 def replay_trade_execution(config: dict[str, Any], trade_execution_id: int) -> dict[str, Any]:
-    with connect_state_db(config) as connection:
-        row = connection.execute(
-            "SELECT * FROM trade_executions WHERE id = ?",
-            (trade_execution_id,),
-        ).fetchone()
+    row = get_trade_execution(config, trade_execution_id)
     if row is None:
         raise ValueError(f"Trade execution not found: {trade_execution_id}")
     trade_row = dict(row)
@@ -2243,51 +1888,33 @@ def replay_trade_execution(config: dict[str, Any], trade_execution_id: int) -> d
         "oldReason": _json_loads(trade_row.get("payload_json"), {}),
         "newReason": {"reason": new_reason, "rawPrompt": raw_prompt},
     }
-    with connect_state_db(config) as connection:
-        connection.execute(
-            """
-            INSERT INTO replay_history (
-                trade_execution_id, prompt_version, strategy_version, model_version, old_decision,
-                new_decision, old_confidence, new_confidence, latency, replay_at, decision_changed,
-                confidence_changed, reason_changed, old_reason_json, new_reason_json, payload_json
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                result["tradeExecutionId"],
-                result["promptVersion"],
-                result["strategyVersion"],
-                result["modelVersion"],
-                result["oldDecision"],
-                result["newDecision"],
-                result["oldConfidence"],
-                result["newConfidence"],
-                result["latency"],
-                result["replayAt"],
-                _bool_int(result["decisionChanged"]),
-                _bool_int(result["confidenceChanged"]),
-                _bool_int(result["reasonChanged"]),
-                json.dumps(result["oldReason"], ensure_ascii=False),
-                json.dumps(result["newReason"], ensure_ascii=False),
-                json.dumps(result, ensure_ascii=False),
-            ),
-        )
-        connection.commit()
+    insert_replay_history_row(
+        config,
+        {
+            "trade_execution_id": result["tradeExecutionId"],
+            "prompt_version": result["promptVersion"],
+            "strategy_version": result["strategyVersion"],
+            "model_version": result["modelVersion"],
+            "old_decision": result["oldDecision"],
+            "new_decision": result["newDecision"],
+            "old_confidence": result["oldConfidence"],
+            "new_confidence": result["newConfidence"],
+            "latency": result["latency"],
+            "replay_at": result["replayAt"],
+            "decision_changed": _bool_int(result["decisionChanged"]),
+            "confidence_changed": _bool_int(result["confidenceChanged"]),
+            "reason_changed": _bool_int(result["reasonChanged"]),
+            "old_reason_json": json.dumps(result["oldReason"], ensure_ascii=False),
+            "new_reason_json": json.dumps(result["newReason"], ensure_ascii=False),
+            "payload_json": json.dumps(result, ensure_ascii=False),
+        },
+    )
     return result
 
 
 def replay_batch(config: dict[str, Any], limit: int) -> dict[str, Any]:
-    with connect_state_db(config) as connection:
-        rows = connection.execute(
-            """
-            SELECT id
-            FROM trade_executions
-            ORDER BY created_at DESC, id DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-    results = [replay_trade_execution(config, _safe_int(row["id"])) for row in rows]
+    execution_ids = list_trade_execution_ids(config, limit=limit)
+    results = [replay_trade_execution(config, trade_execution_id) for trade_execution_id in execution_ids]
     stats = replay_stats(config)
     return {
         "count": len(results),
@@ -2297,17 +1924,7 @@ def replay_batch(config: dict[str, Any], limit: int) -> dict[str, Any]:
 
 
 def replay_stats(config: dict[str, Any]) -> dict[str, Any]:
-    with connect_state_db(config) as connection:
-        rows = connection.execute(
-            """
-            SELECT r.*, e.status AS trade_status, e.pnl AS trade_pnl, e.risk_reward, e.gpt_confidence,
-                   e.created_at AS trade_created_at, e.closed_at AS trade_closed_at
-            FROM replay_history r
-            LEFT JOIN trade_executions e ON e.id = r.trade_execution_id
-            ORDER BY r.replay_at DESC, r.id DESC
-            """
-        ).fetchall()
-    payloads = [dict(row) for row in rows]
+    payloads = list_replay_history_rows(config, include_trade_execution=True)
     total = len(payloads)
     changed = sum(1 for row in payloads if _safe_int(row.get("decision_changed")) == 1)
     confidence_changed = sum(1 for row in payloads if _safe_int(row.get("confidence_changed")) == 1)

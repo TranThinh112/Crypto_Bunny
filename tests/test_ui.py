@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from crypto_trader.config import load_config
 from crypto_trader.codex_features import close_trade_execution, record_trade_candidates, record_trade_execution, try_slot_refill
 from crypto_trader.models import TradeCandidate
-from crypto_trader.storage import connect_state_db, save_market_scan_observations, set_journal_state
+from crypto_trader.storage import list_trade_execution_rows, save_market_scan_observations, set_journal_state
 from crypto_trader.ui import _handle_telegram_update, _run_automation_cycle, _telegram_action_response, create_app
 
 
@@ -52,7 +52,7 @@ class UiTest(TestCase):
         config_path = Path(tmpdir) / "config.yaml"
         config_path.write_text(
             "mode: dry_run\n"
-            f"state_db_path: {Path(tmpdir, 'state.sqlite').as_posix()}\n"
+            "_atlas_test_mode: true\n"
             "ai:\n"
             "  okx:\n"
             "    provider: local_policy\n"
@@ -494,7 +494,7 @@ class UiTest(TestCase):
             config_path = Path(tmpdir) / "config.yaml"
             config_path.write_text(
                 "mode: dry_run\n"
-                f"state_db_path: {Path(tmpdir, 'state.sqlite').as_posix()}\n"
+                "_atlas_test_mode: true\n"
                 "notifications:\n"
                 "  telegram:\n"
                 "    notify_scans: true\n",
@@ -527,7 +527,7 @@ class UiTest(TestCase):
             config_path = Path(tmpdir) / "config.yaml"
             config_path.write_text(
                 "mode: dry_run\n"
-                f"state_db_path: {Path(tmpdir, 'state.sqlite').as_posix()}\n",
+                "_atlas_test_mode: true\n",
                 encoding="utf-8",
             )
             config = load_config(config_path)
@@ -566,7 +566,7 @@ class UiTest(TestCase):
             config_path = Path(tmpdir) / "config.yaml"
             config_path.write_text(
                 "mode: dry_run\n"
-                f"state_db_path: {Path(tmpdir, 'state.sqlite').as_posix()}\n",
+                "_atlas_test_mode: true\n",
                 encoding="utf-8",
             )
             config = load_config(config_path)
@@ -605,7 +605,7 @@ class UiTest(TestCase):
             config_path = Path(tmpdir) / "config.yaml"
             config_path.write_text(
                 "mode: dry_run\n"
-                f"state_db_path: {Path(tmpdir, 'state.sqlite').as_posix()}\n",
+                "_atlas_test_mode: true\n",
                 encoding="utf-8",
             )
             config = load_config(config_path)
@@ -644,7 +644,7 @@ class UiTest(TestCase):
             config_path = Path(tmpdir) / "config.yaml"
             config_path.write_text(
                 "mode: dry_run\n"
-                f"state_db_path: {Path(tmpdir, 'state.sqlite').as_posix()}\n",
+                "_atlas_test_mode: true\n",
                 encoding="utf-8",
             )
             config = load_config(config_path)
@@ -664,7 +664,7 @@ class UiTest(TestCase):
             config_path = Path(tmpdir) / "config.yaml"
             config_path.write_text(
                 "mode: dry_run\n"
-                f"state_db_path: {Path(tmpdir, 'state.sqlite').as_posix()}\n",
+                "_atlas_test_mode: true\n",
                 encoding="utf-8",
             )
             config = load_config(config_path)
@@ -685,8 +685,7 @@ class UiTest(TestCase):
 
             record = record_trade_execution(config, candidate)
 
-            with connect_state_db(config) as connection:
-                rows = connection.execute("SELECT * FROM trade_executions").fetchall()
+            rows = list_trade_execution_rows(config)
 
         self.assertEqual(record["status"], "REJECTED")
         self.assertEqual(len(rows), 1)

@@ -76,7 +76,7 @@ class LcPipelineTest(TestCase):
         self.tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         config = deepcopy(DEFAULT_CONFIG)
         config["_config_dir"] = self.tmpdir.name
-        config["state_db_path"] = "state.sqlite"
+        config["_atlas_test_mode"] = True
         config["ai"]["internal"]["lc_pipeline_notify_two_hour_summary"] = False
         config["ai"]["internal"]["lc_pipeline_promote_to_pending"] = False
         config["ai"]["internal"]["lc_pipeline_min_win_probability_pct"] = 50

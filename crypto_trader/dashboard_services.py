@@ -23,11 +23,12 @@ from .codex_features import (
 from .market_guard import market_guard_block_status
 from .sizing import STATE_KEY as SIZING_STATE_KEY
 from .storage import (
-    connect_state_db,
     count_pending_orders,
     get_journal_state,
+    list_journal_state_prefix,
     list_market_guard_observations,
     list_paper_trades,
+    list_replay_history_rows,
     list_trade_memory,
     recent_market_scan_memory,
     set_journal_state,
@@ -210,26 +211,16 @@ def _trade_memory_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def system_checklist_history(config: dict[str, Any], *, limit: int = 30) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    with connect_state_db(config) as connection:
-        rows = connection.execute(
-            """
-            SELECT key, value, updated_at
-            FROM journal_state
-            WHERE key LIKE 'system_checklist:%'
-            ORDER BY key DESC
-            LIMIT ?
-            """,
-            (max(1, min(limit, 366)),),
-        ).fetchall()
+    rows = list_journal_state_prefix(config, "system_checklist:", limit=max(1, min(limit, 366)))
     for row in rows:
         try:
-            payload = json.loads(str(row["value"]))
+            payload = json.loads(str(row.get("value")))
         except json.JSONDecodeError:
             continue
         if not isinstance(payload, dict):
             continue
-        payload.setdefault("date", str(row["key"]).split(":", 1)[-1])
-        payload.setdefault("updated_at", row["updated_at"])
+        payload.setdefault("date", str(row.get("key") or "").split(":", 1)[-1])
+        payload.setdefault("updated_at", row.get("updated_at"))
         items.append(payload)
     return items
 
@@ -876,7 +867,7 @@ def _build_system_checklist_payload(
             f"journal_state={row_counts.get('journal_state', 0)}, trades={row_counts.get('trade_executions', 0)}",
             evidence=[
                 _evidence_line("Ngay kiem tra", checked_date),
-                _evidence_line("Nguon", "SQLite row_counts + payload_bytes"),
+                _evidence_line("Nguon", "Atlas row_counts + payload_bytes"),
                 _evidence_line("journal_state rows", row_counts.get("journal_state", 0)),
                 _evidence_line("trade_executions rows", row_counts.get("trade_executions", 0)),
                 _evidence_line("decisions rows", row_counts.get("decisions", 0)),
@@ -1225,38 +1216,7 @@ def analytics_dashboard(
 def _build_replay_dashboard_payload(config: dict[str, Any], *, limit: int = 50) -> dict[str, Any]:
     limit = max(1, min(limit, 500))
     stats = replay_stats(config)
-    with connect_state_db(config) as connection:
-        rows = connection.execute(
-            """
-            SELECT
-                r.id,
-                r.trade_execution_id,
-                r.prompt_version,
-                r.strategy_version,
-                r.model_version,
-                r.old_decision,
-                r.new_decision,
-                r.old_confidence,
-                r.new_confidence,
-                r.latency,
-                r.replay_at,
-                r.decision_changed,
-                r.confidence_changed,
-                r.reason_changed,
-                e.symbol,
-                e.side,
-                e.status AS trade_status,
-                e.pnl AS trade_pnl,
-                e.created_at AS trade_created_at,
-                e.closed_at AS trade_closed_at
-            FROM replay_history r
-            LEFT JOIN trade_executions e ON e.id = r.trade_execution_id
-            ORDER BY r.replay_at DESC, r.id DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-    payloads = [dict(row) for row in rows]
+    payloads = list_replay_history_rows(config, limit=limit, include_trade_execution=True)
     decision_counts = Counter(str(row.get("new_decision") or "-") for row in payloads)
     strategy_counts = Counter(str(row.get("strategy_version") or "-") for row in payloads)
     model_counts = Counter(str(row.get("model_version") or "-") for row in payloads)

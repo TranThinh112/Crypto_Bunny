@@ -1,4 +1,4 @@
-Hãy tạo module Configuration Impact Analyzer cho bot AI trading crypto.
+﻿Hãy tạo module Configuration Impact Analyzer cho bot AI trading crypto.
 
 Tên tiếng Việt: Phân tích tác động cấu hình.
 
@@ -20,7 +20,7 @@ Mục tiêu:
 
 Tech stack:
 - Python 3.11+
-- SQLite
+- MongoDB Atlas
 - SQLAlchemy
 - FastAPI
 - Pydantic
@@ -41,7 +41,7 @@ Input cấu hình mẫu:
   "leverage": 20
 }
 
-Database SQLite:
+Database MongoDB Atlas:
 
 1. Tạo bảng trading_config_versions:
    - id

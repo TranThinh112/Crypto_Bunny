@@ -35,7 +35,7 @@ class CodexFeaturesTest(TestCase):
 
     def _config(self) -> dict:
         return {
-            "state_db_path": str(Path(self._tmpdir.name) / "state.sqlite"),
+            "_atlas_test_mode": True,
             "notifications": {
                 "telegram": {
                     "enabled": True,

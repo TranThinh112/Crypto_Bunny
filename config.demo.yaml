@@ -1,7 +1,6 @@
 mode: demo
 report_path: reports/latest_decision.json
 ledger_path: data/trades.jsonl
-state_db_path: data/bot_state.sqlite
 runtime:
   interval_seconds: 300
 news:

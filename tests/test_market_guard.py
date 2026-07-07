@@ -20,7 +20,7 @@ class MarketGuardTest(TestCase):
         self.tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         config = deepcopy(DEFAULT_CONFIG)
         config["_config_dir"] = self.tmpdir.name
-        config["state_db_path"] = "state.sqlite"
+        config["_atlas_test_mode"] = True
         return config
 
     def tearDown(self) -> None:

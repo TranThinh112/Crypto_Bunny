@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-import sqlite3
 import tempfile
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from unittest import TestCase
 from unittest.mock import patch
 
+from crypto_trader.atlas_mirror import atlas_database
 from crypto_trader.config import DEFAULT_CONFIG
 from crypto_trader.lc_pipeline import save_lc_pipeline_mini_scan
 from crypto_trader.models import ExecutionResult, TradeCandidate
 from crypto_trader.pending import maintain_pending_orders
-from crypto_trader.storage import count_pending_orders, list_pending_orders, open_pending_symbols, save_pending_order, state_db_path
+from crypto_trader.storage import count_pending_orders, list_pending_orders, open_pending_symbols, save_pending_order
 
 
 def _candidate(symbol: str = "BTC/USDT:USDT", side: str = "long") -> TradeCandidate:
@@ -38,18 +38,16 @@ def _age_pending_order(config: dict, order_id: int, hours: float) -> None:
     now = datetime.now(timezone.utc)
     created_at = now - timedelta(hours=hours)
     expires_at = now - timedelta(minutes=1)
-    with sqlite3.connect(state_db_path(config)) as connection:
-        connection.execute(
-            """
-            UPDATE pending_orders
-            SET created_at = ?,
-                updated_at = ?,
-                expires_at = ?
-            WHERE id = ?
-            """,
-            (created_at.isoformat(), created_at.isoformat(), expires_at.isoformat(), order_id),
-        )
-        connection.commit()
+    atlas_database(config)["pending_orders"].update_one(
+        {"id": order_id},
+        {
+            "$set": {
+                "created_at": created_at.isoformat(),
+                "updated_at": created_at.isoformat(),
+                "expires_at": expires_at.isoformat(),
+            }
+        },
+    )
 
 
 class PendingTest(TestCase):
@@ -58,7 +56,7 @@ class PendingTest(TestCase):
         config = deepcopy(DEFAULT_CONFIG)
         config["_config_dir"] = self.tmpdir.name
         config["mode"] = mode
-        config["state_db_path"] = "state.sqlite"
+        config["_atlas_test_mode"] = True
         config["ledger_path"] = "ledger.jsonl"
         config["news"]["require_symbol_news"] = False
         config["ai"]["internal"]["provider"] = "local_policy"

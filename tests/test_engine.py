@@ -35,7 +35,7 @@ class EngineMiniQueueTest(TestCase):
         self.tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         config = deepcopy(DEFAULT_CONFIG)
         config["_config_dir"] = self.tmpdir.name
-        config["state_db_path"] = "state.sqlite"
+        config["_atlas_test_mode"] = True
         config["ledger_path"] = "ledger.jsonl"
         config["mode"] = "dry_run"
         config["news"]["require_symbol_news"] = False

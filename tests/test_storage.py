@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import tempfile
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from unittest import TestCase
 
+from crypto_trader.atlas_mirror import atlas_database
 from crypto_trader.models import TradeCandidate
 from crypto_trader.storage import (
     compact_market_scan_observations,
-    connect_state_db,
     prune_decision_history,
     prune_market_scan_observations,
     save_market_scan_observations,
@@ -18,7 +17,8 @@ from crypto_trader.storage import (
 class StorageTest(TestCase):
     def _config(self, tmpdir: str) -> dict:
         return {
-            "state_db_path": str(Path(tmpdir) / "state.sqlite"),
+            "_atlas_test_mode": True,
+            "_atlas_test_database": f"storage_test_{abs(hash(tmpdir))}",
             "market_scan_memory": {
                 "keep_hours": 72,
                 "max_rows_per_symbol_timeframe": 2,
@@ -74,63 +74,50 @@ class StorageTest(TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             config = self._config(tmpdir)
             now = datetime.now(timezone.utc)
-            with connect_state_db(config) as connection:
-                for index in range(4):
-                    created_at = (now - timedelta(minutes=index)).isoformat()
-                    connection.execute(
-                        """
-                        INSERT INTO market_scan_observations (
-                            created_at, source, symbol, side, timeframe,
-                            confidence, win_probability_pct, risk_reward, score,
-                            indicator_json, payload_json
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            created_at,
-                            "test",
-                            "BTC/USDT:USDT",
-                            "long",
-                            "1m",
-                            90,
-                            80,
-                            1.5,
-                            80,
-                            "{}",
-                            "{}",
-                        ),
-                    )
-                connection.execute(
-                    """
-                    INSERT INTO market_scan_observations (
-                        created_at, source, symbol, side, timeframe,
-                        confidence, win_probability_pct, risk_reward, score,
-                        indicator_json, payload_json
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        (now - timedelta(hours=100)).isoformat(),
-                        "test",
-                        "ETH/USDT:USDT",
-                        "long",
-                        "5m",
-                        90,
-                        80,
-                        1.5,
-                        80,
-                        "{}",
-                        "{}",
-                    ),
+            collection = atlas_database(config)["market_scan_observations"]
+            for index in range(4):
+                created_at = (now - timedelta(minutes=index)).isoformat()
+                collection.replace_one(
+                    {"id": index + 1},
+                    {
+                        "_id": index + 1,
+                        "id": index + 1,
+                        "created_at": created_at,
+                        "source": "test",
+                        "symbol": "BTC/USDT:USDT",
+                        "side": "long",
+                        "timeframe": "1m",
+                        "confidence": 90,
+                        "win_probability_pct": 80,
+                        "risk_reward": 1.5,
+                        "score": 80,
+                        "indicator_json": "{}",
+                        "payload_json": "{}",
+                    },
+                    upsert=True,
                 )
-                connection.commit()
+            collection.replace_one(
+                {"id": 5},
+                {
+                    "_id": 5,
+                    "id": 5,
+                    "created_at": (now - timedelta(hours=100)).isoformat(),
+                    "source": "test",
+                    "symbol": "ETH/USDT:USDT",
+                    "side": "long",
+                    "timeframe": "5m",
+                    "confidence": 90,
+                    "win_probability_pct": 80,
+                    "risk_reward": 1.5,
+                    "score": 80,
+                    "indicator_json": "{}",
+                    "payload_json": "{}",
+                },
+                upsert=True,
+            )
 
             result = prune_market_scan_observations(config)
-
-            with connect_state_db(config) as connection:
-                rows = connection.execute(
-                    "SELECT symbol, timeframe FROM market_scan_observations ORDER BY created_at DESC"
-                ).fetchall()
+            rows = list(collection.find({}, {"_id": 0}).sort([("created_at", -1)]))
 
         self.assertEqual(result["deleted_old"], 1)
         self.assertEqual(result["deleted_over_limit"], 2)
@@ -141,11 +128,7 @@ class StorageTest(TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             config = self._config(tmpdir)
             saved = save_market_scan_observations(config, [self._candidate()], source="scan", limit=10)
-
-            with connect_state_db(config) as connection:
-                rows = connection.execute(
-                    "SELECT timeframe, indicator_json, payload_json FROM market_scan_observations ORDER BY timeframe"
-                ).fetchall()
+            rows = list(atlas_database(config)["market_scan_observations"].find({}, {"_id": 0}).sort([("timeframe", 1)]))
 
         self.assertEqual(saved, 2)
         self.assertEqual({row["timeframe"] for row in rows}, {"1m", "5m"})
@@ -161,25 +144,28 @@ class StorageTest(TestCase):
             config = self._config(tmpdir)
             now = datetime.now(timezone.utc).isoformat()
             huge_json = '{"symbol":"BTC/USDT:USDT","candidate":"' + ("x" * 10000) + '","raw_candles":"' + ("y" * 10000) + '"}'
-            with connect_state_db(config) as connection:
-                connection.execute(
-                    """
-                    INSERT INTO market_scan_observations (
-                        created_at, source, symbol, side, timeframe,
-                        confidence, win_probability_pct, risk_reward, score,
-                        indicator_json, payload_json
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (now, "legacy", "BTC/USDT:USDT", "long", "1m", 90, 80, 2, 80, huge_json, huge_json),
-                )
-                connection.commit()
+            atlas_database(config)["market_scan_observations"].replace_one(
+                {"id": 1},
+                {
+                    "_id": 1,
+                    "id": 1,
+                    "created_at": now,
+                    "source": "legacy",
+                    "symbol": "BTC/USDT:USDT",
+                    "side": "long",
+                    "timeframe": "1m",
+                    "confidence": 90,
+                    "win_probability_pct": 80,
+                    "risk_reward": 2,
+                    "score": 80,
+                    "indicator_json": huge_json,
+                    "payload_json": huge_json,
+                },
+                upsert=True,
+            )
 
             result = compact_market_scan_observations(config)
-            with connect_state_db(config) as connection:
-                row = connection.execute(
-                    "SELECT indicator_json, payload_json FROM market_scan_observations"
-                ).fetchone()
+            row = atlas_database(config)["market_scan_observations"].find_one({}, {"_id": 0})
 
         self.assertEqual(result["compacted"], 1)
         self.assertLessEqual(len(row["indicator_json"].encode("utf-8")), 2000)
@@ -190,24 +176,26 @@ class StorageTest(TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             config = self._config(tmpdir)
             now = datetime.now(timezone.utc)
-            with connect_state_db(config) as connection:
-                for index in range(6):
-                    created_at = (now - timedelta(minutes=index)).isoformat()
-                    connection.execute(
-                        """
-                        INSERT INTO decisions (
-                            created_at, action, selected_symbol, selected_side,
-                            selected_win_probability_pct, payload_json
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?)
-                        """,
-                        (created_at, "HOLD", None, None, None, '{"blob":"' + ("x" * 1000) + '"}'),
-                    )
-                connection.commit()
+            collection = atlas_database(config)["decisions"]
+            for index in range(6):
+                created_at = (now - timedelta(minutes=index)).isoformat()
+                collection.replace_one(
+                    {"id": index + 1},
+                    {
+                        "_id": index + 1,
+                        "id": index + 1,
+                        "created_at": created_at,
+                        "action": "HOLD",
+                        "selected_symbol": None,
+                        "selected_side": None,
+                        "selected_win_probability_pct": None,
+                        "payload_json": '{"blob":"' + ("x" * 1000) + '"}',
+                    },
+                    upsert=True,
+                )
 
             result = prune_decision_history(config, keep_hours=72, max_rows=3)
-            with connect_state_db(config) as connection:
-                count = connection.execute("SELECT COUNT(*) AS count FROM decisions").fetchone()["count"]
+            count = atlas_database(config)["decisions"].count_documents({})
 
         self.assertEqual(result["deleted_over_limit"], 3)
         self.assertEqual(count, 3)

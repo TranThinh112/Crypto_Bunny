@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .atlas_mirror import atlas_runtime_is_primary, atlas_runtime_is_read_only
 from .config import DEFAULT_CONFIG, load_config, project_path
 from .ai_coordinator import next_internal_market_scan_at, run_internal_market_scan_if_due
 from .codex_features import (
@@ -357,7 +358,7 @@ def _read_report(config: dict[str, Any]) -> dict[str, Any]:
             "report_exists": latest is not None,
             "report_path": str(path),
             "decision": latest,
-            "source": "sqlite" if latest else "none",
+            "source": "atlas" if latest else "none",
             "paper_state": _paper_state(config),
         }
     with path.open("r", encoding="utf-8") as handle:
@@ -427,7 +428,7 @@ def _automation_interval(config: dict[str, Any]) -> int:
 
 
 def _automation_enabled(config: dict[str, Any]) -> bool:
-    return bool(config.get("automation", {}).get("enabled", True))
+    return bool(config.get("automation", {}).get("enabled", True)) and atlas_runtime_is_primary(config)
 
 
 def _automation_should_execute(config: dict[str, Any]) -> tuple[bool, str]:
@@ -864,6 +865,12 @@ def _telegram_guard_message(config: dict[str, Any], app: FastAPI | None = None) 
 
 def _run_telegram_scan(app: FastAPI | None, config_path: str | Path) -> tuple[dict[str, Any], str, dict[str, Any]]:
     config = load_config(config_path)
+    if atlas_runtime_is_read_only(config):
+        return (
+            config,
+            "⚠️ Runtime hiện tại đang ở chế độ chỉ đọc. Chỉ Railway primary mới được phép scan và ghi state.",
+            telegram_control_keyboard(),
+        )
     if app is None:
         return config, "⚠️ Scan ngay chỉ khả dụng khi bot UI server đang chạy.", telegram_control_keyboard()
     if not app.state.lock.acquire(blocking=False):
@@ -1521,6 +1528,11 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
             raise HTTPException(status_code=409, detail="Analysis is already running")
         try:
             config = load_config(app.state.config_path)
+            if atlas_runtime_is_read_only(config):
+                raise HTTPException(
+                    status_code=403,
+                    detail="This runtime is read-only. Only Railway primary may run analysis and write Atlas state.",
+                )
             decision_result = run_once(config, execute=False)
             return {
                 "report_exists": True,
@@ -1537,6 +1549,11 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
             raise HTTPException(status_code=409, detail="Analysis is already running")
         try:
             config = load_config(app.state.config_path)
+            if atlas_runtime_is_read_only(config):
+                raise HTTPException(
+                    status_code=403,
+                    detail="This runtime is read-only. Only Railway primary may run paper scan and write Atlas state.",
+                )
             decision_result = run_once(config, execute=False)
             paper_result = simulate_paper_scan(config, decision_result)
             return {

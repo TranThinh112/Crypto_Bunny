@@ -1,4 +1,4 @@
-PROMPT 2 — MODULE CAPITAL RESERVE MANAGER
+﻿PROMPT 2 — MODULE CAPITAL RESERVE MANAGER
 Tên tiếng Việt: Quản lý quỹ dự phòng vốn
 
 Hãy tạo module Capital Reserve Manager cho bot AI trading crypto.
@@ -22,7 +22,7 @@ Mục tiêu:
 Tech stack:
 
 * Python 3.11+
-* SQLite
+* MongoDB Atlas
 * SQLAlchemy
 * FastAPI
 * Pydantic
@@ -42,7 +42,7 @@ Cấu hình:
 }
 }
 
-Database SQLite:
+Database MongoDB Atlas:
 
 Tạo bảng capital_reserve_states:
 
@@ -192,3 +192,4 @@ Yêu cầu code:
 * Capital Reserve Manager chỉ được dùng realized_capital.
 * Không dùng unrealized_pnl để tăng khối lượng lệnh.
 * Trả về code đầy đủ chạy được.
+

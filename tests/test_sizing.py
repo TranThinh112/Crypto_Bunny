@@ -53,7 +53,7 @@ class SizingTest(TestCase):
         config = deepcopy(DEFAULT_CONFIG)
         config["_config_dir"] = self.tmpdir.name
         config["mode"] = "demo"
-        config["state_db_path"] = "state.sqlite"
+        config["_atlas_test_mode"] = True
         config["exchange"]["leverage"] = 25
         config["position_sizing"].update(
             {

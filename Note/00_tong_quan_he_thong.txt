@@ -1,10 +1,10 @@
-TỔNG QUAN HỆ THỐNG
+﻿TỔNG QUAN HỆ THỐNG
 
 1. Hệ thống này là gì
 - Đây là một bot phân tích và hỗ trợ giao dịch crypto futures trên OKX.
 - Hệ thống được viết bằng Python.
 - API và dashboard chạy bằng FastAPI.
-- Dữ liệu trạng thái, lịch sử quyết định, giao dịch mô phỏng và các module bổ sung được lưu bằng SQLite.
+- Dữ liệu trạng thái, lịch sử quyết định, giao dịch mô phỏng và các module bổ sung được lưu bằng MongoDB Atlas.
 
 2. Luồng chạy chính
 - `market.py`: lấy dữ liệu thị trường, OHLCV, ticker, khung xác nhận.
@@ -65,3 +65,4 @@ TỔNG QUAN HỆ THỐNG
 8. Kết luận ngắn
 - Nếu dùng để nghiên cứu, demo và tối ưu chiến lược: hệ thống đã khá tốt.
 - Nếu dùng làm bot production nghiêm túc: cần thêm observability, data lineage, replay chuẩn hơn và tách module rõ hơn nữa.
+

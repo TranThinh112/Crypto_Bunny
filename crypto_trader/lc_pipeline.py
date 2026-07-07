@@ -683,7 +683,7 @@ def _candidate_payload(candidate: TradeCandidate) -> dict[str, Any]:
     }
 
 
-def _load_state(config: dict[str, Any], now: datetime) -> dict[str, Any]:
+def _load_state(config: dict[str, Any], now: datetime, *, reset_for_new_day: bool = True) -> dict[str, Any]:
     purge_deprecated_journal_state(config)
     raw = get_journal_state(config, LC_PIPELINE_STATE_KEY)
     if raw:
@@ -697,7 +697,7 @@ def _load_state(config: dict[str, Any], now: datetime) -> dict[str, Any]:
         state["latest_mini_scan"] = {}
         state["state_version"] = LC_PIPELINE_STATE_VERSION
     day = _day_key(config, now)
-    if state.get("day_key") != day:
+    if reset_for_new_day and state.get("day_key") != day:
         state["day_key"] = day
         state["daily_one_hour_counter"] = 0
         state["daily_two_hour_counter"] = 0
@@ -952,7 +952,7 @@ def _save_state(config: dict[str, Any], state: dict[str, Any]) -> None:
 
 
 def lc_pipeline_internal_symbols(config: dict[str, Any], *, limit: int | None = None) -> list[str]:
-    state = _load_state(config, datetime.now(timezone.utc))
+    state = _load_state(config, datetime.now(timezone.utc), reset_for_new_day=False)
     symbols: list[str] = []
     for row in state.get("internal_lc") or []:
         symbol = str(row.get("symbol") or "")
@@ -964,7 +964,7 @@ def lc_pipeline_internal_symbols(config: dict[str, Any], *, limit: int | None = 
 
 
 def latest_lc_pipeline_mini_scan(config: dict[str, Any]) -> dict[str, Any] | None:
-    state = _load_state(config, datetime.now(timezone.utc))
+    state = _load_state(config, datetime.now(timezone.utc), reset_for_new_day=False)
     scan = state.get("latest_mini_scan") if isinstance(state.get("latest_mini_scan"), dict) else {}
     if not scan:
         return None
@@ -1170,7 +1170,7 @@ def _internal_notification_summary_line(item: dict[str, Any], config: dict[str, 
 
 
 def format_internal_notifications_view(config: dict[str, Any], *, limit_per_frame: int = 5) -> str:
-    state = _load_state(config, datetime.now(timezone.utc))
+    state = _load_state(config, datetime.now(timezone.utc), reset_for_new_day=False)
     items = state.get("internal_notifications") if isinstance(state.get("internal_notifications"), list) else []
     if not items:
         return "🔔 Thông báo nội bộ: chưa có dữ liệu 1h/2h/4h."
@@ -1225,7 +1225,7 @@ def _row_age_payload(row: dict[str, Any], now: datetime) -> dict[str, Any]:
 
 def lc_pipeline_dashboard_payload(config: dict[str, Any]) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
-    state = _load_state(config, now)
+    state = _load_state(config, now, reset_for_new_day=False)
     settings = _pipeline_config(config)
     undecided = _sort_saved_rows([_row_age_payload(row, now) for row in state.get("undecided") or []], settings, reverse=True)
     internal_lc = _sort_saved_rows([_row_age_payload(row, now) for row in state.get("internal_lc") or []], settings, reverse=True)
@@ -1264,7 +1264,7 @@ def lc_pipeline_dashboard_payload(config: dict[str, Any]) -> dict[str, Any]:
 
 def format_internal_lc_view(config: dict[str, Any], *, limit: int = 10) -> str:
     now = datetime.now(timezone.utc)
-    state = _load_state(config, now)
+    state = _load_state(config, now, reset_for_new_day=False)
     settings = _pipeline_config(config)
     rows = _sort_saved_rows([_row_age_payload(row, now) for row in state.get("internal_lc") or []], settings, reverse=True)[
         : max(1, int(limit))
@@ -1712,7 +1712,7 @@ def lc_pipeline_mini_pool(config: dict[str, Any], candidates: list[TradeCandidat
     settings = _pipeline_config(config)
     if not settings["enabled"]:
         return _rank_candidates(candidates, limit, settings=settings)
-    state = _load_state(config, datetime.now(timezone.utc))
+    state = _load_state(config, datetime.now(timezone.utc), reset_for_new_day=False)
     blocked_symbols = _active_symbol_blocklist(config)
     candidates_by_symbol = {candidate.symbol: candidate for candidate in candidates}
     desired_symbols: list[str] = []
@@ -1725,7 +1725,7 @@ def lc_pipeline_mini_pool(config: dict[str, Any], candidates: list[TradeCandidat
 
 
 def lc_pipeline_pool_rows(config: dict[str, Any], symbols: list[str]) -> list[dict[str, Any]]:
-    state = _load_state(config, datetime.now(timezone.utc))
+    state = _load_state(config, datetime.now(timezone.utc), reset_for_new_day=False)
     rows_by_symbol = {
         str(row.get("symbol") or ""): row
         for row in state.get("internal_lc") or []

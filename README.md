@@ -64,7 +64,7 @@ Bot sẽ chạy một chu kỳ mỗi 900 giây. Dừng bằng `Ctrl+C`.
 
 ## Lưu dữ liệu và paper trading
 
-Bot lưu trạng thái vào SQLite tại `data/bot_state.sqlite`, gồm các lần phân tích và lệnh mô phỏng. Khi mở lại UI, dữ liệu cũ sẽ được đọc lại từ `reports/latest_decision.json` hoặc SQLite nếu report JSON không còn.
+Bot lưu trạng thái chính trên MongoDB Atlas, gồm các lần phân tích và lệnh mô phỏng. Khi mở lại UI, dữ liệu cũ sẽ được đọc lại từ Atlas hoặc `reports/latest_decision.json` nếu cần hiển thị report gần nhất.
 
 UI tự gọi `paper-scan` mỗi 10 phút theo cấu hình:
 
@@ -142,15 +142,18 @@ OKX_PASSPHRASE=
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 TELEGRAM_NOTIFY_SCANS=true
+MONGODB_URI=
+MONGODB_DATABASE=
 ```
 
-Nen tao Railway Volume mount vao `/data` de giu SQLite, ledger va report qua cac lan redeploy. `config.railway.yaml` dang luu vao:
+Ban Railway hien tai duoc cau hinh `database.backend: atlas`. Atlas la nguon state chinh, con report/ledger o Railway chi la file phu de xem nhanh hoac log:
 
 ```text
-/data/bot_state.sqlite
-/data/trades.jsonl
-/data/latest_decision.json
+/tmp/trades.jsonl
+/tmp/latest_decision.json
 ```
+
+Khong can Railway Volume nua khi da dung Atlas. Dieu quan trong la chi giu `1 replica` va chi Railway production duoc phep ghi state.
 
 Telegram se gui thong bao khi bot start, moi vong scan, khi gui order, khi bi risk gate chan, hoac khi co loi. Neu muon chi bao lenh/loi va bot bot spam, dat:
 
@@ -227,6 +230,6 @@ ai:
     ask_internal_before_entry: true
 ```
 
-Bot scan top 50 cap crypto USDT swap bang khung 1m/5m/1h, luu indicator, mo hinh nen va score vao SQLite. `gpt-5.4-mini` chay moi 4 tieng de tong hop thi truong va chon 1-3 setup tot nhat thanh LC noi bo. `gpt-5.5` chi duoc goi khi mot LC sap duoc dua len OKX hoac chuyen thanh VT. Sau khi 5.5 approve, code van chay validator cuoi cung truoc khi gui OKX. Bo nho LC sap xep bang policy cung: `LC_OKX -> LC noi bo -> setup mini moi`.
+Bot scan top 50 cap crypto USDT swap bang khung 1m/5m/1h, luu indicator, mo hinh nen va score vao MongoDB Atlas. `gpt-5.4-mini` chay moi 4 tieng de tong hop thi truong va chon 1-3 setup tot nhat thanh LC noi bo. `gpt-5.5` chi duoc goi khi mot LC sap duoc dua len OKX hoac chuyen thanh VT. Sau khi 5.5 approve, code van chay validator cuoi cung truoc khi gui OKX. Bo nho LC sap xep bang policy cung: `LC_OKX -> LC noi bo -> setup mini moi`.
 "# Crypto_Bunny" 
 "# Crypto_Bunny" 

@@ -1,4 +1,4 @@
-Hãy tạo module Position Sizing cho bot AI trading crypto.
+﻿Hãy tạo module Position Sizing cho bot AI trading crypto.
 
 Tên tiếng Việt: Tính khối lượng vị thế.
 
@@ -12,7 +12,7 @@ Mục tiêu:
 
 Tech stack:
 - Python 3.11+
-- SQLite
+- MongoDB Atlas
 - SQLAlchemy
 - FastAPI
 - Pydantic
@@ -47,7 +47,7 @@ Cấu hình:
   }
 }
 
-Database SQLite:
+Database MongoDB Atlas:
 
 1. Tạo bảng position_size_calculations:
    - id
