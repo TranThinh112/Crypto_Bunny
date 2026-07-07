@@ -4,8 +4,12 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from .market import fetch_market_snapshots
+from .market_guard import market_guard_symbol_layers
 from .models import TradeCandidate, to_jsonable
+from .news import collect_news
 from .risk import active_trades_summary
+from .sizing import apply_position_sizing
 from .storage import (
     clear_dashboard_snapshot_cache,
     get_journal_state,
@@ -13,6 +17,7 @@ from .storage import (
     purge_deprecated_journal_state,
     set_journal_state,
 )
+from .strategy import build_candidates, enrich_quantities
 
 
 LC_PIPELINE_STATE_KEY = "lc_internal_pipeline_state"
@@ -116,7 +121,13 @@ def _candidate_win_probability(candidate: TradeCandidate | dict[str, Any]) -> fl
 
 
 def _candidate_passes_lc_threshold(candidate: TradeCandidate | dict[str, Any], settings: dict[str, Any]) -> bool:
-    return _candidate_win_probability(candidate) >= float(settings["min_win_probability_pct"])
+    raw = candidate.get("win_probability_pct") if isinstance(candidate, dict) else candidate.win_probability_pct
+    if raw in (None, ""):
+        return True
+    try:
+        return float(raw) >= float(settings["min_win_probability_pct"])
+    except (TypeError, ValueError):
+        return True
 
 
 def _sort_saved_rows(rows: list[dict[str, Any]], settings: dict[str, Any], *, reverse: bool = True) -> list[dict[str, Any]]:
@@ -264,6 +275,295 @@ def _candidate_record(
         "risk_reward": candidate.risk_reward,
         "volume_ratio": (indicator or {}).get("volume_ratio"),
         "payload": payload,
+    }
+
+
+def _refresh_row_from_candidate(
+    row: dict[str, Any],
+    candidate: TradeCandidate,
+    *,
+    now: datetime,
+) -> dict[str, Any]:
+    refreshed = _candidate_record(
+        candidate,
+        state=str(row.get("state") or "HOUR_1"),
+        first_seen_at=row.get("first_seen_at"),
+        now=now,
+    )
+    for key in (
+        "source_slot",
+        "source_index",
+        "source_time",
+        "source_label",
+        "origin_source_slot",
+        "origin_source_index",
+        "origin_source_time",
+        "origin_source_label",
+        "revived_at",
+        "revived_label",
+        "revived_age_hours",
+        "revived_age_label",
+        "mini_index",
+    ):
+        if key in row:
+            refreshed[key] = row.get(key)
+    try:
+        refreshed["previous_scan_win_probability_pct"] = float(row.get("win_probability_pct") or 0)
+    except (TypeError, ValueError):
+        refreshed["previous_scan_win_probability_pct"] = row.get("win_probability_pct")
+    return refreshed
+
+
+def _dropped_setup_keys(dropped: list[dict[str, Any]]) -> set[tuple[str, str]]:
+    keys: set[tuple[str, str]] = set()
+    for item in dropped:
+        if not isinstance(item, dict):
+            continue
+        keys.add((str(item.get("symbol") or ""), str(item.get("old_side") or "").lower()))
+    return keys
+
+
+def _sync_rows_with_recheck(
+    rows: list[dict[str, Any]],
+    refreshed_rows: list[dict[str, Any]],
+    dropped: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    refreshed_by_key = {_setup_key(row): row for row in refreshed_rows if isinstance(row, dict)}
+    dropped_keys = _dropped_setup_keys(dropped)
+    synced: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        key = _setup_key(row)
+        if key in refreshed_by_key:
+            synced.append(refreshed_by_key[key])
+            continue
+        if key in dropped_keys:
+            continue
+        synced.append(row)
+    return synced
+
+
+def _sync_events_with_recheck(
+    events: list[dict[str, Any]],
+    *,
+    slots: list[str],
+    row_field: str,
+    refreshed_rows: list[dict[str, Any]],
+    dropped: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    slot_keys = {str(slot) for slot in slots if str(slot)}
+    synced_events: list[dict[str, Any]] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        if str(event.get("slot") or "") not in slot_keys:
+            synced_events.append(event)
+            continue
+        synced_events.append(
+            {
+                **event,
+                row_field: _sync_rows_with_recheck(list(event.get(row_field) or []), refreshed_rows, dropped),
+            }
+        )
+    return synced_events
+
+
+def _sync_state_after_recheck(
+    state: dict[str, Any],
+    *,
+    hourly_slots: list[str] | None = None,
+    two_hour_slots: list[str] | None = None,
+    refreshed_rows: list[dict[str, Any]],
+    dropped: list[dict[str, Any]],
+) -> None:
+    state["internal_lc"] = _sync_rows_with_recheck(list(state.get("internal_lc") or []), refreshed_rows, dropped)
+    state["undecided"] = _sync_rows_with_recheck(list(state.get("undecided") or []), refreshed_rows, dropped)
+    if hourly_slots:
+        state["hourly_windows"] = _sync_events_with_recheck(
+            list(state.get("hourly_windows") or []),
+            slots=hourly_slots,
+            row_field="top",
+            refreshed_rows=refreshed_rows,
+            dropped=dropped,
+        )
+        state["one_hour_history"] = _sync_events_with_recheck(
+            list(state.get("one_hour_history") or []),
+            slots=hourly_slots,
+            row_field="approved",
+            refreshed_rows=refreshed_rows,
+            dropped=dropped,
+        )
+    if two_hour_slots:
+        state["two_hour_windows"] = _sync_events_with_recheck(
+            list(state.get("two_hour_windows") or []),
+            slots=two_hour_slots,
+            row_field="approved",
+            refreshed_rows=refreshed_rows,
+            dropped=dropped,
+        )
+        state["two_hour_history"] = _sync_events_with_recheck(
+            list(state.get("two_hour_history") or []),
+            slots=two_hour_slots,
+            row_field="approved",
+            refreshed_rows=refreshed_rows,
+            dropped=dropped,
+        )
+
+
+def _recheck_rows_with_latest_market_data(
+    config: dict[str, Any],
+    rows: list[dict[str, Any]],
+    *,
+    now: datetime,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    valid_rows = [row for row in rows if isinstance(row, dict) and str(row.get("symbol") or "")]
+    symbols: list[str] = []
+    for row in valid_rows:
+        symbol = str(row.get("symbol") or "")
+        if symbol and symbol not in symbols:
+            symbols.append(symbol)
+    if not symbols:
+        return [], {"refreshed_count": 0, "dropped": [], "warnings": []}
+
+    warnings: list[str] = []
+    digest = collect_news(config)
+    snapshots, market_warnings = fetch_market_snapshots(config, symbols)
+    warnings.extend(market_warnings)
+    market_layers: dict[str, dict[str, Any]] = {}
+    if config.get("market_guard", {}).get("use_memory_in_strategy", True):
+        try:
+            market_layers = market_guard_symbol_layers(config, symbols)
+        except Exception as exc:
+            warnings.append(f"Market guard memory unavailable during LC recheck: {exc}")
+    refreshed_candidates = build_candidates(
+        config,
+        snapshots,
+        digest,
+        limit=None,
+        market_layers=market_layers,
+    )
+    apply_position_sizing(config, refreshed_candidates)
+    enrich_quantities(config, refreshed_candidates)
+    candidates_by_key = {(candidate.symbol, candidate.side.lower()): candidate for candidate in refreshed_candidates}
+    candidates_by_symbol = {candidate.symbol: candidate for candidate in refreshed_candidates}
+
+    refreshed_rows: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    for row in valid_rows:
+        symbol = str(row.get("symbol") or "")
+        side = str(row.get("side") or "").lower()
+        candidate = candidates_by_key.get((symbol, side))
+        if candidate is not None:
+            refreshed_rows.append(_refresh_row_from_candidate(row, candidate, now=now))
+            continue
+        replacement = candidates_by_symbol.get(symbol)
+        if replacement is not None:
+            dropped.append(
+                {
+                    "symbol": symbol,
+                    "old_side": side,
+                    "reason": f"setup hiện tại đã đổi sang {replacement.side.upper()}",
+                    "current_side": replacement.side,
+                    "current_win_probability_pct": replacement.win_probability_pct,
+                }
+            )
+            continue
+        dropped.append(
+            {
+                "symbol": symbol,
+                "old_side": side,
+                "reason": "không còn setup hợp lệ trong dữ liệu mới nhất",
+            }
+        )
+    if not refreshed_rows and valid_rows:
+        warnings.append("LC recheck fallback: không lấy được setup mới, tạm dùng dữ liệu win rate cũ của nhóm hiện tại")
+        return list(valid_rows), {"refreshed_count": 0, "dropped": dropped, "warnings": warnings, "fallback": True}
+    return refreshed_rows, {"refreshed_count": len(refreshed_rows), "dropped": dropped, "warnings": warnings, "fallback": False}
+
+
+def _recheck_rows_with_latest_market_data(
+    config: dict[str, Any],
+    rows: list[dict[str, Any]],
+    *,
+    now: datetime,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    valid_rows = [row for row in rows if isinstance(row, dict) and str(row.get("symbol") or "")]
+    symbols: list[str] = []
+    for row in valid_rows:
+        symbol = str(row.get("symbol") or "")
+        if symbol and symbol not in symbols:
+            symbols.append(symbol)
+    if not symbols:
+        return [], {
+            "input_count": 0,
+            "refreshed_count": 0,
+            "dropped": [],
+            "dropped_count": 0,
+            "warnings": [],
+            "sync_complete": True,
+            "synchronized_count": 0,
+        }
+
+    warnings: list[str] = []
+    digest = collect_news(config)
+    snapshots, market_warnings = fetch_market_snapshots(config, symbols)
+    warnings.extend(market_warnings)
+    market_layers: dict[str, dict[str, Any]] = {}
+    if config.get("market_guard", {}).get("use_memory_in_strategy", True):
+        try:
+            market_layers = market_guard_symbol_layers(config, symbols)
+        except Exception as exc:
+            warnings.append(f"Market guard memory unavailable during LC recheck: {exc}")
+    refreshed_candidates = build_candidates(
+        config,
+        snapshots,
+        digest,
+        limit=None,
+        market_layers=market_layers,
+    )
+    apply_position_sizing(config, refreshed_candidates)
+    enrich_quantities(config, refreshed_candidates)
+    candidates_by_key = {(candidate.symbol, candidate.side.lower()): candidate for candidate in refreshed_candidates}
+    candidates_by_symbol = {candidate.symbol: candidate for candidate in refreshed_candidates}
+
+    refreshed_rows: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    for row in valid_rows:
+        symbol = str(row.get("symbol") or "")
+        side = str(row.get("side") or "").lower()
+        candidate = candidates_by_key.get((symbol, side))
+        if candidate is not None:
+            refreshed_rows.append(_refresh_row_from_candidate(row, candidate, now=now))
+            continue
+        replacement = candidates_by_symbol.get(symbol)
+        if replacement is not None:
+            dropped.append(
+                {
+                    "symbol": symbol,
+                    "old_side": side,
+                    "reason": f"setup hien tai da doi sang {replacement.side.upper()}",
+                    "current_side": replacement.side,
+                    "current_win_probability_pct": replacement.win_probability_pct,
+                }
+            )
+            continue
+        dropped.append(
+            {
+                "symbol": symbol,
+                "old_side": side,
+                "reason": "khong con setup hop le trong du lieu moi nhat",
+            }
+        )
+    synchronized_count = len(refreshed_rows) + len(dropped)
+    return refreshed_rows, {
+        "input_count": len(valid_rows),
+        "refreshed_count": len(refreshed_rows),
+        "dropped": dropped,
+        "dropped_count": len(dropped),
+        "warnings": warnings,
+        "sync_complete": synchronized_count == len(valid_rows),
+        "synchronized_count": synchronized_count,
     }
 
 
@@ -452,6 +752,7 @@ def _compact_saved_row(row: dict[str, Any]) -> dict[str, Any]:
         "price",
         "confidence",
         "win_probability_pct",
+        "previous_scan_win_probability_pct",
         "risk_reward",
         "volume_ratio",
         "source_slot",
@@ -489,6 +790,7 @@ def _compact_event(event: dict[str, Any]) -> dict[str, Any]:
         "daily_index": event.get("daily_index"),
         "date": event.get("date"),
         "time": event.get("time"),
+        "recheck": event.get("recheck"),
     }
     compact["approved"] = [_compact_saved_row(row) for row in event.get("approved") or [] if isinstance(row, dict)]
     compact["rejected"] = [_compact_saved_row(row) for row in event.get("rejected") or [] if isinstance(row, dict)]
@@ -864,7 +1166,7 @@ def _internal_notification_summary_line(item: dict[str, Any], config: dict[str, 
     header = f"{item.get('icon', '🔔')} {item.get('title', '-')} | {created_label}"
     if not details:
         return header
-    return "\n".join([header, *details])
+    return " | ".join([header, *details])
 
 
 def format_internal_notifications_view(config: dict[str, Any], *, limit_per_frame: int = 5) -> str:
@@ -1010,10 +1312,16 @@ def _source_label(row: dict[str, Any]) -> str:
     return str(source_slot)
 
 
-def notify_mini_pool_summary(config: dict[str, Any], rows: list[dict[str, Any]], *, slot_id: str | None = None) -> None:
+def notify_mini_pool_summary(
+    config: dict[str, Any],
+    rows: list[dict[str, Any]],
+    *,
+    slot_id: str | None = None,
+    now: datetime | None = None,
+) -> None:
     if not rows:
         return
-    now = datetime.now(timezone.utc)
+    now = now or datetime.now(timezone.utc)
     local_now = _local_time(config, now)
     settings = _pipeline_config(config)
     pool_count = len(rows[:3])
@@ -1227,7 +1535,15 @@ def update_lc_internal_pipeline(
         combined: list[dict[str, Any]] = []
         for window in recent_hourly_windows:
             combined.extend(window.get("top") or [])
-        ranked = _sort_saved_rows(combined, settings, reverse=True)
+        refreshed_combined, two_hour_recheck = _recheck_rows_with_latest_market_data(config, combined, now=now)
+        _sync_state_after_recheck(
+            state,
+            hourly_slots=[str(window.get("slot") or "") for window in recent_hourly_windows],
+            refreshed_rows=refreshed_combined,
+            dropped=list(two_hour_recheck.get("dropped") or []),
+        )
+        result["two_hour_recheck"] = two_hour_recheck
+        ranked = _sort_saved_rows(refreshed_combined, settings, reverse=True)
         next_daily_index = int(state.get("daily_two_hour_counter") or 0) + 1
         local_now = _local_time(config, now)
         approved: list[dict[str, Any]] = []
@@ -1280,6 +1596,7 @@ def update_lc_internal_pipeline(
             "time": local_now.strftime("%H:%M:%S"),
             "approved": approved[:top_limit],
             "rejected": rejected,
+            "recheck": two_hour_recheck,
         }
         state["two_hour_history"].append(event)
         state["two_hour_windows"].append(event)
@@ -1297,6 +1614,7 @@ def update_lc_internal_pipeline(
         )
         result["created_two_hour"] = True
         result["two_hour_event"] = event
+        result["two_hour_recheck"] = two_hour_recheck
         if settings["notify_two_hour_summary"]:
             _notify_two_hour_summary(config, event)
 
@@ -1310,7 +1628,15 @@ def update_lc_internal_pipeline(
         combined_two_hour: list[dict[str, Any]] = []
         for window in recent_two_hour_windows:
             combined_two_hour.extend(window.get("approved") or [])
-        ranked_two_hour = _sort_saved_rows(combined_two_hour, settings, reverse=True)
+        refreshed_two_hour, four_hour_recheck = _recheck_rows_with_latest_market_data(config, combined_two_hour, now=now)
+        _sync_state_after_recheck(
+            state,
+            two_hour_slots=[str(window.get("slot") or "") for window in recent_two_hour_windows],
+            refreshed_rows=refreshed_two_hour,
+            dropped=list(four_hour_recheck.get("dropped") or []),
+        )
+        result["four_hour_recheck"] = four_hour_recheck
+        ranked_two_hour = _sort_saved_rows(refreshed_two_hour, settings, reverse=True)
         next_four_hour_index = int(state.get("four_hour_counter") or 0) + 1
         local_now = _local_time(config, now)
         approved_four_hour: list[dict[str, Any]] = []
@@ -1354,12 +1680,14 @@ def update_lc_internal_pipeline(
             "time": local_now.strftime("%H:%M:%S"),
             "approved": approved_four_hour[:top_limit],
             "rejected": rejected_four_hour,
+            "recheck": four_hour_recheck,
         }
         state["four_hour_history"].append(four_hour_event)
         state["four_hour_counter"] = next_four_hour_index
         state["last_four_hour_slot"] = four_hour_slot
         result["created_four_hour"] = True
         result["four_hour_event"] = four_hour_event
+        result["four_hour_recheck"] = four_hour_recheck
 
     last_recheck_at = _parse_time(state.get("last_recheck_at"))
     recheck_due = (

@@ -45,6 +45,32 @@ def _candidate(
     )
 
 
+def _saved_row(
+    symbol: str,
+    win: float,
+    *,
+    side: str = "long",
+    state: str = "HOUR_1",
+    confidence: float = 80.0,
+    volume: float = 1.0,
+) -> dict:
+    return {
+        "symbol": symbol,
+        "base": symbol.split("/")[0],
+        "side": side,
+        "state": state,
+        "first_seen_at": "2026-07-06T00:00:00+00:00",
+        "last_seen_at": "2026-07-06T00:00:00+00:00",
+        "entry": 1.0,
+        "price": 1.0,
+        "confidence": confidence,
+        "win_probability_pct": win,
+        "risk_reward": 1.5,
+        "volume_ratio": volume,
+        "payload": {"symbol": symbol, "side": side, "win_probability_pct": win},
+    }
+
+
 class LcPipelineTest(TestCase):
     def _config(self) -> dict:
         self.tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
@@ -61,11 +87,12 @@ class LcPipelineTest(TestCase):
         if tmpdir:
             tmpdir.cleanup()
 
+    @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
     @patch("crypto_trader.notifier.send_telegram_message")
-    def test_two_hour_summary_keeps_top_three_and_notifies(self, send_message) -> None:
+    def test_two_hour_summary_keeps_top_three_and_notifies(self, send_message, recheck_rows) -> None:
         config = self._config()
         config["ai"]["internal"]["lc_pipeline_notify_two_hour_summary"] = True
-        start = datetime(2026, 7, 6, 0, 5, tzinfo=timezone.utc)
+        start = datetime(2026, 7, 7, 0, 5, tzinfo=timezone.utc)
         first = [
             _candidate("AAA/USDT:USDT", 61, volume=3),
             _candidate("BBB/USDT:USDT", 60, volume=2),
@@ -76,6 +103,17 @@ class LcPipelineTest(TestCase):
             _candidate("EEE/USDT:USDT", 63, volume=3),
             _candidate("FFF/USDT:USDT", 62, volume=2),
         ]
+        recheck_rows.return_value = (
+            [
+                _saved_row("AAA/USDT:USDT", 61, volume=3),
+                _saved_row("BBB/USDT:USDT", 60, volume=2),
+                _saved_row("CCC/USDT:USDT", 59, volume=1),
+                _saved_row("DDD/USDT:USDT", 64, volume=4),
+                _saved_row("EEE/USDT:USDT", 63, volume=3),
+                _saved_row("FFF/USDT:USDT", 62, volume=2),
+            ],
+            {"input_count": 6, "refreshed_count": 6, "dropped": [], "warnings": [], "sync_complete": True, "synchronized_count": 6},
+        )
 
         update_lc_internal_pipeline(config, first, now=start)
         result = update_lc_internal_pipeline(config, second, now=start + timedelta(hours=1))
@@ -98,17 +136,29 @@ class LcPipelineTest(TestCase):
         self.assertIn("DDD/USDT:USDT | LONG | Win 64.00%", send_message.call_args.args[1])
         self.assertFalse(send_message.call_args.kwargs["replace_previous"])
 
-    def test_mini_pool_prefers_saved_internal_lc_pairs(self) -> None:
+    @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
+    def test_mini_pool_prefers_saved_internal_lc_pairs(self, recheck_rows) -> None:
         config = self._config()
         start = datetime(2026, 7, 6, 0, 5, tzinfo=timezone.utc)
         update_lc_internal_pipeline(
             config,
-            [_candidate("AAA/USDT:USDT", 61), _candidate("BBB/USDT:USDT", 60), _candidate("CCC/USDT:USDT", 59)],
+            [_candidate("AAA/USDT:USDT", 64), _candidate("BBB/USDT:USDT", 63), _candidate("CCC/USDT:USDT", 62)],
             now=start,
+        )
+        recheck_rows.return_value = (
+            [
+                _saved_row("AAA/USDT:USDT", 64),
+                _saved_row("BBB/USDT:USDT", 63),
+                _saved_row("CCC/USDT:USDT", 62),
+                _saved_row("DDD/USDT:USDT", 67),
+                _saved_row("EEE/USDT:USDT", 66),
+                _saved_row("FFF/USDT:USDT", 65),
+            ],
+            {"input_count": 6, "refreshed_count": 6, "dropped": [], "warnings": [], "sync_complete": True, "synchronized_count": 6},
         )
         update_lc_internal_pipeline(
             config,
-            [_candidate("DDD/USDT:USDT", 64), _candidate("EEE/USDT:USDT", 63), _candidate("FFF/USDT:USDT", 62)],
+            [_candidate("DDD/USDT:USDT", 67), _candidate("EEE/USDT:USDT", 66), _candidate("FFF/USDT:USDT", 65)],
             now=start + timedelta(hours=1),
         )
         current = [
@@ -124,9 +174,223 @@ class LcPipelineTest(TestCase):
 
         self.assertEqual([candidate.symbol for candidate in pool], ["DDD/USDT:USDT", "EEE/USDT:USDT", "FFF/USDT:USDT"])
 
-    def test_pipeline_stores_hourly_two_hour_four_hour_history_with_lineage(self) -> None:
+    @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
+    def test_two_hour_uses_rechecked_win_rate_before_selecting_top_three(self, recheck_rows) -> None:
         config = self._config()
         start = datetime(2026, 7, 6, 0, 5, tzinfo=timezone.utc)
+        update_lc_internal_pipeline(
+            config,
+            [_candidate("AAA/USDT:USDT", 90), _candidate("BBB/USDT:USDT", 89), _candidate("CCC/USDT:USDT", 88)],
+            now=start,
+        )
+        recheck_rows.return_value = (
+            [
+                _saved_row("AAA/USDT:USDT", 55),
+                _saved_row("BBB/USDT:USDT", 54),
+                _saved_row("CCC/USDT:USDT", 53),
+                _saved_row("DDD/USDT:USDT", 95),
+                _saved_row("EEE/USDT:USDT", 94),
+                _saved_row("FFF/USDT:USDT", 93),
+            ],
+            {"refreshed_count": 6, "dropped": [], "warnings": []},
+        )
+
+        result = update_lc_internal_pipeline(
+            config,
+            [_candidate("DDD/USDT:USDT", 60), _candidate("EEE/USDT:USDT", 59), _candidate("FFF/USDT:USDT", 58)],
+            now=start + timedelta(hours=1),
+        )
+
+        self.assertTrue(result["created_two_hour"])
+        self.assertEqual(
+            [row["symbol"] for row in result["two_hour_event"]["approved"]],
+            ["DDD/USDT:USDT", "EEE/USDT:USDT", "FFF/USDT:USDT"],
+        )
+        self.assertEqual(result["two_hour_recheck"]["refreshed_count"], 6)
+
+    @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
+    def test_four_hour_uses_rechecked_win_rate_before_selecting_top_three(self, recheck_rows) -> None:
+        config = self._config()
+        start = datetime(2026, 7, 6, 0, 5, tzinfo=timezone.utc)
+        update_lc_internal_pipeline(
+            config,
+            [_candidate("AAA/USDT:USDT", 90), _candidate("BBB/USDT:USDT", 89), _candidate("CCC/USDT:USDT", 88)],
+            now=start,
+        )
+        recheck_rows.side_effect = [
+            (
+                [
+                    _saved_row("AAA/USDT:USDT", 90),
+                    _saved_row("BBB/USDT:USDT", 89),
+                    _saved_row("CCC/USDT:USDT", 88),
+                    _saved_row("DDD/USDT:USDT", 87),
+                    _saved_row("EEE/USDT:USDT", 86),
+                    _saved_row("FFF/USDT:USDT", 85),
+                ],
+                {"refreshed_count": 6, "dropped": [], "warnings": []},
+            ),
+            (
+                [
+                    _saved_row("GGG/USDT:USDT", 70),
+                    _saved_row("HHH/USDT:USDT", 69),
+                    _saved_row("III/USDT:USDT", 68),
+                    _saved_row("JJJ/USDT:USDT", 95),
+                    _saved_row("KKK/USDT:USDT", 94),
+                    _saved_row("LLL/USDT:USDT", 93),
+                ],
+                {"refreshed_count": 6, "dropped": [], "warnings": []},
+            ),
+            (
+                [
+                    _saved_row("AAA/USDT:USDT", 99, state="LC_NOI_BO"),
+                    _saved_row("BBB/USDT:USDT", 98, state="LC_NOI_BO"),
+                    _saved_row("CCC/USDT:USDT", 97, state="LC_NOI_BO"),
+                    _saved_row("JJJ/USDT:USDT", 60, state="LC_NOI_BO"),
+                    _saved_row("KKK/USDT:USDT", 59, state="LC_NOI_BO"),
+                    _saved_row("LLL/USDT:USDT", 58, state="LC_NOI_BO"),
+                ],
+                {"refreshed_count": 6, "dropped": [], "warnings": []},
+            ),
+        ]
+        update_lc_internal_pipeline(
+            config,
+            [_candidate("DDD/USDT:USDT", 87), _candidate("EEE/USDT:USDT", 86), _candidate("FFF/USDT:USDT", 85)],
+            now=start + timedelta(hours=1),
+        )
+        update_lc_internal_pipeline(
+            config,
+            [_candidate("GGG/USDT:USDT", 84), _candidate("HHH/USDT:USDT", 83), _candidate("III/USDT:USDT", 82)],
+            now=start + timedelta(hours=2),
+        )
+
+        result = update_lc_internal_pipeline(
+            config,
+            [_candidate("JJJ/USDT:USDT", 81), _candidate("KKK/USDT:USDT", 80), _candidate("LLL/USDT:USDT", 79)],
+            now=start + timedelta(hours=3),
+        )
+
+        self.assertTrue(result["created_four_hour"])
+        self.assertEqual(
+            [row["symbol"] for row in result["four_hour_event"]["approved"]],
+            ["AAA/USDT:USDT", "BBB/USDT:USDT", "CCC/USDT:USDT"],
+        )
+        self.assertEqual(result["four_hour_recheck"]["refreshed_count"], 6)
+
+    @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
+    def test_two_hour_recheck_syncs_latest_hourly_state(self, recheck_rows) -> None:
+        config = self._config()
+        start = datetime(2026, 7, 6, 0, 5, tzinfo=timezone.utc)
+        update_lc_internal_pipeline(
+            config,
+            [_candidate("AAA/USDT:USDT", 61), _candidate("BBB/USDT:USDT", 60), _candidate("CCC/USDT:USDT", 59)],
+            now=start,
+        )
+        recheck_rows.return_value = (
+            [
+                _saved_row("AAA/USDT:USDT", 71),
+                _saved_row("BBB/USDT:USDT", 70),
+                _saved_row("CCC/USDT:USDT", 69),
+                _saved_row("DDD/USDT:USDT", 68),
+                _saved_row("EEE/USDT:USDT", 67),
+                _saved_row("FFF/USDT:USDT", 66),
+            ],
+            {"input_count": 6, "refreshed_count": 6, "dropped": [], "warnings": [], "sync_complete": True, "synchronized_count": 6},
+        )
+
+        update_lc_internal_pipeline(
+            config,
+            [_candidate("DDD/USDT:USDT", 64), _candidate("EEE/USDT:USDT", 63), _candidate("FFF/USDT:USDT", 62)],
+            now=start + timedelta(hours=1),
+        )
+
+        raw_state = get_journal_state(config, "lc_internal_pipeline_state")
+        state = json.loads(raw_state or "{}")
+        self.assertEqual(state["hourly_windows"][0]["top"][0]["win_probability_pct"], 71)
+        self.assertEqual(state["hourly_windows"][1]["top"][0]["win_probability_pct"], 68)
+        self.assertEqual(state["one_hour_history"][0]["approved"][0]["win_probability_pct"], 71)
+        self.assertEqual(state["one_hour_history"][1]["approved"][0]["win_probability_pct"], 68)
+
+    @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
+    def test_two_hour_does_not_fallback_to_stale_rows_when_recheck_finds_no_valid_setup(self, recheck_rows) -> None:
+        config = self._config()
+        start = datetime(2026, 7, 6, 0, 5, tzinfo=timezone.utc)
+        update_lc_internal_pipeline(
+            config,
+            [_candidate("AAA/USDT:USDT", 61), _candidate("BBB/USDT:USDT", 60), _candidate("CCC/USDT:USDT", 59)],
+            now=start,
+        )
+        recheck_rows.return_value = (
+            [],
+            {
+                "input_count": 6,
+                "refreshed_count": 0,
+                "dropped": [
+                    {"symbol": "AAA/USDT:USDT", "old_side": "long"},
+                    {"symbol": "BBB/USDT:USDT", "old_side": "long"},
+                    {"symbol": "CCC/USDT:USDT", "old_side": "long"},
+                    {"symbol": "DDD/USDT:USDT", "old_side": "long"},
+                    {"symbol": "EEE/USDT:USDT", "old_side": "long"},
+                    {"symbol": "FFF/USDT:USDT", "old_side": "long"},
+                ],
+                "warnings": [],
+                "sync_complete": True,
+                "synchronized_count": 6,
+            },
+        )
+
+        result = update_lc_internal_pipeline(
+            config,
+            [_candidate("DDD/USDT:USDT", 64), _candidate("EEE/USDT:USDT", 63), _candidate("FFF/USDT:USDT", 62)],
+            now=start + timedelta(hours=1),
+        )
+
+        raw_state = get_journal_state(config, "lc_internal_pipeline_state")
+        state = json.loads(raw_state or "{}")
+        self.assertTrue(result["created_two_hour"])
+        self.assertEqual(result["two_hour_event"]["approved"], [])
+        self.assertEqual(state["internal_lc"], [])
+        self.assertEqual(state["hourly_windows"][0]["top"], [])
+        self.assertEqual(state["hourly_windows"][1]["top"], [])
+
+    @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
+    def test_pipeline_stores_hourly_two_hour_four_hour_history_with_lineage(self, recheck_rows) -> None:
+        config = self._config()
+        start = datetime(2026, 7, 6, 0, 5, tzinfo=timezone.utc)
+        recheck_rows.side_effect = [
+            (
+                [
+                    _saved_row("AAA/USDT:USDT", 63),
+                    _saved_row("BBB/USDT:USDT", 62),
+                    _saved_row("CCC/USDT:USDT", 61),
+                    _saved_row("DDD/USDT:USDT", 66),
+                    _saved_row("EEE/USDT:USDT", 65),
+                    _saved_row("FFF/USDT:USDT", 64),
+                ],
+                {"input_count": 6, "refreshed_count": 6, "dropped": [], "warnings": [], "sync_complete": True, "synchronized_count": 6},
+            ),
+            (
+                [
+                    _saved_row("GGG/USDT:USDT", 69),
+                    _saved_row("HHH/USDT:USDT", 68),
+                    _saved_row("III/USDT:USDT", 67),
+                    _saved_row("JJJ/USDT:USDT", 72),
+                    _saved_row("KKK/USDT:USDT", 71),
+                    _saved_row("LLL/USDT:USDT", 70),
+                ],
+                {"input_count": 6, "refreshed_count": 6, "dropped": [], "warnings": [], "sync_complete": True, "synchronized_count": 6},
+            ),
+            (
+                [
+                    {**_saved_row("DDD/USDT:USDT", 66, state="LC_NOI_BO"), "source_slot": "2h", "source_index": 1},
+                    {**_saved_row("EEE/USDT:USDT", 65, state="LC_NOI_BO"), "source_slot": "2h", "source_index": 1},
+                    {**_saved_row("FFF/USDT:USDT", 64, state="LC_NOI_BO"), "source_slot": "2h", "source_index": 1},
+                    {**_saved_row("JJJ/USDT:USDT", 72, state="LC_NOI_BO"), "source_slot": "2h", "source_index": 2},
+                    {**_saved_row("KKK/USDT:USDT", 71, state="LC_NOI_BO"), "source_slot": "2h", "source_index": 2},
+                    {**_saved_row("LLL/USDT:USDT", 70, state="LC_NOI_BO"), "source_slot": "2h", "source_index": 2},
+                ],
+                {"input_count": 6, "refreshed_count": 6, "dropped": [], "warnings": [], "sync_complete": True, "synchronized_count": 6},
+            ),
+        ]
 
         update_lc_internal_pipeline(
             config,
@@ -214,7 +478,8 @@ class LcPipelineTest(TestCase):
         self.assertEqual(payload["internal_lc"][0]["symbol"], "ETH/USDT:USDT")
         self.assertEqual(payload["undecided"][0]["symbol"], "LIT/USDT:USDT")
 
-    def test_two_hour_rejected_keeps_opposite_side_duplicate_setup(self) -> None:
+    @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
+    def test_two_hour_rejected_keeps_opposite_side_duplicate_setup(self, recheck_rows) -> None:
         config = self._config()
         start = datetime(2026, 7, 6, 0, 5, tzinfo=timezone.utc)
         update_lc_internal_pipeline(
@@ -225,6 +490,17 @@ class LcPipelineTest(TestCase):
                 _candidate("OP/USDT:USDT", 60.56, side="long"),
             ],
             now=start,
+        )
+        recheck_rows.return_value = (
+            [
+                _saved_row("NEAR/USDT:USDT", 63.5, side="long"),
+                _saved_row("XLM/USDT:USDT", 61.08, side="long"),
+                _saved_row("OP/USDT:USDT", 60.56, side="long"),
+                _saved_row("HOME/USDT:USDT", 60, side="short"),
+                _saved_row("NOT/USDT:USDT", 59.11, side="short"),
+                _saved_row("XLM/USDT:USDT", 56.2, side="short"),
+            ],
+            {"refreshed_count": 6, "dropped": [], "warnings": []},
         )
         result = update_lc_internal_pipeline(
             config,
@@ -259,20 +535,32 @@ class LcPipelineTest(TestCase):
 
         self.assertEqual(pool, [])
 
+    @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
     @patch("crypto_trader.notifier.send_telegram_message")
-    def test_surviving_undecided_pair_promotes_to_internal_lc_and_notifies(self, send_message) -> None:
+    def test_surviving_undecided_pair_promotes_to_internal_lc_and_notifies(self, send_message, recheck_rows) -> None:
         config = self._config()
         config["ai"]["internal"]["lc_pipeline_notify_two_hour_summary"] = False
         config["ai"]["internal"]["lc_pipeline_promote_to_pending"] = True
         start = datetime(2026, 7, 6, 0, 5, tzinfo=timezone.utc)
         update_lc_internal_pipeline(
             config,
-            [_candidate("AAA/USDT:USDT", 61), _candidate("BBB/USDT:USDT", 60), _candidate("CCC/USDT:USDT", 59)],
+            [_candidate("AAA/USDT:USDT", 64), _candidate("BBB/USDT:USDT", 63), _candidate("CCC/USDT:USDT", 62)],
             now=start,
+        )
+        recheck_rows.return_value = (
+            [
+                _saved_row("AAA/USDT:USDT", 64),
+                _saved_row("BBB/USDT:USDT", 63),
+                _saved_row("CCC/USDT:USDT", 62),
+                _saved_row("DDD/USDT:USDT", 67),
+                _saved_row("EEE/USDT:USDT", 66),
+                _saved_row("FFF/USDT:USDT", 65),
+            ],
+            {"input_count": 6, "refreshed_count": 6, "dropped": [], "warnings": [], "sync_complete": True, "synchronized_count": 6},
         )
         update_lc_internal_pipeline(
             config,
-            [_candidate("DDD/USDT:USDT", 64), _candidate("EEE/USDT:USDT", 63), _candidate("FFF/USDT:USDT", 62)],
+            [_candidate("DDD/USDT:USDT", 67), _candidate("EEE/USDT:USDT", 66), _candidate("FFF/USDT:USDT", 65)],
             now=start + timedelta(hours=1),
         )
 
@@ -315,26 +603,39 @@ class LcPipelineTest(TestCase):
         self.assertIn("AAA/USDT:USDT | LONG | 2h #3", message)
         self.assertIn("BBB/USDT:USDT | SHORT | HS 06/07/26 14:00:00", message)
 
+    @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
     @patch("crypto_trader.notifier.send_telegram_message")
-    def test_internal_notifications_view_uses_one_line_timeline_without_chat_push(self, send_message) -> None:
+    def test_internal_notifications_view_uses_one_line_timeline_without_chat_push(self, send_message, recheck_rows) -> None:
         config = self._config()
         config["ai"]["internal"]["lc_pipeline_notify_two_hour_summary"] = False
         config["ai"]["internal"]["lc_pipeline_notify_mini_pool_summary"] = False
-        start = datetime(2026, 7, 6, 0, 5, tzinfo=timezone.utc)
+        start = datetime(2026, 7, 7, 0, 5, tzinfo=timezone.utc)
         update_lc_internal_pipeline(
             config,
-            [_candidate("AAA/USDT:USDT", 61), _candidate("BBB/USDT:USDT", 60), _candidate("CCC/USDT:USDT", 59)],
+            [_candidate("AAA/USDT:USDT", 64), _candidate("BBB/USDT:USDT", 63), _candidate("CCC/USDT:USDT", 62)],
             now=start,
+        )
+        recheck_rows.return_value = (
+            [
+                _saved_row("AAA/USDT:USDT", 64),
+                _saved_row("BBB/USDT:USDT", 63),
+                _saved_row("CCC/USDT:USDT", 62),
+                _saved_row("DDD/USDT:USDT", 67),
+                _saved_row("EEE/USDT:USDT", 66),
+                _saved_row("FFF/USDT:USDT", 65),
+            ],
+            {"input_count": 6, "refreshed_count": 6, "dropped": [], "warnings": [], "sync_complete": True, "synchronized_count": 6},
         )
         update_lc_internal_pipeline(
             config,
-            [_candidate("DDD/USDT:USDT", 64), _candidate("EEE/USDT:USDT", 63), _candidate("FFF/USDT:USDT", 62)],
+            [_candidate("DDD/USDT:USDT", 67), _candidate("EEE/USDT:USDT", 66), _candidate("FFF/USDT:USDT", 65)],
             now=start + timedelta(hours=1),
         )
         notify_mini_pool_summary(
             config,
             [{"symbol": "DDD/USDT:USDT", "side": "long", "source_slot": "2h", "source_index": 1}],
             slot_id="slot-1",
+            now=start + timedelta(hours=1, minutes=10),
         )
 
         message = format_internal_notifications_view(config)

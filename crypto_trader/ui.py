@@ -72,6 +72,7 @@ from .market_guard import (
 from .models import to_jsonable
 from .notifier import (
     answer_callback_query,
+    delete_telegram_message,
     edit_telegram_chat_message,
     fetch_telegram_updates,
     send_telegram_chat_message,
@@ -572,7 +573,7 @@ def _run_automation_cycle(app: FastAPI) -> None:
             config,
             format_scan_message(config, payload, status),
             with_buttons=False,
-            replace_previous=True,
+            replace_previous=False,
         )
     if payload:
         messages.extend(format_pending_event_messages(payload))
