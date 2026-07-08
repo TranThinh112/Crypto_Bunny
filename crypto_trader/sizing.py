@@ -139,6 +139,31 @@ def _default_state(base_margin: float) -> dict[str, Any]:
     }
 
 
+def _state_cycle_pnl(state: dict[str, Any]) -> float:
+    try:
+        return float(state.get("cycle_pnl_usdt") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _state_recovery_step(state: dict[str, Any]) -> int:
+    try:
+        return int(state.get("recovery_step") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _state_is_idle(state: dict[str, Any]) -> bool:
+    return not bool(state.get("blocked")) and _state_recovery_step(state) <= 0 and abs(_state_cycle_pnl(state)) <= 1e-9
+
+
+def _normalize_idle_state(state: dict[str, Any], base_margin: float) -> None:
+    if not _state_is_idle(state):
+        return
+    state["next_margin_usdt"] = round(base_margin, 4)
+    state["block_reason"] = None
+
+
 def _load_state(config: dict[str, Any], base_margin: float) -> dict[str, Any]:
     raw = get_journal_state(config, STATE_KEY)
     if not raw:
@@ -155,6 +180,7 @@ def _load_state(config: dict[str, Any], base_margin: float) -> dict[str, Any]:
     default.update({key: value for key, value in state.items() if key in default})
     if not isinstance(default.get("processed_keys"), list):
         default["processed_keys"] = []
+    _normalize_idle_state(default, base_margin)
     default["_is_new"] = False
     return default
 
@@ -312,11 +338,9 @@ def _candidate_4h_rsi(candidate: TradeCandidate) -> float | None:
 def _recovery_active(state: dict[str, Any], margin: float, base_margin: float) -> bool:
     if bool(state.get("blocked")):
         return True
-    if int(state.get("recovery_step") or 0) > 0:
+    if _state_recovery_step(state) > 0:
         return True
-    if margin > base_margin + 1e-9:
-        return True
-    return abs(float(state.get("cycle_pnl_usdt") or 0)) > 1e-9
+    return abs(_state_cycle_pnl(state)) > 1e-9
 
 
 def _candidate_recovery_guard_reasons(

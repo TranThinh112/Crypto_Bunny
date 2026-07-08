@@ -10,7 +10,6 @@ from .market_guard import market_guard_symbol_layers
 from .models import TradeCandidate, to_jsonable
 from .news import collect_news
 from .risk import active_trades_summary
-from .sizing import apply_position_sizing
 from .storage import (
     clear_dashboard_snapshot_cache,
     get_journal_state,
@@ -815,7 +814,6 @@ def _recheck_rows_with_latest_market_data(
         limit=None,
         market_layers=market_layers,
     )
-    apply_position_sizing(config, refreshed_candidates)
     enrich_quantities(config, refreshed_candidates)
     candidates_by_key = {(candidate.symbol, candidate.side.lower()): candidate for candidate in refreshed_candidates}
     candidate_sides_by_symbol: dict[str, set[str]] = {}
