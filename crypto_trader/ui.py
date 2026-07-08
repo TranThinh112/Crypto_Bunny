@@ -60,7 +60,12 @@ from .dashboard_services import (
     timeframe_state_dashboard,
 )
 from .engine import run_once
-from .lc_pipeline import format_internal_lc_view, format_internal_notifications_view, lc_pipeline_dashboard_payload
+from .lc_pipeline import (
+    format_internal_lc_view,
+    format_internal_notifications_view,
+    internal_notification_timeline_messages,
+    lc_pipeline_dashboard_payload,
+)
 from .market import create_exchange
 from .market_guard import (
     latest_market_guard_status,
@@ -122,6 +127,7 @@ PRICE_CACHE_TTL_SECONDS = 55
 MIN_LEVERAGE = 5
 MAX_LEVERAGE = 25
 MIN_BASE_MARGIN_USDT = 1.0
+SCAN_TELEGRAM_SLOT_KEY = "telegram_last_scan_notify_slot"
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -489,6 +495,27 @@ def _today_key(config: dict[str, Any] | None = None) -> str:
     return datetime.now(_system_timezone(config)).date().isoformat()
 
 
+def _scan_notification_slot_id(config: dict[str, Any], now: datetime) -> str:
+    local_now = now.astimezone(_system_timezone(config))
+    slot_minute = (local_now.minute // 15) * 15
+    slot = local_now.replace(minute=slot_minute, second=0, microsecond=0)
+    return slot.isoformat()
+
+
+def _periodic_scan_notification_due(config: dict[str, Any], now: datetime) -> bool:
+    if not telegram_notify_scans(config):
+        return False
+    local_now = now.astimezone(_system_timezone(config))
+    if local_now.minute % 15 != 0:
+        return False
+    slot_id = _scan_notification_slot_id(config, now)
+    return get_journal_state(config, SCAN_TELEGRAM_SLOT_KEY) != slot_id
+
+
+def _remember_periodic_scan_notification(config: dict[str, Any], now: datetime) -> None:
+    set_journal_state(config, SCAN_TELEGRAM_SLOT_KEY, _scan_notification_slot_id(config, now))
+
+
 
 
 def _run_automation_cycle(app: FastAPI) -> None:
@@ -573,14 +600,16 @@ def _run_automation_cycle(app: FastAPI) -> None:
         pass
 
     messages: list[str] = []
-    should_notify_scan = status.get("last_result") == "error" or telegram_notify_scans(config)
+    should_notify_scan = status.get("last_result") == "error" or _periodic_scan_notification_due(config, now)
     if should_notify_scan:
-        send_telegram_message(
+        sent = send_telegram_message(
             config,
             format_scan_message(config, payload, status),
             with_buttons=False,
             replace_previous=False,
         )
+        if sent and status.get("last_result") != "error":
+            _remember_periodic_scan_notification(config, now)
     if payload:
         messages.extend(format_pending_event_messages(payload))
         messages.extend(format_execution_messages(payload))
@@ -1002,13 +1031,32 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
             return
         thread_id = message.get("message_thread_id")
         message_id = message.get("message_id")
+        if action == "view_internal_notifications":
+            timeline_messages = internal_notification_timeline_messages(config)
+            if not timeline_messages:
+                send_telegram_chat_message(
+                    config,
+                    chat_id,
+                    "🔔 Thông báo nội bộ: chưa có dữ liệu 1h/2h/4h/Mini.",
+                    message_thread_id=thread_id,
+                    with_buttons=False,
+                )
+                return
+            for text in timeline_messages:
+                send_telegram_chat_message(
+                    config,
+                    chat_id,
+                    text,
+                    message_thread_id=thread_id,
+                    with_buttons=False,
+                )
+            return
         response_config, response_text, reply_markup = _telegram_action_response(config, action, config_path, app)
         inline_view_actions = {
             "view_menu",
             "view_guard",
             "view_lc",
             "view_undecided_lc",
-            "view_internal_notifications",
             "view_memory",
             "view_ai",
             "view_ai_more",
@@ -1165,6 +1213,26 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
     action = command_map.get(command)
     if not action:
         return
+    if action == "view_internal_notifications":
+        timeline_messages = internal_notification_timeline_messages(config)
+        if not timeline_messages:
+            send_telegram_chat_message(
+                config,
+                chat_id,
+                "🔔 Thông báo nội bộ: chưa có dữ liệu 1h/2h/4h/Mini.",
+                message_thread_id=message.get("message_thread_id"),
+                with_buttons=False,
+            )
+            return
+        for text in timeline_messages:
+            send_telegram_chat_message(
+                config,
+                chat_id,
+                text,
+                message_thread_id=message.get("message_thread_id"),
+                with_buttons=False,
+            )
+        return
     response_config, response_text, reply_markup = _telegram_action_response(config, action, config_path, app)
     send_telegram_chat_message(
         response_config,
@@ -1225,6 +1293,51 @@ def _mark_market_guard_notified(config: dict[str, Any], now: datetime) -> None:
     set_journal_state(config, "market_guard_last_notify_at", now.isoformat())
 
 
+def _market_guard_notification_status(config: dict[str, Any], status: dict[str, Any]) -> dict[str, Any] | None:
+    guard_config = config.get("market_guard", {})
+    move_threshold = _safe_float(guard_config.get("price_move_5m_pct"), 0.8)
+    critical_move_threshold = _safe_float(guard_config.get("critical_price_move_5m_pct"), 1.4)
+    wick_threshold = _safe_float(guard_config.get("wick_pct"), 0.45)
+    wick_ratio_threshold = _safe_float(guard_config.get("wick_body_ratio"), 2.5)
+    volume_threshold = _safe_float(guard_config.get("volume_ratio"), 2.5)
+    range_threshold = _safe_float(guard_config.get("critical_candle_range_pct"), 1.8)
+
+    filtered_alerts: list[dict[str, Any]] = []
+    for alert in status.get("alerts") or []:
+        if not isinstance(alert, dict):
+            continue
+        move_pct = _safe_float(alert.get("move_pct"))
+        abs_move = abs(move_pct)
+        candle_range_pct = _safe_float(alert.get("candle_range_pct"))
+        wick_pct = _safe_float(alert.get("wick_pct"))
+        wick_body_ratio = _safe_float(alert.get("wick_body_ratio"))
+        volume_ratio = _safe_float(alert.get("volume_ratio"), 1.0)
+        severity = str(alert.get("severity") or "warning").lower()
+
+        strong_wick = (
+            wick_pct >= max(0.65, wick_threshold * 1.35)
+            and wick_body_ratio >= max(3.0, wick_ratio_threshold)
+        )
+        strong_move = abs_move >= critical_move_threshold
+        strong_range = candle_range_pct >= range_threshold
+        strong_volume = volume_ratio >= max(3.0, volume_threshold)
+        stacked_shock = abs_move >= max(1.0, move_threshold) and volume_ratio >= max(2.0, volume_threshold * 0.8)
+        mild_positive_move_only = (
+            0.5 <= move_pct <= 1.0
+            and not strong_wick
+            and not strong_range
+            and not strong_volume
+        )
+        if mild_positive_move_only:
+            continue
+        if severity == "critical" or strong_wick or strong_move or strong_range or strong_volume or stacked_shock:
+            filtered_alerts.append(alert)
+
+    if not filtered_alerts:
+        return None
+    return {**status, "alerts": filtered_alerts}
+
+
 def _market_guard_worker(app: FastAPI) -> None:
     while not app.state.automation_stop.is_set():
         interval = 60
@@ -1245,8 +1358,9 @@ def _market_guard_worker(app: FastAPI) -> None:
             status = run_market_guard(config)
             app.state.market_guard_status = status
             now = datetime.now(timezone.utc)
-            if (status.get("alerts") or []) and _market_guard_notify_due(config, now):
-                send_telegram_message(config, format_market_guard_message(status), replace_previous=False)
+            notify_status = _market_guard_notification_status(config, status)
+            if notify_status and _market_guard_notify_due(config, now):
+                send_telegram_message(config, format_market_guard_message(notify_status), replace_previous=False)
                 _mark_market_guard_notified(config, now)
         except Exception as exc:
             app.state.market_guard_status = {

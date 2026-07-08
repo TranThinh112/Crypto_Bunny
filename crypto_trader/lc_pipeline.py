@@ -22,9 +22,10 @@ from .strategy import build_candidates, enrich_quantities
 
 LC_PIPELINE_STATE_KEY = "lc_internal_pipeline_state"
 LC_PIPELINE_STATE_VERSION = 3
-DEFAULT_TWO_HOUR_ICON = "🕑"
-ONE_HOUR_ICON = "🕐"
-FOUR_HOUR_ICON = "🕓"
+DEFAULT_TWO_HOUR_ICON = "🟡"
+ONE_HOUR_ICON = "🔵"
+FOUR_HOUR_ICON = "🔴"
+MINI_ICON = "🟣"
 ONE_HOUR_HISTORY_KEEP_DAYS = 3
 TWO_HOUR_HISTORY_KEEP_DAYS = 3
 FOUR_HOUR_HISTORY_KEEP_DAYS = 7
@@ -76,6 +77,19 @@ def _two_hour_icon(config: dict[str, Any]) -> str:
     internal = config.get("ai", {}).get("internal", {})
     icon = str(internal.get("lc_pipeline_two_hour_icon") or DEFAULT_TWO_HOUR_ICON).strip()
     return icon or DEFAULT_TWO_HOUR_ICON
+
+
+def _frame_icon(config: dict[str, Any], frame: str) -> str:
+    frame_name = str(frame or "").lower()
+    if frame_name == "1h":
+        return ONE_HOUR_ICON
+    if frame_name == "2h":
+        return _two_hour_icon(config)
+    if frame_name == "4h":
+        return FOUR_HOUR_ICON
+    if frame_name == "mini":
+        return MINI_ICON
+    return "🔹"
 
 
 def _local_time(config: dict[str, Any], now: datetime) -> datetime:
@@ -581,7 +595,9 @@ def _recheck_rows_with_latest_market_data(
     apply_position_sizing(config, refreshed_candidates)
     enrich_quantities(config, refreshed_candidates)
     candidates_by_key = {(candidate.symbol, candidate.side.lower()): candidate for candidate in refreshed_candidates}
-    candidates_by_symbol = {candidate.symbol: candidate for candidate in refreshed_candidates}
+    candidate_sides_by_symbol: dict[str, set[str]] = {}
+    for candidate in refreshed_candidates:
+        candidate_sides_by_symbol.setdefault(candidate.symbol, set()).add(candidate.side.lower())
 
     refreshed_rows: list[dict[str, Any]] = []
     dropped: list[dict[str, Any]] = []
@@ -592,15 +608,18 @@ def _recheck_rows_with_latest_market_data(
         if candidate is not None:
             refreshed_rows.append(_refresh_row_from_candidate(row, candidate, now=now))
             continue
-        replacement = candidates_by_symbol.get(symbol)
-        if replacement is not None:
+        available_sides = candidate_sides_by_symbol.get(symbol) or set()
+        if available_sides:
+            opposite_sides = sorted(side_name.upper() for side_name in available_sides if side_name and side_name != side)
+            opposite_text = f"; thi truong hien nghieng {', '.join(opposite_sides)}" if opposite_sides else ""
             dropped.append(
                 {
                     "symbol": symbol,
                     "old_side": side,
-                    "reason": f"setup hiện tại đã đổi sang {replacement.side.upper()}",
-                    "current_side": replacement.side,
-                    "current_win_probability_pct": replacement.win_probability_pct,
+                    "reason": (
+                        f"setup goc {side.upper()} khong con hop le trong du lieu moi nhat"
+                        f"{opposite_text}; re-check giu nguyen setup goc, khong doi chieu"
+                    ),
                 }
             )
             continue
@@ -748,6 +767,7 @@ def _load_state(config: dict[str, Any], now: datetime, *, reset_for_new_day: boo
         state["day_key"] = day
         state["daily_one_hour_counter"] = 0
         state["daily_two_hour_counter"] = 0
+        state["daily_mini_counter"] = 0
         state["hourly_windows"] = []
         state["two_hour_windows"] = []
         state["telegram_events"] = []
@@ -764,6 +784,7 @@ def _load_state(config: dict[str, Any], now: datetime, *, reset_for_new_day: boo
     state.setdefault("daily_one_hour_counter", 0)
     state.setdefault("daily_two_hour_counter", 0)
     state.setdefault("four_hour_counter", 0)
+    state.setdefault("daily_mini_counter", 0)
     state.setdefault("latest_mini_scan", {})
     state.setdefault("state_version", LC_PIPELINE_STATE_VERSION)
     state["one_hour_history"] = _prune_history(
@@ -846,6 +867,7 @@ def _compact_event(event: dict[str, Any]) -> dict[str, Any]:
         "date": event.get("date"),
         "time": event.get("time"),
         "recheck": event.get("recheck"),
+        "source_windows": event.get("source_windows"),
     }
     compact["approved"] = [_compact_saved_row(row) for row in event.get("approved") or [] if isinstance(row, dict)]
     compact["rejected"] = [_compact_saved_row(row) for row in event.get("rejected") or [] if isinstance(row, dict)]
@@ -951,6 +973,7 @@ def _compact_mini_scan(scan: dict[str, Any]) -> dict[str, Any]:
         "enabled": bool(scan.get("enabled", True)),
         "agent": scan.get("agent"),
         "created_at": scan.get("created_at"),
+        "mini_index": scan.get("mini_index"),
         "slot_id": scan.get("slot_id"),
         "slot_start": scan.get("slot_start"),
         "status": scan.get("status"),
@@ -969,6 +992,7 @@ def _compact_mini_scan(scan: dict[str, Any]) -> dict[str, Any]:
         "ai_review_error": scan.get("ai_review_error"),
         "fallback": scan.get("fallback"),
         "skip_reason": scan.get("skip_reason"),
+        "decision_reason_vi": scan.get("decision_reason_vi"),
     }
     compact["candidates"] = [
         _compact_mini_candidate(item)
@@ -1051,6 +1075,18 @@ def latest_lc_pipeline_mini_scan(config: dict[str, Any]) -> dict[str, Any] | Non
 
 def save_lc_pipeline_mini_scan(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     state = _load_state(config, datetime.now(timezone.utc))
+    latest_scan = state.get("latest_mini_scan") if isinstance(state.get("latest_mini_scan"), dict) else {}
+    if payload.get("mini_index") in (None, ""):
+        same_slot = (
+            latest_scan
+            and str(latest_scan.get("slot_id") or "") == str(payload.get("slot_id") or "")
+            and str(latest_scan.get("created_at") or "") == str(payload.get("created_at") or "")
+        )
+        if same_slot and latest_scan.get("mini_index") not in (None, ""):
+            payload = {**payload, "mini_index": latest_scan.get("mini_index")}
+        else:
+            payload = {**payload, "mini_index": int(state.get("daily_mini_counter") or 0) + 1}
+    state["daily_mini_counter"] = max(int(state.get("daily_mini_counter") or 0), int(payload.get("mini_index") or 0))
     state["latest_mini_scan"] = _compact_mini_scan(payload)
     _save_state(config, state)
     return latest_lc_pipeline_mini_scan(config) or {}
@@ -1200,7 +1236,32 @@ def _latest_four_hour_rows(state: dict[str, Any]) -> list[dict[str, Any]]:
     return [row for row in latest_event.get("approved") or [] if isinstance(row, dict)]
 
 
-def _format_pair_line(index: int, row: dict[str, Any]) -> str:
+def _row_origin_label(row: dict[str, Any], *, config: dict[str, Any]) -> str | None:
+    origin_slot = str(row.get("origin_source_slot") or "").strip()
+    origin_index = row.get("origin_source_index")
+    origin_time = row.get("origin_source_time")
+    if not origin_slot:
+        source_slot = str(row.get("source_slot") or "").strip()
+        if source_slot == "1h":
+            origin_slot = source_slot
+            origin_index = row.get("source_index")
+            origin_time = row.get("source_time")
+    if origin_slot != "1h":
+        return None
+    origin_time_label = _event_clock_label(origin_time, config=config)
+    origin_icon = _frame_icon(config, origin_slot)
+    if origin_index in (None, ""):
+        return f"Gốc {origin_icon} {origin_slot} ({origin_time_label})"
+    return f"Gốc {origin_icon} {origin_slot} #{origin_index} ({origin_time_label})"
+
+
+def _format_pair_line(
+    index: int,
+    row: dict[str, Any],
+    *,
+    config: dict[str, Any] | None = None,
+    include_origin: bool = False,
+) -> str:
     price = row.get("price") or row.get("entry") or "-"
     volume = row.get("volume_ratio")
     win_probability = row.get("win_probability_pct")
@@ -1217,7 +1278,89 @@ def _format_pair_line(index: int, row: dict[str, Any]) -> str:
     except (TypeError, ValueError):
         price_text = str(price)
     side_text = str(row.get("side") or "-").upper()
-    return f"{index}. {row.get('symbol', '-')} | {side_text} | Win {win_text} | Giá {price_text} | KLGD {volume_text}"
+    parts = [
+        f"{index}. {row.get('symbol', '-')}",
+        side_text,
+        f"Win {win_text}",
+        f"Giá {price_text}",
+        f"KLGD {volume_text}",
+    ]
+    if include_origin and config is not None:
+        origin_label = _row_origin_label(row, config=config)
+        if origin_label:
+            parts.append(origin_label)
+    return " | ".join(parts)
+
+
+def _event_clock_label(value: Any, *, config: dict[str, Any] | None = None) -> str:
+    event_time = _parse_time(value)
+    if event_time is None:
+        return "-"
+    return _local_time(config or {}, event_time).strftime("%H:%M")
+
+
+def _source_window_payload(frame: str, event: dict[str, Any], *, config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "frame": frame,
+        "index": event.get("daily_index", event.get("index")),
+        "time": _event_clock_label(event.get("created_at") or event.get("slot"), config=config),
+        "slot": event.get("slot"),
+        "created_at": event.get("created_at"),
+    }
+
+
+def _source_window_label(item: dict[str, Any], *, config: dict[str, Any]) -> str:
+    frame = str(item.get("frame") or "-")
+    index = item.get("index")
+    time_label = str(item.get("time") or "-")
+    icon = _frame_icon(config, frame)
+    if index in (None, ""):
+        return f"{icon} {frame} ({time_label})"
+    return f"{icon} {frame} #{index} ({time_label})"
+
+
+def _event_source_lines(event: dict[str, Any], *, config: dict[str, Any]) -> list[str]:
+    frame = str(event.get("frame") or "-")
+    frame_index = event.get("daily_index", event.get("index"))
+    frame_time = _event_clock_label(event.get("created_at") or event.get("slot"), config=config)
+    frame_icon = _frame_icon(config, frame)
+    if frame_index in (None, ""):
+        lines = [f"Khung {frame_icon} {frame}: ({frame_time})"]
+    else:
+        lines = [f"Khung {frame_icon} {frame}: #{frame_index} ({frame_time})"]
+    source_windows = event.get("source_windows") if isinstance(event.get("source_windows"), list) else []
+    source_labels = [_source_window_label(item, config=config) for item in source_windows if isinstance(item, dict)]
+    if source_labels:
+        lines.append("Gộp từ: " + ", ".join(source_labels))
+    return lines
+
+
+def _mini_reason_vi(scan: dict[str, Any]) -> str:
+    selected_symbols = _symbol_list(scan.get("selected_symbols"), limit=3)
+    ai_review = scan.get("ai_review") if isinstance(scan.get("ai_review"), dict) else {}
+    local_policy = scan.get("local_policy") if isinstance(scan.get("local_policy"), dict) else {}
+    selection_source = str(local_policy.get("selection_source") or "")
+    status = str(scan.get("status") or "")
+    if selected_symbols:
+        if ai_review:
+            return (
+                "Mini đã đối chiếu nhóm LC 4h với đánh giá AI nội bộ, rồi giữ lại các cặp còn mạnh về Win Rate, "
+                "chất lượng setup, xu hướng và chỉ báo."
+            )
+        if selection_source == "lc_internal_pipeline":
+            return (
+                "Mini chọn trực tiếp từ nhóm LC 4h hiện tại vì các cặp này đang nổi bật nhất sau khi so sánh "
+                "Win Rate, chất lượng setup, xu hướng và chỉ báo."
+            )
+        return "Mini giữ lại các cặp đang phù hợp nhất trong nhóm LC 4h hiện tại."
+    if status == "waiting_lc":
+        return "Mini chưa chọn cặp nào vì hiện chưa có đủ LC 4h phù hợp để duyệt."
+    if status == "stale_selection":
+        return "Mini chưa chốt cặp vì dữ liệu LC 4h đã thay đổi, cần chờ lượt Mini mới."
+    skip_reason = str(scan.get("skip_reason") or "").strip()
+    if skip_reason:
+        return f"Mini chưa chọn cặp nào. Lý do: {skip_reason}."
+    return "Mini chưa chọn cặp nào sau khi rà lại nhóm LC 4h."
 
 
 def _build_internal_lc_rows(
@@ -1291,20 +1434,26 @@ def _internal_notification_summary_line(item: dict[str, Any], config: dict[str, 
     return " | ".join([header, *details])
 
 
-def format_internal_notifications_view(config: dict[str, Any], *, limit_per_frame: int = 5) -> str:
+def internal_notification_timeline_messages(config: dict[str, Any], *, limit_per_frame: int = 5) -> list[str]:
     state = _load_state(config, datetime.now(timezone.utc), reset_for_new_day=False)
     items = state.get("internal_notifications") if isinstance(state.get("internal_notifications"), list) else []
     if not items:
-        return "🔔 Thông báo nội bộ: chưa có dữ liệu 1h/2h/4h."
-    timeline_limit = max(3, int(limit_per_frame) * 3)
+        return []
+    timeline_limit = max(4, int(limit_per_frame) * 4)
     timeline = sorted(items, key=lambda row: str(row.get("created_at") or ""))[-timeline_limit:]
-    lines = [
+    return [_internal_notification_text(item, config) for item in timeline]
+
+
+def format_internal_notifications_view(config: dict[str, Any], *, limit_per_frame: int = 5) -> str:
+    timeline_messages = internal_notification_timeline_messages(config, limit_per_frame=limit_per_frame)
+    if not timeline_messages:
+        return "🔔 Thông báo nội bộ: chưa có dữ liệu 1h/2h/4h/Mini."
+    blocks = [
         "🔔 Thông báo nội bộ",
-        "Timeline 1h/2h/4h, mỗi dòng là 1 thông báo, mới nhất nằm dưới cùng.",
+        "Timeline 1h/2h/4h/Mini, mỗi khối là 1 thông báo đầy đủ, mới nhất nằm dưới cùng.",
     ]
-    for item in timeline:
-        lines.append(_internal_notification_summary_line(item, config))
-    return "\n".join(lines)
+    blocks.extend(timeline_messages)
+    return "\n\n".join(blocks)
 
 
 def _notify_two_hour_summary(config: dict[str, Any], event: dict[str, Any]) -> None:
@@ -1317,9 +1466,28 @@ def _notify_two_hour_summary(config: dict[str, Any], event: dict[str, Any]) -> N
     lines = [
         f"{icon} #{event.get('daily_index', '-')} LC nội bộ tổng hợp 2h",
         f"{event.get('date', '-')} {event.get('time', '-')}",
-        "3 cặp duyệt lượt này:",
     ]
-    lines.extend(_format_pair_line(index, row) for index, row in enumerate(rows[:3], 1))
+    lines.extend(_event_source_lines(event, config=config))
+    lines.append("3 cặp duyệt lượt này:")
+    lines.extend(_format_pair_line(index, row, config=config, include_origin=True) for index, row in enumerate(rows[:3], 1))
+    send_telegram_message(config, "\n".join(lines), with_buttons=False, replace_previous=False)
+
+
+def _notify_four_hour_summary(config: dict[str, Any], event: dict[str, Any]) -> None:
+    try:
+        from .notifier import send_telegram_message
+    except Exception:
+        return
+    rows = event.get("approved") or []
+    lines = [f"{FOUR_HOUR_ICON} #{event.get('index', '-')} LC nội bộ tổng hợp 4h"]
+    if event.get("date") or event.get("time"):
+        lines.append(f"{event.get('date', '-')} {event.get('time', '-')}".strip())
+    lines.extend(_event_source_lines(event, config=config))
+    lines.append("Các cặp giữ lại ở 4h:")
+    if rows:
+        lines.extend(_format_pair_line(index, row, config=config, include_origin=True) for index, row in enumerate(rows[:3], 1))
+    else:
+        lines.append("Không có cặp nào đủ điều kiện giữ lại ở 4h.")
     send_telegram_message(config, "\n".join(lines), with_buttons=False, replace_previous=False)
 
 
@@ -1444,29 +1612,39 @@ def notify_mini_pool_summary(
     config: dict[str, Any],
     rows: list[dict[str, Any]],
     *,
+    scan: dict[str, Any] | None = None,
     slot_id: str | None = None,
     now: datetime | None = None,
 ) -> None:
-    if not rows:
-        return
     now = now or datetime.now(timezone.utc)
     local_now = _local_time(config, now)
     settings = _pipeline_config(config)
-    pool_count = len(rows[:3])
+    state = _load_state(config, now)
+    latest_four_hour = state.get("four_hour_history")[-1] if state.get("four_hour_history") else None
+    scan = scan or latest_lc_pipeline_mini_scan(config) or {}
+    selected_symbols = _symbol_list(scan.get("selected_symbols"), limit=3)
+    selected_count = len(selected_symbols)
+    mini_index = scan.get("mini_index") or int(state.get("daily_mini_counter") or 0) or "-"
     lines = [
-        f"Pool mini 4h: {pool_count}/3 cặp",
+        f"Lần gọi Mini: #{mini_index} ({local_now.strftime('%H:%M')})" if mini_index != "-" else f"Lần gọi Mini: {local_now.strftime('%H:%M')}",
+        f"Mini chọn: {selected_count}/3 cặp",
     ]
-    for index, row in enumerate(rows[:3], 1):
-        side = str(row.get("side") or "-").upper()
-        lines.append(f"{index}. {row.get('symbol', '-')} | {side} | {_source_label(row)}")
+    if isinstance(latest_four_hour, dict):
+        lines.extend(_event_source_lines(latest_four_hour, config=config))
+    if rows:
+        for index, row in enumerate(rows[:3], 1):
+            side = str(row.get("side") or "-").upper()
+            lines.append(f"{index}. {row.get('symbol', '-')} | {side} | {_source_label(row)}")
+    else:
+        lines.append("Mini chưa chọn được cặp nào.")
+    lines.append("Lý do: " + str(scan.get("decision_reason_vi") or _mini_reason_vi(scan)))
     if slot_id:
         lines.append(f"Slot: {slot_id}")
-    state = _load_state(config, now)
     _append_internal_notification(
         state,
-        frame="4h",
-        icon=FOUR_HOUR_ICON,
-        title=f"Mini pool 4h {local_now.strftime('%d/%m/%y %H:%M:%S')}",
+        frame="mini",
+        icon=MINI_ICON,
+        title=f"Mini #{mini_index}" if mini_index != "-" else f"Mini {local_now.strftime('%d/%m/%y %H:%M:%S')}",
         lines=lines,
         created_at=now,
     )
@@ -1479,7 +1657,12 @@ def notify_mini_pool_summary(
         return
     send_telegram_message(
         config,
-        "\n".join([f"{FOUR_HOUR_ICON} Mini pool 4h {local_now.strftime('%d/%m/%y %H:%M:%S')}", *lines]),
+        "\n".join(
+            [
+                f"{MINI_ICON} Mini #{mini_index}" if mini_index != "-" else f"{MINI_ICON} Mini {local_now.strftime('%d/%m/%y %H:%M:%S')}",
+                *lines,
+            ]
+        ),
         with_buttons=False,
         replace_previous=False,
     )
@@ -1754,6 +1937,7 @@ def update_lc_internal_pipeline(
             "time": local_now.strftime("%H:%M:%S"),
             "approved": top[:top_limit],
             "rejected": [],
+            "source_windows": [],
         }
         state["one_hour_history"].append(one_hour_event)
         state["hourly_windows"].append(
@@ -1785,7 +1969,8 @@ def update_lc_internal_pipeline(
             frame="1h",
             icon=ONE_HOUR_ICON,
             title=f"1h top {len(top)} setup",
-            lines=[_format_pair_line(index, row) for index, row in enumerate(top[:3], 1)],
+            lines=[f"Khung {ONE_HOUR_ICON} 1h: #{next_hourly_index} ({local_now.strftime('%H:%M')})"]
+            + [_format_pair_line(index, row, config=config) for index, row in enumerate(top[:3], 1)],
             created_at=now,
         )
 
@@ -1860,6 +2045,9 @@ def update_lc_internal_pipeline(
             "approved": approved[:top_limit],
             "rejected": rejected,
             "recheck": two_hour_recheck,
+            "source_windows": [
+                _source_window_payload("1h", window, config=config) for window in recent_hourly_windows if isinstance(window, dict)
+            ],
         }
         state["two_hour_history"].append(event)
         state["two_hour_windows"].append(event)
@@ -1872,7 +2060,8 @@ def update_lc_internal_pipeline(
             frame="2h",
             icon=_two_hour_icon(config),
             title=f"#{state['daily_two_hour_counter']} LC nội bộ tổng hợp 2h",
-            lines=[_format_pair_line(index, row) for index, row in enumerate(approved[:top_limit], 1)],
+            lines=_event_source_lines(event, config=config)
+            + [_format_pair_line(index, row, config=config, include_origin=True) for index, row in enumerate(approved[:top_limit], 1)],
             created_at=now,
         )
         result["created_two_hour"] = True
@@ -1950,13 +2139,31 @@ def update_lc_internal_pipeline(
             "approved": approved_four_hour[:top_limit],
             "rejected": rejected_four_hour,
             "recheck": four_hour_recheck,
+            "source_windows": [
+                _source_window_payload("2h", window, config=config) for window in recent_two_hour_windows if isinstance(window, dict)
+            ],
         }
         state["four_hour_history"].append(four_hour_event)
         state["four_hour_counter"] = next_four_hour_index
         state["last_four_hour_slot"] = four_hour_slot
+        _append_internal_notification(
+            state,
+            frame="4h",
+            icon=FOUR_HOUR_ICON,
+            title=f"#{next_four_hour_index} LC nội bộ tổng hợp 4h",
+            lines=_event_source_lines(four_hour_event, config=config)
+            + (
+                [_format_pair_line(index, row, config=config, include_origin=True) for index, row in enumerate(approved_four_hour[:top_limit], 1)]
+                if approved_four_hour
+                else ["Không có cặp nào đủ điều kiện giữ lại ở 4h."]
+            ),
+            created_at=now,
+        )
         result["created_four_hour"] = True
         result["four_hour_event"] = four_hour_event
         result["four_hour_recheck"] = four_hour_recheck
+        if settings["notify_mini_pool_summary"]:
+            _notify_four_hour_summary(config, four_hour_event)
 
     last_recheck_at = _parse_time(state.get("last_recheck_at"))
     recheck_due = (

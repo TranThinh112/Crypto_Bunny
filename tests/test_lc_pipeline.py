@@ -14,6 +14,7 @@ from crypto_trader.lc_pipeline import (
     lc_pipeline_dashboard_payload,
     lc_pipeline_mini_pool,
     notify_mini_pool_summary,
+    _recheck_rows_with_latest_market_data,
     update_lc_internal_pipeline,
 )
 from crypto_trader.models import TradeCandidate
@@ -109,12 +110,12 @@ class LcPipelineTest(TestCase):
         ]
         recheck_rows.return_value = (
             [
-                _saved_row("AAA/USDT:USDT", 61, volume=3),
-                _saved_row("BBB/USDT:USDT", 60, volume=2),
-                _saved_row("CCC/USDT:USDT", 59, volume=1),
-                _saved_row("DDD/USDT:USDT", 64, volume=4),
-                _saved_row("EEE/USDT:USDT", 63, volume=3),
-                _saved_row("FFF/USDT:USDT", 62, volume=2),
+                {**_saved_row("AAA/USDT:USDT", 61, volume=3), "source_slot": "1h", "source_index": 1, "source_time": start.isoformat()},
+                {**_saved_row("BBB/USDT:USDT", 60, volume=2), "source_slot": "1h", "source_index": 1, "source_time": start.isoformat()},
+                {**_saved_row("CCC/USDT:USDT", 59, volume=1), "source_slot": "1h", "source_index": 1, "source_time": start.isoformat()},
+                {**_saved_row("DDD/USDT:USDT", 64, volume=4), "source_slot": "1h", "source_index": 2, "source_time": (start + timedelta(hours=1)).isoformat()},
+                {**_saved_row("EEE/USDT:USDT", 63, volume=3), "source_slot": "1h", "source_index": 2, "source_time": (start + timedelta(hours=1)).isoformat()},
+                {**_saved_row("FFF/USDT:USDT", 62, volume=2), "source_slot": "1h", "source_index": 2, "source_time": (start + timedelta(hours=1)).isoformat()},
             ],
             {"input_count": 6, "refreshed_count": 6, "dropped": [], "warnings": [], "sync_complete": True, "synchronized_count": 6},
         )
@@ -136,8 +137,11 @@ class LcPipelineTest(TestCase):
         internal_notifications = state.get("internal_notifications") or []
         self.assertEqual([item["frame"] for item in internal_notifications], ["1h", "1h", "2h"])
         send_message.assert_called_once()
-        self.assertIn("🕑 #1 LC nội bộ tổng hợp 2h", send_message.call_args.args[1])
+        self.assertIn("🟡 #1 LC nội bộ tổng hợp 2h", send_message.call_args.args[1])
+        self.assertIn("Khung 🟡 2h: #1 (08:05)", send_message.call_args.args[1])
+        self.assertIn("Gộp từ: 🔵 1h #1 (07:05), 🔵 1h #2 (08:05)", send_message.call_args.args[1])
         self.assertIn("DDD/USDT:USDT | LONG | Win 64.00%", send_message.call_args.args[1])
+        self.assertIn("Gốc 🔵 1h #2 (08:05)", send_message.call_args.args[1])
         self.assertFalse(send_message.call_args.kwargs["replace_previous"])
 
     @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
@@ -750,6 +754,43 @@ class LcPipelineTest(TestCase):
         )
         self.assertEqual(len(result["undecided"]), 3)
 
+    @patch("crypto_trader.lc_pipeline.enrich_quantities")
+    @patch("crypto_trader.lc_pipeline.apply_position_sizing")
+    @patch("crypto_trader.lc_pipeline.build_candidates")
+    @patch("crypto_trader.lc_pipeline.market_guard_symbol_layers")
+    @patch("crypto_trader.lc_pipeline.fetch_market_snapshots")
+    @patch("crypto_trader.lc_pipeline.collect_news")
+    def test_recheck_keeps_original_side_and_does_not_flip_setup(
+        self,
+        collect_news,
+        fetch_market_snapshots,
+        market_guard_symbol_layers,
+        build_candidates,
+        apply_position_sizing,
+        enrich_quantities,
+    ) -> None:
+        config = self._config()
+        collect_news.return_value = {}
+        fetch_market_snapshots.return_value = ([], [])
+        market_guard_symbol_layers.return_value = {}
+        apply_position_sizing.return_value = None
+        enrich_quantities.return_value = []
+        build_candidates.return_value = [_candidate("LIT/USDT:USDT", 42.94, side="short")]
+
+        refreshed, meta = _recheck_rows_with_latest_market_data(
+            config,
+            [{**_saved_row("LIT/USDT:USDT", 65.0, side="long"), "source_slot": "1h", "source_index": 1}],
+            now=datetime(2026, 7, 6, 1, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(refreshed, [])
+        self.assertEqual(len(meta["dropped"]), 1)
+        self.assertEqual(meta["dropped"][0]["symbol"], "LIT/USDT:USDT")
+        self.assertEqual(meta["dropped"][0]["old_side"], "long")
+        self.assertNotIn("current_side", meta["dropped"][0])
+        self.assertNotIn("current_win_probability_pct", meta["dropped"][0])
+        self.assertIn("khong doi chieu", meta["dropped"][0]["reason"])
+
     @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
     def test_undecided_recheck_updates_all_rows_without_deleting_when_below_six(self, recheck_rows) -> None:
         config = self._config()
@@ -892,28 +933,48 @@ class LcPipelineTest(TestCase):
         config = self._config()
         config["ai"]["internal"]["lc_pipeline_notify_two_hour_summary"] = False
         config["ai"]["internal"]["lc_pipeline_promote_to_pending"] = True
+        config["ai"]["internal"]["lc_pipeline_recheck_interval_minutes"] = 60
         start = datetime(2026, 7, 6, 0, 5, tzinfo=timezone.utc)
         update_lc_internal_pipeline(
             config,
             [_candidate("AAA/USDT:USDT", 64), _candidate("BBB/USDT:USDT", 63), _candidate("CCC/USDT:USDT", 62)],
             now=start,
         )
-        recheck_rows.return_value = (
-            [
-                _saved_row("AAA/USDT:USDT", 64),
-                _saved_row("BBB/USDT:USDT", 63),
-                _saved_row("CCC/USDT:USDT", 62),
-                _saved_row("DDD/USDT:USDT", 67),
-                _saved_row("EEE/USDT:USDT", 66),
-                _saved_row("FFF/USDT:USDT", 65),
-            ],
-            {"input_count": 6, "refreshed_count": 6, "dropped": [], "warnings": [], "sync_complete": True, "synchronized_count": 6},
-        )
+        recheck_rows.side_effect = [
+            (
+                [
+                    _saved_row("AAA/USDT:USDT", 64),
+                    _saved_row("BBB/USDT:USDT", 63),
+                    _saved_row("CCC/USDT:USDT", 62),
+                    _saved_row("DDD/USDT:USDT", 67),
+                    _saved_row("EEE/USDT:USDT", 66),
+                    _saved_row("FFF/USDT:USDT", 65),
+                ],
+                {"input_count": 6, "refreshed_count": 6, "dropped": [], "warnings": [], "sync_complete": True, "synchronized_count": 6},
+            ),
+            (
+                [
+                    _saved_row("AAA/USDT:USDT", 64, state="CHUA_DUYET"),
+                    _saved_row("BBB/USDT:USDT", 63, state="CHUA_DUYET"),
+                    _saved_row("CCC/USDT:USDT", 62, state="CHUA_DUYET"),
+                ],
+                {"input_count": 3, "refreshed_count": 3, "dropped": [], "warnings": [], "sync_complete": True, "synchronized_count": 3},
+            ),
+            (
+                [
+                    _saved_row("AAA/USDT:USDT", 70, state="CHUA_DUYET"),
+                    _saved_row("BBB/USDT:USDT", 60, state="CHUA_DUYET"),
+                    _saved_row("CCC/USDT:USDT", 59, state="CHUA_DUYET"),
+                ],
+                {"input_count": 3, "refreshed_count": 3, "dropped": [], "warnings": [], "sync_complete": True, "synchronized_count": 3},
+            ),
+        ]
         update_lc_internal_pipeline(
             config,
             [_candidate("DDD/USDT:USDT", 67), _candidate("EEE/USDT:USDT", 66), _candidate("FFF/USDT:USDT", 65)],
             now=start + timedelta(hours=1),
         )
+        config["ai"]["internal"]["lc_pipeline_one_hour_min_win_probability_pct"] = 80
 
         result = update_lc_internal_pipeline(
             config,
@@ -947,66 +1008,182 @@ class LcPipelineTest(TestCase):
             },
         ]
 
-        notify_mini_pool_summary(config, rows, slot_id="slot-1")
+        notify_mini_pool_summary(
+            config,
+            rows,
+            scan={
+                "mini_index": 1,
+                "selected_symbols": ["AAA/USDT:USDT", "BBB/USDT:USDT"],
+                "decision_reason_vi": "Mini đã chọn 2 cặp tốt nhất trong nhóm LC 4h.",
+            },
+            slot_id="slot-1",
+        )
 
         message = send_message.call_args.args[1]
-        self.assertIn("Mini pool 4h", message)
+        self.assertIn("Mini #1", message)
+        self.assertIn("Mini chọn: 2/3 cặp", message)
         self.assertIn("AAA/USDT:USDT | LONG | 2h #3", message)
         self.assertIn("BBB/USDT:USDT | SHORT | HS 06/07/26 14:00:00", message)
+        self.assertIn("Lý do: Mini đã chọn 2 cặp tốt nhất trong nhóm LC 4h.", message)
+
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_mini_pool_summary_includes_four_hour_lineage_when_available(self, send_message) -> None:
+        config = self._config()
+        config["ai"]["internal"]["lc_pipeline_notify_mini_pool_summary"] = True
+        set_journal_state(
+            config,
+            "lc_internal_pipeline_state",
+            json.dumps(
+                {
+                    "state_version": 3,
+                    "day_key": "2026-07-06",
+                    "four_hour_history": [
+                        {
+                            "frame": "4h",
+                            "slot": "2026-07-06T10:00:00+07:00",
+                            "created_at": "2026-07-06T03:05:00+00:00",
+                            "index": 1,
+                            "daily_index": 1,
+                            "approved": [],
+                            "rejected": [],
+                            "source_windows": [
+                                {"frame": "2h", "index": 1, "time": "08:05"},
+                                {"frame": "2h", "index": 2, "time": "10:05"},
+                            ],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+        notify_mini_pool_summary(
+            config,
+            [{"symbol": "AAA/USDT:USDT", "side": "long", "source_slot": "4h", "source_index": 1}],
+            scan={
+                "mini_index": 2,
+                "selected_symbols": ["AAA/USDT:USDT"],
+                "decision_reason_vi": "Mini chọn lại cặp mạnh nhất từ nhóm LC 4h.",
+            },
+            slot_id="slot-1",
+            now=datetime(2026, 7, 6, 3, 10, tzinfo=timezone.utc),
+        )
+
+        message = send_message.call_args.args[1]
+        self.assertIn("Mini #2", message)
+        self.assertIn("Khung 🔴 4h: #1 (10:05)", message)
+        self.assertIn("Gộp từ: 🟡 2h #1 (08:05), 🟡 2h #2 (10:05)", message)
+        self.assertIn("Lý do: Mini chọn lại cặp mạnh nhất từ nhóm LC 4h.", message)
 
     @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
     @patch("crypto_trader.notifier.send_telegram_message")
-    def test_internal_notifications_view_uses_one_line_timeline_without_chat_push(self, send_message, recheck_rows) -> None:
+    def test_internal_notifications_view_shows_full_messages_in_timeline_without_chat_push(self, send_message, recheck_rows) -> None:
         config = self._config()
         config["ai"]["internal"]["lc_pipeline_notify_two_hour_summary"] = False
         config["ai"]["internal"]["lc_pipeline_notify_mini_pool_summary"] = False
+        config["ai"]["internal"]["lc_pipeline_recheck_interval_minutes"] = 999
         start = datetime(2026, 7, 7, 0, 5, tzinfo=timezone.utc)
         update_lc_internal_pipeline(
             config,
             [_candidate("AAA/USDT:USDT", 64), _candidate("BBB/USDT:USDT", 63), _candidate("CCC/USDT:USDT", 62)],
             now=start,
         )
-        recheck_rows.return_value = (
-            [
-                _saved_row("AAA/USDT:USDT", 64),
-                _saved_row("BBB/USDT:USDT", 63),
-                _saved_row("CCC/USDT:USDT", 62),
-                _saved_row("DDD/USDT:USDT", 67),
-                _saved_row("EEE/USDT:USDT", 66),
-                _saved_row("FFF/USDT:USDT", 65),
-            ],
-            {"input_count": 6, "refreshed_count": 6, "dropped": [], "warnings": [], "sync_complete": True, "synchronized_count": 6},
-        )
+        recheck_rows.side_effect = [
+            (
+                [
+                    {**_saved_row("AAA/USDT:USDT", 64), "source_slot": "1h", "source_index": 1, "source_time": start.isoformat()},
+                    {**_saved_row("BBB/USDT:USDT", 63), "source_slot": "1h", "source_index": 1, "source_time": start.isoformat()},
+                    {**_saved_row("CCC/USDT:USDT", 62), "source_slot": "1h", "source_index": 1, "source_time": start.isoformat()},
+                    {**_saved_row("DDD/USDT:USDT", 67), "source_slot": "1h", "source_index": 2, "source_time": (start + timedelta(hours=1)).isoformat()},
+                    {**_saved_row("EEE/USDT:USDT", 66), "source_slot": "1h", "source_index": 2, "source_time": (start + timedelta(hours=1)).isoformat()},
+                    {**_saved_row("FFF/USDT:USDT", 65), "source_slot": "1h", "source_index": 2, "source_time": (start + timedelta(hours=1)).isoformat()},
+                ],
+                {"input_count": 6, "refreshed_count": 6, "dropped": [], "warnings": [], "sync_complete": True, "synchronized_count": 6},
+            ),
+            (
+                [
+                    {**_saved_row("GGG/USDT:USDT", 69), "source_slot": "1h", "source_index": 3, "source_time": (start + timedelta(hours=2)).isoformat()},
+                    {**_saved_row("HHH/USDT:USDT", 68), "source_slot": "1h", "source_index": 3, "source_time": (start + timedelta(hours=2)).isoformat()},
+                    {**_saved_row("III/USDT:USDT", 67), "source_slot": "1h", "source_index": 3, "source_time": (start + timedelta(hours=2)).isoformat()},
+                    {**_saved_row("JJJ/USDT:USDT", 72), "source_slot": "1h", "source_index": 4, "source_time": (start + timedelta(hours=3)).isoformat()},
+                    {**_saved_row("KKK/USDT:USDT", 71), "source_slot": "1h", "source_index": 4, "source_time": (start + timedelta(hours=3)).isoformat()},
+                    {**_saved_row("LLL/USDT:USDT", 70), "source_slot": "1h", "source_index": 4, "source_time": (start + timedelta(hours=3)).isoformat()},
+                ],
+                {"input_count": 6, "refreshed_count": 6, "dropped": [], "warnings": [], "sync_complete": True, "synchronized_count": 6},
+            ),
+            (
+                [
+                    {**_saved_row("DDD/USDT:USDT", 67, state="LC_NOI_BO"), "source_slot": "2h", "source_index": 1, "origin_source_slot": "1h", "origin_source_index": 2, "origin_source_time": (start + timedelta(hours=1)).isoformat()},
+                    {**_saved_row("EEE/USDT:USDT", 66, state="LC_NOI_BO"), "source_slot": "2h", "source_index": 1, "origin_source_slot": "1h", "origin_source_index": 2, "origin_source_time": (start + timedelta(hours=1)).isoformat()},
+                    {**_saved_row("FFF/USDT:USDT", 65, state="LC_NOI_BO"), "source_slot": "2h", "source_index": 1, "origin_source_slot": "1h", "origin_source_index": 2, "origin_source_time": (start + timedelta(hours=1)).isoformat()},
+                    {**_saved_row("JJJ/USDT:USDT", 72, state="LC_NOI_BO"), "source_slot": "2h", "source_index": 2, "origin_source_slot": "1h", "origin_source_index": 4, "origin_source_time": (start + timedelta(hours=3)).isoformat()},
+                    {**_saved_row("KKK/USDT:USDT", 71, state="LC_NOI_BO"), "source_slot": "2h", "source_index": 2, "origin_source_slot": "1h", "origin_source_index": 4, "origin_source_time": (start + timedelta(hours=3)).isoformat()},
+                    {**_saved_row("LLL/USDT:USDT", 70, state="LC_NOI_BO"), "source_slot": "2h", "source_index": 2, "origin_source_slot": "1h", "origin_source_index": 4, "origin_source_time": (start + timedelta(hours=3)).isoformat()},
+                ],
+                {"input_count": 6, "refreshed_count": 6, "dropped": [], "warnings": [], "sync_complete": True, "synchronized_count": 6},
+            ),
+        ]
         update_lc_internal_pipeline(
             config,
             [_candidate("DDD/USDT:USDT", 67), _candidate("EEE/USDT:USDT", 66), _candidate("FFF/USDT:USDT", 65)],
             now=start + timedelta(hours=1),
         )
+        update_lc_internal_pipeline(
+            config,
+            [_candidate("GGG/USDT:USDT", 69), _candidate("HHH/USDT:USDT", 68), _candidate("III/USDT:USDT", 67)],
+            now=start + timedelta(hours=2),
+        )
+        four_hour = update_lc_internal_pipeline(
+            config,
+            [_candidate("JJJ/USDT:USDT", 72), _candidate("KKK/USDT:USDT", 71), _candidate("LLL/USDT:USDT", 70)],
+            now=start + timedelta(hours=3),
+        )
         notify_mini_pool_summary(
             config,
-            [{"symbol": "DDD/USDT:USDT", "side": "long", "source_slot": "2h", "source_index": 1}],
+            four_hour["four_hour_event"]["approved"][:2],
+            scan={
+                "mini_index": 1,
+                "selected_symbols": ["JJJ/USDT:USDT", "KKK/USDT:USDT"],
+                "decision_reason_vi": "Mini đã chọn 2 cặp mạnh nhất trong nhóm LC 4h.",
+            },
             slot_id="slot-1",
-            now=start + timedelta(hours=1, minutes=10),
+            now=start + timedelta(hours=3, minutes=10),
         )
 
         message = format_internal_notifications_view(config)
 
-        lines = message.splitlines()
-        self.assertIn("mỗi dòng là 1 thông báo", message)
-        self.assertGreaterEqual(len(lines), 5)
-        self.assertTrue(lines[2].startswith("🕐 1h top 3 setup"))
-        self.assertTrue(lines[3].startswith("🕐 1h top 3 setup"))
-        self.assertTrue(lines[4].startswith("🕑 #1 LC nội bộ tổng hợp 2h"))
-        self.assertTrue(lines[5].startswith("🕓 Mini pool 4h"))
-        self.assertIn("AAA/USDT:USDT", lines[2])
-        self.assertIn("DDD/USDT:USDT", lines[4])
+        self.assertIn("mỗi khối là 1 thông báo đầy đủ", message)
+        blocks = message.split("\n\n")
+        self.assertGreaterEqual(len(blocks), 10)
+        self.assertEqual(blocks[0], "🔔 Thông báo nội bộ")
+        self.assertTrue(blocks[2].startswith("🔵 1h top 3 setup\n07/07/26 07:05:00"))
+        self.assertTrue(blocks[3].startswith("🔵 1h top 3 setup\n07/07/26 08:05:00"))
+        self.assertTrue(blocks[4].startswith("🟡 #1 LC nội bộ tổng hợp 2h\n07/07/26 08:05:00"))
+        self.assertTrue(blocks[5].startswith("🔵 1h top 3 setup\n07/07/26 09:05:00"))
+        self.assertTrue(blocks[6].startswith("🔵 1h top 3 setup\n07/07/26 10:05:00"))
+        self.assertTrue(blocks[7].startswith("🟡 #2 LC nội bộ tổng hợp 2h\n07/07/26 10:05:00"))
+        self.assertTrue(blocks[8].startswith("🔴 #1 LC nội bộ tổng hợp 4h\n07/07/26 10:05:00"))
+        self.assertTrue(blocks[9].startswith("🟣 Mini #1\n07/07/26 10:15:00"))
+        self.assertIn("Khung 🔵 1h: #1 (07:05)", blocks[2])
+        self.assertIn("Khung 🟡 2h: #1 (08:05)", blocks[4])
+        self.assertIn("Gộp từ: 🔵 1h #1 (07:05), 🔵 1h #2 (08:05)", blocks[4])
+        self.assertIn("Gốc 🔵 1h #2 (08:05)", blocks[4])
+        self.assertIn("Khung 🔴 4h: #1 (10:05)", blocks[8])
+        self.assertIn("Gộp từ: 🟡 2h #1 (08:05), 🟡 2h #2 (10:05)", blocks[8])
+        self.assertIn("Gốc 🔵 1h #4 (10:05)", blocks[8])
+        self.assertIn("Mini chọn: 2/3 cặp", blocks[9])
+        self.assertIn("AAA/USDT:USDT", blocks[2])
+        self.assertIn("DDD/USDT:USDT", blocks[4])
+        self.assertIn("JJJ/USDT:USDT", blocks[8])
         send_message.assert_not_called()
 
+    @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
     @patch("crypto_trader.notifier.send_telegram_message")
-    def test_one_hour_stays_internal_but_two_hour_and_four_hour_push_when_enabled(self, send_message) -> None:
+    def test_one_hour_stays_internal_but_two_hour_and_four_hour_push_when_enabled(self, send_message, recheck_rows) -> None:
         config = self._config()
         config["ai"]["internal"]["lc_pipeline_notify_two_hour_summary"] = True
         config["ai"]["internal"]["lc_pipeline_notify_mini_pool_summary"] = True
+        config["ai"]["internal"]["lc_pipeline_recheck_interval_minutes"] = 999
         start = datetime(2026, 7, 6, 0, 5, tzinfo=timezone.utc)
 
         update_lc_internal_pipeline(
@@ -1016,18 +1193,71 @@ class LcPipelineTest(TestCase):
         )
         self.assertEqual(send_message.call_count, 0)
 
+        recheck_rows.side_effect = [
+            (
+                [
+                    {**_saved_row("AAA/USDT:USDT", 61), "source_slot": "1h", "source_index": 1, "source_time": start.isoformat()},
+                    {**_saved_row("BBB/USDT:USDT", 60), "source_slot": "1h", "source_index": 1, "source_time": start.isoformat()},
+                    {**_saved_row("CCC/USDT:USDT", 59), "source_slot": "1h", "source_index": 1, "source_time": start.isoformat()},
+                    {**_saved_row("DDD/USDT:USDT", 64), "source_slot": "1h", "source_index": 2, "source_time": (start + timedelta(hours=1)).isoformat()},
+                    {**_saved_row("EEE/USDT:USDT", 63), "source_slot": "1h", "source_index": 2, "source_time": (start + timedelta(hours=1)).isoformat()},
+                    {**_saved_row("FFF/USDT:USDT", 62), "source_slot": "1h", "source_index": 2, "source_time": (start + timedelta(hours=1)).isoformat()},
+                ],
+                {"input_count": 6, "refreshed_count": 6, "dropped": [], "warnings": [], "sync_complete": True, "synchronized_count": 6},
+            ),
+            (
+                [
+                    {**_saved_row("GGG/USDT:USDT", 69), "source_slot": "1h", "source_index": 3, "source_time": (start + timedelta(hours=2)).isoformat()},
+                    {**_saved_row("HHH/USDT:USDT", 68), "source_slot": "1h", "source_index": 3, "source_time": (start + timedelta(hours=2)).isoformat()},
+                    {**_saved_row("III/USDT:USDT", 67), "source_slot": "1h", "source_index": 3, "source_time": (start + timedelta(hours=2)).isoformat()},
+                    {**_saved_row("JJJ/USDT:USDT", 72), "source_slot": "1h", "source_index": 4, "source_time": (start + timedelta(hours=3)).isoformat()},
+                    {**_saved_row("KKK/USDT:USDT", 71), "source_slot": "1h", "source_index": 4, "source_time": (start + timedelta(hours=3)).isoformat()},
+                    {**_saved_row("LLL/USDT:USDT", 70), "source_slot": "1h", "source_index": 4, "source_time": (start + timedelta(hours=3)).isoformat()},
+                ],
+                {"input_count": 6, "refreshed_count": 6, "dropped": [], "warnings": [], "sync_complete": True, "synchronized_count": 6},
+            ),
+            (
+                [
+                    {**_saved_row("DDD/USDT:USDT", 64, state="LC_NOI_BO"), "source_slot": "2h", "source_index": 1, "origin_source_slot": "1h", "origin_source_index": 2, "origin_source_time": (start + timedelta(hours=1)).isoformat()},
+                    {**_saved_row("EEE/USDT:USDT", 63, state="LC_NOI_BO"), "source_slot": "2h", "source_index": 1, "origin_source_slot": "1h", "origin_source_index": 2, "origin_source_time": (start + timedelta(hours=1)).isoformat()},
+                    {**_saved_row("FFF/USDT:USDT", 62, state="LC_NOI_BO"), "source_slot": "2h", "source_index": 1, "origin_source_slot": "1h", "origin_source_index": 2, "origin_source_time": (start + timedelta(hours=1)).isoformat()},
+                    {**_saved_row("JJJ/USDT:USDT", 72, state="LC_NOI_BO"), "source_slot": "2h", "source_index": 2, "origin_source_slot": "1h", "origin_source_index": 4, "origin_source_time": (start + timedelta(hours=3)).isoformat()},
+                    {**_saved_row("KKK/USDT:USDT", 71, state="LC_NOI_BO"), "source_slot": "2h", "source_index": 2, "origin_source_slot": "1h", "origin_source_index": 4, "origin_source_time": (start + timedelta(hours=3)).isoformat()},
+                    {**_saved_row("LLL/USDT:USDT", 70, state="LC_NOI_BO"), "source_slot": "2h", "source_index": 2, "origin_source_slot": "1h", "origin_source_index": 4, "origin_source_time": (start + timedelta(hours=3)).isoformat()},
+                ],
+                {"input_count": 6, "refreshed_count": 6, "dropped": [], "warnings": [], "sync_complete": True, "synchronized_count": 6},
+            ),
+        ]
         update_lc_internal_pipeline(
             config,
             [_candidate("DDD/USDT:USDT", 64), _candidate("EEE/USDT:USDT", 63), _candidate("FFF/USDT:USDT", 62)],
             now=start + timedelta(hours=1),
         )
+        update_lc_internal_pipeline(
+            config,
+            [_candidate("GGG/USDT:USDT", 69), _candidate("HHH/USDT:USDT", 68), _candidate("III/USDT:USDT", 67)],
+            now=start + timedelta(hours=2),
+        )
+        four_hour = update_lc_internal_pipeline(
+            config,
+            [_candidate("JJJ/USDT:USDT", 72), _candidate("KKK/USDT:USDT", 71), _candidate("LLL/USDT:USDT", 70)],
+            now=start + timedelta(hours=3),
+        )
         notify_mini_pool_summary(
             config,
-            [{"symbol": "DDD/USDT:USDT", "side": "long", "source_slot": "2h", "source_index": 1}],
+            four_hour["four_hour_event"]["approved"][:1],
+            scan={
+                "mini_index": 1,
+                "selected_symbols": ["JJJ/USDT:USDT"],
+                "decision_reason_vi": "Mini đã chọn cặp mạnh nhất từ nhóm LC 4h.",
+            },
             slot_id="slot-1",
         )
 
         messages = "\n".join(call.args[1] for call in send_message.call_args_list)
-        self.assertEqual(send_message.call_count, 2)
+        self.assertEqual(send_message.call_count, 4)
         self.assertIn("LC nội bộ tổng hợp 2h", messages)
-        self.assertIn("Mini pool 4h", messages)
+        self.assertIn("LC nội bộ tổng hợp 4h", messages)
+        self.assertIn("Gốc 🔵 1h #2 (08:05)", messages)
+        self.assertIn("Gốc 🔵 1h #4 (10:05)", messages)
+        self.assertIn("Mini #1", messages)

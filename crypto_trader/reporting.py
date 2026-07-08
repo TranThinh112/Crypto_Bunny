@@ -1114,6 +1114,7 @@ def format_market_guard_message(status: dict[str, Any]) -> str:
     if warnings:
         lines.append("⚠️ " + " | ".join(_reason_vi(item) for item in warnings[:2]))
     notify_minutes = max(1, round(float(status.get("notify_interval_seconds") or 600) / 60))
+    lines.append("Chi báo khi có biến động mạnh/rút râu mạnh; bỏ qua các nhịp tăng nhẹ 0.5-1%.")
     lines.append(f"🔕 Guard chỉ gửi Telegram tối đa {notify_minutes} phút/lần.")
     return "\n".join(lines)
 

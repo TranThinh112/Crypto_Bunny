@@ -206,7 +206,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "lc_pipeline_relaxed_min_confidence": 70,
             "lc_pipeline_notify_two_hour_summary": True,
             "lc_pipeline_notify_mini_pool_summary": True,
-            "lc_pipeline_two_hour_icon": "🕑",
+            "lc_pipeline_two_hour_icon": "🟡",
             "lc_pipeline_promote_survivors": True,
             "lc_pipeline_promote_to_pending": True,
             "timeout_seconds": 15,

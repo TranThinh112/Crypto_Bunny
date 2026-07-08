@@ -603,11 +603,6 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
         for candidate in ranked_candidates[:max_symbols]
     ]
     mini_candidate_symbols = [str(item.get("symbol")) for item in candidate_summaries if item.get("symbol")]
-    notify_mini_pool_summary(
-        config,
-        lc_pipeline_pool_rows(config, mini_candidate_symbols),
-        slot_id=slot_id,
-    )
     local_result = _local_market_scan_result(config, candidates, warnings)
     has_mini_pool = len(mini_candidate_symbols) > 0
     if mini_candidate_symbols:
@@ -648,7 +643,9 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
         "compact_ai_payload": compact_payload,
         "warnings": warnings[:20],
     }
-    save_lc_pipeline_mini_scan(config, result)
+    result["decision_reason_vi"] = "Mini đang chờ hoàn tất bước chọn cuối cùng."
+    saved_result = save_lc_pipeline_mini_scan(config, result)
+    result["mini_index"] = saved_result.get("mini_index")
 
     if has_mini_pool and result["provider"] == "openai" and bool(internal_config.get("market_scan_use_ai", True)):
         try:
@@ -678,7 +675,23 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
 
     result["approved_symbols"] = list(result.get("selected_symbols") or [])
     result["status"] = "done" if has_mini_pool else "waiting_lc"
-    return save_lc_pipeline_mini_scan(config, result)
+    result["decision_reason_vi"] = (
+        "Mini đã đối chiếu nhóm LC 4h bằng AI nội bộ và chỉ giữ lại các cặp còn mạnh nhất."
+        if result.get("ai_review")
+        else (
+            "Mini chưa chọn cặp nào vì hiện chưa có LC 4h đủ điều kiện."
+            if not result["approved_symbols"]
+            else "Mini đã chọn từ nhóm LC 4h hiện tại dựa trên Win Rate, chất lượng setup, xu hướng và chỉ báo."
+        )
+    )
+    saved_result = save_lc_pipeline_mini_scan(config, result)
+    notify_mini_pool_summary(
+        config,
+        lc_pipeline_pool_rows(config, list(saved_result.get("selected_symbols") or [])),
+        scan=saved_result,
+        slot_id=slot_id,
+    )
+    return saved_result
 
 
 def run_internal_market_scan_if_due(config: dict[str, Any]) -> dict[str, Any] | None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import tempfile
 import json
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase
@@ -14,11 +14,79 @@ from fastapi.testclient import TestClient
 from crypto_trader.config import load_config
 from crypto_trader.codex_features import close_trade_execution, record_trade_candidates, record_trade_execution, try_slot_refill
 from crypto_trader.models import TradeCandidate
-from crypto_trader.storage import list_trade_execution_rows, save_market_scan_observations, set_journal_state
-from crypto_trader.ui import _handle_telegram_update, _run_automation_cycle, _telegram_action_response, create_app
+from crypto_trader.storage import get_journal_state, list_trade_execution_rows, save_market_scan_observations, set_journal_state
+from crypto_trader.ui import (
+    SCAN_TELEGRAM_SLOT_KEY,
+    _handle_telegram_update,
+    _market_guard_notification_status,
+    _periodic_scan_notification_due,
+    _remember_periodic_scan_notification,
+    _run_automation_cycle,
+    _telegram_action_response,
+    create_app,
+)
 
 
 class UiTest(TestCase):
+    def test_market_guard_notification_status_ignores_mild_positive_move(self) -> None:
+        config = {
+            "market_guard": {
+                "price_move_5m_pct": 0.8,
+                "critical_price_move_5m_pct": 1.4,
+                "critical_candle_range_pct": 1.8,
+                "wick_pct": 0.45,
+                "wick_body_ratio": 2.5,
+                "volume_ratio": 2.5,
+            }
+        }
+        status = {
+            "alerts": [
+                {
+                    "symbol": "BTC/USDT:USDT",
+                    "severity": "warning",
+                    "move_pct": 0.82,
+                    "candle_range_pct": 0.92,
+                    "wick_pct": 0.21,
+                    "wick_body_ratio": 1.4,
+                    "volume_ratio": 1.3,
+                }
+            ]
+        }
+
+        self.assertIsNone(_market_guard_notification_status(config, status))
+
+    def test_market_guard_notification_status_keeps_strong_wick_alert(self) -> None:
+        config = {
+            "market_guard": {
+                "price_move_5m_pct": 0.8,
+                "critical_price_move_5m_pct": 1.4,
+                "critical_candle_range_pct": 1.8,
+                "wick_pct": 0.45,
+                "wick_body_ratio": 2.5,
+                "volume_ratio": 2.5,
+            }
+        }
+        status = {
+            "alerts": [
+                {
+                    "symbol": "ETH/USDT:USDT",
+                    "severity": "warning",
+                    "move_pct": 0.74,
+                    "candle_range_pct": 1.1,
+                    "wick_pct": 0.92,
+                    "wick_body_ratio": 4.2,
+                    "volume_ratio": 2.9,
+                }
+            ]
+        }
+
+        filtered = _market_guard_notification_status(config, status)
+
+        self.assertIsNotNone(filtered)
+        assert filtered is not None
+        self.assertEqual(len(filtered["alerts"]), 1)
+        self.assertEqual(filtered["alerts"][0]["symbol"], "ETH/USDT:USDT")
+
     def _candidate(self) -> TradeCandidate:
         candidate = TradeCandidate(
             symbol="BTC/USDT:USDT",
@@ -471,6 +539,67 @@ class UiTest(TestCase):
         self.assertIn("setup_menu", callbacks)
         self.assertNotIn("set_leverage", callbacks)
 
+    @patch("crypto_trader.ui.answer_callback_query")
+    @patch("crypto_trader.ui.edit_telegram_chat_message")
+    @patch("crypto_trader.ui.send_telegram_chat_message")
+    @patch("crypto_trader.ui.internal_notification_timeline_messages")
+    def test_internal_notifications_callback_sends_timeline_as_separate_messages(
+        self,
+        timeline_messages,
+        send_message,
+        edit_message,
+        answer_callback,
+    ) -> None:
+        timeline_messages.return_value = ["msg-1", "msg-2", "msg-3"]
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text("mode: dry_run\n", encoding="utf-8")
+            config = load_config(config_path)
+            update = {
+                "callback_query": {
+                    "id": "cb-2",
+                    "data": "view_internal_notifications",
+                    "message": {
+                        "message_id": 789,
+                        "chat": {"id": 123},
+                    },
+                }
+            }
+
+            with patch.dict("os.environ", {"TELEGRAM_CHAT_ID": "123"}):
+                _handle_telegram_update(config, update, config_path)
+
+        answer_callback.assert_called_once()
+        edit_message.assert_not_called()
+        self.assertEqual(send_message.call_count, 3)
+        self.assertEqual([call.args[2] for call in send_message.call_args_list], ["msg-1", "msg-2", "msg-3"])
+
+    @patch("crypto_trader.ui.send_telegram_chat_message")
+    @patch("crypto_trader.ui.internal_notification_timeline_messages")
+    def test_internal_notifications_command_sends_timeline_as_separate_messages(
+        self,
+        timeline_messages,
+        send_message,
+    ) -> None:
+        timeline_messages.return_value = ["msg-a", "msg-b"]
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text("mode: dry_run\n", encoding="utf-8")
+            config = load_config(config_path)
+            update = {
+                "message": {
+                    "message_id": 1001,
+                    "chat": {"id": 123},
+                    "text": "/thongbao",
+                }
+            }
+
+            with patch.dict("os.environ", {"TELEGRAM_CHAT_ID": "123"}):
+                _handle_telegram_update(config, update, config_path)
+
+        self.assertEqual(send_message.call_count, 2)
+        self.assertEqual([call.args[2] for call in send_message.call_args_list], ["msg-a", "msg-b"])
+
     @patch("crypto_trader.ui.system_health_dashboard")
     @patch("crypto_trader.ui.replay_dashboard_payload")
     @patch("crypto_trader.ui.analytics_dashboard")
@@ -521,6 +650,32 @@ class UiTest(TestCase):
         for call in send_message.call_args_list:
             self.assertFalse(call.kwargs.get("with_buttons"))
             self.assertFalse(call.kwargs.get("replace_previous"))
+
+    def test_periodic_scan_notification_only_fires_on_quarter_hour_slots(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text(
+                "mode: dry_run\n"
+                "_atlas_test_mode: true\n"
+                "notifications:\n"
+                "  telegram:\n"
+                "    notify_scans: true\n",
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+
+            not_due = datetime(2026, 7, 8, 5, 14, tzinfo=timezone(timedelta(hours=7))).astimezone(timezone.utc)
+            due = datetime(2026, 7, 8, 5, 15, tzinfo=timezone(timedelta(hours=7))).astimezone(timezone.utc)
+            next_due = datetime(2026, 7, 8, 5, 30, tzinfo=timezone(timedelta(hours=7))).astimezone(timezone.utc)
+
+            self.assertFalse(_periodic_scan_notification_due(config, not_due))
+            self.assertTrue(_periodic_scan_notification_due(config, due))
+
+            _remember_periodic_scan_notification(config, due)
+
+            self.assertEqual(get_journal_state(config, SCAN_TELEGRAM_SLOT_KEY), "2026-07-08T05:15:00+07:00")
+            self.assertFalse(_periodic_scan_notification_due(config, due))
+            self.assertTrue(_periodic_scan_notification_due(config, next_due))
 
     def test_telegram_undecided_lc_action_formats_pipeline_state(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:

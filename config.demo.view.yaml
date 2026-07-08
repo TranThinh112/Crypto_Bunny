@@ -86,7 +86,7 @@ ai:
     lc_pipeline_relaxed_min_confidence: 70
     lc_pipeline_notify_two_hour_summary: true
     lc_pipeline_notify_mini_pool_summary: true
-    lc_pipeline_two_hour_icon: "🕑"
+    lc_pipeline_two_hour_icon: "🟡"
     lc_pipeline_promote_survivors: true
     lc_pipeline_promote_to_pending: true
     timeout_seconds: 15
