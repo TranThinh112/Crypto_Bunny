@@ -70,6 +70,7 @@ def _pipeline_config(config: dict[str, Any]) -> dict[str, Any]:
         "relaxed_min_risk_reward": float(internal.get("lc_pipeline_relaxed_min_risk_reward", 1.5) or 1.5),
         "notify_one_hour_summary": bool(internal.get("lc_pipeline_notify_one_hour_summary", True)),
         "notify_two_hour_summary": bool(internal.get("lc_pipeline_notify_two_hour_summary", False)),
+        "notify_undecided_recheck_summary": bool(internal.get("lc_pipeline_notify_undecided_recheck_summary", True)),
         "notify_mini_pool_summary": bool(internal.get("lc_pipeline_notify_mini_pool_summary", False)),
         "promote_survivors": bool(
             internal.get("lc_pipeline_promote_survivors", internal.get("lc_pipeline_promote_to_pending", True))
@@ -1813,6 +1814,54 @@ def _mini_notification_text(
     return "\n".join(lines)
 
 
+def _rc_recheck_row_line(index: int, row: dict[str, Any], *, dropped: bool = False) -> str:
+    side = str(row.get("side") or "-").upper()
+    try:
+        win_text = f"{float(row.get('win_probability_pct') or 0):.2f}%"
+    except (TypeError, ValueError):
+        win_text = "-"
+    prefix = "Win trước" if dropped else "Win"
+    return f"{index}. {row.get('symbol', '-')} | {side} | {prefix} {win_text}"
+
+
+def _undecided_recheck_notification_text(
+    config: dict[str, Any],
+    meta: dict[str, Any],
+    *,
+    kept_rows: list[dict[str, Any]],
+    promoted_rows: list[dict[str, Any]],
+) -> str:
+    created_at = _parse_time(meta.get("recheck_time")) or datetime.now(timezone.utc)
+    local_now = _local_time(config, created_at)
+    recheck_index = meta.get("daily_index", "-")
+    dropped_rows = [row for row in meta.get("dropped_rows") or [] if isinstance(row, dict)]
+    lines = [
+        f"📋 RC #{recheck_index} Chưa Duyệt",
+        local_now.strftime("%d/%m/%y %H:%M:%S"),
+        f"Lần recheck: #{recheck_index} ({local_now.strftime('%H:%M:%S')})",
+        (
+            f"Kept {len(kept_rows)} | Dropped {len(dropped_rows)} | "
+            f"Promoted {len(promoted_rows)}"
+        ),
+    ]
+    if kept_rows:
+        lines.append("Giữ lại:")
+        lines.extend(_rc_recheck_row_line(index, row) for index, row in enumerate(kept_rows[:3], 1))
+    else:
+        lines.append("Giữ lại: không còn cặp nào.")
+    if dropped_rows:
+        lines.append("Bị loại:")
+        lines.extend(_rc_recheck_row_line(index, row, dropped=True) for index, row in enumerate(dropped_rows[:3], 1))
+    else:
+        lines.append("Bị loại: 0")
+    if promoted_rows:
+        lines.append("Đẩy lên LC nội bộ:")
+        lines.extend(_rc_recheck_row_line(index, row) for index, row in enumerate(promoted_rows[:3], 1))
+    else:
+        lines.append("Đẩy lên LC nội bộ: 0")
+    return "\n".join(lines)
+
+
 def internal_notification_timeline_messages(config: dict[str, Any], *, limit_per_frame: int = 5) -> list[str]:
     state = _load_state(config, datetime.now(timezone.utc), reset_for_new_day=False)
     items = state.get("internal_notifications") if isinstance(state.get("internal_notifications"), list) else []
@@ -1834,10 +1883,12 @@ def internal_notification_timeline_messages(config: dict[str, Any], *, limit_per
         entries.append((created_at_key, _mini_notification_text(config, latest_scan, latest_four_hour)))
         mini_created_at_keys.add(created_at_key)
     for item in items:
-        if not isinstance(item, dict) or str(item.get("frame") or "") != "mini":
+        if not isinstance(item, dict):
             continue
         created_at_key = str(item.get("created_at") or "")
-        if not created_at_key or created_at_key in mini_created_at_keys:
+        if not created_at_key:
+            continue
+        if str(item.get("frame") or "") == "mini" and created_at_key in mini_created_at_keys:
             continue
         entries.append((created_at_key, _internal_notification_text(item, config)))
     if not entries:
@@ -1881,6 +1932,36 @@ def _notify_four_hour_summary(config: dict[str, Any], event: dict[str, Any]) -> 
     except Exception:
         return
     send_telegram_message(config, _four_hour_notification_text(config, event), with_buttons=False, replace_previous=False)
+
+
+def _notify_undecided_recheck_summary(
+    config: dict[str, Any],
+    state: dict[str, Any],
+    meta: dict[str, Any],
+    *,
+    kept_rows: list[dict[str, Any]],
+    promoted_rows: list[dict[str, Any]],
+    now: datetime,
+) -> None:
+    if int(meta.get("input_count") or 0) <= 0:
+        return
+    text = _undecided_recheck_notification_text(config, {**meta, "recheck_time": now.isoformat()}, kept_rows=kept_rows, promoted_rows=promoted_rows)
+    lines = text.splitlines()[2:]
+    _append_internal_notification(
+        state,
+        frame="rc",
+        icon="📋",
+        title=f"RC #{meta.get('daily_index', '-')}",
+        lines=lines,
+        created_at=now,
+    )
+    if not _pipeline_config(config)["notify_undecided_recheck_summary"]:
+        return
+    try:
+        from .notifier import send_telegram_message
+    except Exception:
+        return
+    send_telegram_message(config, text, with_buttons=False, replace_previous=False)
 
 
 def _age_label(hours: float) -> str:
@@ -2175,6 +2256,7 @@ def _recheck_undecided_pool(
         for item in list(recheck_meta.get("dropped") or [])
         if isinstance(item, dict)
     }
+    dropped_rows_summary: list[dict[str, Any]] = []
     output: list[dict[str, Any]] = []
     for row in undecided_rows:
         key = _setup_key(row)
@@ -2192,6 +2274,14 @@ def _recheck_undecided_pool(
             continue
         dropped_item = dropped_by_key.get(key)
         if dropped_item:
+            dropped_rows_summary.append(
+                {
+                    "symbol": row.get("symbol"),
+                    "side": row.get("side"),
+                    "win_probability_pct": row.get("current_win_probability_pct", row.get("win_probability_pct")),
+                    "reason": dropped_item.get("reason"),
+                }
+            )
             marked_row = _row_with_recheck_metadata(
                 row,
                 recheck_daily_index=recheck_daily_index,
@@ -2232,6 +2322,7 @@ def _recheck_undecided_pool(
         "trimmed": trimmed,
         "warnings": list(recheck_meta.get("warnings") or []),
         "dropped": list(recheck_meta.get("dropped") or []),
+        "dropped_rows": dropped_rows_summary,
         "daily_index": recheck_daily_index,
         "recheck_label": local_now.strftime("%d/%m/%y %H:%M:%S"),
         "slot": recheck_slot,
@@ -2642,6 +2733,14 @@ def _update_lc_internal_pipeline_impl(
             settings=settings,
         )
         result["promoted"] = _promote_survivors(config, state, candidates_by_symbol, settings, now, blocked_symbols)
+        _notify_undecided_recheck_summary(
+            config,
+            state,
+            result["undecided_recheck"],
+            kept_rows=_sort_saved_rows(state.get("undecided", []), settings, reverse=True)[: int(settings["undecided_max"])],
+            promoted_rows=result["promoted"],
+            now=now,
+        )
 
     result["undecided"] = _sort_saved_rows(state.get("undecided", []), settings, reverse=True)[
         : int(settings["undecided_max"])
