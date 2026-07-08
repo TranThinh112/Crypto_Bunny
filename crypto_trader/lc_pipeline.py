@@ -578,6 +578,10 @@ def _refresh_row_from_candidate(
         "revived_age_hours",
         "revived_age_label",
         "mini_index",
+        "recheck_daily_index",
+        "recheck_slot",
+        "recheck_time",
+        "recheck_label",
     ):
         if key in row:
             refreshed[key] = row.get(key)
@@ -988,6 +992,7 @@ def _load_state(config: dict[str, Any], now: datetime, *, reset_for_new_day: boo
         state["day_key"] = day
         state["daily_one_hour_counter"] = 0
         state["daily_two_hour_counter"] = 0
+        state["daily_undecided_recheck_counter"] = 0
         state["daily_mini_counter"] = 0
         state["last_undecided_recheck_slot"] = None
         state["hourly_windows"] = []
@@ -1005,6 +1010,7 @@ def _load_state(config: dict[str, Any], now: datetime, *, reset_for_new_day: boo
     state.setdefault("internal_notifications", [])
     state.setdefault("daily_one_hour_counter", 0)
     state.setdefault("daily_two_hour_counter", 0)
+    state.setdefault("daily_undecided_recheck_counter", 0)
     state.setdefault("four_hour_counter", 0)
     state.setdefault("daily_mini_counter", 0)
     state.setdefault("last_undecided_recheck_slot", None)
@@ -1068,6 +1074,10 @@ def _compact_saved_row(row: dict[str, Any]) -> dict[str, Any]:
         "undecided_reason",
         "last_recheck_at",
         "mini_index",
+        "recheck_daily_index",
+        "recheck_slot",
+        "recheck_time",
+        "recheck_label",
     }
     compact = {key: row.get(key) for key in keep if key in row}
     payload = row.get("payload")
@@ -2126,8 +2136,26 @@ def _mark_missing_undecided_row(
     return _mark_undecided_row(record, now=now, settings={}, status="missing_setup", reason=reason)
 
 
+def _row_with_recheck_metadata(
+    row: dict[str, Any],
+    *,
+    recheck_daily_index: int,
+    recheck_slot: str,
+    now: datetime,
+    local_now: datetime,
+) -> dict[str, Any]:
+    return {
+        **row,
+        "recheck_daily_index": recheck_daily_index,
+        "recheck_slot": recheck_slot,
+        "recheck_time": now.isoformat(),
+        "recheck_label": local_now.strftime("%d/%m/%y %H:%M:%S"),
+    }
+
+
 def _recheck_undecided_pool(
     config: dict[str, Any],
+    state: dict[str, Any],
     rows: list[dict[str, Any]],
     *,
     now: datetime,
@@ -2136,6 +2164,10 @@ def _recheck_undecided_pool(
     undecided_rows = [row for row in rows if isinstance(row, dict) and str(row.get("symbol") or "")]
     if not undecided_rows:
         return [], {"input_count": 0, "refreshed_count": 0, "dropped_count": 0, "kept_count": 0, "warnings": []}
+    local_now = _local_time(config, now)
+    recheck_daily_index = int(state.get("daily_undecided_recheck_counter") or 0) + 1
+    state["daily_undecided_recheck_counter"] = recheck_daily_index
+    recheck_slot = _fixed_interval_slot_key(config, now, minutes=int(settings["recheck_interval_minutes"]))
     refreshed_rows, recheck_meta = _recheck_rows_with_latest_market_data(config, undecided_rows, now=now)
     refreshed_by_key = {_setup_key(row): row for row in refreshed_rows if isinstance(row, dict)}
     dropped_by_key = {
@@ -2148,24 +2180,44 @@ def _recheck_undecided_pool(
         key = _setup_key(row)
         if key in refreshed_by_key:
             merged = _merge_rechecked_row(row, refreshed_by_key[key])
+            merged = _row_with_recheck_metadata(
+                merged,
+                recheck_daily_index=recheck_daily_index,
+                recheck_slot=recheck_slot,
+                now=now,
+                local_now=local_now,
+            )
             status = "soft_valid" if _row_is_relaxed_valid(merged, settings) else "soft_invalid"
             output.append(_mark_undecided_row(merged, now=now, settings=settings, status=status))
             continue
         dropped_item = dropped_by_key.get(key)
         if dropped_item:
+            marked_row = _row_with_recheck_metadata(
+                row,
+                recheck_daily_index=recheck_daily_index,
+                recheck_slot=recheck_slot,
+                now=now,
+                local_now=local_now,
+            )
             output.append(
                 _mark_missing_undecided_row(
-                    row,
+                    marked_row,
                     now=now,
                     reason=str(dropped_item.get("reason") or "khong con setup hop le trong du lieu moi nhat"),
                 )
             )
             continue
-        stale_row = {
-            **row,
-            "recheck_state": "invalid",
-            "win_rate_trend": "down",
-        }
+        stale_row = _row_with_recheck_metadata(
+            {
+                **row,
+                "recheck_state": "invalid",
+                "win_rate_trend": "down",
+            },
+            recheck_daily_index=recheck_daily_index,
+            recheck_slot=recheck_slot,
+            now=now,
+            local_now=local_now,
+        )
         output.append(_mark_undecided_row(stale_row, now=now, settings=settings, status="stale"))
     kept_rows = list(output)
     trimmed = False
@@ -2180,6 +2232,9 @@ def _recheck_undecided_pool(
         "trimmed": trimmed,
         "warnings": list(recheck_meta.get("warnings") or []),
         "dropped": list(recheck_meta.get("dropped") or []),
+        "daily_index": recheck_daily_index,
+        "recheck_label": local_now.strftime("%d/%m/%y %H:%M:%S"),
+        "slot": recheck_slot,
     }
 
 
@@ -2581,6 +2636,7 @@ def _update_lc_internal_pipeline_impl(
         state["last_undecided_recheck_slot"] = undecided_recheck_slot
         state["undecided"], result["undecided_recheck"] = _recheck_undecided_pool(
             config,
+            state,
             list(state.get("undecided") or []),
             now=now,
             settings=settings,

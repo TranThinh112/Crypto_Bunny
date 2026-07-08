@@ -963,6 +963,53 @@ def _lc_pending_source_label(row: dict[str, Any]) -> str:
     return "-"
 
 
+def _lc_pending_origin_label(row: dict[str, Any]) -> str:
+    origin_slot = str(row.get("origin_source_slot") or "").strip().lower()
+    origin_index = row.get("origin_source_index")
+    raw_label = str(row.get("origin_source_label") or "").strip()
+    origin_time = None
+    if raw_label:
+        parts = raw_label.split()
+        origin_time = parts[-1] if parts else None
+    if not origin_time:
+        raw_origin_time = row.get("origin_source_time")
+        if raw_origin_time:
+            try:
+                origin_time = datetime.fromisoformat(str(raw_origin_time).replace("Z", "+00:00")).strftime("%H:%M:%S")
+            except ValueError:
+                origin_time = None
+
+    def _fmt(label: str) -> str:
+        return f"{label} ({origin_time})" if origin_time else label
+
+    if "4h" in origin_slot or "four" in origin_slot:
+        return _fmt(f"4h #{origin_index}") if origin_index else "4h"
+    if "2h" in origin_slot or "two" in origin_slot:
+        return _fmt(f"2h #{origin_index}") if origin_index else "2h"
+    if "1h" in origin_slot or "hour" in origin_slot:
+        return _fmt(f"1h #{origin_index}") if origin_index else "1h"
+    return "-"
+
+
+def _lc_pending_recheck_label(row: dict[str, Any]) -> str:
+    index = row.get("recheck_daily_index")
+    raw_label = str(row.get("recheck_label") or "").strip()
+    recheck_time = None
+    if raw_label:
+        parts = raw_label.split()
+        recheck_time = parts[-1] if parts else None
+    if not recheck_time:
+        raw_recheck_time = row.get("recheck_time")
+        if raw_recheck_time:
+            try:
+                recheck_time = datetime.fromisoformat(str(raw_recheck_time).replace("Z", "+00:00")).strftime("%H:%M:%S")
+            except ValueError:
+                recheck_time = None
+    if index:
+        return f"RC #{index} ({recheck_time})" if recheck_time else f"RC #{index}"
+    return "-"
+
+
 def _duration_label(started_at: datetime | None, *, now: datetime | None = None) -> str:
     if not started_at:
         return "-"
@@ -988,9 +1035,14 @@ def format_undecided_lc_view(config: dict[str, Any]) -> str:
         scan_at = _parse_time(row.get("last_seen_at") or row.get("first_seen_at"))
         first_seen_at = _parse_time(row.get("first_seen_at"))
         source = _lc_pending_source_label(row)
+        origin = _lc_pending_origin_label(row)
+        recheck = _lc_pending_recheck_label(row)
         alive = _duration_label(first_seen_at)
         win = _fmt_number(row.get("win_probability_pct"), 2, "%")
-        lines.append(f"{index}. {symbol} | {side} | Win {win} | {date_time_label(scan_at) if scan_at else '-'} | {source} | sống {alive}")
+        lines.append(
+            f"{index}. {symbol} | {side} | Win {win} | {date_time_label(scan_at) if scan_at else '-'} | "
+            f"{source} | {recheck} | gốc {origin} | sống {alive}"
+        )
     return "\n".join(lines)
 
 
