@@ -13,6 +13,7 @@ from .codex_features import (
     get_trading_system_state,
 )
 from .lc_pipeline import (
+    lc_pipeline_four_hour_symbols,
     lc_pipeline_internal_symbols,
     lc_pipeline_mini_pool,
     lc_pipeline_pool_rows,
@@ -34,6 +35,20 @@ _PENDING_STATUS_PRIORITY = {
     "WAIT_SLOT": 1,
     "OPEN": 2,
 }
+
+
+def _ordered_unique_symbols(symbols: list[Any]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for symbol in symbols:
+        clean = str(symbol or "").strip()
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        ordered.append(clean)
+    return ordered
+
+
 def ai_config(config: dict[str, Any]) -> dict[str, Any]:
     return config.get("ai", {})
 
@@ -568,14 +583,19 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
         }
     max_source_symbols = max(1, min(40, int(internal_config.get("market_scan_source_symbols", 40) or 40)))
     max_symbols = max(1, min(3, int(internal_config.get("market_scan_max_symbols", 3) or 3)))
+    pending_limit = max(1, min(max_symbols, int(internal_config.get("market_scan_pending_limit", 1) or 1)))
     compact_payload = bool(internal_config.get("compact_ai_payload", True))
-    source_symbols, source_warnings = fetch_top_volume_symbols(config)
-    if source_symbols:
-        source_symbols = source_symbols[:max_source_symbols]
+    base_source_symbols, source_warnings = fetch_top_volume_symbols(config)
+    if base_source_symbols:
+        base_source_symbols = base_source_symbols[:max_source_symbols]
         source = "okx_top_volume_24h"
     else:
-        source_symbols = [str(symbol) for symbol in config.get("strategy", {}).get("symbols", []) if str(symbol)]
+        base_source_symbols = [str(symbol) for symbol in config.get("strategy", {}).get("symbols", []) if str(symbol)]
         source = "configured_fallback"
+    latest_four_hour_symbols = lc_pipeline_four_hour_symbols(config)
+    source_symbols = _ordered_unique_symbols(base_source_symbols + latest_four_hour_symbols)
+    if latest_four_hour_symbols:
+        source = f"{source}+latest_lc_4h"
 
     warnings: list[str] = list(source_warnings)
     digest = collect_news(config)
@@ -633,11 +653,13 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
         "model": str(internal_config.get("model", "gpt-5.4-mini")),
         "source": source,
         "source_symbols": source_symbols,
+        "source_base_symbols": list(base_source_symbols),
+        "source_four_hour_symbols": list(latest_four_hour_symbols),
         "candidate_count": len(candidates),
         "local_policy": local_result,
         "pool_symbols": list(mini_candidate_symbols or []),
-        "selected_symbols": list(local_result.get("approved_symbols") or []),
-        "approved_symbols": list(local_result.get("approved_symbols") or []),
+        "selected_symbols": list((local_result.get("approved_symbols") or [])[:pending_limit]),
+        "approved_symbols": list((local_result.get("approved_symbols") or [])[:pending_limit]),
         "candidates": candidate_summaries[:max_symbols],
         "scan_memory": scan_memory if not compact_payload else {},
         "compact_ai_payload": compact_payload,
@@ -660,7 +682,7 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
                 ai_review,
                 allowed,
                 list(mini_candidate_symbols or local_result.get("approved_symbols") or []),
-                max(1, min(max_symbols, int(internal_config.get("market_scan_pending_limit", 1) or 1))),
+                pending_limit,
             )
             scores = ai_review.get("setup_scores")
             if isinstance(scores, dict):

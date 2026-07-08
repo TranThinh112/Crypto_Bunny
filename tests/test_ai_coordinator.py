@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import tempfile
 from copy import deepcopy
 from datetime import datetime, timezone
 from unittest import TestCase
+from unittest.mock import patch
 
 from crypto_trader.ai_coordinator import (
     _candidate_market_summary,
@@ -12,11 +14,12 @@ from crypto_trader.ai_coordinator import (
     internal_market_scan_due,
     internal_lc_memory,
     okx_ai_approval,
+    run_internal_market_scan,
 )
 from crypto_trader.config import DEFAULT_CONFIG
 from crypto_trader.lc_pipeline import save_lc_pipeline_mini_scan
 from crypto_trader.models import RiskCheck, TradeCandidate
-from crypto_trader.storage import recent_market_scan_memory, save_market_scan_observations, save_pending_order
+from crypto_trader.storage import recent_market_scan_memory, save_market_scan_observations, save_pending_order, set_journal_state
 
 
 def _candidate(symbol: str = "BTC/USDT:USDT", side: str = "long", win: float = 82.0) -> TradeCandidate:
@@ -95,6 +98,65 @@ class AiCoordinatorTest(TestCase):
         )
 
         self.assertFalse(internal_market_scan_due(config, now=now))
+
+    @patch("crypto_trader.ai_coordinator.notify_mini_pool_summary")
+    @patch("crypto_trader.ai_coordinator.recent_market_scan_memory")
+    @patch("crypto_trader.ai_coordinator.enrich_quantities")
+    @patch("crypto_trader.ai_coordinator.apply_position_sizing")
+    @patch("crypto_trader.ai_coordinator.build_candidates")
+    @patch("crypto_trader.ai_coordinator.market_guard_symbol_layers")
+    @patch("crypto_trader.ai_coordinator.fetch_market_snapshots")
+    @patch("crypto_trader.ai_coordinator.fetch_top_volume_symbols")
+    @patch("crypto_trader.ai_coordinator.collect_news")
+    def test_internal_market_scan_fetches_latest_four_hour_symbols_into_source_universe(
+        self,
+        collect_news,
+        fetch_top_volume_symbols,
+        fetch_market_snapshots,
+        market_guard_symbol_layers,
+        build_candidates,
+        apply_position_sizing,
+        enrich_quantities,
+        recent_market_scan_memory_mock,
+        notify_mini_pool_summary,
+    ) -> None:
+        config = self._config()
+        set_journal_state(
+            config,
+            "lc_internal_pipeline_state",
+            json.dumps(
+                {
+                    "state_version": 3,
+                    "day_key": "2026-07-06",
+                    "four_hour_history": [
+                        {
+                            "frame": "4h",
+                            "slot": "2026-07-06T08:00:00+07:00",
+                            "created_at": "2026-07-06T01:00:00+00:00",
+                            "index": 1,
+                            "approved": [{"symbol": "LIT/USDT:USDT"}],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        )
+        collect_news.return_value = {}
+        fetch_top_volume_symbols.return_value = (["BTC/USDT:USDT"], [])
+        fetch_market_snapshots.return_value = ([], [])
+        market_guard_symbol_layers.return_value = {}
+        build_candidates.return_value = []
+        apply_position_sizing.return_value = None
+        enrich_quantities.return_value = []
+        recent_market_scan_memory_mock.return_value = {}
+
+        run_internal_market_scan(config, force=True)
+
+        self.assertEqual(
+            fetch_market_snapshots.call_args.args[1],
+            ["BTC/USDT:USDT", "LIT/USDT:USDT"],
+        )
+        notify_mini_pool_summary.assert_called_once()
 
     def test_candidate_summary_separates_4h_context_from_code_timeframes(self) -> None:
         candidate = _candidate("BTC/USDT:USDT")

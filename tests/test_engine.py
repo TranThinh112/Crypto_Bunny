@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from contextlib import ExitStack
 import tempfile
 from copy import deepcopy
+from pathlib import Path
+from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 
 from crypto_trader.config import DEFAULT_CONFIG
-from crypto_trader.engine import _create_pending_from_internal_scan
+from crypto_trader.engine import _create_pending_from_internal_scan, run_once
 from crypto_trader.models import ExecutionResult, RiskCheck, TradeCandidate
 from crypto_trader.storage import list_pending_orders
 
@@ -171,3 +174,45 @@ class EngineMiniQueueTest(TestCase):
         self.assertFalse(result["allowed"])
         self.assertEqual(result["created"], 0)
         self.assertEqual(list_pending_orders(config, status="OPEN"), [])
+
+    def test_run_once_updates_lc_pipeline_before_running_mini_scan(self) -> None:
+        config = self._config()
+        call_order: list[str] = []
+
+        with ExitStack() as stack:
+            stack.enter_context(patch("crypto_trader.engine.select_runtime_config", side_effect=lambda value: value))
+            stack.enter_context(patch("crypto_trader.engine.latest_decision_payload", return_value=None))
+            stack.enter_context(patch("crypto_trader.engine._resolve_strategy_symbols", return_value=([], {}, [])))
+            stack.enter_context(patch("crypto_trader.engine.open_pending_symbols", return_value=set()))
+            stack.enter_context(patch("crypto_trader.engine.collect_news", return_value=SimpleNamespace(items=[])))
+            stack.enter_context(patch("crypto_trader.engine.fetch_market_snapshots", return_value=([], [])))
+            stack.enter_context(patch("crypto_trader.engine.market_guard_symbol_layers", return_value={}))
+            stack.enter_context(patch("crypto_trader.engine.build_candidates", return_value=[]))
+            stack.enter_context(patch("crypto_trader.engine.apply_position_sizing", return_value=None))
+            stack.enter_context(patch("crypto_trader.engine.enrich_quantities", return_value=[]))
+            stack.enter_context(patch("crypto_trader.engine.detect_market_regime", return_value={}))
+            stack.enter_context(patch("crypto_trader.engine.record_trade_candidates"))
+            stack.enter_context(
+                patch(
+                    "crypto_trader.engine.update_lc_internal_pipeline",
+                    side_effect=lambda *_args, **_kwargs: call_order.append("lc") or {},
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "crypto_trader.engine.run_internal_market_scan_if_due",
+                    side_effect=lambda *_args, **_kwargs: call_order.append("mini") or {"approved_symbols": []},
+                )
+            )
+            stack.enter_context(patch("crypto_trader.engine.save_market_scan_observations", return_value=[]))
+            stack.enter_context(patch("crypto_trader.engine._merge_cycle_candidates", return_value=([], {})))
+            stack.enter_context(patch("crypto_trader.engine.internal_lc_memory", return_value={}))
+            stack.enter_context(patch("crypto_trader.engine.maintain_pending_orders", return_value={}))
+            stack.enter_context(patch("crypto_trader.engine.should_defer_new_vt_to_internal_lc", return_value=False))
+            stack.enter_context(patch("crypto_trader.engine.active_trades_summary", return_value=(0, set(), [])))
+            stack.enter_context(patch("crypto_trader.engine.write_report", return_value=Path("report.json")))
+            stack.enter_context(patch("crypto_trader.engine.save_decision"))
+            stack.enter_context(patch("crypto_trader.engine.record_ai_trade_decision"))
+            run_once(config, execute=False)
+
+        self.assertEqual(call_order, ["lc", "mini"])

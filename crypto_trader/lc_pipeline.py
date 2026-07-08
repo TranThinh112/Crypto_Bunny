@@ -65,6 +65,7 @@ def _pipeline_config(config: dict[str, Any]) -> dict[str, Any]:
         ),
         "relaxed_min_win_probability_pct": float(internal.get("lc_pipeline_relaxed_min_win_probability_pct", 55) or 55),
         "relaxed_min_confidence": float(internal.get("lc_pipeline_relaxed_min_confidence", 70) or 70),
+        "relaxed_min_risk_reward": float(internal.get("lc_pipeline_relaxed_min_risk_reward", 1.5) or 1.5),
         "notify_two_hour_summary": bool(internal.get("lc_pipeline_notify_two_hour_summary", False)),
         "notify_mini_pool_summary": bool(internal.get("lc_pipeline_notify_mini_pool_summary", False)),
         "promote_survivors": bool(
@@ -1078,12 +1079,24 @@ def lc_pipeline_internal_symbols(config: dict[str, Any], *, limit: int | None = 
     return symbols[: max(1, int(limit))]
 
 
+def lc_pipeline_four_hour_symbols(config: dict[str, Any], *, limit: int | None = None) -> list[str]:
+    state = _load_state(config, datetime.now(timezone.utc), reset_for_new_day=False)
+    symbols: list[str] = []
+    for row in _latest_four_hour_rows(state):
+        symbol = str(row.get("symbol") or "")
+        if symbol and symbol not in symbols:
+            symbols.append(symbol)
+    if limit is None:
+        return symbols
+    return symbols[: max(1, int(limit))]
+
+
 def latest_lc_pipeline_mini_scan(config: dict[str, Any]) -> dict[str, Any] | None:
     state = _load_state(config, datetime.now(timezone.utc), reset_for_new_day=False)
     scan = state.get("latest_mini_scan") if isinstance(state.get("latest_mini_scan"), dict) else {}
     if not scan:
         return None
-    current_symbols = lc_pipeline_internal_symbols(config, limit=10)
+    current_symbols = lc_pipeline_four_hour_symbols(config, limit=10)
     original_selected_symbols = _symbol_list(
         scan.get("selected_symbols") if isinstance(scan.get("selected_symbols"), list) else scan.get("approved_symbols"),
         limit=10,
@@ -1836,7 +1849,7 @@ def _candidate_is_relaxed_valid(candidate: TradeCandidate, settings: dict[str, A
     return (
         win_probability >= float(settings["relaxed_min_win_probability_pct"])
         and confidence >= float(settings["relaxed_min_confidence"])
-        and float(candidate.risk_reward or 0) >= 1.5
+        and float(candidate.risk_reward or 0) >= float(settings["relaxed_min_risk_reward"])
     )
 
 
@@ -1856,7 +1869,7 @@ def _row_is_relaxed_valid(row: dict[str, Any], settings: dict[str, Any]) -> bool
     return (
         win_probability >= float(settings["relaxed_min_win_probability_pct"])
         and confidence >= float(settings["relaxed_min_confidence"])
-        and risk_reward >= 1.5
+        and risk_reward >= float(settings["relaxed_min_risk_reward"])
     )
 
 

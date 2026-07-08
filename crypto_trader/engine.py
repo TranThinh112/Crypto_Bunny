@@ -482,18 +482,7 @@ def write_report(config: dict[str, Any], decision: Decision) -> Path:
 def run_once(config: dict[str, Any], execute: bool) -> Decision:
     config = select_runtime_config(config)
     previous_payload = latest_decision_payload(config)
-    internal_market_scan = run_internal_market_scan_if_due(config)
     strategy_symbols, universe_context, universe_warnings = _resolve_strategy_symbols(config)
-    if internal_market_scan:
-        universe_context["internal_market_scan"] = {
-            "created_at": internal_market_scan.get("created_at"),
-            "provider": internal_market_scan.get("provider"),
-            "model": internal_market_scan.get("model"),
-            "approved_symbols": internal_market_scan.get("approved_symbols"),
-            "candidate_count": internal_market_scan.get("candidate_count"),
-            "fallback": internal_market_scan.get("fallback"),
-            "ai_review_error": internal_market_scan.get("ai_review_error"),
-        }
     old_symbols = _previous_symbols(previous_payload)
     pending_symbols_before_scan = _ordered_unique(list(open_pending_symbols(config)))
     fetch_symbols = _ordered_unique(strategy_symbols + old_symbols + pending_symbols_before_scan)
@@ -531,7 +520,10 @@ def run_once(config: dict[str, Any], execute: bool) -> Decision:
         candidate.market_regime = market_regime.get("regime")
         candidate.regime_confidence = market_regime.get("confidence")
     record_trade_candidates(config, all_new_candidates)
+    # Refresh the LC pipeline before Mini so the same cycle can advance
+    # 1h -> 2h -> 4h before Mini snapshots the latest 4h pool.
     lc_pipeline_state = update_lc_internal_pipeline(config, all_new_candidates)
+    internal_market_scan = run_internal_market_scan_if_due(config)
     market_scan_storage = {
         "saved_rows": save_market_scan_observations(
             config,
@@ -547,6 +539,16 @@ def run_once(config: dict[str, Any], execute: bool) -> Decision:
             ],
         ],
     }
+    if internal_market_scan:
+        universe_context["internal_market_scan"] = {
+            "created_at": internal_market_scan.get("created_at"),
+            "provider": internal_market_scan.get("provider"),
+            "model": internal_market_scan.get("model"),
+            "approved_symbols": internal_market_scan.get("approved_symbols"),
+            "candidate_count": internal_market_scan.get("candidate_count"),
+            "fallback": internal_market_scan.get("fallback"),
+            "ai_review_error": internal_market_scan.get("ai_review_error"),
+        }
     new_top = all_new_candidates[:5]
     refreshed_previous = (
         build_candidates(

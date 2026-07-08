@@ -82,7 +82,7 @@ ai:
     lc_pipeline_internal_lc_max: 3
     lc_pipeline_promote_after_hours: 6
     lc_pipeline_recheck_interval_minutes: 90
-    lc_pipeline_relaxed_min_win_probability_pct: 50
+    lc_pipeline_relaxed_min_win_probability_pct: 55
     lc_pipeline_relaxed_min_confidence: 70
     lc_pipeline_notify_two_hour_summary: true
     lc_pipeline_notify_mini_pool_summary: true
