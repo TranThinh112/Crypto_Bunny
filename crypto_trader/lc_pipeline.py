@@ -2401,12 +2401,6 @@ def _update_lc_internal_pipeline_impl(
         for window in aligned_hourly_events:
             combined.extend(window.get("approved") or [])
         refreshed_combined, two_hour_recheck = _recheck_rows_with_latest_market_data(config, combined, now=now)
-        _sync_state_after_recheck(
-            state,
-            hourly_slots=[str(window.get("slot") or "") for window in aligned_hourly_events],
-            refreshed_rows=refreshed_combined,
-            dropped=list(two_hour_recheck.get("dropped") or []),
-        )
         result["two_hour_recheck"] = two_hour_recheck
         eligible_two_hour = [
             row for row in refreshed_combined if _candidate_passes_lc_threshold(row, settings, phase="2h")
