@@ -15,6 +15,8 @@ from .ai_coordinator import (
 )
 from .config import project_path
 from .codex_features import (
+    candidate_from_payload,
+    candidate_to_payload,
     detect_market_regime,
     record_ai_trade_decision,
     record_trade_candidates,
@@ -30,14 +32,18 @@ from .pending import maintain_pending_orders
 from .risk import active_trades_summary, evaluate_candidate
 from .sizing import apply_position_sizing
 from .storage import (
+    get_journal_state,
     latest_decision_payload,
     next_global_counter,
     open_pending_symbols,
     save_decision,
     save_market_scan_observations,
     save_pending_order,
+    set_journal_state,
 )
 from .strategy import build_candidates, enrich_quantities
+
+LC_PIPELINE_CANDIDATE_CACHE_KEY = "lc_pipeline_candidate_cache_v1"
 
 
 def _ordered_unique(symbols: list[str]) -> list[str]:
@@ -110,6 +116,163 @@ def _resolve_strategy_symbols(config: dict[str, Any]) -> tuple[list[str], dict[s
         },
         warnings,
     )
+
+
+def _collect_realtime_scan_inputs(
+    config: dict[str, Any],
+    *,
+    previous_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    strategy_symbols, universe_context, universe_warnings = _resolve_strategy_symbols(config)
+    old_symbols = _previous_symbols(previous_payload)
+    pending_symbols_before_scan = _ordered_unique(list(open_pending_symbols(config)))
+    fetch_symbols = _ordered_unique(strategy_symbols + old_symbols + pending_symbols_before_scan)
+
+    digest = collect_news(config)
+    snapshots, market_warnings = fetch_market_snapshots(config, fetch_symbols)
+    market_warnings = universe_warnings + market_warnings
+    snapshots_by_symbol = {snapshot.symbol: snapshot for snapshot in snapshots}
+    market_layers: dict[str, dict[str, Any]] = {}
+    market_layer_warnings: list[str] = []
+    if config.get("market_guard", {}).get("use_memory_in_strategy", True):
+        try:
+            market_layers = market_guard_symbol_layers(config, fetch_symbols)
+        except Exception as exc:
+            market_layer_warnings.append(f"Market guard memory unavailable: {exc}")
+
+    new_scan_symbols = _ordered_unique(strategy_symbols + pending_symbols_before_scan)
+    new_scan_snapshots = [
+        snapshots_by_symbol[symbol] for symbol in new_scan_symbols if symbol in snapshots_by_symbol
+    ]
+    old_scan_snapshots = [
+        snapshots_by_symbol[symbol] for symbol in old_symbols if symbol in snapshots_by_symbol
+    ]
+
+    all_new_candidates = build_candidates(
+        config,
+        new_scan_snapshots,
+        digest,
+        limit=None,
+        market_layers=market_layers,
+    )
+    apply_position_sizing(config, all_new_candidates)
+    enrich_quantities(config, all_new_candidates)
+    market_regime = detect_market_regime(config, new_scan_snapshots or snapshots)
+    for candidate in all_new_candidates:
+        candidate.market_regime = market_regime.get("regime")
+        candidate.regime_confidence = market_regime.get("confidence")
+
+    return {
+        "strategy_symbols": strategy_symbols,
+        "universe_context": universe_context,
+        "universe_warnings": universe_warnings,
+        "old_symbols": old_symbols,
+        "pending_symbols_before_scan": pending_symbols_before_scan,
+        "fetch_symbols": fetch_symbols,
+        "digest": digest,
+        "snapshots": snapshots,
+        "snapshots_by_symbol": snapshots_by_symbol,
+        "market_warnings": market_warnings,
+        "market_layers": market_layers,
+        "market_layer_warnings": market_layer_warnings,
+        "new_scan_symbols": new_scan_symbols,
+        "new_scan_snapshots": new_scan_snapshots,
+        "old_scan_snapshots": old_scan_snapshots,
+        "all_new_candidates": all_new_candidates,
+        "market_regime": market_regime,
+    }
+
+
+def _serialize_lc_pipeline_candidate_cache(snapshot: dict[str, Any]) -> str:
+    payload = {
+        "enabled": bool(snapshot.get("enabled", True)),
+        "started_at": snapshot.get("started_at"),
+        "created_at": snapshot.get("created_at"),
+        "candidate_count": int(snapshot.get("candidate_count") or 0),
+        "source_symbol_count": int(snapshot.get("source_symbol_count") or 0),
+        "source_symbols": list(snapshot.get("source_symbols") or []),
+        "market_warnings": list(snapshot.get("market_warnings") or []),
+        "market_layer_warnings": list(snapshot.get("market_layer_warnings") or []),
+        "universe": dict(snapshot.get("universe") or {}),
+        "market_regime": dict(snapshot.get("market_regime") or {}),
+        "candidates": [candidate_to_payload(candidate) for candidate in list(snapshot.get("candidates") or [])],
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def save_lc_pipeline_candidate_cache(config: dict[str, Any], snapshot: dict[str, Any]) -> None:
+    set_journal_state(config, LC_PIPELINE_CANDIDATE_CACHE_KEY, _serialize_lc_pipeline_candidate_cache(snapshot))
+
+
+def load_lc_pipeline_candidate_cache(config: dict[str, Any]) -> dict[str, Any] | None:
+    raw = get_journal_state(config, LC_PIPELINE_CANDIDATE_CACHE_KEY)
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    candidate_payloads = payload.get("candidates") or []
+    candidates: list[TradeCandidate] = []
+    if isinstance(candidate_payloads, list):
+        for item in candidate_payloads:
+            if not isinstance(item, dict):
+                continue
+            try:
+                candidates.append(candidate_from_payload(item))
+            except Exception:
+                continue
+    return {
+        "enabled": bool(payload.get("enabled", True)),
+        "started_at": payload.get("started_at"),
+        "created_at": payload.get("created_at"),
+        "candidate_count": int(payload.get("candidate_count") or len(candidates)),
+        "source_symbol_count": int(payload.get("source_symbol_count") or 0),
+        "source_symbols": list(payload.get("source_symbols") or []),
+        "market_warnings": list(payload.get("market_warnings") or []),
+        "market_layer_warnings": list(payload.get("market_layer_warnings") or []),
+        "universe": dict(payload.get("universe") or {}),
+        "market_regime": dict(payload.get("market_regime") or {}),
+        "candidates": candidates,
+    }
+
+
+def collect_lc_pipeline_candidates(config: dict[str, Any]) -> dict[str, Any]:
+    config = select_runtime_config(config)
+    started_at = datetime.now(timezone.utc)
+    scan_inputs = _collect_realtime_scan_inputs(config)
+    snapshot = {
+        "enabled": True,
+        "started_at": started_at.isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "candidate_count": len(scan_inputs["all_new_candidates"]),
+        "source_symbol_count": len(scan_inputs["new_scan_symbols"]),
+        "source_symbols": list(scan_inputs["new_scan_symbols"]),
+        "market_warnings": list(scan_inputs["market_warnings"]),
+        "market_layer_warnings": list(scan_inputs["market_layer_warnings"]),
+        "universe": scan_inputs["universe_context"],
+        "market_regime": scan_inputs["market_regime"],
+        "candidates": list(scan_inputs["all_new_candidates"]),
+    }
+    save_lc_pipeline_candidate_cache(config, snapshot)
+    return snapshot
+
+
+def run_lc_pipeline_cycle(config: dict[str, Any]) -> dict[str, Any]:
+    snapshot = collect_lc_pipeline_candidates(config)
+    pipeline_now = datetime.now(timezone.utc)
+    lc_pipeline_state = update_lc_internal_pipeline(
+        config,
+        list(snapshot.get("candidates") or []),
+        now=pipeline_now,
+    )
+    return {
+        **snapshot,
+        "created_at": pipeline_now.isoformat(),
+        "lc_internal_pipeline": lc_pipeline_state,
+    }
 
 
 def _previous_candidates(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -482,43 +645,20 @@ def write_report(config: dict[str, Any], decision: Decision) -> Path:
 def run_once(config: dict[str, Any], execute: bool) -> Decision:
     config = select_runtime_config(config)
     previous_payload = latest_decision_payload(config)
-    strategy_symbols, universe_context, universe_warnings = _resolve_strategy_symbols(config)
-    old_symbols = _previous_symbols(previous_payload)
-    pending_symbols_before_scan = _ordered_unique(list(open_pending_symbols(config)))
-    fetch_symbols = _ordered_unique(strategy_symbols + old_symbols + pending_symbols_before_scan)
-
-    digest = collect_news(config)
-    snapshots, market_warnings = fetch_market_snapshots(config, fetch_symbols)
-    market_warnings = universe_warnings + market_warnings
-    snapshots_by_symbol = {snapshot.symbol: snapshot for snapshot in snapshots}
-    market_layers: dict[str, dict[str, Any]] = {}
-    market_layer_warnings: list[str] = []
-    if config.get("market_guard", {}).get("use_memory_in_strategy", True):
-        try:
-            market_layers = market_guard_symbol_layers(config, fetch_symbols)
-        except Exception as exc:
-            market_layer_warnings.append(f"Market guard memory unavailable: {exc}")
-    new_scan_symbols = _ordered_unique(strategy_symbols + pending_symbols_before_scan)
-    new_scan_snapshots = [
-        snapshots_by_symbol[symbol] for symbol in new_scan_symbols if symbol in snapshots_by_symbol
-    ]
-    old_scan_snapshots = [
-        snapshots_by_symbol[symbol] for symbol in old_symbols if symbol in snapshots_by_symbol
-    ]
-
-    all_new_candidates = build_candidates(
-        config,
-        new_scan_snapshots,
-        digest,
-        limit=None,
-        market_layers=market_layers,
-    )
-    apply_position_sizing(config, all_new_candidates)
-    enrich_quantities(config, all_new_candidates)
-    market_regime = detect_market_regime(config, new_scan_snapshots or snapshots)
-    for candidate in all_new_candidates:
-        candidate.market_regime = market_regime.get("regime")
-        candidate.regime_confidence = market_regime.get("confidence")
+    scan_inputs = _collect_realtime_scan_inputs(config, previous_payload=previous_payload)
+    strategy_symbols = list(scan_inputs["strategy_symbols"])
+    universe_context = dict(scan_inputs["universe_context"])
+    old_symbols = list(scan_inputs["old_symbols"])
+    pending_symbols_before_scan = list(scan_inputs["pending_symbols_before_scan"])
+    snapshots = list(scan_inputs["snapshots"])
+    market_warnings = list(scan_inputs["market_warnings"])
+    snapshots_by_symbol = dict(scan_inputs["snapshots_by_symbol"])
+    market_layers = dict(scan_inputs["market_layers"])
+    market_layer_warnings = list(scan_inputs["market_layer_warnings"])
+    new_scan_snapshots = list(scan_inputs["new_scan_snapshots"])
+    old_scan_snapshots = list(scan_inputs["old_scan_snapshots"])
+    all_new_candidates = list(scan_inputs["all_new_candidates"])
+    market_regime = dict(scan_inputs["market_regime"])
     record_trade_candidates(config, all_new_candidates)
     # Refresh the LC pipeline before Mini so the same cycle can advance
     # 1h -> 2h -> 4h before Mini snapshots the latest 4h pool.

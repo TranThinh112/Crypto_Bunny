@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import urllib.request
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -121,17 +122,30 @@ def score_sentiment(text: str) -> tuple[float, str]:
     return score, "neutral"
 
 
+def _parse_feed(feed_url: str, *, timeout_seconds: float) -> Any:
+    request = urllib.request.Request(
+        feed_url,
+        headers={"User-Agent": "Crypto_Bunny/1.0"},
+    )
+    with urllib.request.urlopen(request, timeout=max(1.0, float(timeout_seconds))) as response:
+        return feedparser.parse(response.read())
+
+
 def collect_news(config: dict[str, Any]) -> NewsDigest:
     news_config = config["news"]
     symbols = config["strategy"]["symbols"]
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(hours=float(news_config["lookback_hours"]))
     max_items = int(news_config.get("max_items_per_feed", 40))
+    timeout_seconds = float(news_config.get("timeout_seconds", 5) or 5)
     seen: set[str] = set()
     items: list[NewsItem] = []
 
     for feed_url in news_config.get("feeds", []):
-        parsed_feed = feedparser.parse(feed_url)
+        try:
+            parsed_feed = _parse_feed(str(feed_url), timeout_seconds=timeout_seconds)
+        except Exception:
+            continue
         source = parsed_feed.feed.get("title", feed_url)
         for entry in parsed_feed.entries[:max_items]:
             title = _clean_text(entry.get("title", ""))

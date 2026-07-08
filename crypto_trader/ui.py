@@ -59,12 +59,13 @@ from .dashboard_services import (
     system_health_dashboard,
     timeframe_state_dashboard,
 )
-from .engine import run_once
+from .engine import collect_lc_pipeline_candidates, load_lc_pipeline_candidate_cache, run_once
 from .lc_pipeline import (
     format_internal_lc_view,
     format_internal_notifications_view,
     internal_notification_timeline_messages,
     lc_pipeline_dashboard_payload,
+    update_lc_internal_pipeline,
 )
 from .market import create_exchange
 from .market_guard import (
@@ -434,6 +435,17 @@ def _automation_interval(config: dict[str, Any]) -> int:
     return max(60, int(automation.get("scan_interval_seconds", fallback) or 60))
 
 
+def _lc_pipeline_worker_interval(config: dict[str, Any]) -> int:
+    internal = config.get("ai", {}).get("internal", {})
+    fallback = _automation_interval(config)
+    return max(60, int(internal.get("lc_pipeline_worker_interval_seconds", fallback) or fallback))
+
+
+def _lc_pipeline_slot_poll_interval(config: dict[str, Any]) -> int:
+    internal = config.get("ai", {}).get("internal", {})
+    return max(5, min(60, int(internal.get("lc_pipeline_slot_poll_seconds", 10) or 10)))
+
+
 def _next_automation_cycle_at(now: datetime, interval_seconds: int) -> datetime:
     interval = max(60, int(interval_seconds or 60))
     current = int(now.timestamp())
@@ -443,6 +455,11 @@ def _next_automation_cycle_at(now: datetime, interval_seconds: int) -> datetime:
 
 def _automation_enabled(config: dict[str, Any]) -> bool:
     return bool(config.get("automation", {}).get("enabled", True)) and atlas_runtime_is_primary(config)
+
+
+def _lc_pipeline_worker_enabled(config: dict[str, Any]) -> bool:
+    internal = config.get("ai", {}).get("internal", {})
+    return bool(internal.get("lc_pipeline_enabled", True)) and _automation_enabled(config)
 
 
 def _automation_should_execute(config: dict[str, Any]) -> tuple[bool, str]:
@@ -479,6 +496,18 @@ def _automation_status_payload(app: FastAPI) -> dict[str, Any]:
         config = load_config(app.state.config_path)
         status["enabled"] = _automation_enabled(config)
         status["interval_seconds"] = _automation_interval(config)
+        status["mode"] = config.get("mode", "dry_run")
+    except Exception as exc:
+        status.setdefault("error", str(exc))
+    return status
+
+
+def _lc_pipeline_status_payload(app: FastAPI) -> dict[str, Any]:
+    status = getattr(app.state, "lc_pipeline_status", {}).copy()
+    try:
+        config = load_config(app.state.config_path)
+        status["enabled"] = _lc_pipeline_worker_enabled(config)
+        status["interval_seconds"] = _lc_pipeline_worker_interval(config)
         status["mode"] = config.get("mode", "dry_run")
     except Exception as exc:
         status.setdefault("error", str(exc))
@@ -637,6 +666,165 @@ def _automation_worker(app: FastAPI) -> None:
         next_run_at = _next_automation_cycle_at(datetime.now(timezone.utc), interval)
         wait_seconds = max(1.0, (next_run_at - datetime.now(timezone.utc)).total_seconds())
         app.state.automation_stop.wait(wait_seconds)
+
+
+def _run_lc_pipeline_worker_cycle(app: FastAPI) -> None:
+    now = datetime.now(timezone.utc)
+    config = load_config(app.state.config_path)
+    interval = _lc_pipeline_worker_interval(config)
+    next_scan_at = _next_automation_cycle_at(now, interval)
+    status: dict[str, Any] = {
+        "enabled": _lc_pipeline_worker_enabled(config),
+        "interval_seconds": interval,
+        "mode": config.get("mode", "dry_run"),
+        "last_started_at": now.isoformat(),
+        "next_scan_at": next_scan_at.isoformat(),
+    }
+    if not status["enabled"]:
+        status["last_result"] = "disabled"
+        app.state.lc_pipeline_status = status
+        return
+
+    if not app.state.lc_pipeline_lock.acquire(blocking=False):
+        status["last_result"] = "skipped_busy"
+        app.state.lc_pipeline_status = status
+        return
+
+    try:
+        cycle_result = collect_lc_pipeline_candidates(config)
+        app.state.lc_pipeline_candidate_cache = cycle_result
+        pipeline = update_lc_internal_pipeline(
+            config,
+            list(cycle_result.get("candidates") or []),
+            now=datetime.now(timezone.utc),
+        )
+        status.update(
+            {
+                "last_finished_at": datetime.now(timezone.utc).isoformat(),
+                "last_result": "updated",
+                "candidate_count": cycle_result.get("candidate_count"),
+                "source_symbol_count": cycle_result.get("source_symbol_count"),
+                "created_hourly": bool(pipeline.get("created_hourly")),
+                "created_two_hour": bool(pipeline.get("created_two_hour")),
+                "created_four_hour": bool(pipeline.get("created_four_hour")),
+                "hourly_slot": pipeline.get("hourly_slot"),
+                "two_hour_slot": pipeline.get("two_hour_slot"),
+                "four_hour_slot": pipeline.get("four_hour_slot"),
+            }
+        )
+    except Exception as exc:
+        status.update(
+            {
+                "last_finished_at": datetime.now(timezone.utc).isoformat(),
+                "last_result": "error",
+                "error": str(exc),
+            }
+        )
+    finally:
+        app.state.lc_pipeline_status = status
+        app.state.lc_pipeline_lock.release()
+
+
+def _lc_pipeline_worker(app: FastAPI) -> None:
+    while not app.state.automation_stop.is_set():
+        try:
+            config = load_config(app.state.config_path)
+            interval = _lc_pipeline_worker_interval(config)
+        except Exception:
+            interval = 60
+        _run_lc_pipeline_worker_cycle(app)
+        next_run_at = _next_automation_cycle_at(datetime.now(timezone.utc), interval)
+        wait_seconds = max(1.0, (next_run_at - datetime.now(timezone.utc)).total_seconds())
+        app.state.automation_stop.wait(wait_seconds)
+
+
+def _run_lc_pipeline_slot_cycle(app: FastAPI) -> None:
+    now = datetime.now(timezone.utc)
+    config = load_config(app.state.config_path)
+    if not _lc_pipeline_worker_enabled(config):
+        return
+    if not app.state.lc_pipeline_slot_lock.acquire(blocking=False):
+        return
+    try:
+        cache = getattr(app.state, "lc_pipeline_candidate_cache", None) or {}
+        if not cache:
+            cache = load_lc_pipeline_candidate_cache(config) or {}
+            if cache:
+                app.state.lc_pipeline_candidate_cache = cache
+        candidates = list(cache.get("candidates") or [])
+        created_at_raw = cache.get("created_at")
+        created_at = None
+        if created_at_raw:
+            try:
+                created_at = datetime.fromisoformat(str(created_at_raw).replace("Z", "+00:00")).astimezone(timezone.utc)
+            except ValueError:
+                created_at = None
+        max_age_seconds = max(
+            60,
+            int(config.get("ai", {}).get("internal", {}).get("lc_pipeline_candidate_cache_max_age_seconds", 900) or 900),
+        )
+        if not candidates or created_at is None:
+            persisted = load_lc_pipeline_candidate_cache(config) or {}
+            if persisted:
+                cache = persisted
+                app.state.lc_pipeline_candidate_cache = persisted
+                candidates = list(cache.get("candidates") or [])
+                created_at_raw = cache.get("created_at")
+                if created_at_raw:
+                    try:
+                        created_at = datetime.fromisoformat(str(created_at_raw).replace("Z", "+00:00")).astimezone(timezone.utc)
+                    except ValueError:
+                        created_at = None
+        if not candidates or created_at is None:
+            return
+        if (now - created_at).total_seconds() > max_age_seconds:
+            persisted = load_lc_pipeline_candidate_cache(config) or {}
+            persisted_created_at_raw = persisted.get("created_at") if persisted else None
+            persisted_created_at = None
+            if persisted_created_at_raw:
+                try:
+                    persisted_created_at = datetime.fromisoformat(
+                        str(persisted_created_at_raw).replace("Z", "+00:00")
+                    ).astimezone(timezone.utc)
+                except ValueError:
+                    persisted_created_at = None
+            if persisted and persisted_created_at and (now - persisted_created_at).total_seconds() <= max_age_seconds:
+                cache = persisted
+                app.state.lc_pipeline_candidate_cache = persisted
+                candidates = list(cache.get("candidates") or [])
+                created_at = persisted_created_at
+            else:
+                return
+        if not candidates or created_at is None:
+            return
+        pipeline = update_lc_internal_pipeline(config, candidates, now=now)
+        current_status = getattr(app.state, "lc_pipeline_status", {}).copy()
+        current_status.update(
+            {
+                "last_slot_check_at": now.isoformat(),
+                "slot_cache_created_at": created_at.isoformat(),
+                "created_hourly": bool(pipeline.get("created_hourly")),
+                "created_two_hour": bool(pipeline.get("created_two_hour")),
+                "created_four_hour": bool(pipeline.get("created_four_hour")),
+                "hourly_slot": pipeline.get("hourly_slot"),
+                "two_hour_slot": pipeline.get("two_hour_slot"),
+                "four_hour_slot": pipeline.get("four_hour_slot"),
+            }
+        )
+        app.state.lc_pipeline_status = current_status
+    finally:
+        app.state.lc_pipeline_slot_lock.release()
+
+
+def _lc_pipeline_slot_worker(app: FastAPI) -> None:
+    while not app.state.automation_stop.is_set():
+        try:
+            config = load_config(app.state.config_path)
+            interval = _lc_pipeline_slot_poll_interval(config)
+        except Exception:
+            interval = 10
+        _run_lc_pipeline_slot_cycle(app)
+        app.state.automation_stop.wait(interval)
 
 
 def _telegram_polling_enabled(config: dict[str, Any]) -> bool:
@@ -1575,10 +1763,17 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
     app.state.config_path = config_path
     app.state.lock = threading.Lock()
     app.state.automation_stop = threading.Event()
+    app.state.lc_pipeline_lock = threading.Lock()
+    app.state.lc_pipeline_slot_lock = threading.Lock()
     app.state.automation_status = {
         "enabled": False,
         "last_result": "not_started",
     }
+    app.state.lc_pipeline_status = {
+        "enabled": False,
+        "last_result": "not_started",
+    }
+    app.state.lc_pipeline_candidate_cache = {}
     app.state.market_guard_status = None
     app.state.price_cache = None
 
@@ -1638,6 +1833,18 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
             daemon=True,
         )
         app.state.market_guard_thread.start()
+        app.state.lc_pipeline_thread = threading.Thread(
+            target=lambda: _lc_pipeline_worker(app),
+            name="crypto-lc-pipeline",
+            daemon=True,
+        )
+        app.state.lc_pipeline_thread.start()
+        app.state.lc_pipeline_slot_thread = threading.Thread(
+            target=lambda: _lc_pipeline_slot_worker(app),
+            name="crypto-lc-slot",
+            daemon=True,
+        )
+        app.state.lc_pipeline_slot_thread.start()
 
     @app.on_event("shutdown")
     def stop_automation() -> None:
@@ -1651,6 +1858,12 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
         market_guard_thread = getattr(app.state, "market_guard_thread", None)
         if market_guard_thread and market_guard_thread.is_alive():
             market_guard_thread.join(timeout=5)
+        lc_pipeline_thread = getattr(app.state, "lc_pipeline_thread", None)
+        if lc_pipeline_thread and lc_pipeline_thread.is_alive():
+            lc_pipeline_thread.join(timeout=5)
+        lc_pipeline_slot_thread = getattr(app.state, "lc_pipeline_slot_thread", None)
+        if lc_pipeline_slot_thread and lc_pipeline_slot_thread.is_alive():
+            lc_pipeline_slot_thread.join(timeout=5)
 
     @app.get("/")
     def index() -> FileResponse:
@@ -1662,6 +1875,7 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
             "ok": True,
             "mode": load_config(app.state.config_path).get("mode", "dry_run"),
             "automation": _automation_status_payload(app),
+            "lc_pipeline_worker": _lc_pipeline_status_payload(app),
         }
 
     @app.get("/api/decision")

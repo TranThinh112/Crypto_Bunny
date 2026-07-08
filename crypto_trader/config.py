@@ -38,6 +38,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "lookback_hours": 24,
         "max_items_per_feed": 40,
         "require_symbol_news": True,
+        "timeout_seconds": 5,
         "feeds": [
             "https://www.coindesk.com/arc/outboundfeeds/rss/",
             "https://cointelegraph.com/rss",
@@ -54,6 +55,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "passphrase_env": "OKX_PASSPHRASE",
         "default_settle": "USDT",
         "position_side_mode": "net",
+        "timeout_ms": 10000,
         "leverage_presets": [5, 10, 15, 20, 25],
     },
     "strategy": {

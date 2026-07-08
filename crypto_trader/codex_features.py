@@ -205,6 +205,14 @@ def _candidate_from_payload(payload: dict[str, Any]) -> TradeCandidate:
     )
 
 
+def candidate_to_payload(candidate: TradeCandidate) -> dict[str, Any]:
+    return _candidate_payload(candidate)
+
+
+def candidate_from_payload(payload: dict[str, Any]) -> TradeCandidate:
+    return _candidate_from_payload(payload)
+
+
 def _prompt_dir(config: dict[str, Any]) -> Path:
     prompt_config = config.get("prompt_engine", {})
     return project_path(config, str(prompt_config.get("directory", "Prompts") or "Prompts"))

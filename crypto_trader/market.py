@@ -57,6 +57,7 @@ def create_exchange(config: dict[str, Any], authenticated: bool = False) -> Any:
     exchange_class = getattr(ccxt, exchange_name)
     params: dict[str, Any] = {
         "enableRateLimit": True,
+        "timeout": int(config["exchange"].get("timeout_ms", 10000) or 10000),
         "options": {
             "defaultType": config["exchange"].get("account_type", "swap"),
         },

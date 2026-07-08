@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -30,6 +31,7 @@ ONE_HOUR_HISTORY_KEEP_DAYS = 3
 TWO_HOUR_HISTORY_KEEP_DAYS = 3
 FOUR_HOUR_HISTORY_KEEP_DAYS = 7
 RECHECK_STABLE_DELTA_PCT = 1.0
+_LC_PIPELINE_UPDATE_LOCK = threading.RLock()
 
 
 def _parse_time(value: Any) -> datetime | None:
@@ -2247,6 +2249,16 @@ def _promote_survivors(
 
 
 def update_lc_internal_pipeline(
+    config: dict[str, Any],
+    candidates: list[TradeCandidate],
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    with _LC_PIPELINE_UPDATE_LOCK:
+        return _update_lc_internal_pipeline_impl(config, candidates, now=now)
+
+
+def _update_lc_internal_pipeline_impl(
     config: dict[str, Any],
     candidates: list[TradeCandidate],
     *,
