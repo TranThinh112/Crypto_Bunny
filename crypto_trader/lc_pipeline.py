@@ -1321,7 +1321,9 @@ def _source_window_label(item: dict[str, Any], *, config: dict[str, Any]) -> str
 
 def _event_source_lines(event: dict[str, Any], *, config: dict[str, Any]) -> list[str]:
     frame = str(event.get("frame") or "-")
-    frame_index = event.get("daily_index", event.get("index"))
+    frame_index = event.get("daily_index")
+    if frame_index in (None, ""):
+        frame_index = event.get("index")
     frame_time = _event_clock_label(event.get("created_at") or event.get("slot"), config=config)
     frame_icon = _frame_icon(config, frame)
     if frame_index in (None, ""):
@@ -1434,14 +1436,103 @@ def _internal_notification_summary_line(item: dict[str, Any], config: dict[str, 
     return " | ".join([header, *details])
 
 
+def _one_hour_notification_text(config: dict[str, Any], event: dict[str, Any]) -> str:
+    rows = [row for row in event.get("approved") or [] if isinstance(row, dict)]
+    lines = [
+        f"{ONE_HOUR_ICON} 1h top {len(rows)} setup",
+        f"{event.get('date', '-')} {event.get('time', '-')}",
+        f"Khung {ONE_HOUR_ICON} 1h: #{event.get('daily_index', event.get('index', '-'))} ({_event_clock_label(event.get('created_at') or event.get('slot'), config=config)})",
+    ]
+    lines.extend(_format_pair_line(index, row, config=config) for index, row in enumerate(rows[:3], 1))
+    return "\n".join(lines)
+
+
+def _two_hour_notification_text(config: dict[str, Any], event: dict[str, Any]) -> str:
+    rows = [row for row in event.get("approved") or [] if isinstance(row, dict)]
+    icon = _two_hour_icon(config)
+    lines = [
+        f"{icon} #{event.get('daily_index', '-')} LC nội bộ tổng hợp 2h",
+        f"{event.get('date', '-')} {event.get('time', '-')}",
+    ]
+    lines.extend(_event_source_lines(event, config=config))
+    lines.append("3 cặp duyệt lượt này:")
+    lines.extend(_format_pair_line(index, row, config=config, include_origin=True) for index, row in enumerate(rows[:3], 1))
+    return "\n".join(lines)
+
+
+def _four_hour_notification_text(config: dict[str, Any], event: dict[str, Any]) -> str:
+    rows = [row for row in event.get("approved") or [] if isinstance(row, dict)]
+    lines = [f"{FOUR_HOUR_ICON} #{event.get('index', '-')} LC nội bộ tổng hợp 4h"]
+    if event.get("date") or event.get("time"):
+        lines.append(f"{event.get('date', '-')} {event.get('time', '-')}".strip())
+    lines.extend(_event_source_lines(event, config=config))
+    lines.append("Các cặp giữ lại ở 4h:")
+    if rows:
+        lines.extend(_format_pair_line(index, row, config=config, include_origin=True) for index, row in enumerate(rows[:3], 1))
+    else:
+        lines.append("Không có cặp nào đủ điều kiện giữ lại ở 4h.")
+    return "\n".join(lines)
+
+
+def _mini_notification_text(config: dict[str, Any], scan: dict[str, Any], latest_four_hour: dict[str, Any] | None) -> str:
+    created_at = _parse_time(scan.get("created_at")) or datetime.now(timezone.utc)
+    local_now = _local_time(config, created_at)
+    selected_symbols = _symbol_list(scan.get("selected_symbols"), limit=3)
+    selected_count = len(selected_symbols)
+    mini_index = scan.get("mini_index") or "-"
+    rows = lc_pipeline_pool_rows(config, list(selected_symbols))
+    lines = [
+        f"{MINI_ICON} Mini #{mini_index}" if mini_index != "-" else f"{MINI_ICON} Mini",
+        local_now.strftime("%d/%m/%y %H:%M:%S"),
+        f"Lần gọi Mini: #{mini_index} ({local_now.strftime('%H:%M')})" if mini_index != "-" else f"Lần gọi Mini: {local_now.strftime('%H:%M')}",
+        f"Mini chọn: {selected_count}/3 cặp",
+    ]
+    if isinstance(latest_four_hour, dict):
+        lines.extend(_event_source_lines(latest_four_hour, config=config))
+    if rows:
+        for index, row in enumerate(rows[:3], 1):
+            side = str(row.get("side") or "-").upper()
+            lines.append(f"{index}. {row.get('symbol', '-')} | {side} | {_source_label(row)}")
+    else:
+        lines.append("Mini chưa chọn được cặp nào.")
+    lines.append("Lý do: " + str(scan.get("decision_reason_vi") or _mini_reason_vi(scan)))
+    if scan.get("slot_id"):
+        lines.append(f"Slot: {scan.get('slot_id')}")
+    return "\n".join(lines)
+
+
 def internal_notification_timeline_messages(config: dict[str, Any], *, limit_per_frame: int = 5) -> list[str]:
     state = _load_state(config, datetime.now(timezone.utc), reset_for_new_day=False)
     items = state.get("internal_notifications") if isinstance(state.get("internal_notifications"), list) else []
-    if not items:
+    entries: list[tuple[str, str]] = []
+    for event in state.get("one_hour_history") or []:
+        if isinstance(event, dict):
+            entries.append((str(event.get("created_at") or ""), _one_hour_notification_text(config, event)))
+    for event in state.get("two_hour_history") or []:
+        if isinstance(event, dict):
+            entries.append((str(event.get("created_at") or ""), _two_hour_notification_text(config, event)))
+    for event in state.get("four_hour_history") or []:
+        if isinstance(event, dict):
+            entries.append((str(event.get("created_at") or ""), _four_hour_notification_text(config, event)))
+    latest_scan = latest_lc_pipeline_mini_scan(config)
+    latest_four_hour = state.get("four_hour_history")[-1] if state.get("four_hour_history") else None
+    mini_created_at_keys: set[str] = set()
+    if isinstance(latest_scan, dict) and latest_scan.get("created_at"):
+        created_at_key = str(latest_scan.get("created_at") or "")
+        entries.append((created_at_key, _mini_notification_text(config, latest_scan, latest_four_hour)))
+        mini_created_at_keys.add(created_at_key)
+    for item in items:
+        if not isinstance(item, dict) or str(item.get("frame") or "") != "mini":
+            continue
+        created_at_key = str(item.get("created_at") or "")
+        if not created_at_key or created_at_key in mini_created_at_keys:
+            continue
+        entries.append((created_at_key, _internal_notification_text(item, config)))
+    if not entries:
         return []
     timeline_limit = max(4, int(limit_per_frame) * 4)
-    timeline = sorted(items, key=lambda row: str(row.get("created_at") or ""))[-timeline_limit:]
-    return [_internal_notification_text(item, config) for item in timeline]
+    timeline = sorted(entries, key=lambda item: item[0])[-timeline_limit:]
+    return [text for _, text in timeline]
 
 
 def format_internal_notifications_view(config: dict[str, Any], *, limit_per_frame: int = 5) -> str:

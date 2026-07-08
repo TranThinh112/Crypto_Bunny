@@ -571,8 +571,11 @@ class UiTest(TestCase):
 
         answer_callback.assert_called_once()
         edit_message.assert_not_called()
-        self.assertEqual(send_message.call_count, 3)
-        self.assertEqual([call.args[2] for call in send_message.call_args_list], ["msg-1", "msg-2", "msg-3"])
+        self.assertEqual(send_message.call_count, 4)
+        self.assertEqual(
+            [call.args[2] for call in send_message.call_args_list],
+            ["🔔 Thông báo nội bộ", "msg-1", "msg-2", "msg-3"],
+        )
 
     @patch("crypto_trader.ui.send_telegram_chat_message")
     @patch("crypto_trader.ui.internal_notification_timeline_messages")
@@ -597,8 +600,11 @@ class UiTest(TestCase):
             with patch.dict("os.environ", {"TELEGRAM_CHAT_ID": "123"}):
                 _handle_telegram_update(config, update, config_path)
 
-        self.assertEqual(send_message.call_count, 2)
-        self.assertEqual([call.args[2] for call in send_message.call_args_list], ["msg-a", "msg-b"])
+        self.assertEqual(send_message.call_count, 3)
+        self.assertEqual(
+            [call.args[2] for call in send_message.call_args_list],
+            ["🔔 Thông báo nội bộ", "msg-a", "msg-b"],
+        )
 
     @patch("crypto_trader.ui.system_health_dashboard")
     @patch("crypto_trader.ui.replay_dashboard_payload")

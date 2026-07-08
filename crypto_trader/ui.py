@@ -1042,6 +1042,13 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
                     with_buttons=False,
                 )
                 return
+            send_telegram_chat_message(
+                config,
+                chat_id,
+                "🔔 Thông báo nội bộ",
+                message_thread_id=thread_id,
+                with_buttons=False,
+            )
             for text in timeline_messages:
                 send_telegram_chat_message(
                     config,
@@ -1224,6 +1231,13 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
                 with_buttons=False,
             )
             return
+        send_telegram_chat_message(
+            config,
+            chat_id,
+            "🔔 Thông báo nội bộ",
+            message_thread_id=message.get("message_thread_id"),
+            with_buttons=False,
+        )
         for text in timeline_messages:
             send_telegram_chat_message(
                 config,
