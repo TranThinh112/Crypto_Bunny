@@ -1474,13 +1474,21 @@ def _four_hour_notification_text(config: dict[str, Any], event: dict[str, Any]) 
     return "\n".join(lines)
 
 
-def _mini_notification_text(config: dict[str, Any], scan: dict[str, Any], latest_four_hour: dict[str, Any] | None) -> str:
+def _mini_notification_text(
+    config: dict[str, Any],
+    scan: dict[str, Any],
+    latest_four_hour: dict[str, Any] | None,
+    *,
+    rows: list[dict[str, Any]] | None = None,
+) -> str:
     created_at = _parse_time(scan.get("created_at")) or datetime.now(timezone.utc)
     local_now = _local_time(config, created_at)
     selected_symbols = _symbol_list(scan.get("selected_symbols"), limit=3)
     selected_count = len(selected_symbols)
     mini_index = scan.get("mini_index") or "-"
-    rows = lc_pipeline_pool_rows(config, list(selected_symbols))
+    display_rows = [row for row in (rows or []) if isinstance(row, dict)]
+    if not display_rows:
+        display_rows = lc_pipeline_pool_rows(config, list(selected_symbols))
     lines = [
         f"{MINI_ICON} Mini #{mini_index}" if mini_index != "-" else f"{MINI_ICON} Mini",
         local_now.strftime("%d/%m/%y %H:%M:%S"),
@@ -1489,8 +1497,8 @@ def _mini_notification_text(config: dict[str, Any], scan: dict[str, Any], latest
     ]
     if isinstance(latest_four_hour, dict):
         lines.extend(_event_source_lines(latest_four_hour, config=config))
-    if rows:
-        for index, row in enumerate(rows[:3], 1):
+    if display_rows:
+        for index, row in enumerate(display_rows[:3], 1):
             side = str(row.get("side") or "-").upper()
             lines.append(f"{index}. {row.get('symbol', '-')} | {side} | {_source_label(row)}")
     else:
@@ -1552,16 +1560,7 @@ def _notify_two_hour_summary(config: dict[str, Any], event: dict[str, Any]) -> N
         from .notifier import send_telegram_message
     except Exception:
         return
-    rows = event.get("approved") or []
-    icon = _two_hour_icon(config)
-    lines = [
-        f"{icon} #{event.get('daily_index', '-')} LC nội bộ tổng hợp 2h",
-        f"{event.get('date', '-')} {event.get('time', '-')}",
-    ]
-    lines.extend(_event_source_lines(event, config=config))
-    lines.append("3 cặp duyệt lượt này:")
-    lines.extend(_format_pair_line(index, row, config=config, include_origin=True) for index, row in enumerate(rows[:3], 1))
-    send_telegram_message(config, "\n".join(lines), with_buttons=False, replace_previous=False)
+    send_telegram_message(config, _two_hour_notification_text(config, event), with_buttons=False, replace_previous=False)
 
 
 def _notify_four_hour_summary(config: dict[str, Any], event: dict[str, Any]) -> None:
@@ -1569,17 +1568,7 @@ def _notify_four_hour_summary(config: dict[str, Any], event: dict[str, Any]) -> 
         from .notifier import send_telegram_message
     except Exception:
         return
-    rows = event.get("approved") or []
-    lines = [f"{FOUR_HOUR_ICON} #{event.get('index', '-')} LC nội bộ tổng hợp 4h"]
-    if event.get("date") or event.get("time"):
-        lines.append(f"{event.get('date', '-')} {event.get('time', '-')}".strip())
-    lines.extend(_event_source_lines(event, config=config))
-    lines.append("Các cặp giữ lại ở 4h:")
-    if rows:
-        lines.extend(_format_pair_line(index, row, config=config, include_origin=True) for index, row in enumerate(rows[:3], 1))
-    else:
-        lines.append("Không có cặp nào đủ điều kiện giữ lại ở 4h.")
-    send_telegram_message(config, "\n".join(lines), with_buttons=False, replace_previous=False)
+    send_telegram_message(config, _four_hour_notification_text(config, event), with_buttons=False, replace_previous=False)
 
 
 def _age_label(hours: float) -> str:
@@ -1708,14 +1697,16 @@ def notify_mini_pool_summary(
     now: datetime | None = None,
 ) -> None:
     now = now or datetime.now(timezone.utc)
-    local_now = _local_time(config, now)
     settings = _pipeline_config(config)
     state = _load_state(config, now)
     latest_four_hour = state.get("four_hour_history")[-1] if state.get("four_hour_history") else None
     scan = scan or latest_lc_pipeline_mini_scan(config) or {}
+    mini_index = scan.get("mini_index") or int(state.get("daily_mini_counter") or 0) or "-"
+    if slot_id and not scan.get("slot_id"):
+        scan = {**scan, "slot_id": slot_id}
+    local_now = _local_time(config, now)
     selected_symbols = _symbol_list(scan.get("selected_symbols"), limit=3)
     selected_count = len(selected_symbols)
-    mini_index = scan.get("mini_index") or int(state.get("daily_mini_counter") or 0) or "-"
     lines = [
         f"Lần gọi Mini: #{mini_index} ({local_now.strftime('%H:%M')})" if mini_index != "-" else f"Lần gọi Mini: {local_now.strftime('%H:%M')}",
         f"Mini chọn: {selected_count}/3 cặp",
@@ -1729,8 +1720,8 @@ def notify_mini_pool_summary(
     else:
         lines.append("Mini chưa chọn được cặp nào.")
     lines.append("Lý do: " + str(scan.get("decision_reason_vi") or _mini_reason_vi(scan)))
-    if slot_id:
-        lines.append(f"Slot: {slot_id}")
+    if scan.get("slot_id"):
+        lines.append(f"Slot: {scan.get('slot_id')}")
     _append_internal_notification(
         state,
         frame="mini",
@@ -1748,12 +1739,7 @@ def notify_mini_pool_summary(
         return
     send_telegram_message(
         config,
-        "\n".join(
-            [
-                f"{MINI_ICON} Mini #{mini_index}" if mini_index != "-" else f"{MINI_ICON} Mini {local_now.strftime('%d/%m/%y %H:%M:%S')}",
-                *lines,
-            ]
-        ),
+        _mini_notification_text(config, scan, latest_four_hour, rows=rows),
         with_buttons=False,
         replace_previous=False,
     )

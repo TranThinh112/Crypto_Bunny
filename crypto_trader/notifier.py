@@ -55,6 +55,8 @@ def telegram_command_list() -> list[dict[str, str]]:
         {"command": "guard", "description": "Xem Market Guard"},
         {"command": "vt", "description": "Xem vi the va PNL"},
         {"command": "lc", "description": "Xem lenh cho"},
+        {"command": "thongbao", "description": "Xem thong bao noi bo"},
+        {"command": "noibo", "description": "Xem timeline noi bo"},
         {"command": "memory", "description": "Xem bo nho scan"},
         {"command": "ai", "description": "Xem lich su goi AI"},
         {"command": "usdt", "description": "Chinh USDT cho lenh sau"},

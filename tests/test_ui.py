@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from crypto_trader.config import load_config
 from crypto_trader.codex_features import close_trade_execution, record_trade_candidates, record_trade_execution, try_slot_refill
 from crypto_trader.models import TradeCandidate
+from crypto_trader.notifier import telegram_command_list
 from crypto_trader.storage import get_journal_state, list_trade_execution_rows, save_market_scan_observations, set_journal_state
 from crypto_trader.ui import (
     SCAN_TELEGRAM_SLOT_KEY,
@@ -28,6 +29,11 @@ from crypto_trader.ui import (
 
 
 class UiTest(TestCase):
+    def test_telegram_command_list_includes_internal_notification_commands(self) -> None:
+        commands = {item["command"] for item in telegram_command_list()}
+        self.assertIn("thongbao", commands)
+        self.assertIn("noibo", commands)
+
     def test_market_guard_notification_status_ignores_mild_positive_move(self) -> None:
         config = {
             "market_guard": {
