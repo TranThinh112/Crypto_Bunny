@@ -1319,6 +1319,55 @@ def _source_window_label(item: dict[str, Any], *, config: dict[str, Any]) -> str
     return f"{icon} {frame} #{index} ({time_label})"
 
 
+def _raw_pipeline_state(config: dict[str, Any]) -> dict[str, Any]:
+    raw = get_journal_state(config, LC_PIPELINE_STATE_KEY)
+    if not raw:
+        return {}
+    try:
+        state = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def _infer_source_windows(config: dict[str, Any], event: dict[str, Any]) -> list[dict[str, Any]]:
+    frame = str(event.get("frame") or "").lower()
+    history_key = ""
+    source_frame = ""
+    if frame == "2h":
+        history_key = "one_hour_history"
+        source_frame = "1h"
+    elif frame == "4h":
+        history_key = "two_hour_history"
+        source_frame = "2h"
+    else:
+        return []
+
+    state = _raw_pipeline_state(config)
+    history = state.get(history_key) if isinstance(state.get(history_key), list) else []
+    if not history:
+        return []
+    target_time = _parse_time(event.get("created_at") or event.get("slot"))
+    eligible: list[dict[str, Any]] = []
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        item_time = _parse_time(item.get("created_at") or item.get("slot"))
+        if target_time is not None and item_time is not None and item_time > target_time:
+            continue
+        eligible.append(item)
+    inferred = eligible[-2:]
+    return [_source_window_payload(source_frame, item, config=config) for item in inferred if isinstance(item, dict)]
+
+
+def _event_source_windows(config: dict[str, Any], event: dict[str, Any]) -> list[dict[str, Any]]:
+    source_windows = event.get("source_windows") if isinstance(event.get("source_windows"), list) else []
+    source_windows = [item for item in source_windows if isinstance(item, dict)]
+    if source_windows:
+        return source_windows
+    return _infer_source_windows(config, event)
+
+
 def _event_source_lines(event: dict[str, Any], *, config: dict[str, Any]) -> list[str]:
     frame = str(event.get("frame") or "-")
     frame_index = event.get("daily_index")
@@ -1330,7 +1379,7 @@ def _event_source_lines(event: dict[str, Any], *, config: dict[str, Any]) -> lis
         lines = [f"Khung {frame_icon} {frame}: ({frame_time})"]
     else:
         lines = [f"Khung {frame_icon} {frame}: #{frame_index} ({frame_time})"]
-    source_windows = event.get("source_windows") if isinstance(event.get("source_windows"), list) else []
+    source_windows = _event_source_windows(config, event)
     source_labels = [_source_window_label(item, config=config) for item in source_windows if isinstance(item, dict)]
     if source_labels:
         lines.append("Gộp từ: " + ", ".join(source_labels))

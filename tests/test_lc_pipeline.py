@@ -9,12 +9,14 @@ from unittest.mock import patch
 
 from crypto_trader.config import DEFAULT_CONFIG
 from crypto_trader.lc_pipeline import (
+    _four_hour_notification_text,
     format_internal_lc_view,
     format_internal_notifications_view,
     lc_pipeline_dashboard_payload,
     lc_pipeline_mini_pool,
     notify_mini_pool_summary,
     _recheck_rows_with_latest_market_data,
+    _two_hour_notification_text,
     update_lc_internal_pipeline,
 )
 from crypto_trader.models import TradeCandidate
@@ -91,6 +93,94 @@ class LcPipelineTest(TestCase):
         tmpdir = getattr(self, "tmpdir", None)
         if tmpdir:
             tmpdir.cleanup()
+
+    def test_two_hour_notification_infers_source_windows_from_one_hour_history(self) -> None:
+        config = self._config()
+        state = {
+            "state_version": 3,
+            "day_key": "2026-07-06",
+            "one_hour_history": [
+                {
+                    "frame": "1h",
+                    "slot": "2026-07-06T07:00:00+07:00",
+                    "created_at": "2026-07-06T00:05:00+00:00",
+                    "index": 1,
+                    "daily_index": 1,
+                    "approved": [],
+                    "rejected": [],
+                },
+                {
+                    "frame": "1h",
+                    "slot": "2026-07-06T08:00:00+07:00",
+                    "created_at": "2026-07-06T01:05:00+00:00",
+                    "index": 2,
+                    "daily_index": 2,
+                    "approved": [],
+                    "rejected": [],
+                },
+            ],
+            "two_hour_history": [
+                {
+                    "frame": "2h",
+                    "slot": "2026-07-06T08:00:00+07:00",
+                    "created_at": "2026-07-06T01:05:00+00:00",
+                    "index": 1,
+                    "daily_index": 1,
+                    "approved": [{**_saved_row("AAA/USDT:USDT", 64), "origin_source_slot": "1h", "origin_source_index": 2}],
+                    "rejected": [],
+                }
+            ],
+        }
+        set_journal_state(config, "lc_internal_pipeline_state", json.dumps(state, ensure_ascii=False))
+
+        message = _two_hour_notification_text(config, state["two_hour_history"][0])
+
+        self.assertIn("Khung 🟡 2h: #1 (08:05)", message)
+        self.assertIn("Gộp từ: 🔵 1h #1 (07:05), 🔵 1h #2 (08:05)", message)
+
+    def test_four_hour_notification_infers_source_windows_from_two_hour_history(self) -> None:
+        config = self._config()
+        state = {
+            "state_version": 3,
+            "day_key": "2026-07-06",
+            "two_hour_history": [
+                {
+                    "frame": "2h",
+                    "slot": "2026-07-06T08:00:00+07:00",
+                    "created_at": "2026-07-06T01:05:00+00:00",
+                    "index": 1,
+                    "daily_index": 1,
+                    "approved": [],
+                    "rejected": [],
+                },
+                {
+                    "frame": "2h",
+                    "slot": "2026-07-06T10:00:00+07:00",
+                    "created_at": "2026-07-06T03:05:00+00:00",
+                    "index": 2,
+                    "daily_index": 2,
+                    "approved": [],
+                    "rejected": [],
+                },
+            ],
+            "four_hour_history": [
+                {
+                    "frame": "4h",
+                    "slot": "2026-07-06T10:00:00+07:00",
+                    "created_at": "2026-07-06T03:05:00+00:00",
+                    "index": 1,
+                    "daily_index": 1,
+                    "approved": [{**_saved_row("BBB/USDT:USDT", 65), "origin_source_slot": "1h", "origin_source_index": 4}],
+                    "rejected": [],
+                }
+            ],
+        }
+        set_journal_state(config, "lc_internal_pipeline_state", json.dumps(state, ensure_ascii=False))
+
+        message = _four_hour_notification_text(config, state["four_hour_history"][0])
+
+        self.assertIn("Khung 🔴 4h: #1 (10:05)", message)
+        self.assertIn("Gộp từ: 🟡 2h #1 (08:05), 🟡 2h #2 (10:05)", message)
 
     @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
     @patch("crypto_trader.notifier.send_telegram_message")
