@@ -53,6 +53,7 @@ def _pipeline_config(config: dict[str, Any]) -> dict[str, Any]:
         "internal_lc_max": max(1, min(3, int(internal.get("lc_pipeline_internal_lc_max", 3) or 3))),
         "promote_after_hours": max(1.0, float(internal.get("lc_pipeline_promote_after_hours", 6) or 6)),
         "recheck_interval_minutes": max(15, int(internal.get("lc_pipeline_recheck_interval_minutes", 90) or 90)),
+        "slot_tolerance_minutes": max(1, min(10, int(internal.get("lc_pipeline_slot_tolerance_minutes", 3) or 3))),
         "min_win_probability_pct": shared_min_win,
         "one_hour_min_win_probability_pct": float(
             internal.get("lc_pipeline_one_hour_min_win_probability_pct", 61) or 61
@@ -112,6 +113,188 @@ def _slot_key(config: dict[str, Any], now: datetime, hours: int) -> str:
     local = _local_time(config, now)
     slot_hour = (local.hour // hours) * hours
     return local.replace(hour=slot_hour, minute=0, second=0, microsecond=0).isoformat()
+
+
+def _aligned_source_slots(config: dict[str, Any], target_slot: str, *, parent_hours: int, child_hours: int) -> list[str]:
+    target_time = _parse_time(target_slot)
+    if target_time is None:
+        return []
+    local_target = _local_time(config, target_time)
+    offsets = range(parent_hours - child_hours, -1, -child_hours)
+    return [(local_target - timedelta(hours=offset)).isoformat() for offset in offsets]
+
+
+def _slot_is_open(config: dict[str, Any], now: datetime, *, hours: int, tolerance_minutes: int) -> bool:
+    local_now = _local_time(config, now)
+    slot_hour = (local_now.hour // hours) * hours
+    slot_start = local_now.replace(hour=slot_hour, minute=0, second=0, microsecond=0)
+    elapsed = (local_now - slot_start).total_seconds()
+    return 0 <= elapsed <= max(1, int(tolerance_minutes)) * 60
+
+
+def _fixed_interval_slot_key(config: dict[str, Any], now: datetime, *, minutes: int) -> str:
+    interval_minutes = max(1, int(minutes))
+    local_now = _local_time(config, now)
+    midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    minutes_since_midnight = local_now.hour * 60 + local_now.minute
+    slot_minutes = (minutes_since_midnight // interval_minutes) * interval_minutes
+    slot_start = midnight + timedelta(minutes=slot_minutes)
+    return slot_start.isoformat()
+
+
+def _fixed_interval_slot_is_exact(config: dict[str, Any], now: datetime, *, minutes: int) -> bool:
+    interval_minutes = max(1, int(minutes))
+    local_now = _local_time(config, now)
+    minutes_since_midnight = local_now.hour * 60 + local_now.minute
+    return (
+        minutes_since_midnight % interval_minutes == 0
+        and local_now.second == 0
+        and local_now.microsecond == 0
+    )
+
+
+def _latest_events_for_slots(events: list[dict[str, Any]], slots: list[str]) -> list[dict[str, Any]]:
+    matched: list[dict[str, Any]] = []
+    for slot in slots:
+        event = next(
+            (
+                item
+                for item in reversed(events)
+                if isinstance(item, dict) and str(item.get("slot") or "") == slot
+            ),
+            None,
+        )
+        if event is not None:
+            matched.append(event)
+    return matched
+
+
+def _event_source_slots(event: dict[str, Any]) -> list[str]:
+    source_windows = event.get("source_windows") if isinstance(event.get("source_windows"), list) else []
+    slots: list[str] = []
+    for item in source_windows:
+        if not isinstance(item, dict):
+            continue
+        slot = str(item.get("slot") or "").strip()
+        if slot and slot not in slots:
+            slots.append(slot)
+    return slots
+
+
+def _event_expected_source_slots(config: dict[str, Any], event: dict[str, Any]) -> list[str]:
+    frame = str(event.get("frame") or "").lower()
+    target_slot = str(event.get("slot") or "")
+    if frame == "2h":
+        return _aligned_source_slots(config, target_slot, parent_hours=2, child_hours=1)
+    if frame == "4h":
+        return _aligned_source_slots(config, target_slot, parent_hours=4, child_hours=2)
+    return []
+
+
+def _event_has_aligned_sources(config: dict[str, Any], event: dict[str, Any]) -> bool:
+    frame = str(event.get("frame") or "").lower()
+    if frame not in {"2h", "4h"}:
+        return True
+    actual_slots = _event_source_slots(event)
+    expected_slots = _event_expected_source_slots(config, event)
+    if not actual_slots or not expected_slots:
+        return False
+    return all(slot in expected_slots for slot in actual_slots)
+
+
+def _latest_event_for_slot(
+    events: list[dict[str, Any]],
+    slot: str,
+    *,
+    config: dict[str, Any] | None = None,
+    require_aligned_sources: bool = False,
+) -> dict[str, Any] | None:
+    for event in reversed(events):
+        if not isinstance(event, dict) or str(event.get("slot") or "") != slot:
+            continue
+        if require_aligned_sources and config is not None and not _event_has_aligned_sources(config, event):
+            continue
+        return event
+    return None
+
+
+def _latest_events_for_slots_aligned(
+    config: dict[str, Any],
+    events: list[dict[str, Any]],
+    slots: list[str],
+) -> list[dict[str, Any]]:
+    matched: list[dict[str, Any]] = []
+    for slot in slots:
+        event = _latest_event_for_slot(events, slot, config=config, require_aligned_sources=True)
+        if event is not None:
+            matched.append(event)
+    return matched
+
+
+def _replace_event_for_slot(events: list[dict[str, Any]], replacement: dict[str, Any]) -> list[dict[str, Any]]:
+    slot = str(replacement.get("slot") or "")
+    frame = str(replacement.get("frame") or "")
+    output: list[dict[str, Any]] = []
+    replaced = False
+    for event in events:
+        if (
+            isinstance(event, dict)
+            and str(event.get("slot") or "") == slot
+            and str(event.get("frame") or "") == frame
+        ):
+            if not replaced:
+                output.append(replacement)
+                replaced = True
+            continue
+        output.append(event)
+    if not replaced:
+        output.append(replacement)
+    return output
+
+
+def _latest_slot_from_events(config: dict[str, Any], events: list[dict[str, Any]], frame: str) -> str | None:
+    slots: list[datetime] = []
+    for event in events:
+        if not isinstance(event, dict) or str(event.get("frame") or "").lower() != frame:
+            continue
+        event_time = _parse_time(event.get("slot"))
+        if event_time is None:
+            continue
+        slots.append(event_time)
+    if not slots:
+        return None
+    latest = max(slots)
+    return _local_time(config, latest).isoformat()
+
+
+def _sanitize_current_day_aggregate_state(config: dict[str, Any], state: dict[str, Any], now: datetime) -> None:
+    current_day = _day_key(config, now)
+
+    def _keep_event(event: dict[str, Any]) -> bool:
+        if not isinstance(event, dict):
+            return False
+        frame = str(event.get("frame") or "").lower()
+        if frame not in {"2h", "4h"}:
+            return True
+        event_time = _parse_time(event.get("slot") or event.get("created_at"))
+        if event_time is None or _day_key(config, event_time) != current_day:
+            return True
+        return _event_has_aligned_sources(config, event)
+
+    state["two_hour_history"] = [
+        event for event in state.get("two_hour_history") or [] if isinstance(event, dict) and _keep_event(event)
+    ]
+    state["four_hour_history"] = [
+        event for event in state.get("four_hour_history") or [] if isinstance(event, dict) and _keep_event(event)
+    ]
+    state["two_hour_windows"] = [
+        event for event in state.get("two_hour_windows") or [] if isinstance(event, dict) and _keep_event(event)
+    ]
+    state["telegram_events"] = [
+        event for event in state.get("telegram_events") or [] if isinstance(event, dict) and _keep_event(event)
+    ]
+    state["last_two_hour_slot"] = _latest_slot_from_events(config, state.get("two_hour_history") or [], "2h")
+    state["last_four_hour_slot"] = _latest_slot_from_events(config, state.get("four_hour_history") or [], "4h")
 
 
 def _candidate_score(candidate: TradeCandidate | dict[str, Any]) -> tuple[float, float, float]:
@@ -805,6 +988,7 @@ def _load_state(config: dict[str, Any], now: datetime, *, reset_for_new_day: boo
         state["daily_one_hour_counter"] = 0
         state["daily_two_hour_counter"] = 0
         state["daily_mini_counter"] = 0
+        state["last_undecided_recheck_slot"] = None
         state["hourly_windows"] = []
         state["two_hour_windows"] = []
         state["telegram_events"] = []
@@ -822,6 +1006,7 @@ def _load_state(config: dict[str, Any], now: datetime, *, reset_for_new_day: boo
     state.setdefault("daily_two_hour_counter", 0)
     state.setdefault("four_hour_counter", 0)
     state.setdefault("daily_mini_counter", 0)
+    state.setdefault("last_undecided_recheck_slot", None)
     state.setdefault("latest_mini_scan", {})
     state.setdefault("state_version", LC_PIPELINE_STATE_VERSION)
     state["one_hour_history"] = _prune_history(
@@ -839,6 +1024,7 @@ def _load_state(config: dict[str, Any], now: datetime, *, reset_for_new_day: boo
         now=now,
         keep_days=FOUR_HOUR_HISTORY_KEEP_DAYS,
     )
+    _sanitize_current_day_aggregate_state(config, state, now)
     _backfill_one_hour_source_metadata(state)
     _prune_low_win_state(state, _pipeline_config(config))
     return state
@@ -1089,6 +1275,15 @@ def lc_pipeline_four_hour_symbols(config: dict[str, Any], *, limit: int | None =
     if limit is None:
         return symbols
     return symbols[: max(1, int(limit))]
+
+
+def latest_lc_pipeline_four_hour_event(config: dict[str, Any]) -> dict[str, Any] | None:
+    state = _load_state(config, datetime.now(timezone.utc), reset_for_new_day=False)
+    four_hour_history = state.get("four_hour_history") or []
+    if not four_hour_history:
+        return None
+    latest_event = four_hour_history[-1]
+    return latest_event if isinstance(latest_event, dict) else None
 
 
 def latest_lc_pipeline_mini_scan(config: dict[str, Any]) -> dict[str, Any] | None:
@@ -2070,11 +2265,31 @@ def update_lc_internal_pipeline(
     hourly_slot = _slot_key(config, now, 1)
     two_hour_slot = _slot_key(config, now, 2)
     four_hour_slot = _slot_key(config, now, 4)
+    undecided_recheck_slot = _fixed_interval_slot_key(
+        config,
+        now,
+        minutes=int(settings["recheck_interval_minutes"]),
+    )
+    slot_tolerance_minutes = int(settings["slot_tolerance_minutes"])
+    hourly_slot_open = _slot_is_open(config, now, hours=1, tolerance_minutes=slot_tolerance_minutes)
+    two_hour_slot_open = _slot_is_open(config, now, hours=2, tolerance_minutes=slot_tolerance_minutes)
+    four_hour_slot_open = _slot_is_open(config, now, hours=4, tolerance_minutes=slot_tolerance_minutes)
+    undecided_recheck_due = _fixed_interval_slot_is_exact(
+        config,
+        now,
+        minutes=int(settings["recheck_interval_minutes"]),
+    ) and state.get("last_undecided_recheck_slot") != undecided_recheck_slot
     result: dict[str, Any] = {
         "enabled": True,
         "hourly_slot": hourly_slot,
         "two_hour_slot": two_hour_slot,
         "four_hour_slot": four_hour_slot,
+        "undecided_recheck_slot": undecided_recheck_slot,
+        "slot_tolerance_minutes": slot_tolerance_minutes,
+        "hourly_slot_open": hourly_slot_open,
+        "two_hour_slot_open": two_hour_slot_open,
+        "four_hour_slot_open": four_hour_slot_open,
+        "undecided_recheck_due": undecided_recheck_due,
         "created_hourly": False,
         "created_two_hour": False,
         "created_four_hour": False,
@@ -2082,7 +2297,7 @@ def update_lc_internal_pipeline(
         "blocked_symbols": sorted(blocked_symbols),
     }
 
-    if candidates and state.get("last_hourly_slot") != hourly_slot:
+    if candidates and hourly_slot_open and state.get("last_hourly_slot") != hourly_slot:
         local_now = _local_time(config, now)
         next_hourly_index = int(state.get("daily_one_hour_counter") or 0) + 1
         top = [
@@ -2149,20 +2364,23 @@ def update_lc_internal_pipeline(
             created_at=now,
         )
 
-    hourly_windows = state.get("hourly_windows") or []
-    recent_hourly_windows = hourly_windows[-2:] if len(hourly_windows) >= 2 else []
-    has_full_two_hour_inputs = (
-        len(recent_hourly_windows) >= 2
-        and all(list(window.get("top") or []) for window in recent_hourly_windows)
+    expected_hourly_slots = _aligned_source_slots(config, two_hour_slot, parent_hours=2, child_hours=1)
+    aligned_hourly_events = _latest_events_for_slots(list(state.get("one_hour_history") or []), expected_hourly_slots)
+    has_two_hour_inputs = any(list(window.get("approved") or []) for window in aligned_hourly_events)
+    current_two_hour_event = _latest_event_for_slot(
+        list(state.get("two_hour_history") or []),
+        two_hour_slot,
+        config=config,
+        require_aligned_sources=True,
     )
-    if has_full_two_hour_inputs and state.get("last_two_hour_slot") != two_hour_slot:
+    if two_hour_slot_open and has_two_hour_inputs and current_two_hour_event is None:
         combined: list[dict[str, Any]] = []
-        for window in recent_hourly_windows:
-            combined.extend(window.get("top") or [])
+        for window in aligned_hourly_events:
+            combined.extend(window.get("approved") or [])
         refreshed_combined, two_hour_recheck = _recheck_rows_with_latest_market_data(config, combined, now=now)
         _sync_state_after_recheck(
             state,
-            hourly_slots=[str(window.get("slot") or "") for window in recent_hourly_windows],
+            hourly_slots=[str(window.get("slot") or "") for window in aligned_hourly_events],
             refreshed_rows=refreshed_combined,
             dropped=list(two_hour_recheck.get("dropped") or []),
         )
@@ -2219,14 +2437,14 @@ def update_lc_internal_pipeline(
             "rejected": rejected,
             "recheck": two_hour_recheck,
             "source_windows": [
-                _source_window_payload("1h", window, config=config) for window in recent_hourly_windows if isinstance(window, dict)
+                _source_window_payload("1h", window, config=config) for window in aligned_hourly_events if isinstance(window, dict)
             ],
         }
-        state["two_hour_history"].append(event)
-        state["two_hour_windows"].append(event)
+        state["two_hour_history"] = _replace_event_for_slot(list(state.get("two_hour_history") or []), event)
+        state["two_hour_windows"] = _replace_event_for_slot(list(state.get("two_hour_windows") or []), event)
         state["two_hour_windows"] = state["two_hour_windows"][-2:]
         state["last_two_hour_slot"] = two_hour_slot
-        state["telegram_events"].append(event)
+        state["telegram_events"] = _replace_event_for_slot(list(state.get("telegram_events") or []), event)
         state["telegram_events"] = state["telegram_events"][-20:]
         _append_internal_notification(
             state,
@@ -2243,20 +2461,27 @@ def update_lc_internal_pipeline(
         if settings["notify_two_hour_summary"]:
             _notify_two_hour_summary(config, event)
 
-    two_hour_windows = state.get("two_hour_windows") or []
-    recent_two_hour_windows = two_hour_windows[-2:] if len(two_hour_windows) >= 2 else []
-    has_full_four_hour_inputs = (
-        len(recent_two_hour_windows) >= 2
-        and all(list(window.get("approved") or []) for window in recent_two_hour_windows)
+    expected_two_hour_slots = _aligned_source_slots(config, four_hour_slot, parent_hours=4, child_hours=2)
+    aligned_two_hour_events = _latest_events_for_slots_aligned(
+        config,
+        list(state.get("two_hour_history") or []),
+        expected_two_hour_slots,
     )
-    if has_full_four_hour_inputs and state.get("last_four_hour_slot") != four_hour_slot:
+    has_four_hour_inputs = any(list(window.get("approved") or []) for window in aligned_two_hour_events)
+    current_four_hour_event = _latest_event_for_slot(
+        list(state.get("four_hour_history") or []),
+        four_hour_slot,
+        config=config,
+        require_aligned_sources=True,
+    )
+    if four_hour_slot_open and has_four_hour_inputs and current_four_hour_event is None:
         combined_two_hour: list[dict[str, Any]] = []
-        for window in recent_two_hour_windows:
+        for window in aligned_two_hour_events:
             combined_two_hour.extend(window.get("approved") or [])
         refreshed_two_hour, four_hour_recheck = _recheck_rows_with_latest_market_data(config, combined_two_hour, now=now)
         _sync_state_after_recheck(
             state,
-            two_hour_slots=[str(window.get("slot") or "") for window in recent_two_hour_windows],
+            two_hour_slots=[str(window.get("slot") or "") for window in aligned_two_hour_events],
             refreshed_rows=refreshed_two_hour,
             dropped=list(four_hour_recheck.get("dropped") or []),
         )
@@ -2311,10 +2536,10 @@ def update_lc_internal_pipeline(
             "rejected": rejected_four_hour,
             "recheck": four_hour_recheck,
             "source_windows": [
-                _source_window_payload("2h", window, config=config) for window in recent_two_hour_windows if isinstance(window, dict)
+                _source_window_payload("2h", window, config=config) for window in aligned_two_hour_events if isinstance(window, dict)
             ],
         }
-        state["four_hour_history"].append(four_hour_event)
+        state["four_hour_history"] = _replace_event_for_slot(list(state.get("four_hour_history") or []), four_hour_event)
         state["four_hour_counter"] = next_four_hour_index
         state["last_four_hour_slot"] = four_hour_slot
         _append_internal_notification(
@@ -2336,13 +2561,9 @@ def update_lc_internal_pipeline(
         if settings["notify_mini_pool_summary"]:
             _notify_four_hour_summary(config, four_hour_event)
 
-    last_recheck_at = _parse_time(state.get("last_recheck_at"))
-    recheck_due = (
-        last_recheck_at is None
-        or (now - last_recheck_at).total_seconds() >= int(settings["recheck_interval_minutes"]) * 60
-    )
-    if recheck_due:
+    if undecided_recheck_due:
         state["last_recheck_at"] = now.isoformat()
+        state["last_undecided_recheck_slot"] = undecided_recheck_slot
         state["undecided"], result["undecided_recheck"] = _recheck_undecided_pool(
             config,
             list(state.get("undecided") or []),

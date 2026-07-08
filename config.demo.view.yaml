@@ -14,10 +14,10 @@ exchange:
   - 25
 automation:
   enabled: true
-  scan_interval_seconds: 300
+  scan_interval_seconds: 60
   execute_demo: true
   execute_live: false
-  initial_delay_seconds: 300
+  initial_delay_seconds: 5
 risk:
   order_usdt: 50
   max_active_trades: 5
@@ -31,7 +31,7 @@ risk:
 paper_trading:
   enabled: true
   auto_scan_enabled: false
-  scan_interval_seconds: 300
+  scan_interval_seconds: 60
   max_active_trades: 5
 pending_orders:
   enabled: true
@@ -63,6 +63,7 @@ ai:
     market_scan_enabled: true
     market_scan_interval_seconds: 14400
     market_scan_fixed_schedule: true
+    market_scan_slot_tolerance_minutes: 3
     market_scan_timezone: Asia/Ho_Chi_Minh
     market_scan_source_symbols: 40
     market_scan_max_symbols: 3
@@ -82,6 +83,7 @@ ai:
     lc_pipeline_internal_lc_max: 3
     lc_pipeline_promote_after_hours: 6
     lc_pipeline_recheck_interval_minutes: 90
+    lc_pipeline_slot_tolerance_minutes: 3
     lc_pipeline_relaxed_min_win_probability_pct: 55
     lc_pipeline_relaxed_min_confidence: 70
     lc_pipeline_notify_two_hour_summary: true

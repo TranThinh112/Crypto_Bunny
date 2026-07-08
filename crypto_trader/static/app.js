@@ -1931,7 +1931,7 @@ function renderLcPipeline(payload) {
       <div>Cắt lọc: bỏ ${fmt(settings.undecided_prune_drop, 0)} win rate thấp nhất khi vượt ${fmt(settings.undecided_prune_floor, 0)}</div>
       <div>LC nội bộ: <strong>${fmt(counts.internal_lc, 0)}</strong> / tối đa ${fmt(settings.internal_lc_max, 0)}</div>
       <div>Tổng hợp 2h hôm nay: <strong>${fmt(data.daily_two_hour_counter, 0)}</strong></div>
-      <div>Recheck: mỗi <strong>${fmt(settings.recheck_interval_minutes, 0)} phút</strong> · Promote sau <strong>${fmt(settings.promote_after_hours, 1)}h</strong></div>
+      <div>Recheck: đúng <strong>mốc cố định ${fmt(settings.recheck_interval_minutes, 0)} phút</strong> · không sớm/trễ · Promote sau <strong>${fmt(settings.promote_after_hours, 1)}h</strong></div>
       <div>Lần 2h gần nhất: ${timeLabel(data.last_two_hour_slot)}</div>
     `;
   }
@@ -1968,7 +1968,7 @@ function renderLcPipelineEnhanced(payload) {
       <div>Cắt lọc: bỏ ${fmt(settings.undecided_prune_drop, 0)} win rate thấp nhất khi vượt ${fmt(settings.undecided_prune_floor, 0)}</div>
       <div>LC nội bộ: <strong>${fmt(counts.internal_lc, 0)}</strong> / tối đa ${fmt(settings.internal_lc_max, 0)}</div>
       <div>Tổng hợp 2h hôm nay: <strong>${fmt(data.daily_two_hour_counter, 0)}</strong></div>
-      <div>Recheck: mỗi <strong>${fmt(settings.recheck_interval_minutes, 0)} phút</strong> · Promote sau <strong>${fmt(settings.promote_after_hours, 1)}h</strong></div>
+      <div>Recheck: đúng <strong>mốc cố định ${fmt(settings.recheck_interval_minutes, 0)} phút</strong> · không sớm/trễ · Promote sau <strong>${fmt(settings.promote_after_hours, 1)}h</strong></div>
       <div>Lần 2h gần nhất: ${timeLabel(data.last_two_hour_slot)}</div>
     `;
   }
@@ -2038,7 +2038,7 @@ function renderLcPipelineEnhanced(payload) {
       <div>Cắt lọc: bỏ ${fmt(settings.undecided_prune_drop, 0)} win rate thấp nhất khi vượt ${fmt(settings.undecided_prune_floor, 0)}</div>
       <div>LC nội bộ: <strong>${fmt(counts.internal_lc, 0)}</strong> / tối đa ${fmt(settings.internal_lc_max, 0)}</div>
       <div>Tổng hợp 2h hôm nay: <strong>${fmt(data.daily_two_hour_counter, 0)}</strong></div>
-      <div>Recheck: mỗi <strong>${fmt(settings.recheck_interval_minutes, 0)} phút</strong> · Promote sau <strong>${fmt(settings.promote_after_hours, 1)}h</strong></div>
+      <div>Recheck: đúng <strong>mốc cố định ${fmt(settings.recheck_interval_minutes, 0)} phút</strong> · không sớm/trễ · Promote sau <strong>${fmt(settings.promote_after_hours, 1)}h</strong></div>
       <div>Lần 2h gần nhất: ${timeLabel(data.last_two_hour_slot)}</div>
     `;
   }
@@ -2112,7 +2112,7 @@ function renderLcPipelineEnhanced(payload) {
       <div>Cắt lọc: bỏ ${fmt(settings.undecided_prune_drop, 0)} win rate thấp nhất khi vượt ${fmt(settings.undecided_prune_floor, 0)}</div>
       <div>LC nội bộ: <strong>${fmt(counts.internal_lc, 0)}</strong> / tối đa ${fmt(settings.internal_lc_max, 0)}</div>
       <div>Tổng hợp 2h hôm nay: <strong>${fmt(data.daily_two_hour_counter, 0)}</strong></div>
-      <div>Recheck: mỗi <strong>${fmt(settings.recheck_interval_minutes, 0)} phút</strong> · Promote sau <strong>${fmt(settings.promote_after_hours, 1)}h</strong></div>
+      <div>Recheck: đúng <strong>mốc cố định ${fmt(settings.recheck_interval_minutes, 0)} phút</strong> · không sớm/trễ · Promote sau <strong>${fmt(settings.promote_after_hours, 1)}h</strong></div>
       <div>Lần 2h gần nhất: ${timeLabel(data.last_two_hour_slot)}</div>
     `;
   }

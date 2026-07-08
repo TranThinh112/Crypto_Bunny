@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .atlas_mirror import atlas_runtime_is_primary, atlas_runtime_is_read_only
 from .config import DEFAULT_CONFIG, load_config, project_path
-from .ai_coordinator import next_internal_market_scan_at, run_internal_market_scan_if_due
+from .ai_coordinator import next_internal_market_scan_at
 from .codex_features import (
     activate_strategy_version,
     ai_trade_decision_stats,
@@ -434,6 +434,13 @@ def _automation_interval(config: dict[str, Any]) -> int:
     return max(60, int(automation.get("scan_interval_seconds", fallback) or 60))
 
 
+def _next_automation_cycle_at(now: datetime, interval_seconds: int) -> datetime:
+    interval = max(60, int(interval_seconds or 60))
+    current = int(now.timestamp())
+    next_tick = ((current // interval) + 1) * interval
+    return datetime.fromtimestamp(next_tick, tz=timezone.utc)
+
+
 def _automation_enabled(config: dict[str, Any]) -> bool:
     return bool(config.get("automation", {}).get("enabled", True)) and atlas_runtime_is_primary(config)
 
@@ -522,13 +529,14 @@ def _run_automation_cycle(app: FastAPI) -> None:
     now = datetime.now(timezone.utc)
     config = load_config(app.state.config_path)
     interval = _automation_interval(config)
+    next_scan_at = _next_automation_cycle_at(now, interval)
     payload: dict[str, Any] | None = None
     status: dict[str, Any] = {
         "enabled": _automation_enabled(config),
         "interval_seconds": interval,
         "mode": config.get("mode", "dry_run"),
         "last_started_at": now.isoformat(),
-        "next_scan_at": (now + timedelta(seconds=interval)).isoformat(),
+        "next_scan_at": next_scan_at.isoformat(),
     }
     if not status["enabled"]:
         status["last_result"] = "disabled"
@@ -626,7 +634,9 @@ def _automation_worker(app: FastAPI) -> None:
         except Exception:
             interval = 60
         _run_automation_cycle(app)
-        app.state.automation_stop.wait(interval)
+        next_run_at = _next_automation_cycle_at(datetime.now(timezone.utc), interval)
+        wait_seconds = max(1.0, (next_run_at - datetime.now(timezone.utc)).total_seconds())
+        app.state.automation_stop.wait(wait_seconds)
 
 
 def _telegram_polling_enabled(config: dict[str, Any]) -> bool:
@@ -1886,11 +1896,11 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
                     detail=f"Missing OKX demo env: {', '.join(status['missing_env'])}",
                 )
             before_prompt = prompt_status(config)
-            forced_internal_scan = run_internal_market_scan_if_due(config)
             decision_result = run_once(config, execute=True)
             after_prompt = prompt_status(config)
             decision_payload = to_jsonable(decision_result)
             scan_comparison = decision_payload.get("scan_comparison") or {}
+            forced_internal_scan = scan_comparison.get("internal_market_scan") or {}
             mini_pending_queue = scan_comparison.get("mini_pending_queue") or {}
             return {
                 "ok": True,

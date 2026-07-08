@@ -17,6 +17,7 @@ from .lc_pipeline import (
     lc_pipeline_internal_symbols,
     lc_pipeline_mini_pool,
     lc_pipeline_pool_rows,
+    latest_lc_pipeline_four_hour_event,
     latest_lc_pipeline_mini_scan,
     notify_mini_pool_summary,
     save_lc_pipeline_mini_scan,
@@ -397,6 +398,17 @@ def _internal_market_scan_slot_start(config: dict[str, Any], now: datetime) -> d
     return local_slot.astimezone(timezone.utc)
 
 
+def _internal_market_scan_slot_tolerance_minutes(config: dict[str, Any]) -> int:
+    internal_config = ai_config(config).get("internal", {})
+    return max(1, min(10, int(internal_config.get("market_scan_slot_tolerance_minutes", 3) or 3)))
+
+
+def _internal_market_scan_slot_open(config: dict[str, Any], now: datetime) -> bool:
+    slot_start = _internal_market_scan_slot_start(config, now)
+    elapsed = (now - slot_start).total_seconds()
+    return 0 <= elapsed <= _internal_market_scan_slot_tolerance_minutes(config) * 60
+
+
 def _internal_market_scan_slot_id(config: dict[str, Any], now: datetime) -> str:
     return _internal_market_scan_slot_start(config, now).isoformat()
 
@@ -418,6 +430,17 @@ def latest_internal_market_scan(config: dict[str, Any]) -> dict[str, Any] | None
     return latest_lc_pipeline_mini_scan(config)
 
 
+def _current_four_hour_event_for_market_scan(config: dict[str, Any], now: datetime) -> dict[str, Any] | None:
+    latest_four_hour = latest_lc_pipeline_four_hour_event(config)
+    if not latest_four_hour:
+        return None
+    four_hour_slot = _parse_time(latest_four_hour.get("slot") or latest_four_hour.get("created_at"))
+    current_slot = _internal_market_scan_slot_start(config, now)
+    if four_hour_slot is None or four_hour_slot != current_slot:
+        return None
+    return latest_four_hour
+
+
 def internal_market_scan_due(config: dict[str, Any], now: datetime | None = None) -> bool:
     if not ai_enabled(config):
         return False
@@ -425,6 +448,10 @@ def internal_market_scan_due(config: dict[str, Any], now: datetime | None = None
     if not bool(internal_config.get("market_scan_enabled", True)):
         return False
     now = now or datetime.now(timezone.utc)
+    if not _internal_market_scan_slot_open(config, now):
+        return False
+    if _current_four_hour_event_for_market_scan(config, now) is None:
+        return False
     latest = latest_internal_market_scan(config)
     created_at = _parse_time((latest or {}).get("created_at"))
     if not created_at:
