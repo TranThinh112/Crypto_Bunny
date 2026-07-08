@@ -209,6 +209,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "lc_pipeline_relaxed_min_win_probability_pct": 55,
             "lc_pipeline_relaxed_min_confidence": 70,
             "lc_pipeline_relaxed_min_risk_reward": 1.5,
+            "lc_pipeline_notify_one_hour_summary": True,
             "lc_pipeline_notify_two_hour_summary": True,
             "lc_pipeline_notify_mini_pool_summary": True,
             "lc_pipeline_two_hour_icon": "🟡",

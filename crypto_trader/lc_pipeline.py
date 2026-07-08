@@ -69,6 +69,7 @@ def _pipeline_config(config: dict[str, Any]) -> dict[str, Any]:
         "relaxed_min_win_probability_pct": float(internal.get("lc_pipeline_relaxed_min_win_probability_pct", 55) or 55),
         "relaxed_min_confidence": float(internal.get("lc_pipeline_relaxed_min_confidence", 70) or 70),
         "relaxed_min_risk_reward": float(internal.get("lc_pipeline_relaxed_min_risk_reward", 1.5) or 1.5),
+        "notify_one_hour_summary": bool(internal.get("lc_pipeline_notify_one_hour_summary", True)),
         "notify_two_hour_summary": bool(internal.get("lc_pipeline_notify_two_hour_summary", False)),
         "notify_mini_pool_summary": bool(internal.get("lc_pipeline_notify_mini_pool_summary", False)),
         "promote_survivors": bool(
@@ -1858,6 +1859,14 @@ def _notify_two_hour_summary(config: dict[str, Any], event: dict[str, Any]) -> N
     send_telegram_message(config, _two_hour_notification_text(config, event), with_buttons=False, replace_previous=False)
 
 
+def _notify_one_hour_summary(config: dict[str, Any], event: dict[str, Any]) -> None:
+    try:
+        from .notifier import send_telegram_message
+    except Exception:
+        return
+    send_telegram_message(config, _one_hour_notification_text(config, event), with_buttons=False, replace_previous=False)
+
+
 def _notify_four_hour_summary(config: dict[str, Any], event: dict[str, Any]) -> None:
     try:
         from .notifier import send_telegram_message
@@ -2375,6 +2384,8 @@ def _update_lc_internal_pipeline_impl(
             + [_format_pair_line(index, row, config=config) for index, row in enumerate(top[:3], 1)],
             created_at=now,
         )
+        if settings["notify_one_hour_summary"]:
+            _notify_one_hour_summary(config, one_hour_event)
 
     expected_hourly_slots = _aligned_source_slots(config, two_hour_slot, parent_hours=2, child_hours=1)
     aligned_hourly_events = _latest_events_for_slots(list(state.get("one_hour_history") or []), expected_hourly_slots)
