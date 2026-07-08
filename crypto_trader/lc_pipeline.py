@@ -63,7 +63,7 @@ def _pipeline_config(config: dict[str, Any]) -> dict[str, Any]:
         "four_hour_min_win_probability_pct": float(
             internal.get("lc_pipeline_four_hour_min_win_probability_pct", 63) or 63
         ),
-        "relaxed_min_win_probability_pct": float(internal.get("lc_pipeline_relaxed_min_win_probability_pct", 50) or 50),
+        "relaxed_min_win_probability_pct": float(internal.get("lc_pipeline_relaxed_min_win_probability_pct", 55) or 55),
         "relaxed_min_confidence": float(internal.get("lc_pipeline_relaxed_min_confidence", 70) or 70),
         "notify_two_hour_summary": bool(internal.get("lc_pipeline_notify_two_hour_summary", False)),
         "notify_mini_pool_summary": bool(internal.get("lc_pipeline_notify_mini_pool_summary", False)),
@@ -491,6 +491,42 @@ def _merge_undecided_rows(
         merged = _upsert_by_setup(merged, updated)
         existing_by_setup[_setup_key(updated)] = updated
     return merged
+
+
+def _soft_undecided_rows(
+    rows: list[dict[str, Any]],
+    *,
+    settings: dict[str, Any],
+    approved_keys: set[tuple[str, str]],
+    blocked_symbols: set[str],
+    source_slot: str,
+    source_index: int | None,
+    now: datetime,
+    local_now: datetime,
+) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in _sort_saved_rows(list(rows), settings, reverse=True):
+        if not isinstance(row, dict):
+            continue
+        key = _setup_key(row)
+        symbol = str(row.get("symbol") or "")
+        if not symbol or symbol in blocked_symbols or key in approved_keys or key in seen:
+            continue
+        if not _row_is_relaxed_valid(row, settings):
+            continue
+        output.append(
+            _row_with_source_metadata(
+                row,
+                state_label="CHUA_DUYET",
+                source_slot=source_slot,
+                source_index=source_index,
+                now=now,
+                local_now=local_now,
+            )
+        )
+        seen.add(key)
+    return output
 
 
 def _sync_events_with_recheck(
@@ -1798,7 +1834,7 @@ def _candidate_is_relaxed_valid(candidate: TradeCandidate, settings: dict[str, A
     win_probability = float(candidate.win_probability_pct or 0)
     confidence = float(candidate.confidence or 0)
     return (
-        win_probability > float(settings["relaxed_min_win_probability_pct"])
+        win_probability >= float(settings["relaxed_min_win_probability_pct"])
         and confidence >= float(settings["relaxed_min_confidence"])
         and float(candidate.risk_reward or 0) >= 1.5
     )
@@ -1818,7 +1854,7 @@ def _row_is_relaxed_valid(row: dict[str, Any], settings: dict[str, Any]) -> bool
     except (TypeError, ValueError):
         risk_reward = 0.0
     return (
-        win_probability > float(settings["relaxed_min_win_probability_pct"])
+        win_probability >= float(settings["relaxed_min_win_probability_pct"])
         and confidence >= float(settings["relaxed_min_confidence"])
         and risk_reward >= 1.5
     )
@@ -2143,18 +2179,16 @@ def update_lc_internal_pipeline(
             seen.add(symbol)
             if len(approved) >= top_limit:
                 break
-        rejected = [
-            _row_with_source_metadata(
-                row,
-                state_label="CHUA_DUYET",
-                source_slot="2h",
-                source_index=next_daily_index,
-                now=now,
-                local_now=local_now,
-            )
-            for row in ranked
-            if _setup_key(row) not in approved_keys and str(row.get("symbol") or "") not in blocked_symbols
-        ]
+        rejected = _soft_undecided_rows(
+            refreshed_combined,
+            settings=settings,
+            approved_keys=approved_keys,
+            blocked_symbols=blocked_symbols,
+            source_slot="2h",
+            source_index=next_daily_index,
+            now=now,
+            local_now=local_now,
+        )
         existing = list(state.get("undecided") or [])
         existing = _merge_undecided_rows(existing, rejected, now=now)
         state["undecided"] = _sort_saved_rows(existing, settings, reverse=True)
@@ -2239,18 +2273,16 @@ def update_lc_internal_pipeline(
             seen_four_hour.add(symbol)
             if len(approved_four_hour) >= top_limit:
                 break
-        rejected_four_hour = [
-            _row_with_source_metadata(
-                row,
-                state_label="CHUA_DUYET",
-                source_slot="4h",
-                source_index=next_four_hour_index,
-                now=now,
-                local_now=local_now,
-            )
-            for row in ranked_two_hour
-            if _setup_key(row) not in approved_four_hour_keys and str(row.get("symbol") or "") not in blocked_symbols
-        ]
+        rejected_four_hour = _soft_undecided_rows(
+            refreshed_two_hour,
+            settings=settings,
+            approved_keys=approved_four_hour_keys,
+            blocked_symbols=blocked_symbols,
+            source_slot="4h",
+            source_index=next_four_hour_index,
+            now=now,
+            local_now=local_now,
+        )
         existing = list(state.get("undecided") or [])
         existing = _merge_undecided_rows(existing, rejected_four_hour, now=now)
         state["undecided"] = _sort_saved_rows(existing, settings, reverse=True)

@@ -844,6 +844,60 @@ class LcPipelineTest(TestCase):
         )
         self.assertEqual(len(result["undecided"]), 3)
 
+    @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
+    def test_two_hour_sends_soft_valid_below_threshold_rows_to_undecided_only(self, recheck_rows) -> None:
+        config = self._config()
+        config["ai"]["internal"]["lc_pipeline_two_hour_min_win_probability_pct"] = 62
+        start = datetime(2026, 7, 6, 0, 5, tzinfo=timezone.utc)
+        update_lc_internal_pipeline(
+            config,
+            [
+                _candidate("AAA/USDT:USDT", 60, confidence=85, volume=2),
+                _candidate("BBB/USDT:USDT", 59, confidence=82, volume=1),
+            ],
+            now=start,
+        )
+        recheck_rows.return_value = (
+            [
+                _saved_row("AAA/USDT:USDT", 60, confidence=85, volume=2),
+                _saved_row("CCC/USDT:USDT", 58, confidence=81, volume=1),
+                _saved_row("DDD/USDT:USDT", 55, confidence=80, volume=0.5),
+            ],
+            {
+                "refreshed_count": 3,
+                "dropped": [
+                    {
+                        "symbol": "BBB/USDT:USDT",
+                        "old_side": "long",
+                        "reason": "setup goc LONG khong con hop le trong du lieu moi nhat",
+                    }
+                ],
+                "warnings": [],
+            },
+        )
+
+        result = update_lc_internal_pipeline(
+            config,
+            [
+                _candidate("CCC/USDT:USDT", 58, confidence=81, volume=1),
+                _candidate("DDD/USDT:USDT", 55, confidence=80, volume=0.5),
+            ],
+            now=start + timedelta(hours=1),
+        )
+
+        self.assertEqual(result["two_hour_event"]["approved"], [])
+        rejected = [(row["symbol"], row["side"], row["source_slot"]) for row in result["two_hour_event"]["rejected"]]
+        self.assertEqual(
+            rejected,
+            [
+                ("AAA/USDT:USDT", "long", "2h"),
+                ("CCC/USDT:USDT", "long", "2h"),
+                ("DDD/USDT:USDT", "long", "2h"),
+            ],
+        )
+        self.assertEqual([row["symbol"] for row in result["undecided"]], ["AAA/USDT:USDT", "CCC/USDT:USDT", "DDD/USDT:USDT"])
+        self.assertNotIn("BBB/USDT:USDT", [row["symbol"] for row in result["undecided"]])
+
     @patch("crypto_trader.lc_pipeline.enrich_quantities")
     @patch("crypto_trader.lc_pipeline.apply_position_sizing")
     @patch("crypto_trader.lc_pipeline.build_candidates")
