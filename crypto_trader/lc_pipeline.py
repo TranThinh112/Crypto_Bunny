@@ -578,6 +578,7 @@ def _refresh_row_from_candidate(
         "revived_label",
         "revived_age_hours",
         "revived_age_label",
+        "revived_target_rank",
         "mini_index",
         "recheck_daily_index",
         "recheck_slot",
@@ -1071,6 +1072,7 @@ def _compact_saved_row(row: dict[str, Any]) -> dict[str, Any]:
         "revived_label",
         "revived_age_hours",
         "revived_age_label",
+        "revived_target_rank",
         "undecided_status",
         "undecided_reason",
         "last_recheck_at",
@@ -1511,6 +1513,38 @@ def _row_origin_label(row: dict[str, Any], *, config: dict[str, Any]) -> str | N
     return f"Gốc {origin_icon} {origin_slot} #{origin_index} ({origin_time_label})"
 
 
+def _base_source_label(row: dict[str, Any]) -> str:
+    source_slot = row.get("source_slot") or row.get("state") or "-"
+    source_index = row.get("source_index")
+    raw_label = str(row.get("source_label") or "").strip()
+    source_clock = None
+    if raw_label:
+        parts = raw_label.split()
+        source_clock = parts[-1] if parts else None
+    if not source_clock:
+        source_time = _parse_time(row.get("source_time"))
+        source_clock = source_time.strftime("%H:%M:%S") if source_time else None
+    if source_index:
+        return f"{source_slot} #{source_index} ({source_clock})" if source_clock else f"{source_slot} #{source_index}"
+    return str(source_slot)
+
+
+def _revived_target_label(row: dict[str, Any]) -> str:
+    rank = row.get("revived_target_rank")
+    if rank in (None, ""):
+        return "LC nội bộ hiện tại"
+    return f"LC nội bộ #{rank}"
+
+
+def _revived_time_label(row: dict[str, Any]) -> str | None:
+    raw_label = str(row.get("revived_label") or "").strip()
+    if raw_label:
+        parts = raw_label.split()
+        return parts[-1] if parts else raw_label
+    revived_at = _parse_time(row.get("revived_at"))
+    return revived_at.strftime("%H:%M:%S") if revived_at else None
+
+
 def _format_pair_line(
     index: int,
     row: dict[str, Any],
@@ -1545,6 +1579,8 @@ def _format_pair_line(
         origin_label = _row_origin_label(row, config=config)
         if origin_label:
             parts.append(origin_label)
+    if row.get("revived_at"):
+        parts.append("HS")
     return " | ".join(parts)
 
 
@@ -1805,7 +1841,7 @@ def _mini_notification_text(
     if display_rows:
         for index, row in enumerate(display_rows[:3], 1):
             side = str(row.get("side") or "-").upper()
-            lines.append(f"{index}. {row.get('symbol', '-')} | {side} | {_source_label(row)}")
+            lines.append(f"{index}. {row.get('symbol', '-')} | {side} | {_source_label_v2(row)}")
     else:
         lines.append("Mini chưa chọn được cặp nào.")
     lines.append("Lý do: " + str(scan.get("decision_reason_vi") or _mini_reason_vi(scan)))
@@ -1859,6 +1895,65 @@ def _undecided_recheck_notification_text(
         lines.extend(_rc_recheck_row_line(index, row) for index, row in enumerate(promoted_rows[:3], 1))
     else:
         lines.append("Đẩy lên LC nội bộ: 0")
+    return "\n".join(lines)
+
+
+def _rc_recheck_row_line_v2(index: int, row: dict[str, Any], *, dropped: bool = False) -> str:
+    side = str(row.get("side") or "-").upper()
+    try:
+        win_text = f"{float(row.get('win_probability_pct') or 0):.2f}%"
+    except (TypeError, ValueError):
+        win_text = "-"
+    prefix = "Win trước" if dropped else "Win"
+    parts = [f"{index}. {row.get('symbol', '-')}", side, f"{prefix} {win_text}"]
+    if row.get("revived_at"):
+        parts.append(_revived_target_label(row))
+        parts.append(_base_source_label(row))
+        revived_time = _revived_time_label(row)
+        if revived_time:
+            parts.append(f"Hồi sinh {revived_time}")
+        parts.append("HS")
+    return " | ".join(parts)
+
+
+def _undecided_recheck_notification_text_v2(
+    config: dict[str, Any],
+    meta: dict[str, Any],
+    *,
+    kept_rows: list[dict[str, Any]],
+    promoted_rows: list[dict[str, Any]],
+) -> str:
+    created_at = _parse_time(meta.get("recheck_time")) or datetime.now(timezone.utc)
+    local_now = _local_time(config, created_at)
+    recheck_index = meta.get("daily_index", "-")
+    dropped_rows = [row for row in meta.get("dropped_rows") or [] if isinstance(row, dict)]
+    lines = [
+        f"📋 RC #{recheck_index} Chưa Duyệt",
+        local_now.strftime("%d/%m/%y %H:%M:%S"),
+        f"Lần recheck: #{recheck_index} ({local_now.strftime('%H:%M:%S')})",
+        f"Kept {len(kept_rows)} | Dropped {len(dropped_rows)} | Promoted {len(promoted_rows)}",
+    ]
+    if kept_rows:
+        lines.append("🟢 Giữ lại:")
+        lines.extend(_rc_recheck_row_line_v2(index, row) for index, row in enumerate(kept_rows[:3], 1))
+    else:
+        lines.append("🟢 Giữ lại: không còn cặp nào.")
+    if dropped_rows:
+        lines.append("🔴 Bị loại:")
+        lines.extend(_rc_recheck_row_line_v2(index, row, dropped=True) for index, row in enumerate(dropped_rows[:3], 1))
+    else:
+        lines.append("🔴 Bị loại: 0")
+    if promoted_rows:
+        lines.append("♻️ Đẩy lên LC nội bộ:")
+        lines.extend(_rc_recheck_row_line_v2(index, row) for index, row in enumerate(promoted_rows[:3], 1))
+        top = promoted_rows[0]
+        revived_time = _revived_time_label(top)
+        lines.append(
+            f"Thông báo hồi sinh: {top.get('symbol', '-')} -> {_revived_target_label(top)} | "
+            f"từ {_base_source_label(top)} | lúc {revived_time or '-'}"
+        )
+    else:
+        lines.append("♻️ Đẩy lên LC nội bộ: 0")
     return "\n".join(lines)
 
 
@@ -1945,7 +2040,12 @@ def _notify_undecided_recheck_summary(
 ) -> None:
     if int(meta.get("input_count") or 0) <= 0:
         return
-    text = _undecided_recheck_notification_text(config, {**meta, "recheck_time": now.isoformat()}, kept_rows=kept_rows, promoted_rows=promoted_rows)
+    text = _undecided_recheck_notification_text_v2(
+        config,
+        {**meta, "recheck_time": now.isoformat()},
+        kept_rows=kept_rows,
+        promoted_rows=promoted_rows,
+    )
     lines = text.splitlines()[2:]
     _append_internal_notification(
         state,
@@ -2038,7 +2138,7 @@ def format_internal_lc_view(config: dict[str, Any], *, limit: int = 10) -> str:
         return "\n".join(lines)
     for index, row in enumerate(rows, 1):
         side = str(row.get("side") or "-").upper()
-        source_label = _source_label(row)
+        source_label = _source_label_v2(row)
         try:
             win_label = f"{float(row.get('win_probability_pct') or 0):.2f}%"
         except (TypeError, ValueError):
@@ -2081,6 +2181,29 @@ def _source_label(row: dict[str, Any]) -> str:
     return str(source_slot)
 
 
+def _source_label_v2(row: dict[str, Any]) -> str:
+    if row.get("revived_at"):
+        return f"{_revived_target_label(row)} | HS {row.get('revived_label') or row.get('revived_at')}"
+    return _source_label(row)
+
+
+def _notify_promoted_lc_v2(config: dict[str, Any], record: dict[str, Any], *, age_hours: float, remaining_count: int) -> None:
+    try:
+        from .notifier import send_telegram_message
+    except Exception:
+        return
+    side = str(record.get("side") or "-").upper()
+    revived_time = _revived_time_label(record) or "-"
+    lines = [
+        "♻️ Chưa Duyệt hồi sinh thành LC nội bộ",
+        f"{record.get('symbol', '-')} | {side} | sống {_age_label(age_hours)}",
+        f"Vào: {_revived_target_label(record)} | từ {_base_source_label(record)}",
+        f"Hồi sinh lúc: {revived_time}",
+        f"Chưa Duyệt còn: {remaining_count}",
+    ]
+    send_telegram_message(config, "\n".join(lines), with_buttons=False, replace_previous=False)
+
+
 def notify_mini_pool_summary(
     config: dict[str, Any],
     rows: list[dict[str, Any]],
@@ -2109,7 +2232,7 @@ def notify_mini_pool_summary(
     if rows:
         for index, row in enumerate(rows[:3], 1):
             side = str(row.get("side") or "-").upper()
-            lines.append(f"{index}. {row.get('symbol', '-')} | {side} | {_source_label(row)}")
+            lines.append(f"{index}. {row.get('symbol', '-')} | {side} | {_source_label_v2(row)}")
     else:
         lines.append("Mini chưa chọn được cặp nào.")
     lines.append("Lý do: " + str(scan.get("decision_reason_vi") or _mini_reason_vi(scan)))
@@ -2390,14 +2513,21 @@ def _promote_survivors(
         undecided.append(row)
     state["undecided"] = _trim_undecided(undecided, settings)
     state["internal_lc"] = _sort_saved_rows(internal_lc, settings, reverse=True)[: int(settings["internal_lc_max"])]
+    for position, lc_row in enumerate(state["internal_lc"], 1):
+        if isinstance(lc_row, dict) and lc_row.get("revived_at"):
+            lc_row["revived_target_rank"] = position
     survivor_symbols = {str(row.get("symbol") or "") for row in state["internal_lc"]}
     for record, candidate, age_hours in revive_candidates:
         symbol = str(record.get("symbol") or "")
         if symbol not in survivor_symbols:
             continue
+        for lc_row in state["internal_lc"]:
+            if isinstance(lc_row, dict) and str(lc_row.get("symbol") or "") == symbol:
+                record["revived_target_rank"] = lc_row.get("revived_target_rank")
+                break
         promoted.append(record)
         active_symbols.add(symbol)
-        _notify_promoted_lc(config, record, age_hours=age_hours, remaining_count=len(state["undecided"]))
+        _notify_promoted_lc_v2(config, record, age_hours=age_hours, remaining_count=len(state["undecided"]))
     return promoted
 
 
