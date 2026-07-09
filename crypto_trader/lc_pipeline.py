@@ -1674,7 +1674,7 @@ def _source_window_label(item: dict[str, Any], *, config: dict[str, Any]) -> str
     icon = _frame_icon(config, frame)
     if index in (None, ""):
         return f"{icon} {frame} ({time_label})"
-    return f"{icon} {frame} #{index} ({time_label})"
+    return f"{icon} #{index} {frame} ({time_label})"
 
 
 def _raw_pipeline_state(config: dict[str, Any]) -> dict[str, Any]:
@@ -1736,7 +1736,7 @@ def _event_source_lines(event: dict[str, Any], *, config: dict[str, Any]) -> lis
     if frame_index in (None, ""):
         lines = [f"Khung {frame_icon} {frame}: ({frame_time})"]
     else:
-        lines = [f"Khung {frame_icon} {frame}: #{frame_index} ({frame_time})"]
+        lines = [f"Khung {frame_icon} #{frame_index} {frame} ({frame_time})"]
     source_windows = _event_source_windows(config, event)
     source_labels = [_source_window_label(item, config=config) for item in source_windows if isinstance(item, dict)]
     if source_labels:
@@ -1845,10 +1845,11 @@ def _internal_notification_summary_line(item: dict[str, Any], config: dict[str, 
 
 def _one_hour_notification_text(config: dict[str, Any], event: dict[str, Any]) -> str:
     rows = [row for row in event.get("approved") or [] if isinstance(row, dict)]
+    daily_index = event.get("daily_index", event.get("index", "-"))
     lines = [
-        f"{ONE_HOUR_ICON} 1h top {len(rows)} setup",
+        f"{ONE_HOUR_ICON} #{daily_index} 1h top {len(rows)} setup",
         f"{event.get('date', '-')} {event.get('time', '-')}",
-        f"Khung {ONE_HOUR_ICON} 1h: #{event.get('daily_index', event.get('index', '-'))} ({_event_clock_label(event.get('created_at') or event.get('slot'), config=config)})",
+        f"Khung {ONE_HOUR_ICON} #{daily_index} 1h ({_event_clock_label(event.get('created_at') or event.get('slot'), config=config)})",
     ]
     lines.extend(_format_pair_line(index, row, config=config) for index, row in enumerate(rows[:3], 1))
     return "\n".join(lines)
@@ -2084,12 +2085,13 @@ def internal_notification_timeline_messages(config: dict[str, Any], *, limit_per
     for item in items:
         if not isinstance(item, dict):
             continue
-        if str(item.get("frame") or "") == "rc":
+        frame = str(item.get("frame") or "")
+        if frame in {"rc", "1h", "2h", "4h"}:
             continue
         created_at_key = str(item.get("created_at") or "")
         if not created_at_key or not _is_same_local_day(config, created_at_key, current_day):
             continue
-        if str(item.get("frame") or "") == "mini" and created_at_key in mini_created_at_keys:
+        if frame == "mini" and created_at_key in mini_created_at_keys:
             continue
         entries.append((created_at_key, _internal_notification_text(item, config)))
     if not entries:
