@@ -313,6 +313,13 @@ def _sanitize_current_day_aggregate_state(config: dict[str, Any], state: dict[st
     state["last_four_hour_slot"] = _latest_slot_from_events(config, state.get("four_hour_history") or [], "4h")
 
 
+def _is_same_local_day(config: dict[str, Any], value: Any, current_day: str) -> bool:
+    event_time = _parse_time(value)
+    if event_time is None:
+        return False
+    return _day_key(config, event_time) == current_day
+
+
 def _candidate_score(candidate: TradeCandidate | dict[str, Any]) -> tuple[float, float, float]:
     if isinstance(candidate, dict):
         win_probability = candidate.get("win_probability_pct")
@@ -2017,22 +2024,28 @@ def _undecided_recheck_notification_text_v2(
 
 
 def internal_notification_timeline_messages(config: dict[str, Any], *, limit_per_frame: int = 5) -> list[str]:
-    state = _load_state(config, datetime.now(timezone.utc), reset_for_new_day=False)
+    now = datetime.now(timezone.utc)
+    current_day = _day_key(config, now)
+    state = _load_state(config, now, reset_for_new_day=False)
     items = state.get("internal_notifications") if isinstance(state.get("internal_notifications"), list) else []
     entries: list[tuple[str, str]] = []
     for event in state.get("one_hour_history") or []:
-        if isinstance(event, dict):
+        if isinstance(event, dict) and _is_same_local_day(config, event.get("created_at") or event.get("slot"), current_day):
             entries.append((str(event.get("created_at") or ""), _one_hour_notification_text(config, event)))
     for event in state.get("two_hour_history") or []:
-        if isinstance(event, dict):
+        if isinstance(event, dict) and _is_same_local_day(config, event.get("created_at") or event.get("slot"), current_day):
             entries.append((str(event.get("created_at") or ""), _two_hour_notification_text(config, event)))
     for event in state.get("four_hour_history") or []:
-        if isinstance(event, dict):
+        if isinstance(event, dict) and _is_same_local_day(config, event.get("created_at") or event.get("slot"), current_day):
             entries.append((str(event.get("created_at") or ""), _four_hour_notification_text(config, event)))
     latest_scan = latest_lc_pipeline_mini_scan(config)
     latest_four_hour = state.get("four_hour_history")[-1] if state.get("four_hour_history") else None
     mini_created_at_keys: set[str] = set()
-    if isinstance(latest_scan, dict) and latest_scan.get("created_at"):
+    if (
+        isinstance(latest_scan, dict)
+        and latest_scan.get("created_at")
+        and _is_same_local_day(config, latest_scan.get("created_at"), current_day)
+    ):
         created_at_key = str(latest_scan.get("created_at") or "")
         entries.append((created_at_key, _mini_notification_text(config, latest_scan, latest_four_hour)))
         mini_created_at_keys.add(created_at_key)
@@ -2042,7 +2055,7 @@ def internal_notification_timeline_messages(config: dict[str, Any], *, limit_per
         if str(item.get("frame") or "") == "rc":
             continue
         created_at_key = str(item.get("created_at") or "")
-        if not created_at_key:
+        if not created_at_key or not _is_same_local_day(config, created_at_key, current_day):
             continue
         if str(item.get("frame") or "") == "mini" and created_at_key in mini_created_at_keys:
             continue
@@ -2055,7 +2068,9 @@ def internal_notification_timeline_messages(config: dict[str, Any], *, limit_per
 
 
 def undecided_notification_timeline_messages(config: dict[str, Any], *, limit_per_frame: int = 5) -> list[str]:
-    state = _load_state(config, datetime.now(timezone.utc), reset_for_new_day=False)
+    now = datetime.now(timezone.utc)
+    current_day = _day_key(config, now)
+    state = _load_state(config, now, reset_for_new_day=False)
     items = state.get("internal_notifications") if isinstance(state.get("internal_notifications"), list) else []
     entries: list[tuple[str, str]] = []
     for item in items:
@@ -2064,7 +2079,7 @@ def undecided_notification_timeline_messages(config: dict[str, Any], *, limit_pe
         if str(item.get("frame") or "") != "rc":
             continue
         created_at_key = str(item.get("created_at") or "")
-        if not created_at_key:
+        if not created_at_key or not _is_same_local_day(config, created_at_key, current_day):
             continue
         entries.append((created_at_key, _internal_notification_text(item, config)))
     if not entries:
