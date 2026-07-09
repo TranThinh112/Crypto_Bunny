@@ -10,7 +10,9 @@ from unittest.mock import patch
 import crypto_trader.lc_pipeline as lc_pipeline_module
 from crypto_trader.config import DEFAULT_CONFIG
 from crypto_trader.lc_pipeline import (
+    _notify_two_hour_summary,
     _four_hour_notification_text,
+    _one_hour_notification_text,
     format_internal_lc_view,
     format_internal_notifications_view,
     lc_pipeline_dashboard_payload,
@@ -138,6 +140,89 @@ class LcPipelineTest(TestCase):
 
         self.assertIn("Khung 🟡 2h: #1 (08:05)", message)
         self.assertIn("Gộp từ: 🔵 1h #1 (07:05), 🔵 1h #2 (08:05)", message)
+
+    def test_one_hour_notification_shows_empty_state_when_no_approved_rows(self) -> None:
+        config = self._config()
+        event = {
+            "frame": "1h",
+            "slot": "2026-07-06T07:00:00+07:00",
+            "created_at": "2026-07-06T00:05:00+00:00",
+            "index": 1,
+            "daily_index": 1,
+            "date": "06/07/26",
+            "time": "07:05:00",
+            "approved": [],
+            "rejected": [],
+        }
+
+        message = _one_hour_notification_text(config, event)
+
+        self.assertIn("1h top 0 setup", message)
+        self.assertIn("Khong co cap nao du dieu kien giu lai o 1h.", message)
+
+    def test_two_hour_notification_shows_empty_state_when_no_approved_rows(self) -> None:
+        config = self._config()
+        state = {
+            "state_version": 3,
+            "day_key": "2026-07-06",
+            "one_hour_history": [
+                {
+                    "frame": "1h",
+                    "slot": "2026-07-06T07:00:00+07:00",
+                    "created_at": "2026-07-06T00:05:00+00:00",
+                    "index": 1,
+                    "daily_index": 1,
+                    "approved": [],
+                    "rejected": [],
+                },
+                {
+                    "frame": "1h",
+                    "slot": "2026-07-06T08:00:00+07:00",
+                    "created_at": "2026-07-06T01:05:00+00:00",
+                    "index": 2,
+                    "daily_index": 2,
+                    "approved": [],
+                    "rejected": [],
+                },
+            ],
+        }
+        set_journal_state(config, "lc_internal_pipeline_state", json.dumps(state, ensure_ascii=False))
+        event = {
+            "frame": "2h",
+            "slot": "2026-07-06T08:00:00+07:00",
+            "created_at": "2026-07-06T01:05:00+00:00",
+            "index": 1,
+            "daily_index": 1,
+            "date": "06/07/26",
+            "time": "08:05:00",
+            "approved": [],
+            "rejected": [],
+        }
+
+        message = _two_hour_notification_text(config, event)
+
+        self.assertIn("2h: #1 (08:05)", message)
+        self.assertIn("Khong co cap nao du dieu kien giu lai o 2h.", message)
+
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_two_hour_summary_still_notifies_when_event_is_empty(self, send_message) -> None:
+        config = self._config()
+        event = {
+            "frame": "2h",
+            "slot": "2026-07-06T08:00:00+07:00",
+            "created_at": "2026-07-06T01:05:00+00:00",
+            "index": 1,
+            "daily_index": 1,
+            "date": "06/07/26",
+            "time": "08:05:00",
+            "approved": [],
+            "rejected": [],
+        }
+
+        _notify_two_hour_summary(config, event)
+
+        self.assertEqual(send_message.call_count, 1)
+        self.assertIn("Khong co cap nao du dieu kien giu lai o 2h.", send_message.call_args.args[1])
 
     def test_dashboard_payload_sanitizes_sample_symbols_when_filter_enabled(self) -> None:
         config = self._config()
@@ -322,6 +407,37 @@ class LcPipelineTest(TestCase):
         raw_state = get_journal_state(config, "lc_internal_pipeline_state")
         state = json.loads(raw_state or "{}")
         self.assertEqual(state.get("last_hourly_slot"), result["hourly_slot"])
+
+    @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_one_hour_summary_is_not_suppressed_when_two_hour_summary_enabled(self, send_message, recheck_rows) -> None:
+        config = self._config()
+        config["ai"]["internal"]["lc_pipeline_notify_two_hour_summary"] = True
+        config["ai"]["internal"]["lc_pipeline_notify_mini_pool_summary"] = False
+        start = datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc)
+
+        first = update_lc_internal_pipeline(config, [_candidate("AAA/USDT:USDT", 61)], now=start)
+
+        self.assertTrue(first["created_hourly"])
+        self.assertEqual(send_message.call_count, 1)
+        self.assertIn("1h top 1 setup", send_message.call_args_list[0].args[1])
+
+        recheck_rows.return_value = (
+            [
+                {**_saved_row("AAA/USDT:USDT", 61), "source_slot": "1h", "source_index": 1, "source_time": start.isoformat()},
+                {**_saved_row("BBB/USDT:USDT", 62), "source_slot": "1h", "source_index": 2, "source_time": (start + timedelta(hours=1)).isoformat()},
+            ],
+            {"input_count": 2, "refreshed_count": 2, "dropped": [], "warnings": [], "sync_complete": True, "synchronized_count": 2},
+        )
+
+        second = update_lc_internal_pipeline(config, [_candidate("BBB/USDT:USDT", 62)], now=start + timedelta(hours=1))
+
+        self.assertTrue(second["created_hourly"])
+        self.assertTrue(second["created_two_hour"])
+        self.assertEqual(send_message.call_count, 3)
+        self.assertIn("1h top 1 setup", send_message.call_args_list[1].args[1])
+        self.assertIn("2h", send_message.call_args_list[2].args[1])
+        self.assertIn("BBB/USDT:USDT", send_message.call_args_list[2].args[1])
 
     @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
     def test_mini_pool_uses_latest_four_hour_pairs(self, recheck_rows) -> None:

@@ -2165,7 +2165,10 @@ def _one_hour_notification_text(config: dict[str, Any], event: dict[str, Any]) -
         f"{event.get('date', '-')} {event.get('time', '-')}",
         f"Khung {ONE_HOUR_ICON} 1h: #{daily_index} ({_event_clock_label(event.get('created_at') or event.get('slot'), config=config)})",
     ]
-    lines.extend(_format_pair_line(index, row, config=config) for index, row in enumerate(rows[:3], 1))
+    if rows:
+        lines.extend(_format_pair_line(index, row, config=config) for index, row in enumerate(rows[:3], 1))
+    else:
+        lines.append("Khong co cap nao du dieu kien giu lai o 1h.")
     return "\n".join(lines)
 
 
@@ -2178,7 +2181,10 @@ def _two_hour_notification_text(config: dict[str, Any], event: dict[str, Any]) -
     ]
     lines.extend(_event_source_lines(event, config=config))
     lines.append("3 cặp duyệt lượt này:")
-    lines.extend(_format_pair_line(index, row, config=config, include_origin=True) for index, row in enumerate(rows[:3], 1))
+    if rows:
+        lines.extend(_format_pair_line(index, row, config=config, include_origin=True) for index, row in enumerate(rows[:3], 1))
+    else:
+        lines.append("Khong co cap nao du dieu kien giu lai o 2h.")
     return "\n".join(lines)
 
 
@@ -2451,8 +2457,6 @@ def format_internal_notifications_view(config: dict[str, Any], *, limit_per_fram
 
 def _notify_two_hour_summary(config: dict[str, Any], event: dict[str, Any]) -> None:
     sanitized_event, _ = _sanitize_event_sample_rows(config, event)
-    if not (sanitized_event.get("approved") or sanitized_event.get("rejected")):
-        return
     try:
         from .notifier import send_telegram_message
     except Exception:
@@ -2462,8 +2466,6 @@ def _notify_two_hour_summary(config: dict[str, Any], event: dict[str, Any]) -> N
 
 def _notify_one_hour_summary(config: dict[str, Any], event: dict[str, Any]) -> None:
     sanitized_event, _ = _sanitize_event_sample_rows(config, event)
-    if not (sanitized_event.get("approved") or sanitized_event.get("rejected")):
-        return
     try:
         from .notifier import send_telegram_message
     except Exception:
@@ -2473,8 +2475,6 @@ def _notify_one_hour_summary(config: dict[str, Any], event: dict[str, Any]) -> N
 
 def _notify_four_hour_summary(config: dict[str, Any], event: dict[str, Any]) -> None:
     sanitized_event, _ = _sanitize_event_sample_rows(config, event)
-    if not (sanitized_event.get("approved") or sanitized_event.get("rejected")):
-        return
     try:
         from .notifier import send_telegram_message
     except Exception:
@@ -3400,7 +3400,6 @@ def _update_lc_internal_pipeline_impl(
     _save_state(config, state)
     if (
         settings["notify_one_hour_summary"]
-        and not settings["notify_two_hour_summary"]
         and _should_push_one_hour_summary(config, now)
         and isinstance(result.get("one_hour_event"), dict)
     ):
