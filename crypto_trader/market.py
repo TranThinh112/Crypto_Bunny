@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
 
@@ -421,6 +423,68 @@ def _confirmation_timeframes(config: dict[str, Any]) -> tuple[bool, list[str], i
     return False, [], int(strategy_config.get("ohlcv_limit", 180))
 
 
+def _snapshot_worker_count(config: dict[str, Any], symbol_count: int) -> int:
+    raw = config.get("exchange", {}).get("snapshot_workers", 4)
+    try:
+        workers = int(raw or 4)
+    except (TypeError, ValueError):
+        workers = 4
+    return max(1, min(max(1, symbol_count), workers, 8))
+
+
+def _build_snapshot_exchange(
+    config: dict[str, Any],
+    *,
+    markets: dict[str, Any],
+    currencies: dict[str, Any],
+) -> Any:
+    exchange = create_exchange(config, authenticated=False)
+    if markets and hasattr(exchange, "set_markets"):
+        exchange.set_markets(markets, currencies if isinstance(currencies, dict) else None)
+    else:
+        exchange.load_markets()
+    return exchange
+
+
+def _fetch_single_snapshot(
+    exchange: Any,
+    symbol: str,
+    *,
+    markets: dict[str, Any],
+    tickers: dict[str, Any],
+    timeframe: str,
+    limit: int,
+    higher_enabled: bool,
+    higher_frames: list[str],
+    higher_limit: int,
+) -> tuple[MarketSnapshot | None, list[str]]:
+    warnings: list[str] = []
+    try:
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        market = markets.get(symbol) if isinstance(markets, dict) else {}
+        ticker = None
+        if isinstance(tickers, dict):
+            ticker = tickers.get(symbol)
+            if ticker is None and isinstance(market, dict):
+                ticker = tickers.get(str(market.get("id") or ""))
+        if not isinstance(ticker, dict):
+            ticker = exchange.fetch_ticker(symbol)
+        last = float(ticker.get("last") or float(ohlcv[-1][4]))
+        higher_timeframes: dict[str, dict[str, Any]] = {}
+        if higher_enabled:
+            for frame in higher_frames:
+                if frame == timeframe:
+                    continue
+                try:
+                    frame_ohlcv = exchange.fetch_ohlcv(symbol, timeframe=frame, limit=higher_limit)
+                    higher_timeframes[frame] = _frame_summary(frame, symbol, frame_ohlcv, last)
+                except Exception as exc:
+                    warnings.append(f"{symbol}: {frame} confirmation fetch failed: {exc}")
+        return snapshot_from_ohlcv(symbol, ohlcv, ticker, higher_timeframes, timeframe=timeframe), warnings
+    except Exception as exc:
+        return None, [f"{symbol}: market fetch failed: {exc}"]
+
+
 def fetch_market_snapshots(
     config: dict[str, Any],
     symbols: list[str] | None = None,
@@ -449,31 +513,76 @@ def fetch_market_snapshots(
         return [], warnings + ["Market snapshot exchange is unavailable"]
     if not markets:
         markets = exchange.load_markets() or getattr(exchange, "markets", {}) or {}
-    for symbol in active_symbols:
-        try:
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-            market = markets.get(symbol) if isinstance(markets, dict) else {}
-            ticker = None
-            if isinstance(tickers, dict):
-                ticker = tickers.get(symbol)
-                if ticker is None and isinstance(market, dict):
-                    ticker = tickers.get(str(market.get("id") or ""))
-            if not isinstance(ticker, dict):
-                ticker = exchange.fetch_ticker(symbol)
-            last = float(ticker.get("last") or float(ohlcv[-1][4]))
-            higher_timeframes: dict[str, dict[str, Any]] = {}
-            if higher_enabled:
-                for frame in higher_frames:
-                    if frame == timeframe:
-                        continue
-                    try:
-                        frame_ohlcv = exchange.fetch_ohlcv(symbol, timeframe=frame, limit=higher_limit)
-                        higher_timeframes[frame] = _frame_summary(frame, symbol, frame_ohlcv, last)
-                    except Exception as exc:
-                        warnings.append(f"{symbol}: {frame} confirmation fetch failed: {exc}")
-            snapshots.append(snapshot_from_ohlcv(symbol, ohlcv, ticker, higher_timeframes, timeframe=timeframe))
-        except Exception as exc:
-            warnings.append(f"{symbol}: market fetch failed: {exc}")
+    worker_count = _snapshot_worker_count(config, len(active_symbols))
+    if worker_count <= 1 or len(active_symbols) <= 1:
+        for symbol in active_symbols:
+            snapshot, symbol_warnings = _fetch_single_snapshot(
+                exchange,
+                symbol,
+                markets=markets,
+                tickers=tickers if isinstance(tickers, dict) else {},
+                timeframe=timeframe,
+                limit=limit,
+                higher_enabled=higher_enabled,
+                higher_frames=higher_frames,
+                higher_limit=higher_limit,
+            )
+            warnings.extend(symbol_warnings)
+            if snapshot is not None:
+                snapshots.append(snapshot)
+        return snapshots, warnings
+
+    currencies = (market_data or {}).get("currencies") or getattr(exchange, "currencies", {}) or {}
+    worker_local = threading.local()
+
+    def _worker(symbol: str) -> tuple[str, MarketSnapshot | None, list[str]]:
+        worker_exchange = getattr(worker_local, "exchange", None)
+        if worker_exchange is None:
+            worker_exchange = _build_snapshot_exchange(
+                config,
+                markets=markets if isinstance(markets, dict) else {},
+                currencies=currencies if isinstance(currencies, dict) else {},
+            )
+            worker_local.exchange = worker_exchange
+        snapshot, symbol_warnings = _fetch_single_snapshot(
+            worker_exchange,
+            symbol,
+            markets=markets if isinstance(markets, dict) else {},
+            tickers=tickers if isinstance(tickers, dict) else {},
+            timeframe=timeframe,
+            limit=limit,
+            higher_enabled=higher_enabled,
+            higher_frames=higher_frames,
+            higher_limit=higher_limit,
+        )
+        return symbol, snapshot, symbol_warnings
+
+    completed_symbols: set[str] = set()
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        for symbol, snapshot, symbol_warnings in executor.map(_worker, active_symbols):
+            completed_symbols.add(symbol)
+            warnings.extend(symbol_warnings)
+            if snapshot is not None:
+                snapshots.append(snapshot)
+    if len(snapshots) < len(active_symbols):
+        snapshot_symbols = {snapshot.symbol for snapshot in snapshots}
+        for symbol in active_symbols:
+            if symbol in snapshot_symbols:
+                continue
+            snapshot, symbol_warnings = _fetch_single_snapshot(
+                exchange,
+                symbol,
+                markets=markets if isinstance(markets, dict) else {},
+                tickers=tickers if isinstance(tickers, dict) else {},
+                timeframe=timeframe,
+                limit=limit,
+                higher_enabled=higher_enabled,
+                higher_frames=higher_frames,
+                higher_limit=higher_limit,
+            )
+            warnings.extend(symbol_warnings)
+            if snapshot is not None:
+                snapshots.append(snapshot)
     return snapshots, warnings
 
 

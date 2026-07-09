@@ -58,6 +58,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "default_settle": "USDT",
         "position_side_mode": "net",
         "timeout_ms": 10000,
+        "snapshot_workers": 3,
         "leverage_presets": [5, 10, 15, 20, 25],
     },
     "strategy": {
