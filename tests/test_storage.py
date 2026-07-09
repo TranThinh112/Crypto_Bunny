@@ -3,9 +3,10 @@ from __future__ import annotations
 import tempfile
 from datetime import datetime, timedelta, timezone
 from unittest import TestCase
+from unittest.mock import patch
 
 from crypto_trader.atlas_mirror import atlas_database
-from crypto_trader.models import TradeCandidate
+from crypto_trader.models import Decision, RiskCheck, TradeCandidate
 from crypto_trader.storage import (
     compact_market_scan_observations,
     ensure_ai_model_version,
@@ -16,7 +17,10 @@ from crypto_trader.storage import (
     prune_trade_candidates,
     prune_trade_executions,
     prune_market_scan_observations,
+    recent_market_scan_memory,
+    save_decision,
     save_market_scan_observations,
+    save_pending_order,
 )
 
 
@@ -25,6 +29,7 @@ class StorageTest(TestCase):
         return {
             "_atlas_test_mode": True,
             "_atlas_test_database": f"storage_test_{abs(hash(tmpdir))}",
+            "_config_dir": tmpdir,
             "market_scan_memory": {
                 "keep_hours": 12,
                 "max_rows_per_symbol_timeframe": 2,
@@ -160,6 +165,24 @@ class StorageTest(TestCase):
             self.assertNotIn("raw_candles", row["payload_json"])
             self.assertNotIn('"candidate"', row["payload_json"])
 
+    def test_recent_market_scan_memory_falls_back_to_local_cache_on_retryable_timeout(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config = self._config(tmpdir)
+            save_market_scan_observations(config, [self._candidate()], source="scan", limit=10)
+
+            with patch("crypto_trader.storage._mongo_find_many", side_effect=RuntimeError("read operation timed out")):
+                memory = recent_market_scan_memory(
+                    config,
+                    symbols=["BTC/USDT:USDT"],
+                    timeframes=["1m", "5m"],
+                    lookback_hours=12,
+                    per_symbol_timeframe_limit=2,
+                )
+
+        self.assertIn("BTC/USDT:USDT", memory)
+        self.assertEqual(len(memory["BTC/USDT:USDT"]["1m"]), 1)
+        self.assertEqual(len(memory["BTC/USDT:USDT"]["5m"]), 1)
+
     def test_compact_market_scan_observations_rewrites_existing_large_rows(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             config = self._config(tmpdir)
@@ -221,6 +244,29 @@ class StorageTest(TestCase):
         self.assertEqual(result["deleted_over_limit"], 3)
         self.assertEqual(count, 3)
 
+    def test_save_decision_keeps_latest_insert_when_prune_times_out(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config = self._config(tmpdir)
+            decision = Decision(
+                created_at=datetime.now(timezone.utc),
+                mode="demo",
+                action="hold",
+                selected=None,
+                candidates=[self._candidate()],
+                risk_check=RiskCheck(True, [], []),
+                execution=None,
+                news_items=[],
+            )
+
+            with patch("crypto_trader.storage.prune_decision_history", side_effect=RuntimeError("read operation timed out")):
+                row_id = save_decision(config, decision)
+
+            rows = list(atlas_database(config)["decisions"].find({}, {"_id": 0}))
+
+        self.assertEqual(row_id, 1)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], 1)
+
     def test_prune_trade_candidates_removes_rows_older_than_7_days(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             config = self._config(tmpdir)
@@ -265,6 +311,20 @@ class StorageTest(TestCase):
 
         self.assertEqual(result["deleted_old"], 1)
         self.assertEqual(ids, [2])
+
+    def test_save_pending_order_keeps_insert_when_prune_times_out(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config = self._config(tmpdir)
+
+            with patch("crypto_trader.storage.prune_pending_orders", side_effect=RuntimeError("read operation timed out")):
+                with patch("crypto_trader.storage.prune_internal_pending_orders", side_effect=RuntimeError("read operation timed out")):
+                    row = save_pending_order(config, self._candidate(), None, journal_id=12)
+
+            rows = list(atlas_database(config)["internal_pending_orders"].find({}, {"_id": 0}))
+
+        self.assertEqual(row["id"], 1)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["journal_id"], 12)
 
     def test_prune_trade_executions_keeps_open_rows_older_than_1_year(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:

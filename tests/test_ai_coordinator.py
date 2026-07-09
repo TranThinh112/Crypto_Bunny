@@ -158,6 +158,45 @@ class AiCoordinatorTest(TestCase):
         )
         notify_mini_pool_summary.assert_called_once()
 
+    @patch("crypto_trader.ai_coordinator.notify_mini_pool_summary")
+    @patch("crypto_trader.ai_coordinator.recent_market_scan_memory")
+    @patch("crypto_trader.ai_coordinator.enrich_quantities")
+    @patch("crypto_trader.ai_coordinator.apply_position_sizing")
+    @patch("crypto_trader.ai_coordinator.build_candidates")
+    @patch("crypto_trader.ai_coordinator.market_guard_symbol_layers")
+    @patch("crypto_trader.ai_coordinator.fetch_market_snapshots")
+    @patch("crypto_trader.ai_coordinator.fetch_top_volume_symbols")
+    @patch("crypto_trader.ai_coordinator.collect_news")
+    def test_internal_market_scan_holds_candidates_when_position_sizing_times_out(
+        self,
+        collect_news,
+        fetch_top_volume_symbols,
+        fetch_market_snapshots,
+        market_guard_symbol_layers,
+        build_candidates,
+        apply_position_sizing,
+        enrich_quantities,
+        recent_market_scan_memory_mock,
+        notify_mini_pool_summary,
+    ) -> None:
+        config = self._config()
+        candidate = _candidate("BTC/USDT:USDT", win=88.0)
+        collect_news.return_value = {}
+        fetch_top_volume_symbols.return_value = (["BTC/USDT:USDT"], [])
+        fetch_market_snapshots.return_value = ([], [])
+        market_guard_symbol_layers.return_value = {}
+        build_candidates.return_value = [candidate]
+        apply_position_sizing.side_effect = RuntimeError("read operation timed out")
+        enrich_quantities.return_value = []
+        recent_market_scan_memory_mock.return_value = {}
+
+        result = run_internal_market_scan(config, force=True)
+
+        self.assertTrue(any("Position sizing state unavailable" in item for item in result["warnings"]))
+        self.assertEqual(candidate.warnings[0], "Position sizing state unavailable; mini scan is holding new entries until storage recovers")
+        self.assertEqual(candidate.order_usdt, 0.0)
+        notify_mini_pool_summary.assert_called_once()
+
     def test_candidate_summary_separates_4h_context_from_code_timeframes(self) -> None:
         candidate = _candidate("BTC/USDT:USDT")
         candidate.higher_timeframes = {

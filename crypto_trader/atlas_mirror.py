@@ -5,8 +5,37 @@ import threading
 from typing import Any
 
 
-_ATLAS_LOCK = threading.Lock()
+_ATLAS_LOCK = threading.RLock()
 _ATLAS_CLIENTS: dict[tuple[str, str], Any] = {}
+_ATLAS_INDEXES_READY: set[tuple[str, str]] = set()
+
+_ATLAS_COLLECTION_INDEX_SPECS: dict[str, list[list[tuple[str, int]]]] = {
+    "decisions": [
+        [("id", -1)],
+        [("created_at", -1), ("id", -1)],
+    ],
+    "market_scan_observations": [
+        [("created_at", -1), ("id", -1)],
+        [("timeframe", 1), ("created_at", -1), ("id", -1)],
+        [("symbol", 1), ("timeframe", 1), ("created_at", -1), ("id", -1)],
+    ],
+    "pending_orders": [
+        [("status", 1), ("updated_at", -1), ("created_at", -1), ("id", -1)],
+        [("exchange_order_id", 1)],
+    ],
+    "internal_pending_orders": [
+        [("status", 1), ("updated_at", -1), ("created_at", -1), ("id", -1)],
+        [("exchange_order_id", 1)],
+    ],
+    "trade_executions": [
+        [("status", 1), ("created_at", -1), ("id", -1)],
+        [("symbol", 1), ("side", 1), ("status", 1), ("created_at", -1), ("id", -1)],
+    ],
+    "trade_candidates": [
+        [("is_used", 1), ("created_at", -1), ("id", -1)],
+        [("is_used", 1), ("rule_score", -1), ("gpt_confidence", -1), ("risk_reward", -1), ("id", 1)],
+    ],
+}
 
 
 def atlas_backend_enabled(config: dict[str, Any]) -> bool:
@@ -54,6 +83,19 @@ def _load_pymongo() -> Any:
     return MongoClient
 
 
+def _ensure_atlas_indexes(database: Any, cache_key: tuple[str, str]) -> None:
+    if cache_key in _ATLAS_INDEXES_READY:
+        return
+    with _ATLAS_LOCK:
+        if cache_key in _ATLAS_INDEXES_READY:
+            return
+        for collection_name, index_specs in _ATLAS_COLLECTION_INDEX_SPECS.items():
+            collection = database[collection_name]
+            for index_fields in index_specs:
+                collection.create_index(index_fields)
+        _ATLAS_INDEXES_READY.add(cache_key)
+
+
 def atlas_database(config: dict[str, Any]) -> Any:
     if _test_mode_enabled(config):
         default_name = config.get("_atlas_test_database")
@@ -79,6 +121,7 @@ def atlas_database(config: dict[str, Any]) -> Any:
                 raise RuntimeError("Test Atlas fallback requires mongomock to be installed.") from exc
             client = mongomock.MongoClient()
             database = client[database_name]
+            _ensure_atlas_indexes(database, cache_key)
             _ATLAS_CLIENTS[cache_key] = database
             return database
 
@@ -103,5 +146,6 @@ def atlas_database(config: dict[str, Any]) -> Any:
         )
         client.admin.command("ping")
         database = client[database_name]
+        _ensure_atlas_indexes(database, cache_key)
         _ATLAS_CLIENTS[cache_key] = database
         return database

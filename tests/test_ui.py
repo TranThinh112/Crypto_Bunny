@@ -438,6 +438,30 @@ class UiTest(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertGreaterEqual(sync_commands.call_count, 1)
 
+    def test_healthz_includes_runtime_build_metadata(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text("mode: dry_run\n", encoding="utf-8")
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "RAILWAY_GIT_COMMIT_SHA": "abc123",
+                    "RAILWAY_DEPLOYMENT_ID": "deploy-1",
+                    "RAILWAY_PUBLIC_DOMAIN": "crypto-bunny.up.railway.app",
+                },
+                clear=False,
+            ):
+                with TestClient(create_app(str(config_path))) as client:
+                    response = client.get("/healthz")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["app_version"], "0.1.0")
+        self.assertEqual(payload["build"]["commit_sha"], "abc123")
+        self.assertEqual(payload["build"]["deployment_id"], "deploy-1")
+        self.assertEqual(payload["build"]["public_domain"], "crypto-bunny.up.railway.app")
+
     @patch("crypto_trader.notifier._telegram_api_request")
     def test_edit_telegram_chat_message_uses_edit_message_text(self, api_request) -> None:
         from crypto_trader.notifier import edit_telegram_chat_message

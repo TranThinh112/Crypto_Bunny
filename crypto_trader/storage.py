@@ -7,12 +7,14 @@ import threading
 import time
 import zlib
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from .atlas_mirror import (
     atlas_database,
     atlas_runtime_is_primary,
 )
+from .config import project_path
 from .models import Decision, TradeCandidate, to_jsonable
 
 
@@ -31,6 +33,7 @@ JOURNAL_STATE_COMPRESSION_THRESHOLD_BYTES = 8_192
 DEFAULT_JOURNAL_STATE_CACHE_TTL_SECONDS = 5.0
 DEFAULT_MONGO_OPERATION_RETRY_ATTEMPTS = 3
 DEFAULT_MONGO_OPERATION_RETRY_DELAY_SECONDS = 0.35
+LOCAL_MARKET_SCAN_CACHE_FILENAME = "latest_market_scan_memory.json"
 
 _JOURNAL_STATE_CACHE_LOCK = threading.Lock()
 _JOURNAL_STATE_CACHE: dict[str, tuple[float, str]] = {}
@@ -172,6 +175,15 @@ def _mongo_call_with_retry(config: dict[str, Any], operation: Any) -> Any:
             time.sleep(delay * attempt)
 
 
+def _best_effort_retryable_storage_side_effect(config: dict[str, Any], operation: Any) -> Any:
+    try:
+        return operation()
+    except Exception as exc:
+        if not _mongo_error_is_retryable(exc):
+            raise
+        return None
+
+
 def _mongo_collection(config: dict[str, Any], table: str) -> Any:
     return _RetryingCollectionProxy(config, atlas_database(config)[table])
 
@@ -264,6 +276,162 @@ def _mongo_find_one(
 
 def _storage_retention(config: dict[str, Any]) -> dict[str, Any]:
     return config.get("storage_retention", {})
+
+
+def _market_scan_memory_cache_path(config: dict[str, Any]) -> Path:
+    memory_config = config.get("market_scan_memory", {})
+    configured_path = memory_config.get("cache_path")
+    if configured_path:
+        return project_path(config, configured_path)
+    report_path = project_path(config, config.get("report_path", "reports/latest_decision.json"))
+    return report_path.parent / LOCAL_MARKET_SCAN_CACHE_FILENAME
+
+
+def _json_object_or_empty(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    try:
+        parsed = json.loads(str(value or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return dict(parsed) if isinstance(parsed, dict) else {}
+
+
+def _load_local_market_scan_cache_rows(config: dict[str, Any]) -> list[dict[str, Any]]:
+    path = _market_scan_memory_cache_path(config)
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return []
+    rows = payload.get("rows") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        result.append(
+            {
+                "created_at": item.get("created_at"),
+                "source": item.get("source"),
+                "symbol": item.get("symbol"),
+                "side": item.get("side"),
+                "timeframe": item.get("timeframe"),
+                "confidence": item.get("confidence"),
+                "win_probability_pct": item.get("win_probability_pct"),
+                "risk_reward": item.get("risk_reward"),
+                "score": item.get("score"),
+                "indicator": _json_object_or_empty(item.get("indicator")),
+                "payload": _json_object_or_empty(item.get("payload")),
+            }
+        )
+    return result
+
+
+def _store_local_market_scan_cache_rows(config: dict[str, Any], rows: list[dict[str, Any]]) -> None:
+    path = _market_scan_memory_cache_path(config)
+    payload = {
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "rows": rows,
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        return
+
+
+def _prune_local_market_scan_cache_rows(config: dict[str, Any], rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    memory_config = config.get("market_scan_memory", {})
+    keep_hours = int(memory_config.get("keep_hours", 72) or 72)
+    max_rows = int(memory_config.get("max_rows_per_symbol_timeframe", 200) or 200)
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=max(1, keep_hours))).isoformat()
+    ordered_rows = sorted(
+        rows,
+        key=lambda item: (
+            str(item.get("created_at") or ""),
+            str(item.get("symbol") or ""),
+            str(item.get("timeframe") or ""),
+            str(item.get("source") or ""),
+        ),
+        reverse=True,
+    )
+    counters: dict[tuple[str, str], int] = {}
+    pruned: list[dict[str, Any]] = []
+    for item in ordered_rows:
+        created_at = str(item.get("created_at") or "")
+        if created_at and created_at < cutoff:
+            continue
+        symbol = str(item.get("symbol") or "")
+        timeframe = str(item.get("timeframe") or "")
+        if not symbol or not timeframe:
+            continue
+        key = (symbol, timeframe)
+        if counters.get(key, 0) >= max(1, max_rows):
+            continue
+        pruned.append(item)
+        counters[key] = counters.get(key, 0) + 1
+    return pruned
+
+
+def _update_local_market_scan_cache(config: dict[str, Any], rows: list[tuple[Any, ...]]) -> None:
+    cache_rows = [
+        {
+            "created_at": row[0],
+            "source": row[1],
+            "symbol": row[2],
+            "side": row[3],
+            "timeframe": row[4],
+            "confidence": row[5],
+            "win_probability_pct": row[6],
+            "risk_reward": row[7],
+            "score": row[8],
+            "indicator": _json_object_or_empty(row[9]),
+            "payload": _json_object_or_empty(row[10]),
+        }
+        for row in rows
+    ]
+    merged_rows = _prune_local_market_scan_cache_rows(
+        config,
+        cache_rows + _load_local_market_scan_cache_rows(config),
+    )
+    _store_local_market_scan_cache_rows(config, merged_rows)
+
+
+def _group_recent_market_scan_rows(
+    rows: list[dict[str, Any]],
+    *,
+    per_symbol_timeframe_limit: int,
+) -> dict[str, dict[str, list[dict[str, Any]]]]:
+    grouped: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    counters: dict[tuple[str, str], int] = {}
+    for item in rows:
+        symbol = str(item.get("symbol") or "")
+        timeframe = str(item.get("timeframe") or "")
+        if not symbol or not timeframe:
+            continue
+        key = (symbol, timeframe)
+        if counters.get(key, 0) >= max(1, int(per_symbol_timeframe_limit)):
+            continue
+        indicator = _json_object_or_empty(item.get("indicator"))
+        payload = _json_object_or_empty(item.get("payload"))
+        grouped.setdefault(symbol, {}).setdefault(timeframe, []).append(
+            {
+                "created_at": item.get("created_at"),
+                "source": item.get("source"),
+                "side": item.get("side"),
+                "confidence": item.get("confidence"),
+                "win_probability_pct": item.get("win_probability_pct"),
+                "risk_reward": item.get("risk_reward"),
+                "score": item.get("score"),
+                "indicator": indicator,
+                "payload": payload,
+            }
+        )
+        counters[key] = counters.get(key, 0) + 1
+    return grouped
 
 
 def _iso_cutoff_days(days: float) -> str:
@@ -1145,8 +1313,9 @@ def _json_limited(payload: dict[str, Any], max_bytes: int) -> str:
 def save_decision(config: dict[str, Any], decision: Decision) -> int:
     payload = to_jsonable(decision)
     selected = decision.selected
-    prune_decision_history(config)
-    return _insert_decision_payload(config, decision, payload, selected)
+    row_id = _insert_decision_payload(config, decision, payload, selected)
+    _best_effort_retryable_storage_side_effect(config, lambda: prune_decision_history(config))
+    return row_id
 
 
 def _insert_decision_payload(
@@ -1262,9 +1431,10 @@ def save_market_scan_observations(
                         _json_limited(frame_payload_json, max_json_bytes),
                     )
                 )
-    prune_market_scan_observations(config)
+    _update_local_market_scan_cache(config, rows)
     _insert_market_scan_rows(config, rows)
-    run_storage_maintenance(config, vacuum=False)
+    _best_effort_retryable_storage_side_effect(config, lambda: prune_market_scan_observations(config))
+    _best_effort_retryable_storage_side_effect(config, lambda: run_storage_maintenance(config, vacuum=False))
     return len(rows)
 
 
@@ -1518,45 +1688,63 @@ def recent_market_scan_memory(
         query["symbol"] = {"$in": symbol_list}
     if timeframe_list:
         query["timeframe"] = {"$in": timeframe_list}
-    rows = _mongo_find_many(
-        config,
-        "market_scan_observations",
-        query=query,
-        sort=[("created_at", -1), ("id", -1)],
-        limit=max(10, int(total_limit)),
-    )
-    grouped: dict[str, dict[str, list[dict[str, Any]]]] = {}
-    counters: dict[tuple[str, str], int] = {}
-    for item in rows:
-        symbol = str(item.get("symbol") or "")
-        timeframe = str(item.get("timeframe") or "")
-        if not symbol or not timeframe:
-            continue
-        key = (symbol, timeframe)
-        if counters.get(key, 0) >= max(1, int(per_symbol_timeframe_limit)):
-            continue
-        indicator = json.loads(str(item.get("indicator_json") or "{}"))
-        payload = json.loads(str(item.get("payload_json") or "{}"))
-        grouped.setdefault(symbol, {}).setdefault(timeframe, []).append(
+    try:
+        rows = _mongo_find_many(
+            config,
+            "market_scan_observations",
+            query=query,
+            sort=[("created_at", -1), ("id", -1)],
+            limit=max(10, int(total_limit)),
+        )
+        normalized_rows = [
             {
                 "created_at": item.get("created_at"),
                 "source": item.get("source"),
                 "side": item.get("side"),
+                "symbol": item.get("symbol"),
+                "timeframe": item.get("timeframe"),
                 "confidence": item.get("confidence"),
                 "win_probability_pct": item.get("win_probability_pct"),
                 "risk_reward": item.get("risk_reward"),
                 "score": item.get("score"),
-                "indicator": indicator,
-                "payload": payload,
+                "indicator": _json_object_or_empty(item.get("indicator_json")),
+                "payload": _json_object_or_empty(item.get("payload_json")),
             }
-        )
-        counters[key] = counters.get(key, 0) + 1
-    return grouped
+            for item in rows
+        ]
+    except Exception as exc:
+        if not _mongo_error_is_retryable(exc):
+            raise
+        normalized_rows = _load_local_market_scan_cache_rows(config)
+        cutoff = query["created_at"]["$gte"]
+        normalized_rows = [
+            item
+            for item in normalized_rows
+            if str(item.get("created_at") or "") >= cutoff
+            and (not symbol_list or str(item.get("symbol") or "") in symbol_list)
+            and (not timeframe_list or str(item.get("timeframe") or "") in timeframe_list)
+        ]
+    return _group_recent_market_scan_rows(
+        normalized_rows,
+        per_symbol_timeframe_limit=per_symbol_timeframe_limit,
+    )
 def latest_decision_payload(config: dict[str, Any]) -> dict[str, Any] | None:
-    row = _mongo_find_one(config, "decisions", sort=[("id", -1)])
-    if not row:
-        return None
-    return json.loads(str(row["payload_json"]))
+    try:
+        row = _mongo_find_one(config, "decisions", sort=[("id", -1)])
+        if not row:
+            return None
+        return json.loads(str(row["payload_json"]))
+    except Exception as exc:
+        if not _mongo_error_is_retryable(exc):
+            raise
+        report_path = project_path(config, config.get("report_path", "reports/latest_decision.json"))
+        if not report_path.exists():
+            return None
+        try:
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
 def list_paper_trades(config: dict[str, Any], limit: int = 20) -> list[dict[str, Any]]:
     return _mongo_find_many(config, "paper_trades", sort=[("id", -1)], limit=limit)
 def active_paper_trades(config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1650,8 +1838,6 @@ def save_pending_order(
     journal_id: int | None = None,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
-    prune_pending_orders(config)
-    prune_internal_pending_orders(config)
     migrate_legacy_pending_orders(config)
     payload = to_jsonable(candidate)
     normalized_status = str(status or ("LC_OKX" if exchange_order_id else "OPEN")).upper()
@@ -1681,6 +1867,8 @@ def save_pending_order(
         "close_reason": None,
     }
     _mongo_upsert_by_pk(config, target_table, "id", row)
+    _best_effort_retryable_storage_side_effect(config, lambda: prune_pending_orders(config))
+    _best_effort_retryable_storage_side_effect(config, lambda: prune_internal_pending_orders(config))
     return row
 def refresh_pending_order(
     config: dict[str, Any],

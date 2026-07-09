@@ -27,7 +27,7 @@ from .market_guard import market_guard_symbol_layers
 from .models import RiskCheck, TradeCandidate
 from .news import collect_news
 from .sizing import apply_position_sizing
-from .storage import list_pending_orders, recent_market_scan_memory
+from .storage import is_retryable_storage_error, list_pending_orders, recent_market_scan_memory
 from .strategy import build_candidates, enrich_quantities
 
 
@@ -48,6 +48,18 @@ def _ordered_unique_symbols(symbols: list[Any]) -> list[str]:
         seen.add(clean)
         ordered.append(clean)
     return ordered
+
+
+def _storage_warning(label: str, exc: Exception) -> str:
+    return f"{label} unavailable: {exc}"
+
+
+def _block_candidates_for_storage_hold(candidates: list[TradeCandidate], reason: str) -> None:
+    for candidate in candidates:
+        candidate.margin_usdt = 0.0
+        candidate.order_usdt = 0.0
+        candidate.recovery_margin_usdt = None
+        candidate.warnings.append(reason)
 
 
 def ai_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -636,7 +648,16 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
         except Exception as exc:
             warnings.append(f"Market guard memory unavailable: {exc}")
     candidates = build_candidates(config, snapshots, digest, limit=None, market_layers=market_layers)
-    apply_position_sizing(config, candidates)
+    try:
+        apply_position_sizing(config, candidates)
+    except Exception as exc:
+        if not is_retryable_storage_error(exc):
+            raise
+        warnings.append(_storage_warning("Position sizing state", exc))
+        _block_candidates_for_storage_hold(
+            candidates,
+            "Position sizing state unavailable; mini scan is holding new entries until storage recovers",
+        )
     warnings.extend(enrich_quantities(config, candidates))
     scan_memory = recent_market_scan_memory(
         config,

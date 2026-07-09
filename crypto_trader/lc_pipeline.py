@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -36,6 +37,7 @@ TWO_HOUR_HISTORY_KEEP_DAYS = 3
 FOUR_HOUR_HISTORY_KEEP_DAYS = 7
 RECHECK_STABLE_DELTA_PCT = 1.0
 _LC_PIPELINE_UPDATE_LOCK = threading.RLock()
+_SAMPLE_SYMBOL_PATTERN = re.compile(r"\b([A-Z])\1{2,}(?:/USDT:USDT)?\b")
 
 
 def _parse_time(value: Any) -> datetime | None:
@@ -45,6 +47,175 @@ def _parse_time(value: Any) -> datetime | None:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
     except ValueError:
         return None
+
+
+def _sample_symbol_filter_enabled(config: dict[str, Any]) -> bool:
+    internal = config.get("ai", {}).get("internal", {})
+    default_enabled = not bool(config.get("_atlas_test_mode"))
+    return bool(internal.get("lc_pipeline_drop_sample_symbols", default_enabled))
+
+
+def _symbol_base(symbol: Any) -> str:
+    return str(symbol or "").split("/")[0].strip().upper()
+
+
+def _is_sample_symbol(config: dict[str, Any], symbol: Any) -> bool:
+    if not _sample_symbol_filter_enabled(config):
+        return False
+    base = _symbol_base(symbol)
+    return bool(base) and bool(re.fullmatch(r"([A-Z])\1{2,}", base))
+
+
+def _contains_sample_symbol_text(config: dict[str, Any], value: Any) -> bool:
+    if not _sample_symbol_filter_enabled(config):
+        return False
+    text = str(value or "")
+    for match in _SAMPLE_SYMBOL_PATTERN.finditer(text):
+        if _is_sample_symbol(config, match.group(0)):
+            return True
+    return False
+
+
+def _filter_sample_rows(config: dict[str, Any], rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        row for row in rows
+        if isinstance(row, dict) and not _is_sample_symbol(config, row.get("symbol"))
+    ]
+
+
+def _sanitize_event_sample_rows(config: dict[str, Any], event: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    if not isinstance(event, dict):
+        return {}, False
+    sanitized = dict(event)
+    changed = False
+    for key in ("approved", "rejected", "top"):
+        value = sanitized.get(key)
+        if not isinstance(value, list):
+            continue
+        filtered = _filter_sample_rows(config, value)
+        if len(filtered) != len(value):
+            sanitized[key] = filtered
+            changed = True
+    return sanitized, changed
+
+
+def _sanitize_internal_notifications(config: dict[str, Any], rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
+    sanitized: list[dict[str, Any]] = []
+    changed = False
+    for item in rows:
+        if not isinstance(item, dict):
+            changed = True
+            continue
+        if _contains_sample_symbol_text(config, item.get("title")):
+            changed = True
+            continue
+        filtered_lines = [
+            line for line in list(item.get("lines") or [])
+            if not _contains_sample_symbol_text(config, line)
+        ]
+        if len(filtered_lines) != len(list(item.get("lines") or [])):
+            changed = True
+        if filtered_lines:
+            sanitized.append({**item, "lines": filtered_lines})
+        else:
+            changed = True
+    return sanitized, changed
+
+
+def _sanitize_mini_scan_sample_symbols(config: dict[str, Any], scan: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    if not isinstance(scan, dict):
+        return {}, False
+    sanitized = dict(scan)
+    changed = False
+    for key in ("source_symbols", "pool_symbols", "selected_symbols", "approved_symbols"):
+        value = sanitized.get(key)
+        if not isinstance(value, list):
+            continue
+        filtered = [symbol for symbol in value if not _is_sample_symbol(config, symbol)]
+        if len(filtered) != len(value):
+            sanitized[key] = filtered
+            changed = True
+    candidates = sanitized.get("candidates")
+    if isinstance(candidates, list):
+        filtered_candidates = _filter_sample_rows(config, candidates)
+        if len(filtered_candidates) != len(candidates):
+            sanitized["candidates"] = filtered_candidates
+            changed = True
+    local_policy = sanitized.get("local_policy")
+    if isinstance(local_policy, dict):
+        local_policy_sanitized = dict(local_policy)
+        for key in ("qualified_symbols", "approved_symbols"):
+            value = local_policy_sanitized.get(key)
+            if not isinstance(value, list):
+                continue
+            filtered = [symbol for symbol in value if not _is_sample_symbol(config, symbol)]
+            if len(filtered) != len(value):
+                local_policy_sanitized[key] = filtered
+                local_policy_sanitized["approved_count"] = len(local_policy_sanitized.get("approved_symbols") or [])
+                changed = True
+        sanitized["local_policy"] = local_policy_sanitized
+    return sanitized, changed
+
+
+def _sanitize_pipeline_state_sample_symbols(config: dict[str, Any], state: dict[str, Any]) -> bool:
+    if not _sample_symbol_filter_enabled(config):
+        return False
+    changed = False
+    for key in ("undecided", "internal_lc"):
+        value = state.get(key)
+        if isinstance(value, list):
+            filtered = _filter_sample_rows(config, value)
+            if len(filtered) != len(value):
+                state[key] = filtered
+                changed = True
+    for key in ("one_hour_history", "two_hour_history", "four_hour_history", "two_hour_windows", "telegram_events"):
+        value = state.get(key)
+        if not isinstance(value, list):
+            continue
+        sanitized_events: list[dict[str, Any]] = []
+        event_changed = False
+        for item in value:
+            if not isinstance(item, dict):
+                event_changed = True
+                continue
+            sanitized_item, item_changed = _sanitize_event_sample_rows(config, item)
+            if item_changed:
+                event_changed = True
+            sanitized_events.append(sanitized_item)
+        if event_changed:
+            state[key] = sanitized_events
+            changed = True
+    hourly_windows = state.get("hourly_windows")
+    if isinstance(hourly_windows, list):
+        sanitized_windows: list[dict[str, Any]] = []
+        window_changed = False
+        for item in hourly_windows:
+            if not isinstance(item, dict):
+                window_changed = True
+                continue
+            top_rows = item.get("top") if isinstance(item.get("top"), list) else []
+            filtered_top = _filter_sample_rows(config, top_rows)
+            if len(filtered_top) != len(top_rows):
+                window_changed = True
+                sanitized_windows.append({**item, "top": filtered_top})
+            else:
+                sanitized_windows.append(item)
+        if window_changed:
+            state["hourly_windows"] = sanitized_windows
+            changed = True
+    notifications = state.get("internal_notifications")
+    if isinstance(notifications, list):
+        filtered_notifications, notification_changed = _sanitize_internal_notifications(config, notifications)
+        if notification_changed:
+            state["internal_notifications"] = filtered_notifications
+            changed = True
+    latest_mini_scan = state.get("latest_mini_scan")
+    if isinstance(latest_mini_scan, dict):
+        sanitized_mini_scan, mini_scan_changed = _sanitize_mini_scan_sample_symbols(config, latest_mini_scan)
+        if mini_scan_changed:
+            state["latest_mini_scan"] = sanitized_mini_scan
+            changed = True
+    return changed
 
 
 def _pipeline_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -1129,9 +1300,15 @@ def _load_state(config: dict[str, Any], now: datetime, *, reset_for_new_day: boo
         now=history_now,
         keep_days=FOUR_HOUR_HISTORY_KEEP_DAYS,
     )
+    sample_rows_changed = _sanitize_pipeline_state_sample_symbols(config, state)
     _sanitize_current_day_aggregate_state(config, state, now)
     _backfill_one_hour_source_metadata(state)
     _prune_low_win_state(state, _pipeline_config(config), now)
+    if sample_rows_changed:
+        try:
+            _save_state(config, state)
+        except Exception:
+            pass
     return state
 
 
@@ -1800,7 +1977,14 @@ def _raw_pipeline_state(config: dict[str, Any]) -> dict[str, Any]:
         state = json.loads(raw)
     except json.JSONDecodeError:
         return {}
-    return state if isinstance(state, dict) else {}
+    if not isinstance(state, dict):
+        return {}
+    if _sanitize_pipeline_state_sample_symbols(config, state):
+        try:
+            _save_state(config, state)
+        except Exception:
+            pass
+    return state
 
 
 def _infer_source_windows(config: dict[str, Any], event: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2251,27 +2435,36 @@ def format_internal_notifications_view(config: dict[str, Any], *, limit_per_fram
 
 
 def _notify_two_hour_summary(config: dict[str, Any], event: dict[str, Any]) -> None:
+    sanitized_event, _ = _sanitize_event_sample_rows(config, event)
+    if not (sanitized_event.get("approved") or sanitized_event.get("rejected")):
+        return
     try:
         from .notifier import send_telegram_message
     except Exception:
         return
-    send_telegram_message(config, _two_hour_notification_text(config, event), with_buttons=False, replace_previous=False)
+    send_telegram_message(config, _two_hour_notification_text(config, sanitized_event), with_buttons=False, replace_previous=False)
 
 
 def _notify_one_hour_summary(config: dict[str, Any], event: dict[str, Any]) -> None:
+    sanitized_event, _ = _sanitize_event_sample_rows(config, event)
+    if not (sanitized_event.get("approved") or sanitized_event.get("rejected")):
+        return
     try:
         from .notifier import send_telegram_message
     except Exception:
         return
-    send_telegram_message(config, _one_hour_notification_text(config, event), with_buttons=False, replace_previous=False)
+    send_telegram_message(config, _one_hour_notification_text(config, sanitized_event), with_buttons=False, replace_previous=False)
 
 
 def _notify_four_hour_summary(config: dict[str, Any], event: dict[str, Any]) -> None:
+    sanitized_event, _ = _sanitize_event_sample_rows(config, event)
+    if not (sanitized_event.get("approved") or sanitized_event.get("rejected")):
+        return
     try:
         from .notifier import send_telegram_message
     except Exception:
         return
-    send_telegram_message(config, _four_hour_notification_text(config, event), with_buttons=False, replace_previous=False)
+    send_telegram_message(config, _four_hour_notification_text(config, sanitized_event), with_buttons=False, replace_previous=False)
 
 
 def _should_push_one_hour_summary(config: dict[str, Any], now: datetime) -> bool:
@@ -2288,13 +2481,17 @@ def _notify_undecided_recheck_summary(
     promoted_rows: list[dict[str, Any]],
     now: datetime,
 ) -> None:
-    if int(meta.get("input_count") or 0) <= 0:
+    filtered_kept_rows = _filter_sample_rows(config, kept_rows)
+    filtered_promoted_rows = _filter_sample_rows(config, promoted_rows)
+    filtered_dropped_rows = _filter_sample_rows(config, list(meta.get("dropped_rows") or []))
+    filtered_input_count = len(filtered_kept_rows) + len(filtered_dropped_rows)
+    if filtered_input_count <= 0:
         return
     text = _undecided_recheck_notification_text_v2(
         config,
-        {**meta, "recheck_time": now.isoformat()},
-        kept_rows=kept_rows,
-        promoted_rows=promoted_rows,
+        {**meta, "recheck_time": now.isoformat(), "input_count": filtered_input_count, "dropped_rows": filtered_dropped_rows},
+        kept_rows=filtered_kept_rows,
+        promoted_rows=filtered_promoted_rows,
     )
     lines = text.splitlines()[2:]
     _append_internal_notification(
@@ -2475,6 +2672,9 @@ def notify_mini_pool_summary(
     state = _load_state(config, now)
     latest_four_hour = state.get("four_hour_history")[-1] if state.get("four_hour_history") else None
     scan = scan or latest_lc_pipeline_mini_scan(config) or {}
+    rows = _filter_sample_rows(config, rows)
+    latest_four_hour, _ = _sanitize_event_sample_rows(config, latest_four_hour or {})
+    scan, _ = _sanitize_mini_scan_sample_symbols(config, scan)
     mini_index = scan.get("mini_index") or int(state.get("daily_mini_counter") or 0) or "-"
     if slot_id and not scan.get("slot_id"):
         scan = {**scan, "slot_id": slot_id}
@@ -2505,6 +2705,8 @@ def notify_mini_pool_summary(
         created_at=now,
     )
     _save_state(config, state)
+    if not rows and not _symbol_list(scan.get("selected_symbols"), limit=3):
+        return
     if not settings["notify_mini_pool_summary"]:
         return
     try:

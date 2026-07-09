@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import __version__
 from .atlas_mirror import atlas_runtime_is_primary, atlas_runtime_is_read_only
 from .config import DEFAULT_CONFIG, load_config, project_path
 from .ai_coordinator import next_internal_market_scan_at, run_internal_market_scan_if_due
@@ -128,6 +129,17 @@ from .sizing import STATE_KEY as SIZING_STATE_KEY
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 PRICE_CACHE_TTL_SECONDS = 55
 TELEGRAM_VIEW_CACHE_TTL_SECONDS = 4
+
+
+def _build_runtime_metadata() -> dict[str, Any]:
+    return {
+        "app_version": __version__,
+        "build": {
+            "commit_sha": os.getenv("RAILWAY_GIT_COMMIT_SHA") or os.getenv("SOURCE_COMMIT"),
+            "deployment_id": os.getenv("RAILWAY_DEPLOYMENT_ID"),
+            "public_domain": os.getenv("RAILWAY_PUBLIC_DOMAIN"),
+        },
+    }
 TELEGRAM_TIMELINE_CACHE_TTL_SECONDS = 4
 TELEGRAM_COMMANDS_SYNC_INTERVAL_SECONDS = 600
 MIN_LEVERAGE = 5
@@ -2032,12 +2044,14 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
 
     @app.get("/healthz")
     def healthz() -> dict[str, Any]:
-        return {
+        payload = {
             "ok": True,
             "mode": load_config(app.state.config_path).get("mode", "dry_run"),
             "automation": _automation_status_payload(app),
             "lc_pipeline_worker": _lc_pipeline_status_payload(app),
         }
+        payload.update(_build_runtime_metadata())
+        return payload
 
     @app.get("/api/decision")
     def decision() -> dict[str, Any]:

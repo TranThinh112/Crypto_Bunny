@@ -139,6 +139,38 @@ class LcPipelineTest(TestCase):
         self.assertIn("Khung 🟡 2h: #1 (08:05)", message)
         self.assertIn("Gộp từ: 🔵 1h #1 (07:05), 🔵 1h #2 (08:05)", message)
 
+    def test_dashboard_payload_sanitizes_sample_symbols_when_filter_enabled(self) -> None:
+        config = self._config()
+        config["ai"]["internal"]["lc_pipeline_drop_sample_symbols"] = True
+        state = {
+            "state_version": 3,
+            "day_key": "2026-07-06",
+            "undecided": [
+                _saved_row("AAA/USDT:USDT", 61, state="CHUA_DUYET"),
+                _saved_row("NEAR/USDT:USDT", 63, state="CHUA_DUYET", side="short"),
+            ],
+            "internal_lc": [
+                _saved_row("BBB/USDT:USDT", 64, state="LC_NOI_BO"),
+                _saved_row("ETH/USDT:USDT", 65, state="LC_NOI_BO"),
+            ],
+            "internal_notifications": [
+                {
+                    "title": "RC #1",
+                    "lines": ["1. AAA/USDT:USDT | LONG", "2. ETH/USDT:USDT | LONG"],
+                    "created_at": "2026-07-06T00:00:00+00:00",
+                }
+            ],
+        }
+        set_journal_state(config, "lc_internal_pipeline_state", json.dumps(state, ensure_ascii=False))
+
+        payload = lc_pipeline_dashboard_payload(config)
+        saved_state = json.loads(get_journal_state(config, "lc_internal_pipeline_state") or "{}")
+
+        self.assertEqual([row["symbol"] for row in payload["undecided"]], ["NEAR/USDT:USDT"])
+        self.assertEqual([row["symbol"] for row in payload["internal_lc"]], ["ETH/USDT:USDT"])
+        self.assertNotIn("AAA/USDT:USDT", json.dumps(saved_state, ensure_ascii=False))
+        self.assertNotIn("BBB/USDT:USDT", json.dumps(saved_state, ensure_ascii=False))
+
     def test_four_hour_notification_infers_source_windows_from_two_hour_history(self) -> None:
         config = self._config()
         state = {
@@ -1247,6 +1279,25 @@ class LcPipelineTest(TestCase):
         self.assertIn("Khung 🔴 4h: #1 (10:05)", message)
         self.assertIn("Gộp từ: 🟡 2h #1 (08:05), 🟡 2h #2 (10:05)", message)
         self.assertIn("Lý do: Mini chọn lại cặp mạnh nhất từ nhóm LC 4h.", message)
+
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_mini_pool_summary_skips_sample_symbols_when_filter_enabled(self, send_message) -> None:
+        config = self._config()
+        config["ai"]["internal"]["lc_pipeline_drop_sample_symbols"] = True
+        config["ai"]["internal"]["lc_pipeline_notify_mini_pool_summary"] = True
+
+        notify_mini_pool_summary(
+            config,
+            [{"symbol": "AAA/USDT:USDT", "side": "long", "source_slot": "4h", "source_index": 1}],
+            scan={
+                "mini_index": 1,
+                "selected_symbols": ["AAA/USDT:USDT"],
+                "decision_reason_vi": "sample only",
+            },
+            now=datetime(2026, 7, 6, 1, 0, tzinfo=timezone.utc),
+        )
+
+        send_message.assert_not_called()
 
     @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
     @patch("crypto_trader.notifier.send_telegram_message")
