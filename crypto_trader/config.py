@@ -25,6 +25,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "app_name": "Crypto_Bunny",
             "server_selection_timeout_ms": 10000,
             "connect_timeout_ms": 10000,
+            "socket_timeout_ms": 15000,
+            "wait_queue_timeout_ms": 10000,
         },
     },
     "automation": {

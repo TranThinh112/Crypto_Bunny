@@ -4,12 +4,13 @@ import json
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .ai_coordinator import (
     internal_lc_memory,
     internal_market_shortlist,
     okx_ai_approval,
+    run_internal_market_scan,
     run_internal_market_scan_if_due,
     should_defer_new_vt_to_internal_lc,
 )
@@ -44,6 +45,16 @@ from .storage import (
 from .strategy import build_candidates, enrich_quantities
 
 LC_PIPELINE_CANDIDATE_CACHE_KEY = "lc_pipeline_candidate_cache_v1"
+
+
+def _report_progress(
+    progress_callback: Callable[[str, dict[str, Any] | None], None] | None,
+    phase: str,
+    **metadata: Any,
+) -> None:
+    if progress_callback is None:
+        return
+    progress_callback(phase, metadata or None)
 
 
 def _ordered_unique(symbols: list[str]) -> list[str]:
@@ -642,9 +653,31 @@ def write_report(config: dict[str, Any], decision: Decision) -> Path:
     return path
 
 
-def run_once(config: dict[str, Any], execute: bool) -> Decision:
+def force_mini_scan_from_latest_four_hour(config: dict[str, Any]) -> dict[str, Any]:
+    internal_market_scan = run_internal_market_scan(config, force=True)
+    mini_pending_queue = _create_pending_from_internal_scan(
+        config,
+        [],
+        internal_market_scan,
+        active_trades_summary(config),
+        open_pending_symbols(config),
+    )
+    return {
+        "internal_market_scan": internal_market_scan,
+        "mini_pending_queue": mini_pending_queue,
+    }
+
+
+def run_once(
+    config: dict[str, Any],
+    execute: bool,
+    *,
+    progress_callback: Callable[[str, dict[str, Any] | None], None] | None = None,
+) -> Decision:
     config = select_runtime_config(config)
+    _report_progress(progress_callback, "load_previous_payload")
     previous_payload = latest_decision_payload(config)
+    _report_progress(progress_callback, "collect_realtime_scan_inputs")
     scan_inputs = _collect_realtime_scan_inputs(config, previous_payload=previous_payload)
     strategy_symbols = list(scan_inputs["strategy_symbols"])
     universe_context = dict(scan_inputs["universe_context"])
@@ -660,11 +693,15 @@ def run_once(config: dict[str, Any], execute: bool) -> Decision:
     old_scan_snapshots = list(scan_inputs["old_scan_snapshots"])
     all_new_candidates = list(scan_inputs["all_new_candidates"])
     market_regime = dict(scan_inputs["market_regime"])
+    _report_progress(progress_callback, "record_trade_candidates", candidate_count=len(all_new_candidates))
     record_trade_candidates(config, all_new_candidates)
     # Refresh the LC pipeline before Mini so the same cycle can advance
     # 1h -> 2h -> 4h before Mini snapshots the latest 4h pool.
+    _report_progress(progress_callback, "update_lc_internal_pipeline")
     lc_pipeline_state = update_lc_internal_pipeline(config, all_new_candidates)
+    _report_progress(progress_callback, "run_internal_market_scan")
     internal_market_scan = run_internal_market_scan_if_due(config)
+    _report_progress(progress_callback, "save_market_scan_observations")
     market_scan_storage = {
         "saved_rows": save_market_scan_observations(
             config,
@@ -690,6 +727,7 @@ def run_once(config: dict[str, Any], execute: bool) -> Decision:
             "fallback": internal_market_scan.get("fallback"),
             "ai_review_error": internal_market_scan.get("ai_review_error"),
         }
+    _report_progress(progress_callback, "merge_cycle_candidates")
     new_top = all_new_candidates[:5]
     refreshed_previous = (
         build_candidates(
@@ -725,12 +763,15 @@ def run_once(config: dict[str, Any], execute: bool) -> Decision:
             "enabled": False,
             "warnings": market_layer_warnings,
         }
+    _report_progress(progress_callback, "apply_position_sizing")
     scan_comparison["position_sizing"] = apply_position_sizing(config, candidates)
 
+    _report_progress(progress_callback, "enrich_quantities")
     quantity_warnings = enrich_quantities(config, candidates)
     if candidates and (market_warnings or quantity_warnings or market_layer_warnings):
         candidates[0].warnings.extend(market_warnings + quantity_warnings + market_layer_warnings)
 
+    _report_progress(progress_callback, "maintain_pending_orders")
     ai_internal_before_pending = internal_lc_memory(config)
     scan_comparison["ai_internal_before_pending"] = ai_internal_before_pending
     review_candidates_by_key = {
@@ -762,6 +803,7 @@ def run_once(config: dict[str, Any], execute: bool) -> Decision:
         and not defer_new_vt_to_internal_lc
         and config.get("pending_orders", {}).get("enabled", True)
     ):
+        _report_progress(progress_callback, "create_pending_from_mini")
         mini_pending_queue = _create_pending_from_internal_scan(
             config,
             candidates,
@@ -784,6 +826,7 @@ def run_once(config: dict[str, Any], execute: bool) -> Decision:
             market_warnings + quantity_warnings,
         )
     else:
+        _report_progress(progress_callback, "evaluate_candidates")
         for candidate in candidates:
             current_check = evaluate_candidate(
                 config,
@@ -875,6 +918,7 @@ def run_once(config: dict[str, Any], execute: bool) -> Decision:
                 raw={"mini_pending_queue": mini_pending_queue},
             )
         elif execute:
+            _report_progress(progress_callback, "pre_entry_check")
             pre_entry_check = evaluate_candidate(
                 config,
                 selected,
@@ -888,6 +932,7 @@ def run_once(config: dict[str, Any], execute: bool) -> Decision:
                 "warnings": pre_entry_check.warnings,
             }
             if pre_entry_check.passed:
+                _report_progress(progress_callback, "okx_ai_approval")
                 ai_decision = okx_ai_approval(
                     config,
                     selected,
@@ -920,6 +965,7 @@ def run_once(config: dict[str, Any], execute: bool) -> Decision:
                             + "; ".join(final_validator.reasons[:3]),
                         )
                     else:
+                        _report_progress(progress_callback, "execute_candidate")
                         journal_id = next_global_counter(config, "VT") if config.get("mode") != "dry_run" else None
                         execution_result = execute_candidate(
                             config,
@@ -1008,7 +1054,11 @@ def run_once(config: dict[str, Any], execute: bool) -> Decision:
         news_items=digest.items,
         scan_comparison={**scan_comparison, "pending_orders": pending_review},
     )
+    _report_progress(progress_callback, "write_report")
     write_report(config, decision)
+    _report_progress(progress_callback, "save_decision")
     save_decision(config, decision)
+    _report_progress(progress_callback, "record_ai_trade_decision")
     record_ai_trade_decision(config, decision)
+    _report_progress(progress_callback, "completed", action=action)
     return decision

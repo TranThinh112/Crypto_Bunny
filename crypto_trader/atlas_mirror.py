@@ -98,6 +98,8 @@ def atlas_database(config: dict[str, Any]) -> Any:
             appname=str(atlas.get("app_name", "Crypto_Bunny")),
             serverSelectionTimeoutMS=int(atlas.get("server_selection_timeout_ms", 10000) or 10000),
             connectTimeoutMS=int(atlas.get("connect_timeout_ms", 10000) or 10000),
+            socketTimeoutMS=int(atlas.get("socket_timeout_ms", 15000) or 15000),
+            waitQueueTimeoutMS=int(atlas.get("wait_queue_timeout_ms", 10000) or 10000),
         )
         client.admin.command("ping")
         database = client[database_name]

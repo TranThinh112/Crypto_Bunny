@@ -59,12 +59,13 @@ from .dashboard_services import (
     system_health_dashboard,
     timeframe_state_dashboard,
 )
-from .engine import collect_lc_pipeline_candidates, load_lc_pipeline_candidate_cache, run_once
+from .engine import collect_lc_pipeline_candidates, force_mini_scan_from_latest_four_hour, load_lc_pipeline_candidate_cache, run_once
 from .lc_pipeline import (
     format_internal_lc_view,
     format_internal_notifications_view,
     internal_notification_timeline_messages,
     lc_pipeline_dashboard_payload,
+    latest_lc_pipeline_four_hour_event,
     undecided_notification_timeline_messages,
     update_lc_internal_pipeline,
 )
@@ -488,6 +489,7 @@ def _automation_should_execute(config: dict[str, Any]) -> tuple[bool, str]:
 
 def _automation_status_payload(app: FastAPI) -> dict[str, Any]:
     status = getattr(app.state, "automation_status", {}).copy()
+    status["lock_held"] = bool(getattr(app.state, "lock", None) and app.state.lock.locked())
     guard_status = getattr(app.state, "market_guard_status", None)
     if guard_status is None:
         try:
@@ -556,6 +558,27 @@ def _remember_periodic_scan_notification(config: dict[str, Any], now: datetime) 
     set_journal_state(config, SCAN_TELEGRAM_SLOT_KEY, _scan_notification_slot_id(config, now))
 
 
+def _publish_automation_status(app: FastAPI, status: dict[str, Any], **fields: Any) -> None:
+    status.update(fields)
+    app.state.automation_status = dict(status)
+
+
+def _set_automation_phase(
+    app: FastAPI,
+    status: dict[str, Any],
+    phase: str,
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    _publish_automation_status(
+        app,
+        status,
+        automation_phase=phase,
+        automation_phase_started_at=datetime.now(timezone.utc).isoformat(),
+        automation_phase_metadata=metadata or None,
+    )
+
+
 
 
 def _run_automation_cycle(app: FastAPI) -> None:
@@ -579,18 +602,26 @@ def _run_automation_cycle(app: FastAPI) -> None:
     execute, reason = _automation_should_execute(config)
     status["execute"] = execute
     status["execute_reason"] = reason
+    _publish_automation_status(app, status)
 
     if not app.state.lock.acquire(blocking=False):
         status["last_result"] = "skipped_busy"
-        app.state.automation_status = status
+        _publish_automation_status(app, status, automation_phase="skipped_busy")
         return
 
     try:
+        _set_automation_phase(app, status, "runtime_sync")
         try:
             sync_runtime_state(config)
         except Exception as sync_exc:
             status["runtime_sync_error"] = str(sync_exc)
-        decision_result = run_once(config, execute=execute)
+            _publish_automation_status(app, status)
+
+        def _progress(phase: str, metadata: dict[str, Any] | None = None) -> None:
+            _set_automation_phase(app, status, phase, metadata=metadata)
+
+        _set_automation_phase(app, status, "run_once")
+        decision_result = run_once(config, execute=execute, progress_callback=_progress)
         payload = to_jsonable(decision_result)
         execution = payload.get("execution") or {}
         execution_raw = execution.get("raw") if isinstance(execution.get("raw"), dict) else {}
@@ -605,6 +636,7 @@ def _run_automation_cycle(app: FastAPI) -> None:
             {
                 "last_finished_at": datetime.now(timezone.utc).isoformat(),
                 "last_result": last_result,
+                "automation_phase": "completed",
                 "action": payload.get("action"),
                 "selected_symbol": selected.get("symbol"),
                 "top_symbol": top.get("symbol"),
@@ -620,11 +652,12 @@ def _run_automation_cycle(app: FastAPI) -> None:
             {
                 "last_finished_at": datetime.now(timezone.utc).isoformat(),
                 "last_result": "error",
+                "automation_phase": "error",
                 "error": str(exc),
             }
         )
     finally:
-        app.state.automation_status = status
+        _publish_automation_status(app, status)
         app.state.lock.release()
 
     try:
@@ -1882,12 +1915,14 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
     app = FastAPI(title="Crypto Signal Bot UI")
     app.state.config_path = config_path
     app.state.lock = threading.Lock()
+    app.state.mini_force_lock = threading.Lock()
     app.state.automation_stop = threading.Event()
     app.state.lc_pipeline_lock = threading.Lock()
     app.state.lc_pipeline_slot_lock = threading.Lock()
     app.state.automation_status = {
         "enabled": False,
         "last_result": "not_started",
+        "automation_phase": "idle",
     }
     app.state.lc_pipeline_status = {
         "enabled": False,
@@ -1920,6 +1955,7 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
             "interval_seconds": interval,
             "mode": config.get("mode", "dry_run"),
             "last_result": "waiting_initial_delay" if enabled else "disabled",
+            "automation_phase": "waiting_initial_delay" if enabled else "disabled",
             "next_scan_at": (now + timedelta(seconds=initial_delay)).isoformat() if enabled else None,
         }
         if config.get("notifications", {}).get("telegram", {}).get("startup_message_enabled", True):
@@ -2217,6 +2253,40 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
             }
         finally:
             app.state.lock.release()
+
+    @app.post("/api/force-mini-from-latest-4h")
+    def force_mini_from_latest_four_hour() -> dict[str, Any]:
+        if not app.state.mini_force_lock.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="Mini force is already running")
+        try:
+            config = load_config(app.state.config_path)
+            if atlas_runtime_is_read_only(config):
+                raise HTTPException(
+                    status_code=403,
+                    detail="This runtime is read-only. Only Railway primary may run mini force and write Atlas state.",
+                )
+            latest_four_hour = latest_lc_pipeline_four_hour_event(config)
+            if not latest_four_hour:
+                raise HTTPException(status_code=409, detail="No latest 4h LC pool is available")
+            demo_status = _okx_demo_status(config) if config.get("mode") == "demo" else None
+            if demo_status and demo_status.get("missing_env"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Missing OKX demo env: {', '.join(demo_status['missing_env'])}",
+                )
+            result = force_mini_scan_from_latest_four_hour(config)
+            return {
+                "ok": True,
+                "mode": config.get("mode"),
+                "latest_four_hour": latest_four_hour,
+                "internal_market_scan": result.get("internal_market_scan") or {},
+                "mini_pending_queue": result.get("mini_pending_queue") or {},
+                "demo_status": demo_status,
+                "paper_state": _paper_state(config),
+                "automation": _automation_status_payload(app),
+            }
+        finally:
+            app.state.mini_force_lock.release()
 
     @app.post("/api/demo-ai-flow-check")
     def demo_ai_flow_check() -> dict[str, Any]:
