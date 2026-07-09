@@ -1964,17 +1964,43 @@ def _undecided_recheck_notification_text(
     return "\n".join(lines)
 
 
-def _rc_recheck_row_line_v2(index: int, row: dict[str, Any], *, dropped: bool = False) -> str:
+def _rc_row_age_label(row: dict[str, Any], now: datetime) -> str:
+    age_hours = _row_age_hours(row, now)
+    if age_hours is None:
+        return str(row.get("age_label") or "-")
+    return _age_label(age_hours)
+
+
+def _rc_row_source_label(config: dict[str, Any], row: dict[str, Any]) -> str:
+    origin_label = _row_origin_label(row, config=config)
+    if origin_label:
+        return origin_label
+    return f"Nguồn {_base_source_label(row)}"
+
+
+def _rc_recheck_row_line_v2(
+    config: dict[str, Any],
+    index: int,
+    row: dict[str, Any],
+    *,
+    now: datetime,
+    dropped: bool = False,
+) -> str:
     side = str(row.get("side") or "-").upper()
     try:
         win_text = f"{float(row.get('win_probability_pct') or 0):.2f}%"
     except (TypeError, ValueError):
         win_text = "-"
     prefix = "Win trước" if dropped else "Win"
-    parts = [f"{index}. {row.get('symbol', '-')}", side, f"{prefix} {win_text}"]
+    parts = [
+        f"{index}. {row.get('symbol', '-')}",
+        side,
+        f"{prefix} {win_text}",
+        _rc_row_source_label(config, row),
+        f"sống {_rc_row_age_label(row, now)}",
+    ]
     if row.get("revived_at"):
         parts.append(_revived_target_label(row))
-        parts.append(_base_source_label(row))
         revived_time = _revived_time_label(row)
         if revived_time:
             parts.append(f"Hồi sinh {revived_time}")
@@ -2001,17 +2027,23 @@ def _undecided_recheck_notification_text_v2(
     ]
     if kept_rows:
         lines.append("🟢 Giữ lại:")
-        lines.extend(_rc_recheck_row_line_v2(index, row) for index, row in enumerate(kept_rows[:3], 1))
+        lines.extend(_rc_recheck_row_line_v2(config, index, row, now=created_at) for index, row in enumerate(kept_rows[:3], 1))
     else:
         lines.append("🟢 Giữ lại: không còn cặp nào.")
     if dropped_rows:
         lines.append("🔴 Bị loại:")
-        lines.extend(_rc_recheck_row_line_v2(index, row, dropped=True) for index, row in enumerate(dropped_rows[:3], 1))
+        lines.extend(
+            _rc_recheck_row_line_v2(config, index, row, now=created_at, dropped=True)
+            for index, row in enumerate(dropped_rows[:3], 1)
+        )
     else:
         lines.append("🔴 Bị loại: 0")
     if promoted_rows:
         lines.append("♻️ Đẩy lên LC nội bộ:")
-        lines.extend(_rc_recheck_row_line_v2(index, row) for index, row in enumerate(promoted_rows[:3], 1))
+        lines.extend(
+            _rc_recheck_row_line_v2(config, index, row, now=created_at)
+            for index, row in enumerate(promoted_rows[:3], 1)
+        )
         top = promoted_rows[0]
         revived_time = _revived_time_label(top)
         lines.append(
