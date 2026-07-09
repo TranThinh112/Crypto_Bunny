@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
+import zlib
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -22,6 +24,7 @@ DEPRECATED_JOURNAL_STATE_KEYS = {
     "ai_internal_market_scan_latest",
 }
 DASHBOARD_SNAPSHOT_PREFIX = "dashboard_snapshot:"
+JOURNAL_STATE_COMPRESSION_THRESHOLD_BYTES = 8_192
 
 
 def _mongo_collection(config: dict[str, Any], table: str) -> Any:
@@ -690,9 +693,40 @@ def _is_deprecated_journal_state_key(key: str) -> bool:
     return str(key) in DEPRECATED_JOURNAL_STATE_KEYS
 
 
+def _encode_journal_state_payload(value: str) -> dict[str, Any]:
+    payload = str(value or "")
+    raw = payload.encode("utf-8")
+    if len(raw) < JOURNAL_STATE_COMPRESSION_THRESHOLD_BYTES:
+        return {"value": payload}
+    compressed = zlib.compress(raw, level=6)
+    encoded = base64.b64encode(compressed).decode("ascii")
+    if len(encoded) >= len(payload):
+        return {"value": payload}
+    return {
+        "value": None,
+        "value_compressed": encoded,
+        "value_encoding": "zlib+base64",
+    }
+
+
+def _decode_journal_state_payload(row: dict[str, Any] | None) -> str | None:
+    if not row:
+        return None
+    compressed = row.get("value_compressed")
+    encoding = str(row.get("value_encoding") or "")
+    if compressed and encoding == "zlib+base64":
+        try:
+            raw = zlib.decompress(base64.b64decode(str(compressed)))
+            return raw.decode("utf-8")
+        except Exception:
+            return None
+    value = row.get("value")
+    return None if value is None else str(value)
+
+
 def delete_journal_state(config: dict[str, Any], key: str) -> None:
     _ensure_mongo_write_allowed(config)
-    _mongo_collection(config, "journal_state").delete_one({"key": key})
+    _mongo_collection(config, "journal_state").delete_one({"_id": key})
     return
 def delete_journal_state_prefix(config: dict[str, Any], prefix: str) -> None:
     _ensure_mongo_write_allowed(config)
@@ -714,23 +748,34 @@ def get_journal_state(config: dict[str, Any], key: str) -> str | None:
     if _is_deprecated_journal_state_key(key):
         delete_journal_state(config, key)
         return None
-    row = _mongo_find_one(config, "journal_state", query={"key": key})
-    return str(row["value"]) if row else None
+    row = _mongo_collection(config, "journal_state").find_one(
+        {"_id": key},
+        {"_id": 0, "value": 1, "value_compressed": 1, "value_encoding": 1},
+    )
+    payload = _decode_journal_state_payload(row)
+    if payload is None:
+        return None
+    if row and row.get("value") is not None and atlas_runtime_is_primary(config):
+        encoded = _encode_journal_state_payload(payload)
+        if encoded.get("value_compressed"):
+            set_journal_state(config, key, payload)
+    return payload
 def set_journal_state(config: dict[str, Any], key: str, value: str) -> None:
     if _is_deprecated_journal_state_key(key):
         delete_journal_state(config, key)
         return
     now = datetime.now(timezone.utc).isoformat()
     _ensure_mongo_write_allowed(config)
-    _mongo_upsert_by_pk(
-        config,
-        "journal_state",
-        "key",
+    payload = _encode_journal_state_payload(value)
+    _mongo_collection(config, "journal_state").replace_one(
+        {"_id": key},
         {
+            "_id": key,
             "key": key,
-            "value": value,
+            **payload,
             "updated_at": now,
         },
+        upsert=True,
     )
     return
 def next_global_counter(config: dict[str, Any], name: str) -> int:
