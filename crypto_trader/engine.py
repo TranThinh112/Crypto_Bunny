@@ -648,6 +648,7 @@ def run_once(config: dict[str, Any], execute: bool) -> Decision:
     scan_inputs = _collect_realtime_scan_inputs(config, previous_payload=previous_payload)
     strategy_symbols = list(scan_inputs["strategy_symbols"])
     universe_context = dict(scan_inputs["universe_context"])
+    digest = scan_inputs["digest"]
     old_symbols = list(scan_inputs["old_symbols"])
     pending_symbols_before_scan = list(scan_inputs["pending_symbols_before_scan"])
     snapshots = list(scan_inputs["snapshots"])

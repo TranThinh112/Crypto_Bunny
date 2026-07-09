@@ -200,6 +200,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "lc_pipeline_undecided_prune_drop": 3,
             "lc_pipeline_internal_lc_max": 3,
             "lc_pipeline_promote_after_hours": 6,
+            "lc_pipeline_undecided_max_age_hours": 12,
             "lc_pipeline_recheck_interval_minutes": 90,
             "lc_pipeline_slot_tolerance_minutes": 3,
             "lc_pipeline_min_win_probability_pct": 62,
