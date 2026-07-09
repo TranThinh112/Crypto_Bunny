@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import json
 import re
+import threading
+import time
 import zlib
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -24,15 +26,154 @@ DEPRECATED_JOURNAL_STATE_KEYS = {
     "ai_internal_market_scan_latest",
 }
 DASHBOARD_SNAPSHOT_PREFIX = "dashboard_snapshot:"
+DASHBOARD_SNAPSHOT_VERSION_KEY = "dashboard_snapshot:version"
 JOURNAL_STATE_COMPRESSION_THRESHOLD_BYTES = 8_192
+DEFAULT_JOURNAL_STATE_CACHE_TTL_SECONDS = 5.0
+DEFAULT_MONGO_OPERATION_RETRY_ATTEMPTS = 3
+DEFAULT_MONGO_OPERATION_RETRY_DELAY_SECONDS = 0.35
+
+_JOURNAL_STATE_CACHE_LOCK = threading.Lock()
+_JOURNAL_STATE_CACHE: dict[str, tuple[float, str]] = {}
+
+
+class _RetryingCollectionProxy:
+    def __init__(self, config: dict[str, Any], collection: Any) -> None:
+        self._config = config
+        self._collection = collection
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._collection, name)
+        if not callable(attr) or name == "find":
+            return attr
+
+        def _wrapped(*args: Any, **kwargs: Any) -> Any:
+            return _mongo_call_with_retry(self._config, lambda: attr(*args, **kwargs))
+
+        return _wrapped
+
+
+def _journal_state_cache_namespace(config: dict[str, Any]) -> str:
+    return str(
+        config.get("_config_path")
+        or config.get("_config_dir")
+        or config.get("database", {}).get("atlas", {}).get("database")
+        or "default"
+    )
+
+
+def _journal_state_cache_key(config: dict[str, Any], key: str) -> str:
+    return f"{_journal_state_cache_namespace(config)}::{key}"
+
+
+def _journal_state_cache_ttl_seconds(config: dict[str, Any]) -> float:
+    atlas = config.get("database", {}).get("atlas", {})
+    raw = atlas.get("journal_state_cache_ttl_seconds", DEFAULT_JOURNAL_STATE_CACHE_TTL_SECONDS)
+    try:
+        return max(0.0, float(raw or 0.0))
+    except (TypeError, ValueError):
+        return DEFAULT_JOURNAL_STATE_CACHE_TTL_SECONDS
+
+
+def _journal_state_cache_get(config: dict[str, Any], key: str) -> str | None:
+    ttl = _journal_state_cache_ttl_seconds(config)
+    if ttl <= 0:
+        return None
+    cache_key = _journal_state_cache_key(config, key)
+    now = time.monotonic()
+    with _JOURNAL_STATE_CACHE_LOCK:
+        entry = _JOURNAL_STATE_CACHE.get(cache_key)
+        if not entry:
+            return None
+        expires_at, value = entry
+        if expires_at <= now:
+            _JOURNAL_STATE_CACHE.pop(cache_key, None)
+            return None
+        return value
+
+
+def _journal_state_cache_set(config: dict[str, Any], key: str, value: str) -> None:
+    ttl = _journal_state_cache_ttl_seconds(config)
+    if ttl <= 0:
+        return
+    cache_key = _journal_state_cache_key(config, key)
+    with _JOURNAL_STATE_CACHE_LOCK:
+        _JOURNAL_STATE_CACHE[cache_key] = (time.monotonic() + ttl, value)
+
+
+def _journal_state_cache_invalidate(config: dict[str, Any], key: str) -> None:
+    cache_key = _journal_state_cache_key(config, key)
+    with _JOURNAL_STATE_CACHE_LOCK:
+        _JOURNAL_STATE_CACHE.pop(cache_key, None)
+
+
+def _journal_state_cache_invalidate_prefix(config: dict[str, Any], prefix: str) -> None:
+    match = f"{_journal_state_cache_namespace(config)}::{str(prefix or '')}"
+    with _JOURNAL_STATE_CACHE_LOCK:
+        stale_keys = [cache_key for cache_key in _JOURNAL_STATE_CACHE if cache_key.startswith(match)]
+        for cache_key in stale_keys:
+            _JOURNAL_STATE_CACHE.pop(cache_key, None)
+
+
+def _mongo_operation_retry_attempts(config: dict[str, Any]) -> int:
+    atlas = config.get("database", {}).get("atlas", {})
+    raw = atlas.get("operation_retry_attempts", DEFAULT_MONGO_OPERATION_RETRY_ATTEMPTS)
+    try:
+        return max(1, int(raw or 1))
+    except (TypeError, ValueError):
+        return DEFAULT_MONGO_OPERATION_RETRY_ATTEMPTS
+
+
+def _mongo_operation_retry_delay_seconds(config: dict[str, Any]) -> float:
+    atlas = config.get("database", {}).get("atlas", {})
+    raw = atlas.get("operation_retry_delay_seconds", DEFAULT_MONGO_OPERATION_RETRY_DELAY_SECONDS)
+    try:
+        return max(0.0, float(raw or 0.0))
+    except (TypeError, ValueError):
+        return DEFAULT_MONGO_OPERATION_RETRY_DELAY_SECONDS
+
+
+def _mongo_error_is_retryable(exc: Exception) -> bool:
+    if exc.__class__.__name__ in {
+        "AutoReconnect",
+        "ConnectionFailure",
+        "ExecutionTimeout",
+        "NetworkTimeout",
+        "ServerSelectionTimeoutError",
+        "WaitQueueTimeoutError",
+    }:
+        return True
+    message = str(exc).lower()
+    return any(
+        token in message
+        for token in (
+            "read operation timed out",
+            "timed out",
+            "wait queue timeout",
+            "connection pool paused",
+            "connection reset",
+            "temporarily unavailable",
+        )
+    )
+
+
+def _mongo_call_with_retry(config: dict[str, Any], operation: Any) -> Any:
+    attempts = _mongo_operation_retry_attempts(config)
+    delay = _mongo_operation_retry_delay_seconds(config)
+    for attempt in range(1, attempts + 1):
+        try:
+            return operation()
+        except Exception as exc:
+            if attempt >= attempts or not _mongo_error_is_retryable(exc):
+                raise
+            time.sleep(delay * attempt)
 
 
 def _mongo_collection(config: dict[str, Any], table: str) -> Any:
-    return atlas_database(config)[table]
+    return _RetryingCollectionProxy(config, atlas_database(config)[table])
 
 
 def _mongo_meta_collection(config: dict[str, Any]) -> Any:
-    return atlas_database(config)["_meta_counters"]
+    return _RetryingCollectionProxy(config, atlas_database(config)["_meta_counters"])
 
 
 def _ensure_mongo_write_allowed(config: dict[str, Any]) -> None:
@@ -95,12 +236,15 @@ def _mongo_find_many(
     sort: list[tuple[str, int]] | None = None,
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
-    cursor = _mongo_collection(config, table).find(query or {}, {"_id": 0})
-    if sort:
-        cursor = cursor.sort(sort)
-    if limit is not None:
-        cursor = cursor.limit(max(0, int(limit)))
-    return [dict(row) for row in cursor]
+    def _operation() -> list[dict[str, Any]]:
+        cursor = _mongo_collection(config, table).find(query or {}, {"_id": 0})
+        if sort:
+            cursor = cursor.sort(sort)
+        if limit is not None:
+            cursor = cursor.limit(max(0, int(limit)))
+        return [dict(row) for row in cursor]
+
+    return _mongo_call_with_retry(config, _operation)
 
 
 def _mongo_find_one(
@@ -727,13 +871,20 @@ def _decode_journal_state_payload(row: dict[str, Any] | None) -> str | None:
 def delete_journal_state(config: dict[str, Any], key: str) -> None:
     _ensure_mongo_write_allowed(config)
     _mongo_collection(config, "journal_state").delete_one({"_id": key})
+    _journal_state_cache_invalidate(config, key)
     return
 def delete_journal_state_prefix(config: dict[str, Any], prefix: str) -> None:
     _ensure_mongo_write_allowed(config)
     _mongo_collection(config, "journal_state").delete_many({"key": {"$regex": f"^{prefix}"}})
+    _journal_state_cache_invalidate_prefix(config, prefix)
     return
 def clear_dashboard_snapshot_cache(config: dict[str, Any]) -> None:
-    delete_journal_state_prefix(config, DASHBOARD_SNAPSHOT_PREFIX)
+    _ensure_mongo_write_allowed(config)
+    set_journal_state(config, DASHBOARD_SNAPSHOT_VERSION_KEY, datetime.now(timezone.utc).isoformat())
+
+
+def dashboard_snapshot_cache_version(config: dict[str, Any]) -> str:
+    return str(get_journal_state(config, DASHBOARD_SNAPSHOT_VERSION_KEY) or "0")
 
 
 def purge_deprecated_journal_state(config: dict[str, Any]) -> list[str]:
@@ -748,6 +899,9 @@ def get_journal_state(config: dict[str, Any], key: str) -> str | None:
     if _is_deprecated_journal_state_key(key):
         delete_journal_state(config, key)
         return None
+    cached = _journal_state_cache_get(config, key)
+    if cached is not None:
+        return cached
     row = _mongo_collection(config, "journal_state").find_one(
         {"_id": key},
         {"_id": 0, "value": 1, "value_compressed": 1, "value_encoding": 1},
@@ -755,6 +909,7 @@ def get_journal_state(config: dict[str, Any], key: str) -> str | None:
     payload = _decode_journal_state_payload(row)
     if payload is None:
         return None
+    _journal_state_cache_set(config, key, payload)
     if row and row.get("value") is not None and atlas_runtime_is_primary(config):
         encoded = _encode_journal_state_payload(payload)
         if encoded.get("value_compressed"):
@@ -777,6 +932,7 @@ def set_journal_state(config: dict[str, Any], key: str, value: str) -> None:
         },
         upsert=True,
     )
+    _journal_state_cache_set(config, key, str(value or ""))
     return
 def next_global_counter(config: dict[str, Any], name: str) -> int:
     key = f"counter:{name}"

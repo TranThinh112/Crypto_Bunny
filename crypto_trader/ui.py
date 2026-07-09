@@ -674,7 +674,9 @@ def _run_automation_cycle(app: FastAPI) -> None:
         pass
 
     messages: list[str] = []
-    should_notify_scan = status.get("last_result") == "error" or _periodic_scan_notification_due(config, now)
+    should_notify_scan = telegram_notify_scans(config) and (
+        status.get("last_result") == "error" or _periodic_scan_notification_due(config, now)
+    )
     if should_notify_scan:
         sent = send_telegram_message(
             config,

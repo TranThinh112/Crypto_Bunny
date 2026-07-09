@@ -663,6 +663,49 @@ class UiTest(TestCase):
             self.assertFalse(call.kwargs.get("with_buttons"))
             self.assertFalse(call.kwargs.get("replace_previous"))
 
+    @patch("crypto_trader.ui.system_health_dashboard")
+    @patch("crypto_trader.ui.replay_dashboard_payload")
+    @patch("crypto_trader.ui.analytics_dashboard")
+    @patch("crypto_trader.ui.scan_memory_dashboard")
+    @patch("crypto_trader.ui.timeframe_state_dashboard")
+    @patch("crypto_trader.ui.refresh_system_checklist_snapshot")
+    @patch("crypto_trader.ui.run_once")
+    @patch("crypto_trader.ui.send_telegram_message")
+    def test_automation_error_does_not_send_scan_message_when_scan_notify_disabled(
+        self,
+        send_message,
+        run_once,
+        refresh_checklist,
+        timeframe_dashboard,
+        scan_dashboard,
+        analytics_dashboard_mock,
+        replay_dashboard,
+        health_dashboard,
+    ) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text(
+                "mode: dry_run\n"
+                "_atlas_test_mode: true\n"
+                "notifications:\n"
+                "  telegram:\n"
+                "    notify_scans: false\n",
+                encoding="utf-8",
+            )
+            run_once.side_effect = RuntimeError("atlas read timeout")
+            app = SimpleNamespace(
+                state=SimpleNamespace(
+                    config_path=config_path,
+                    automation_status={},
+                    lock=threading.Lock(),
+                )
+            )
+
+            _run_automation_cycle(app)
+
+        scan_messages = [call.args[1] for call in send_message.call_args_list if len(call.args) >= 2]
+        self.assertFalse(any(str(message).startswith("🔎🔵 SC") for message in scan_messages))
+
     def test_periodic_scan_notification_only_fires_on_quarter_hour_slots(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             config_path = Path(tmpdir) / "config.yaml"

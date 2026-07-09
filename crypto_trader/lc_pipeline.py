@@ -2892,9 +2892,6 @@ def _update_lc_internal_pipeline_impl(
             + [_format_pair_line(index, row, config=config) for index, row in enumerate(top[:3], 1)],
             created_at=now,
         )
-        if settings["notify_one_hour_summary"]:
-            _notify_one_hour_summary(config, one_hour_event)
-
     expected_hourly_slots = _aligned_source_slots(config, two_hour_slot, parent_hours=2, child_hours=1)
     aligned_hourly_events = _latest_events_for_slots(list(state.get("one_hour_history") or []), expected_hourly_slots)
     has_two_hour_inputs = any(list(window.get("approved") or []) for window in aligned_hourly_events)
@@ -2983,9 +2980,6 @@ def _update_lc_internal_pipeline_impl(
         result["created_two_hour"] = True
         result["two_hour_event"] = event
         result["two_hour_recheck"] = two_hour_recheck
-        if settings["notify_two_hour_summary"]:
-            _notify_two_hour_summary(config, event)
-
     expected_two_hour_slots = _aligned_source_slots(config, four_hour_slot, parent_hours=4, child_hours=2)
     aligned_two_hour_events = _latest_events_for_slots_aligned(
         config,
@@ -3083,9 +3077,6 @@ def _update_lc_internal_pipeline_impl(
         result["created_four_hour"] = True
         result["four_hour_event"] = four_hour_event
         result["four_hour_recheck"] = four_hour_recheck
-        if settings["notify_mini_pool_summary"]:
-            _notify_four_hour_summary(config, four_hour_event)
-
     if undecided_recheck_due:
         state["last_recheck_at"] = now.isoformat()
         state["last_undecided_recheck_slot"] = undecided_recheck_slot
@@ -3113,6 +3104,12 @@ def _update_lc_internal_pipeline_impl(
         : int(settings["internal_lc_max"])
     ]
     _save_state(config, state)
+    if settings["notify_one_hour_summary"] and isinstance(result.get("one_hour_event"), dict):
+        _notify_one_hour_summary(config, result["one_hour_event"])
+    if settings["notify_two_hour_summary"] and isinstance(result.get("two_hour_event"), dict):
+        _notify_two_hour_summary(config, result["two_hour_event"])
+    if settings["notify_mini_pool_summary"] and isinstance(result.get("four_hour_event"), dict):
+        _notify_four_hour_summary(config, result["four_hour_event"])
     return result
 
 

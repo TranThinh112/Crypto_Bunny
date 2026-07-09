@@ -24,6 +24,7 @@ from .market_guard import market_guard_block_status
 from .sizing import STATE_KEY as SIZING_STATE_KEY
 from .storage import (
     count_pending_orders,
+    dashboard_snapshot_cache_version,
     get_journal_state,
     list_journal_state_prefix,
     list_market_guard_observations,
@@ -259,7 +260,8 @@ def _cache_token(value: Any) -> str:
     return "".join(ch if ch.isalnum() or ch in {"_", "-", "."} else "_" for ch in text)
 
 
-def _dashboard_snapshot_key(name: str, **params: Any) -> str:
+def _dashboard_snapshot_key(config: dict[str, Any], name: str, **params: Any) -> str:
+    params = {"v": dashboard_snapshot_cache_version(config), **params}
     if not params:
         return f"{DASHBOARD_SNAPSHOT_PREFIX}:{name}"
     suffix = ";".join(f"{_cache_token(key)}={_cache_token(value)}" for key, value in sorted(params.items()))
@@ -1024,7 +1026,7 @@ def timeframe_state_dashboard(
     max_age_seconds: int | None = DASHBOARD_DEFAULT_TTL_SECONDS,
 ) -> dict[str, Any]:
     lookback_hours = max(1, min(168, int(lookback_hours or 24)))
-    key = _dashboard_snapshot_key("timeframes", lookback_hours=lookback_hours)
+    key = _dashboard_snapshot_key(config, "timeframes", lookback_hours=lookback_hours)
     return _get_or_build_cached_payload(
         config,
         key=key,
@@ -1120,6 +1122,7 @@ def scan_memory_dashboard(
     lookback_hours = max(1, min(168, int(lookback_hours or 24)))
     per_symbol_timeframe_limit = max(1, min(20, int(per_symbol_timeframe_limit or 5)))
     key = _dashboard_snapshot_key(
+        config,
         "scan_memory",
         lookback_hours=lookback_hours,
         per_symbol_timeframe_limit=per_symbol_timeframe_limit,
@@ -1203,7 +1206,7 @@ def analytics_dashboard(
     max_age_seconds: int | None = DASHBOARD_DEFAULT_TTL_SECONDS,
 ) -> dict[str, Any]:
     lookback_hours = max(1, min(168, int(lookback_hours or 24)))
-    key = _dashboard_snapshot_key("analytics", lookback_hours=lookback_hours)
+    key = _dashboard_snapshot_key(config, "analytics", lookback_hours=lookback_hours)
     return _get_or_build_cached_payload(
         config,
         key=key,
@@ -1240,7 +1243,7 @@ def replay_dashboard_payload(
     max_age_seconds: int | None = DASHBOARD_DEFAULT_TTL_SECONDS,
 ) -> dict[str, Any]:
     limit = max(1, min(limit, 500))
-    key = _dashboard_snapshot_key("replay", limit=limit)
+    key = _dashboard_snapshot_key(config, "replay", limit=limit)
     return _get_or_build_cached_payload(
         config,
         key=key,
@@ -1289,7 +1292,7 @@ def system_health_dashboard(
     max_age_seconds: int | None = DASHBOARD_DEFAULT_TTL_SECONDS,
 ) -> dict[str, Any]:
     history_limit = max(1, min(history_limit, 180))
-    key = _dashboard_snapshot_key("system_health", history_limit=history_limit)
+    key = _dashboard_snapshot_key(config, "system_health", history_limit=history_limit)
     return _get_or_build_cached_payload(
         config,
         key=key,

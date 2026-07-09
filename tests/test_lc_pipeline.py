@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from unittest import TestCase
 from unittest.mock import patch
 
+import crypto_trader.lc_pipeline as lc_pipeline_module
 from crypto_trader.config import DEFAULT_CONFIG
 from crypto_trader.lc_pipeline import (
     _four_hour_notification_text,
@@ -233,6 +234,34 @@ class LcPipelineTest(TestCase):
         self.assertIn("DDD/USDT:USDT | LONG | Win 64.00%", send_message.call_args.args[1])
         self.assertIn("Gốc 🔵 1h #2 (08:05)", send_message.call_args.args[1])
         self.assertFalse(send_message.call_args.kwargs["replace_previous"])
+
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_one_hour_summary_is_sent_only_after_state_save_succeeds(self, send_message) -> None:
+        config = self._config()
+        start = datetime(2026, 7, 7, 12, 0, 40, tzinfo=timezone.utc)
+        original_save_state = lc_pipeline_module._save_state
+        save_attempts = {"count": 0}
+
+        def flaky_save_state(config_arg, state_arg):
+            save_attempts["count"] += 1
+            if save_attempts["count"] == 1:
+                raise RuntimeError("atlas timeout while saving state")
+            return original_save_state(config_arg, state_arg)
+
+        with patch("crypto_trader.lc_pipeline._save_state", side_effect=flaky_save_state):
+            with self.assertRaisesRegex(RuntimeError, "atlas timeout while saving state"):
+                update_lc_internal_pipeline(config, [_candidate("ARB/USDT:USDT", 64.03)], now=start)
+
+            self.assertEqual(send_message.call_count, 0)
+
+            result = update_lc_internal_pipeline(config, [_candidate("ARB/USDT:USDT", 64.03)], now=start)
+
+        self.assertTrue(result["created_hourly"])
+        self.assertEqual(send_message.call_count, 1)
+        self.assertIn("1h top 1 setup", send_message.call_args.args[1])
+        raw_state = get_journal_state(config, "lc_internal_pipeline_state")
+        state = json.loads(raw_state or "{}")
+        self.assertEqual(state.get("last_hourly_slot"), result["hourly_slot"])
 
     @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
     def test_mini_pool_uses_latest_four_hour_pairs(self, recheck_rows) -> None:
