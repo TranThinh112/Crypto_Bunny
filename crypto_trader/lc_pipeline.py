@@ -38,6 +38,9 @@ FOUR_HOUR_HISTORY_KEEP_DAYS = 7
 RECHECK_STABLE_DELTA_PCT = 1.0
 _LC_PIPELINE_UPDATE_LOCK = threading.RLock()
 _SAMPLE_SYMBOL_PATTERN = re.compile(r"\b([A-Z])\1{2,}(?:/USDT:USDT)?\b")
+# DEMO_RULE_TEST:
+# Giữ lại rule cũ trong comment ở dưới; hiện dùng rule_test để demo luồng pipeline.
+rule_test = 57
 
 
 def _parse_time(value: Any) -> datetime | None:
@@ -564,11 +567,20 @@ def _recheck_strength(previous_win_probability: Any, current_win_probability: An
 
 def _phase_min_win_probability(settings: dict[str, Any], phase: str) -> float:
     phase_key = str(phase or "2h").lower()
+    # OLD_RULE_DISABLED_FOR_DEMO:
+    # if phase_key == "1h":
+    #     return float(settings.get("one_hour_min_win_probability_pct", settings.get("min_win_probability_pct", 61)) or 61)
+    # if phase_key == "4h":
+    #     return float(settings.get("four_hour_min_win_probability_pct", settings.get("min_win_probability_pct", 63)) or 63)
+    # return float(settings.get("two_hour_min_win_probability_pct", settings.get("min_win_probability_pct", 62)) or 62)
+    #
+    # DEMO_RULE_ACTIVE:
+    # Giữ rule cũ cho 1h; chỉ dùng rule_test cho các pool sau recheck (2h/4h) để demo pipeline.
     if phase_key == "1h":
         return float(settings.get("one_hour_min_win_probability_pct", settings.get("min_win_probability_pct", 61)) or 61)
-    if phase_key == "4h":
-        return float(settings.get("four_hour_min_win_probability_pct", settings.get("min_win_probability_pct", 63)) or 63)
-    return float(settings.get("two_hour_min_win_probability_pct", settings.get("min_win_probability_pct", 62)) or 62)
+    if phase_key in {"2h", "4h"}:
+        return float(rule_test)
+    return float(settings.get("min_win_probability_pct", 62) or 62)
 
 
 def _phase_settings(settings: dict[str, Any], phase: str) -> dict[str, Any]:
@@ -3143,7 +3155,13 @@ def _update_lc_internal_pipeline_impl(
         )
     expected_hourly_slots = _aligned_source_slots(config, two_hour_slot, parent_hours=2, child_hours=1)
     aligned_hourly_events = _latest_events_for_slots(list(state.get("one_hour_history") or []), expected_hourly_slots)
-    has_two_hour_inputs = any(list(window.get("approved") or []) for window in aligned_hourly_events)
+    # OLD_RULE_DISABLED_FOR_DEMO:
+    # has_two_hour_inputs = any(list(window.get("approved") or []) for window in aligned_hourly_events)
+    #
+    # DEMO_RULE_ACTIVE:
+    # Chỉ cần 1 pool 1h có approved data là 2h vẫn chạy để kiểm tra hệ thống.
+    aligned_hourly_input_count = sum(1 for window in aligned_hourly_events if list(window.get("approved") or []))
+    has_two_hour_inputs = aligned_hourly_input_count >= 1
     current_two_hour_event = _latest_event_for_slot(
         list(state.get("two_hour_history") or []),
         two_hour_slot,
@@ -3241,7 +3259,13 @@ def _update_lc_internal_pipeline_impl(
         list(state.get("two_hour_history") or []),
         expected_two_hour_slots,
     )
-    has_four_hour_inputs = sum(1 for window in aligned_two_hour_events if list(window.get("approved") or [])) >= 2
+    # OLD_RULE_DISABLED_FOR_DEMO:
+    # has_four_hour_inputs = sum(1 for window in aligned_two_hour_events if list(window.get("approved") or [])) >= 2
+    #
+    # DEMO_RULE_ACTIVE:
+    # Chỉ cần 1 pool 2h có approved data là 4h vẫn chạy để kiểm tra hệ thống.
+    aligned_two_hour_input_count = sum(1 for window in aligned_two_hour_events if list(window.get("approved") or []))
+    has_four_hour_inputs = aligned_two_hour_input_count >= 1
     current_four_hour_event = _latest_event_for_slot(
         list(state.get("four_hour_history") or []),
         four_hour_slot,
