@@ -109,6 +109,7 @@ ai:
 market_guard:
   enabled: true
   interval_seconds: 60
+  notify_telegram: false
   notify_interval_seconds: 600
   timeframe: 1m
   ohlcv_limit: 40
@@ -213,8 +214,9 @@ notifications:
     polling_enabled: true
     poll_timeout_seconds: 1
     button_cache_ttl_seconds: 15
-    account_report_interval_seconds: 18000
-    daily_summary_enabled: true
+    account_report_interval_seconds: 0
+    daily_summary_enabled: false
+    startup_message_enabled: false
     trade_memory_limit: 100
 execution:
   order_type: market

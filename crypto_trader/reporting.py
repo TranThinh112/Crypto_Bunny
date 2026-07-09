@@ -1198,7 +1198,9 @@ def format_daily_summary(
 
 
 def _account_report_due(config: dict[str, Any], now: datetime) -> bool:
-    interval = int(config.get("notifications", {}).get("telegram", {}).get("account_report_interval_seconds", 18_000) or 18_000)
+    interval = int(config.get("notifications", {}).get("telegram", {}).get("account_report_interval_seconds", 18_000) or 0)
+    if interval <= 0:
+        return False
     last_value = get_journal_state(config, "last_account_report_at")
     last = _parse_time(last_value)
     if last is None:

@@ -251,6 +251,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "market_guard": {
         "enabled": True,
         "interval_seconds": 60,
+        "notify_telegram": True,
         "notify_interval_seconds": 600,
         "timeframe": "1m",
         "ohlcv_limit": 40,
@@ -365,6 +366,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "button_cache_ttl_seconds": 15,
             "account_report_interval_seconds": 18000,
             "daily_summary_enabled": True,
+            "startup_message_enabled": True,
             "trade_memory_limit": 100,
         },
     },

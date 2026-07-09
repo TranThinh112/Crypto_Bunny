@@ -1495,6 +1495,8 @@ def _parse_iso_time(value: Any) -> datetime | None:
 
 
 def _market_guard_notify_due(config: dict[str, Any], now: datetime) -> bool:
+    if not bool(config.get("market_guard", {}).get("notify_telegram", True)):
+        return False
     last = _parse_iso_time(get_journal_state(config, "market_guard_last_notify_at"))
     if last is None:
         return True
@@ -1800,15 +1802,16 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
             "last_result": "waiting_initial_delay" if enabled else "disabled",
             "next_scan_at": (now + timedelta(seconds=initial_delay)).isoformat() if enabled else None,
         }
-        send_telegram_message(
-            config,
-            "🟢 Bot crypto đã khởi động\n"
-            f"⚙️ Chế độ: {config.get('mode', 'dry_run')}\n"
-            f"🤖 Tự động: {'bật' if enabled else 'tắt'}\n"
-            f"⏱️ Chu kỳ: {interval}s\n"
-            f"🛡️ Guard: {'bật' if market_guard_enabled(config) else 'tắt'} / {market_guard_interval(config)}s, báo Telegram mỗi {market_guard_notify_interval(config) // 60} phút\n"
-            "📲 Có thể bấm nút bên dưới để xem VT/PNL/SD, SD, LC bất cứ lúc nào.",
-        )
+        if config.get("notifications", {}).get("telegram", {}).get("startup_message_enabled", True):
+            send_telegram_message(
+                config,
+                "🟢 Bot crypto đã khởi động\n"
+                f"⚙️ Chế độ: {config.get('mode', 'dry_run')}\n"
+                f"🤖 Tự động: {'bật' if enabled else 'tắt'}\n"
+                f"⏱️ Chu kỳ: {interval}s\n"
+                f"🛡️ Guard: {'bật' if market_guard_enabled(config) else 'tắt'} / {market_guard_interval(config)}s, báo Telegram mỗi {market_guard_notify_interval(config) // 60} phút\n"
+                "📲 Có thể bấm nút bên dưới để xem VT/PNL/SD, SD, LC bất cứ lúc nào.",
+            )
 
         def delayed_worker() -> None:
             if app.state.automation_stop.wait(initial_delay):
