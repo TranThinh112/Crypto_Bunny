@@ -49,6 +49,34 @@ NON_CRYPTO_KEYWORDS = {
 }
 
 
+def prefetch_market_data(
+    config: dict[str, Any],
+    *,
+    symbols: list[str] | None = None,
+    require_all_tickers: bool = False,
+) -> dict[str, Any]:
+    exchange = create_exchange(config, authenticated=False)
+    markets = exchange.load_markets() or getattr(exchange, "markets", {}) or {}
+    warnings: list[str] = []
+    tickers: dict[str, Any] = {}
+    ticker_symbols = None if require_all_tickers else [str(symbol) for symbol in (symbols or []) if str(symbol)]
+    try:
+        tickers = _fetch_tickers_batch(exchange, ticker_symbols)
+        if not isinstance(tickers, dict):
+            warnings.append("Market prefetch returned invalid ticker data")
+            tickers = {}
+    except Exception as exc:
+        warnings.append(f"Market prefetch ticker fetch failed: {exc}")
+        tickers = {}
+    return {
+        "exchange": exchange,
+        "markets": markets if isinstance(markets, dict) else {},
+        "currencies": getattr(exchange, "currencies", {}) or {},
+        "tickers": tickers,
+        "warnings": warnings,
+    }
+
+
 def create_exchange(config: dict[str, Any], authenticated: bool = False) -> Any:
     import ccxt
 
@@ -236,7 +264,24 @@ def select_top_volume_symbols_from_tickers(
     return [symbol for _, symbol in ranked[:max_symbols]]
 
 
-def fetch_top_volume_symbols(config: dict[str, Any]) -> tuple[list[str], list[str]]:
+def _fetch_tickers_batch(exchange: Any, symbols: list[str] | None = None) -> dict[str, Any]:
+    fetch_symbols = [str(symbol) for symbol in (symbols or []) if str(symbol)]
+    if fetch_symbols:
+        try:
+            tickers = exchange.fetch_tickers(fetch_symbols)
+            if isinstance(tickers, dict):
+                return tickers
+        except TypeError:
+            pass
+    tickers = exchange.fetch_tickers()
+    return tickers if isinstance(tickers, dict) else {}
+
+
+def fetch_top_volume_symbols(
+    config: dict[str, Any],
+    *,
+    market_data: dict[str, Any] | None = None,
+) -> tuple[list[str], list[str]]:
     strategy_config = config.get("strategy", {})
     universe = strategy_config.get("universe", {})
     limit = max(1, min(50, int(universe.get("max_symbols", 50) or 50)))
@@ -245,12 +290,24 @@ def fetch_top_volume_symbols(config: dict[str, Any]) -> tuple[list[str], list[st
     asset_class = str(universe.get("asset_class", "crypto") or "crypto")
     excluded_bases = universe.get("exclude_bases") or list(NON_CRYPTO_BASES)
     excluded_keywords = universe.get("exclude_keywords") or list(NON_CRYPTO_KEYWORDS)
+    warnings: list[str] = list((market_data or {}).get("warnings") or [])
     try:
-        exchange = create_exchange(config, authenticated=False)
-        markets = exchange.load_markets() or getattr(exchange, "markets", {}) or {}
-        tickers = exchange.fetch_tickers()
+        if market_data:
+            exchange = market_data.get("exchange")
+            markets = market_data.get("markets") or {}
+            tickers = market_data.get("tickers") or {}
+        else:
+            prefetched = prefetch_market_data(config, require_all_tickers=True)
+            exchange = prefetched.get("exchange")
+            markets = prefetched.get("markets") or {}
+            tickers = prefetched.get("tickers") or {}
+            warnings.extend(prefetched.get("warnings") or [])
+        if exchange is None:
+            raise RuntimeError("Exchange is unavailable")
+        if not tickers:
+            tickers = _fetch_tickers_batch(exchange)
         if not isinstance(markets, dict) or not isinstance(tickers, dict):
-            return [], ["Top-volume universe fetch returned invalid market data"]
+            return [], warnings + ["Top-volume universe fetch returned invalid market data"]
         symbols = select_top_volume_symbols_from_tickers(
             markets,
             tickers,
@@ -262,10 +319,10 @@ def fetch_top_volume_symbols(config: dict[str, Any]) -> tuple[list[str], list[st
             excluded_keywords=excluded_keywords,
         )
         if not symbols:
-            return [], ["Top-volume universe returned no eligible symbols"]
-        return symbols, []
+            return [], warnings + ["Top-volume universe returned no eligible symbols"]
+        return symbols, warnings
     except Exception as exc:
-        return [], [f"Top-volume universe fetch failed: {exc}"]
+        return [], warnings + [f"Top-volume universe fetch failed: {exc}"]
 
 
 def _spread_pct(ticker: dict[str, Any], last: float) -> float | None:
@@ -367,19 +424,42 @@ def _confirmation_timeframes(config: dict[str, Any]) -> tuple[bool, list[str], i
 def fetch_market_snapshots(
     config: dict[str, Any],
     symbols: list[str] | None = None,
+    *,
+    market_data: dict[str, Any] | None = None,
 ) -> tuple[list[MarketSnapshot], list[str]]:
-    exchange = create_exchange(config, authenticated=False)
     timeframe = config["strategy"].get("timeframe", "15m")
     limit = int(config["strategy"].get("ohlcv_limit", 180))
     higher_enabled, higher_frames, higher_limit = _confirmation_timeframes(config)
     snapshots: list[MarketSnapshot] = []
-    warnings: list[str] = []
-
-    exchange.load_markets()
-    for symbol in symbols or config["strategy"]["symbols"]:
+    warnings: list[str] = list((market_data or {}).get("warnings") or [])
+    active_symbols = [str(symbol) for symbol in (symbols or config["strategy"]["symbols"]) if str(symbol)]
+    if not active_symbols:
+        return [], warnings
+    if market_data:
+        exchange = market_data.get("exchange")
+        markets = market_data.get("markets") or {}
+        tickers = market_data.get("tickers") or {}
+    else:
+        prefetched = prefetch_market_data(config, symbols=active_symbols)
+        exchange = prefetched.get("exchange")
+        markets = prefetched.get("markets") or {}
+        tickers = prefetched.get("tickers") or {}
+        warnings.extend(prefetched.get("warnings") or [])
+    if exchange is None:
+        return [], warnings + ["Market snapshot exchange is unavailable"]
+    if not markets:
+        markets = exchange.load_markets() or getattr(exchange, "markets", {}) or {}
+    for symbol in active_symbols:
         try:
             ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-            ticker = exchange.fetch_ticker(symbol)
+            market = markets.get(symbol) if isinstance(markets, dict) else {}
+            ticker = None
+            if isinstance(tickers, dict):
+                ticker = tickers.get(symbol)
+                if ticker is None and isinstance(market, dict):
+                    ticker = tickers.get(str(market.get("id") or ""))
+            if not isinstance(ticker, dict):
+                ticker = exchange.fetch_ticker(symbol)
             last = float(ticker.get("last") or float(ohlcv[-1][4]))
             higher_timeframes: dict[str, dict[str, Any]] = {}
             if higher_enabled:

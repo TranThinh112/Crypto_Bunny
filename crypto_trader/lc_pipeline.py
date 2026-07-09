@@ -21,6 +21,10 @@ from .strategy import build_candidates, enrich_quantities
 
 
 LC_PIPELINE_STATE_KEY = "lc_internal_pipeline_state"
+LC_PIPELINE_INTERNAL_SYMBOLS_KEY = "lc_internal_pipeline_internal_symbols"
+LC_PIPELINE_LATEST_FOUR_HOUR_KEY = "lc_internal_pipeline_latest_four_hour"
+LC_PIPELINE_LATEST_FOUR_HOUR_SYMBOLS_KEY = "lc_internal_pipeline_latest_four_hour_symbols"
+LC_PIPELINE_LATEST_MINI_SCAN_KEY = "lc_internal_pipeline_latest_mini_scan"
 LC_PIPELINE_STATE_VERSION = 3
 DEFAULT_TWO_HOUR_ICON = "🟡"
 ONE_HOUR_ICON = "🔵"
@@ -1330,11 +1334,70 @@ def _save_state(config: dict[str, Any], state: dict[str, Any]) -> None:
     state["telegram_events"] = [_compact_event(event) for event in state.get("telegram_events") or [] if isinstance(event, dict)]
     state["latest_mini_scan"] = _compact_mini_scan(state.get("latest_mini_scan") or {})
     set_journal_state(config, LC_PIPELINE_STATE_KEY, json.dumps(state, ensure_ascii=False))
+    _persist_compact_state_views(config, state)
     clear_dashboard_snapshot_cache(config)
 
 
+def _persist_compact_state_views(config: dict[str, Any], state: dict[str, Any]) -> None:
+    latest_four_hour_event = (
+        state["four_hour_history"][-1]
+        if state.get("four_hour_history") and isinstance(state["four_hour_history"][-1], dict)
+        else {}
+    )
+    latest_four_hour_symbols = [
+        str(row.get("symbol") or "")
+        for row in (latest_four_hour_event.get("approved") or [])
+        if isinstance(row, dict) and str(row.get("symbol") or "")
+    ]
+    internal_symbols = [
+        str(row.get("symbol") or "")
+        for row in state.get("internal_lc") or []
+        if isinstance(row, dict) and str(row.get("symbol") or "")
+    ]
+    set_journal_state(
+        config,
+        LC_PIPELINE_INTERNAL_SYMBOLS_KEY,
+        json.dumps({"symbols": internal_symbols}, ensure_ascii=False),
+    )
+    set_journal_state(
+        config,
+        LC_PIPELINE_LATEST_FOUR_HOUR_KEY,
+        json.dumps(latest_four_hour_event, ensure_ascii=False),
+    )
+    set_journal_state(
+        config,
+        LC_PIPELINE_LATEST_FOUR_HOUR_SYMBOLS_KEY,
+        json.dumps(latest_four_hour_symbols, ensure_ascii=False),
+    )
+    set_journal_state(
+        config,
+        LC_PIPELINE_LATEST_MINI_SCAN_KEY,
+        json.dumps(state["latest_mini_scan"], ensure_ascii=False),
+    )
+
+
+def _load_compact_state_value(config: dict[str, Any], key: str) -> Any | None:
+    raw = get_journal_state(config, key)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
 def lc_pipeline_internal_symbols(config: dict[str, Any], *, limit: int | None = None) -> list[str]:
+    compact = _load_compact_state_value(config, LC_PIPELINE_INTERNAL_SYMBOLS_KEY)
+    if isinstance(compact, dict):
+        compact_symbols = [str(symbol) for symbol in compact.get("symbols") or [] if str(symbol)]
+        if limit is None:
+            return compact_symbols
+        return compact_symbols[: max(1, int(limit))]
     state = _load_state(config, datetime.now(timezone.utc), reset_for_new_day=False)
+    try:
+        _persist_compact_state_views(config, state)
+    except Exception:
+        pass
     symbols: list[str] = []
     for row in state.get("internal_lc") or []:
         symbol = str(row.get("symbol") or "")
@@ -1346,7 +1409,17 @@ def lc_pipeline_internal_symbols(config: dict[str, Any], *, limit: int | None = 
 
 
 def lc_pipeline_four_hour_symbols(config: dict[str, Any], *, limit: int | None = None) -> list[str]:
+    compact = _load_compact_state_value(config, LC_PIPELINE_LATEST_FOUR_HOUR_SYMBOLS_KEY)
+    if isinstance(compact, list):
+        compact_symbols = [str(symbol) for symbol in compact if str(symbol)]
+        if limit is None:
+            return compact_symbols
+        return compact_symbols[: max(1, int(limit))]
     state = _load_state(config, datetime.now(timezone.utc), reset_for_new_day=False)
+    try:
+        _persist_compact_state_views(config, state)
+    except Exception:
+        pass
     symbols: list[str] = []
     for row in _latest_four_hour_rows(state):
         symbol = str(row.get("symbol") or "")
@@ -1358,7 +1431,14 @@ def lc_pipeline_four_hour_symbols(config: dict[str, Any], *, limit: int | None =
 
 
 def latest_lc_pipeline_four_hour_event(config: dict[str, Any]) -> dict[str, Any] | None:
+    compact = _load_compact_state_value(config, LC_PIPELINE_LATEST_FOUR_HOUR_KEY)
+    if isinstance(compact, dict) and compact:
+        return compact
     state = _load_state(config, datetime.now(timezone.utc), reset_for_new_day=False)
+    try:
+        _persist_compact_state_views(config, state)
+    except Exception:
+        pass
     four_hour_history = state.get("four_hour_history") or []
     if not four_hour_history:
         return None
@@ -1367,8 +1447,15 @@ def latest_lc_pipeline_four_hour_event(config: dict[str, Any]) -> dict[str, Any]
 
 
 def latest_lc_pipeline_mini_scan(config: dict[str, Any]) -> dict[str, Any] | None:
-    state = _load_state(config, datetime.now(timezone.utc), reset_for_new_day=False)
-    scan = state.get("latest_mini_scan") if isinstance(state.get("latest_mini_scan"), dict) else {}
+    compact = _load_compact_state_value(config, LC_PIPELINE_LATEST_MINI_SCAN_KEY)
+    scan = compact if isinstance(compact, dict) else {}
+    if not scan:
+        state = _load_state(config, datetime.now(timezone.utc), reset_for_new_day=False)
+        try:
+            _persist_compact_state_views(config, state)
+        except Exception:
+            pass
+        scan = state.get("latest_mini_scan") if isinstance(state.get("latest_mini_scan"), dict) else {}
     if not scan:
         return None
     current_symbols = lc_pipeline_four_hour_symbols(config, limit=10)

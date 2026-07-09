@@ -22,7 +22,7 @@ from .lc_pipeline import (
     notify_mini_pool_summary,
     save_lc_pipeline_mini_scan,
 )
-from .market import fetch_market_snapshots, fetch_top_volume_symbols
+from .market import fetch_market_snapshots, fetch_top_volume_symbols, prefetch_market_data
 from .market_guard import market_guard_symbol_layers
 from .models import RiskCheck, TradeCandidate
 from .news import collect_news
@@ -612,7 +612,8 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
     max_symbols = max(1, min(3, int(internal_config.get("market_scan_max_symbols", 3) or 3)))
     pending_limit = max(1, min(max_symbols, int(internal_config.get("market_scan_pending_limit", 1) or 1)))
     compact_payload = bool(internal_config.get("compact_ai_payload", True))
-    base_source_symbols, source_warnings = fetch_top_volume_symbols(config)
+    prefetched_market_data = prefetch_market_data(config, require_all_tickers=True)
+    base_source_symbols, source_warnings = fetch_top_volume_symbols(config, market_data=prefetched_market_data)
     if base_source_symbols:
         base_source_symbols = base_source_symbols[:max_source_symbols]
         source = "okx_top_volume_24h"
@@ -626,7 +627,7 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
 
     warnings: list[str] = list(source_warnings)
     digest = collect_news(config)
-    snapshots, market_warnings = fetch_market_snapshots(config, source_symbols)
+    snapshots, market_warnings = fetch_market_snapshots(config, source_symbols, market_data=prefetched_market_data)
     warnings.extend(market_warnings)
     market_layers: dict[str, dict[str, Any]] = {}
     if config.get("market_guard", {}).get("use_memory_in_strategy", True):

@@ -26,6 +26,7 @@ from .codex_features import (
 from .executor import execute_candidate
 from .lc_pipeline import lc_pipeline_pool_rows, update_lc_internal_pipeline
 from .market import fetch_market_snapshots, fetch_top_volume_symbols
+from .market import prefetch_market_data
 from .market_guard import market_guard_symbol_layers, market_guard_top_risk
 from .models import Decision, ExecutionResult, RiskCheck, TradeCandidate, to_jsonable
 from .news import collect_news
@@ -69,7 +70,18 @@ def _ordered_unique(symbols: list[str]) -> list[str]:
     return unique
 
 
-def _resolve_strategy_symbols(config: dict[str, Any]) -> tuple[list[str], dict[str, Any], list[str]]:
+def _universe_uses_top_volume(config: dict[str, Any]) -> bool:
+    universe = config.get("strategy", {}).get("universe", {})
+    mode = str(universe.get("mode", "configured") or "configured")
+    enabled = bool(universe.get("enabled", mode == "top_volume_24h"))
+    return enabled and mode == "top_volume_24h"
+
+
+def _resolve_strategy_symbols(
+    config: dict[str, Any],
+    *,
+    market_data: dict[str, Any] | None = None,
+) -> tuple[list[str], dict[str, Any], list[str]]:
     strategy_config = config.get("strategy", {})
     configured_symbols = _ordered_unique(strategy_config.get("symbols", []))
     shortlist_symbols, shortlist_state = internal_market_shortlist(config)
@@ -98,7 +110,7 @@ def _resolve_strategy_symbols(config: dict[str, Any]) -> tuple[list[str], dict[s
         return configured_symbols, {"enabled": False, "mode": "configured", "symbols": configured_symbols}, []
 
     max_symbols = max(1, min(50, int(universe.get("max_symbols", 50) or 50)))
-    volume_symbols, warnings = fetch_top_volume_symbols(config)
+    volume_symbols, warnings = fetch_top_volume_symbols(config, market_data=market_data)
     if volume_symbols:
         selected = _ordered_unique(volume_symbols)[:max_symbols]
         return (
@@ -133,20 +145,35 @@ def _collect_realtime_scan_inputs(
     config: dict[str, Any],
     *,
     previous_payload: dict[str, Any] | None = None,
+    progress_callback: Callable[[str, dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
-    strategy_symbols, universe_context, universe_warnings = _resolve_strategy_symbols(config)
     old_symbols = _previous_symbols(previous_payload)
+    _report_progress(progress_callback, "collect_realtime_scan_inputs.pending_symbols")
     pending_symbols_before_scan = _ordered_unique(list(open_pending_symbols(config)))
+    prefetched_market_data: dict[str, Any] | None = None
+    if _universe_uses_top_volume(config):
+        _report_progress(progress_callback, "collect_realtime_scan_inputs.prefetch_top_volume_market_data")
+        prefetched_market_data = prefetch_market_data(config, require_all_tickers=True)
+    _report_progress(progress_callback, "collect_realtime_scan_inputs.resolve_strategy_symbols")
+    strategy_symbols, universe_context, universe_warnings = _resolve_strategy_symbols(
+        config,
+        market_data=prefetched_market_data,
+    )
     fetch_symbols = _ordered_unique(strategy_symbols + old_symbols + pending_symbols_before_scan)
-
+    if prefetched_market_data is None:
+        _report_progress(progress_callback, "collect_realtime_scan_inputs.prefetch_snapshot_market_data", symbol_count=len(fetch_symbols))
+        prefetched_market_data = prefetch_market_data(config, symbols=fetch_symbols)
+    _report_progress(progress_callback, "collect_realtime_scan_inputs.collect_news")
     digest = collect_news(config)
-    snapshots, market_warnings = fetch_market_snapshots(config, fetch_symbols)
+    _report_progress(progress_callback, "collect_realtime_scan_inputs.fetch_market_snapshots", symbol_count=len(fetch_symbols))
+    snapshots, market_warnings = fetch_market_snapshots(config, fetch_symbols, market_data=prefetched_market_data)
     market_warnings = universe_warnings + market_warnings
     snapshots_by_symbol = {snapshot.symbol: snapshot for snapshot in snapshots}
     market_layers: dict[str, dict[str, Any]] = {}
     market_layer_warnings: list[str] = []
     if config.get("market_guard", {}).get("use_memory_in_strategy", True):
         try:
+            _report_progress(progress_callback, "collect_realtime_scan_inputs.load_market_guard_memory", symbol_count=len(fetch_symbols))
             market_layers = market_guard_symbol_layers(config, fetch_symbols)
         except Exception as exc:
             market_layer_warnings.append(f"Market guard memory unavailable: {exc}")
@@ -159,6 +186,7 @@ def _collect_realtime_scan_inputs(
         snapshots_by_symbol[symbol] for symbol in old_symbols if symbol in snapshots_by_symbol
     ]
 
+    _report_progress(progress_callback, "collect_realtime_scan_inputs.build_candidates", snapshot_count=len(new_scan_snapshots))
     all_new_candidates = build_candidates(
         config,
         new_scan_snapshots,
@@ -166,8 +194,11 @@ def _collect_realtime_scan_inputs(
         limit=None,
         market_layers=market_layers,
     )
+    _report_progress(progress_callback, "collect_realtime_scan_inputs.apply_position_sizing", candidate_count=len(all_new_candidates))
     apply_position_sizing(config, all_new_candidates)
+    _report_progress(progress_callback, "collect_realtime_scan_inputs.enrich_quantities", candidate_count=len(all_new_candidates))
     enrich_quantities(config, all_new_candidates)
+    _report_progress(progress_callback, "collect_realtime_scan_inputs.detect_market_regime")
     market_regime = detect_market_regime(config, new_scan_snapshots or snapshots)
     for candidate in all_new_candidates:
         candidate.market_regime = market_regime.get("regime")
@@ -678,7 +709,11 @@ def run_once(
     _report_progress(progress_callback, "load_previous_payload")
     previous_payload = latest_decision_payload(config)
     _report_progress(progress_callback, "collect_realtime_scan_inputs")
-    scan_inputs = _collect_realtime_scan_inputs(config, previous_payload=previous_payload)
+    scan_inputs = _collect_realtime_scan_inputs(
+        config,
+        previous_payload=previous_payload,
+        progress_callback=progress_callback,
+    )
     strategy_symbols = list(scan_inputs["strategy_symbols"])
     universe_context = dict(scan_inputs["universe_context"])
     digest = scan_inputs["digest"]
