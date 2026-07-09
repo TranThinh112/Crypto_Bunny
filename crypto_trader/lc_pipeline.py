@@ -53,9 +53,12 @@ def _parse_time(value: Any) -> datetime | None:
 
 
 def _sample_symbol_filter_enabled(config: dict[str, Any]) -> bool:
+    # Hard-lock sample-symbol filtering outside test mode so production cannot
+    # accidentally replay AAA/BBB/CCC rows because of stale config/state.
+    if not bool(config.get("_atlas_test_mode")):
+        return True
     internal = config.get("ai", {}).get("internal", {})
-    default_enabled = not bool(config.get("_atlas_test_mode"))
-    return bool(internal.get("lc_pipeline_drop_sample_symbols", default_enabled))
+    return bool(internal.get("lc_pipeline_drop_sample_symbols", False))
 
 
 def _symbol_base(symbol: Any) -> str:
@@ -2839,6 +2842,7 @@ def _recheck_undecided_pool(
     settings: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     undecided_rows = [row for row in rows if isinstance(row, dict) and str(row.get("symbol") or "")]
+    undecided_rows = _filter_sample_rows(config, undecided_rows)
     if not undecided_rows:
         return [], {"input_count": 0, "refreshed_count": 0, "dropped_count": 0, "kept_count": 0, "warnings": []}
     local_now = _local_time(config, now)
@@ -2846,11 +2850,16 @@ def _recheck_undecided_pool(
     state["daily_undecided_recheck_counter"] = recheck_daily_index
     recheck_slot = _fixed_interval_slot_key(config, now, minutes=int(settings["recheck_interval_minutes"]))
     refreshed_rows, recheck_meta = _recheck_rows_with_latest_market_data(config, undecided_rows, now=now)
+    refreshed_rows = _filter_sample_rows(config, refreshed_rows)
+    filtered_dropped_items = [
+        item
+        for item in list(recheck_meta.get("dropped") or [])
+        if isinstance(item, dict) and not _is_sample_symbol(config, item.get("symbol"))
+    ]
     refreshed_by_key = {_setup_key(row): row for row in refreshed_rows if isinstance(row, dict)}
     dropped_by_key = {
         (str(item.get("symbol") or ""), str(item.get("old_side") or "").lower()): item
-        for item in list(recheck_meta.get("dropped") or [])
-        if isinstance(item, dict)
+        for item in filtered_dropped_items
     }
     dropped_rows_summary: list[dict[str, Any]] = []
     output: list[dict[str, Any]] = []
@@ -2938,7 +2947,7 @@ def _recheck_undecided_pool(
         "kept_count": len(kept_rows),
         "trimmed": trimmed,
         "warnings": list(recheck_meta.get("warnings") or []),
-        "dropped": list(recheck_meta.get("dropped") or []),
+        "dropped": filtered_dropped_items,
         "dropped_rows": dropped_rows_summary,
         "daily_index": recheck_daily_index,
         "recheck_label": local_now.strftime("%d/%m/%y %H:%M:%S"),
