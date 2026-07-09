@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .atlas_mirror import atlas_runtime_is_primary, atlas_runtime_is_read_only
 from .config import DEFAULT_CONFIG, load_config, project_path
-from .ai_coordinator import next_internal_market_scan_at
+from .ai_coordinator import next_internal_market_scan_at, run_internal_market_scan_if_due
 from .codex_features import (
     activate_strategy_version,
     ai_trade_decision_stats,
@@ -802,6 +802,7 @@ def _run_lc_pipeline_slot_cycle(app: FastAPI) -> None:
         if not candidates or created_at is None:
             return
         pipeline = update_lc_internal_pipeline(config, candidates, now=now)
+        mini_scan = run_internal_market_scan_if_due(config)
         current_status = getattr(app.state, "lc_pipeline_status", {}).copy()
         current_status.update(
             {
@@ -815,6 +816,16 @@ def _run_lc_pipeline_slot_cycle(app: FastAPI) -> None:
                 "four_hour_slot": pipeline.get("four_hour_slot"),
             }
         )
+        if isinstance(mini_scan, dict):
+            current_status.update(
+                {
+                    "mini_scan_created_at": mini_scan.get("created_at"),
+                    "mini_scan_slot_id": mini_scan.get("slot_id"),
+                    "mini_scan_status": mini_scan.get("status"),
+                    "mini_scan_skipped": bool(mini_scan.get("skipped")),
+                    "mini_scan_skip_reason": mini_scan.get("skip_reason"),
+                }
+            )
         app.state.lc_pipeline_status = current_status
     finally:
         app.state.lc_pipeline_slot_lock.release()
