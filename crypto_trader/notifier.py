@@ -34,6 +34,8 @@ def telegram_enabled(config: dict[str, Any]) -> bool:
 def telegram_notify_scans(config: dict[str, Any]) -> bool:
     telegram_config = config.get("notifications", {}).get("telegram", {})
     default = bool(telegram_config.get("notify_scans", True))
+    if not default:
+        return False
     return _env_bool("TELEGRAM_NOTIFY_SCANS", default)
 
 

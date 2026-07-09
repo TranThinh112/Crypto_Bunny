@@ -10,6 +10,7 @@ from .market_guard import market_guard_symbol_layers
 from .models import TradeCandidate, to_jsonable
 from .news import collect_news
 from .risk import active_trades_summary
+from .sizing import apply_position_sizing
 from .storage import (
     clear_dashboard_snapshot_cache,
     get_journal_state,
@@ -148,7 +149,8 @@ def _slot_is_open(config: dict[str, Any], now: datetime, *, hours: int, toleranc
     slot_hour = (local_now.hour // hours) * hours
     slot_start = local_now.replace(hour=slot_hour, minute=0, second=0, microsecond=0)
     elapsed = (local_now - slot_start).total_seconds()
-    return 0 <= elapsed <= max(1, int(tolerance_minutes)) * 60
+    # Keep the window wide enough for the normal `:05` execution cadence.
+    return 0 <= elapsed <= max(5, int(tolerance_minutes)) * 60
 
 
 def _fixed_interval_slot_key(config: dict[str, Any], now: datetime, *, minutes: int) -> str:
@@ -169,7 +171,7 @@ def _fixed_interval_slot_is_exact(config: dict[str, Any], now: datetime, *, minu
     slot_minutes = (minutes_since_midnight // interval_minutes) * interval_minutes
     slot_start = midnight + timedelta(minutes=slot_minutes)
     elapsed = (local_now - slot_start).total_seconds()
-    tolerance_seconds = max(1, int(_pipeline_config(config)["slot_tolerance_minutes"])) * 60
+    tolerance_seconds = max(5, int(_pipeline_config(config)["slot_tolerance_minutes"])) * 60
     return 0 <= elapsed <= tolerance_seconds
 
 
@@ -217,8 +219,8 @@ def _event_has_aligned_sources(config: dict[str, Any], event: dict[str, Any]) ->
         return True
     actual_slots = _event_source_slots(event)
     expected_slots = _event_expected_source_slots(config, event)
-    if not actual_slots or not expected_slots:
-        return False
+    if not expected_slots or not actual_slots:
+        return True
     return all(slot in expected_slots for slot in actual_slots)
 
 
@@ -454,6 +456,8 @@ def _strip_blocked_symbols(rows: list[dict[str, Any]], blocked_symbols: set[str]
 
 
 def _undecided_drop_reason(row: dict[str, Any], settings: dict[str, Any], now: datetime) -> str:
+    if str(row.get("undecided_status") or "").lower() == "missing_setup":
+        return str(row.get("undecided_reason") or "khong tim thay setup hop le trong du lieu moi nhat")
     age_hours = _row_age_hours(row, now)
     if age_hours is not None and age_hours > float(settings["undecided_max_age_hours"]):
         return f"qua han Chua duyet ({_age_label(age_hours)} > {float(settings['undecided_max_age_hours']):.0f}h)"
@@ -467,24 +471,30 @@ def _undecided_drop_reason(row: dict[str, Any], settings: dict[str, Any], now: d
         confidence = float(row.get("confidence") or 0)
     except (TypeError, ValueError):
         confidence = 0.0
-    if confidence < float(settings["relaxed_min_confidence"]):
+    if row.get("confidence") not in (None, "") and confidence < float(settings["relaxed_min_confidence"]):
         return f"confidence {confidence:.2f} < relaxed {float(settings['relaxed_min_confidence']):.0f}"
     try:
         risk_reward = float(row.get("risk_reward") or 0)
     except (TypeError, ValueError):
         risk_reward = 0.0
-    if risk_reward < float(settings["relaxed_min_risk_reward"]):
+    if row.get("risk_reward") not in (None, "") and risk_reward < float(settings["relaxed_min_risk_reward"]):
         return f"RR {risk_reward:.2f} < relaxed {float(settings['relaxed_min_risk_reward']):.2f}"
     return "khong con hop le trong Chua duyet"
 
 
 def _undecided_row_is_active(row: dict[str, Any], settings: dict[str, Any], now: datetime) -> bool:
-    if not _row_is_relaxed_valid(row, settings):
-        return False
     age_hours = _row_age_hours(row, now)
-    if age_hours is None:
+    if age_hours is not None and age_hours > float(settings["undecided_max_age_hours"]):
+        return False
+    if str(row.get("undecided_status") or "").lower() == "missing_setup":
         return True
-    return age_hours <= float(settings["undecided_max_age_hours"])
+    return _row_is_relaxed_valid(row, settings)
+
+
+def _undecided_row_is_visible(row: dict[str, Any], settings: dict[str, Any]) -> bool:
+    if str(row.get("undecided_status") or "").lower() == "missing_setup":
+        return True
+    return _row_meets_optional_floor(row.get("win_probability_pct"), float(settings["relaxed_min_win_probability_pct"]))
 
 
 def _prune_blocked_state(state: dict[str, Any], blocked_symbols: set[str]) -> None:
@@ -505,7 +515,7 @@ def _prune_low_win_state(state: dict[str, Any], settings: dict[str, Any], now: d
     state["undecided"] = [
         row
         for row in list(state.get("undecided") or [])
-        if isinstance(row, dict) and _undecided_row_is_active(row, settings, now)
+        if isinstance(row, dict) and _undecided_row_is_visible(row, settings)
     ]
     hourly_windows = []
     for window in state.get("hourly_windows") or []:
@@ -1088,19 +1098,35 @@ def _load_state(config: dict[str, Any], now: datetime, *, reset_for_new_day: boo
     state.setdefault("last_undecided_recheck_slot", None)
     state.setdefault("latest_mini_scan", {})
     state.setdefault("state_version", LC_PIPELINE_STATE_VERSION)
+    history_now = now
+    if not reset_for_new_day:
+        raw_day_key = str(state.get("day_key") or "").strip()
+        if raw_day_key:
+            try:
+                anchored_day = datetime.fromisoformat(raw_day_key).date()
+            except ValueError:
+                anchored_day = None
+            if anchored_day is not None:
+                local_now = _local_time(config, now)
+                if anchored_day < local_now.date():
+                    history_now = datetime.combine(
+                        anchored_day,
+                        datetime.max.time(),
+                        tzinfo=local_now.tzinfo,
+                    ).astimezone(timezone.utc)
     state["one_hour_history"] = _prune_history(
         state.get("one_hour_history") or [],
-        now=now,
+        now=history_now,
         keep_days=ONE_HOUR_HISTORY_KEEP_DAYS,
     )
     state["two_hour_history"] = _prune_history(
         state.get("two_hour_history") or [],
-        now=now,
+        now=history_now,
         keep_days=TWO_HOUR_HISTORY_KEEP_DAYS,
     )
     state["four_hour_history"] = _prune_history(
         state.get("four_hour_history") or [],
-        now=now,
+        now=history_now,
         keep_days=FOUR_HOUR_HISTORY_KEEP_DAYS,
     )
     _sanitize_current_day_aggregate_state(config, state, now)
@@ -1182,14 +1208,16 @@ def _compact_event(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def _prune_history(events: list[dict[str, Any]], *, now: datetime, keep_days: int) -> list[dict[str, Any]]:
-    cutoff = now - timedelta(days=max(1, int(keep_days)))
+    local_now = _local_time({"timezone": "Asia/Ho_Chi_Minh"}, now)
     kept: list[dict[str, Any]] = []
     for event in events:
         if not isinstance(event, dict):
             continue
         created_at = _parse_time(event.get("created_at"))
-        if created_at is not None and created_at < cutoff:
-            continue
+        if created_at is not None:
+            event_day = _local_time({"timezone": "Asia/Ho_Chi_Minh"}, created_at).date()
+            if (local_now.date() - event_day).days > max(1, int(keep_days)):
+                continue
         kept.append(event)
     return kept
 
@@ -1761,7 +1789,7 @@ def _source_window_label(item: dict[str, Any], *, config: dict[str, Any]) -> str
     icon = _frame_icon(config, frame)
     if index in (None, ""):
         return f"{icon} {frame} ({time_label})"
-    return f"{icon} #{index} {frame} ({time_label})"
+    return f"{icon} {frame} #{index} ({time_label})"
 
 
 def _raw_pipeline_state(config: dict[str, Any]) -> dict[str, Any]:
@@ -1823,7 +1851,7 @@ def _event_source_lines(event: dict[str, Any], *, config: dict[str, Any]) -> lis
     if frame_index in (None, ""):
         lines = [f"Khung {frame_icon} {frame}: ({frame_time})"]
     else:
-        lines = [f"Khung {frame_icon} #{frame_index} {frame} ({frame_time})"]
+        lines = [f"Khung {frame_icon} {frame}: #{frame_index} ({frame_time})"]
     source_windows = _event_source_windows(config, event)
     source_labels = [_source_window_label(item, config=config) for item in source_windows if isinstance(item, dict)]
     if source_labels:
@@ -1934,9 +1962,9 @@ def _one_hour_notification_text(config: dict[str, Any], event: dict[str, Any]) -
     rows = [row for row in event.get("approved") or [] if isinstance(row, dict)]
     daily_index = event.get("daily_index", event.get("index", "-"))
     lines = [
-        f"{ONE_HOUR_ICON} #{daily_index} 1h top {len(rows)} setup",
+        f"{ONE_HOUR_ICON} 1h top {len(rows)} setup",
         f"{event.get('date', '-')} {event.get('time', '-')}",
-        f"Khung {ONE_HOUR_ICON} #{daily_index} 1h ({_event_clock_label(event.get('created_at') or event.get('slot'), config=config)})",
+        f"Khung {ONE_HOUR_ICON} 1h: #{daily_index} ({_event_clock_label(event.get('created_at') or event.get('slot'), config=config)})",
     ]
     lines.extend(_format_pair_line(index, row, config=config) for index, row in enumerate(rows[:3], 1))
     return "\n".join(lines)
@@ -1995,7 +2023,7 @@ def _mini_notification_text(
     if display_rows:
         for index, row in enumerate(display_rows[:3], 1):
             side = str(row.get("side") or "-").upper()
-            lines.append(f"{index}. {row.get('symbol', '-')} | {side} | {_source_label_v2(row)}")
+            lines.append(f"{index}. {row.get('symbol', '-')} | {side} | {_source_label(row)}")
     else:
         lines.append("Mini chưa chọn được cặp nào.")
     lines.append("Lý do: " + str(scan.get("decision_reason_vi") or _mini_reason_vi(scan)))
@@ -2145,8 +2173,8 @@ def _undecided_recheck_notification_text_v2(
 
 def internal_notification_timeline_messages(config: dict[str, Any], *, limit_per_frame: int = 5) -> list[str]:
     now = datetime.now(timezone.utc)
-    current_day = _day_key(config, now)
     state = _load_state(config, now, reset_for_new_day=False)
+    current_day = str(state.get("day_key") or _day_key(config, now))
     items = state.get("internal_notifications") if isinstance(state.get("internal_notifications"), list) else []
     entries: list[tuple[str, str]] = []
     for event in state.get("one_hour_history") or []:
@@ -2190,8 +2218,8 @@ def internal_notification_timeline_messages(config: dict[str, Any], *, limit_per
 
 def undecided_notification_timeline_messages(config: dict[str, Any], *, limit_per_frame: int = 5) -> list[str]:
     now = datetime.now(timezone.utc)
-    current_day = _day_key(config, now)
     state = _load_state(config, now, reset_for_new_day=False)
+    current_day = str(state.get("day_key") or _day_key(config, now))
     items = state.get("internal_notifications") if isinstance(state.get("internal_notifications"), list) else []
     entries: list[tuple[str, str]] = []
     for item in items:
@@ -2244,6 +2272,11 @@ def _notify_four_hour_summary(config: dict[str, Any], event: dict[str, Any]) -> 
     except Exception:
         return
     send_telegram_message(config, _four_hour_notification_text(config, event), with_buttons=False, replace_previous=False)
+
+
+def _should_push_one_hour_summary(config: dict[str, Any], now: datetime) -> bool:
+    local_now = _local_time(config, now)
+    return local_now.minute == 0
 
 
 def _notify_undecided_recheck_summary(
@@ -2311,7 +2344,7 @@ def lc_pipeline_dashboard_payload(config: dict[str, Any]) -> dict[str, Any]:
         [
             _row_age_payload(row, now)
             for row in state.get("undecided") or []
-            if isinstance(row, dict) and _undecided_row_is_active(row, settings, now)
+            if isinstance(row, dict) and _undecided_row_is_visible(row, settings)
         ],
         settings,
         reverse=True,
@@ -2457,7 +2490,7 @@ def notify_mini_pool_summary(
     if rows:
         for index, row in enumerate(rows[:3], 1):
             side = str(row.get("side") or "-").upper()
-            lines.append(f"{index}. {row.get('symbol', '-')} | {side} | {_source_label_v2(row)}")
+            lines.append(f"{index}. {row.get('symbol', '-')} | {side} | {_source_label(row)}")
     else:
         lines.append("Mini chưa chọn được cặp nào.")
     lines.append("Lý do: " + str(scan.get("decision_reason_vi") or _mini_reason_vi(scan)))
@@ -2496,23 +2529,24 @@ def _candidate_is_relaxed_valid(candidate: TradeCandidate, settings: dict[str, A
     )
 
 
+def _row_meets_optional_floor(value: Any, threshold: float) -> bool:
+    if value in (None, ""):
+        return True
+    try:
+        return float(value) >= threshold
+    except (TypeError, ValueError):
+        return False
+
+
 def _row_is_relaxed_valid(row: dict[str, Any], settings: dict[str, Any]) -> bool:
     try:
         win_probability = float(row.get("win_probability_pct") or 0)
     except (TypeError, ValueError):
         win_probability = 0.0
-    try:
-        confidence = float(row.get("confidence") or 0)
-    except (TypeError, ValueError):
-        confidence = 0.0
-    try:
-        risk_reward = float(row.get("risk_reward") or 0)
-    except (TypeError, ValueError):
-        risk_reward = 0.0
     return (
         win_probability >= float(settings["relaxed_min_win_probability_pct"])
-        and confidence >= float(settings["relaxed_min_confidence"])
-        and risk_reward >= float(settings["relaxed_min_risk_reward"])
+        and _row_meets_optional_floor(row.get("confidence"), float(settings["relaxed_min_confidence"]))
+        and _row_meets_optional_floor(row.get("risk_reward"), float(settings["relaxed_min_risk_reward"]))
     )
 
 
@@ -2617,35 +2651,34 @@ def _recheck_undecided_pool(
                 now=now,
                 local_now=local_now,
             )
-            if not _undecided_row_is_active(merged, settings, now):
+            if _undecided_row_is_active(merged, settings, now):
+                output.append(_mark_undecided_row(merged, now=now, settings=settings, status="soft_valid"))
+            else:
+                reason = _undecided_drop_reason(merged, settings, now)
                 dropped_rows_summary.append(
                     {
                         "symbol": merged.get("symbol"),
                         "side": merged.get("side"),
                         "win_probability_pct": merged.get("win_probability_pct"),
-                        "reason": _undecided_drop_reason(merged, settings, now),
+                        "reason": reason,
                     }
                 )
-                continue
-            output.append(_mark_undecided_row(merged, now=now, settings=settings, status="soft_valid"))
+                output.append(_mark_undecided_row(merged, now=now, settings=settings, status="soft_invalid", reason=reason))
             continue
         dropped_item = dropped_by_key.get(key)
         if dropped_item:
-            dropped_rows_summary.append(
-                {
-                    "symbol": row.get("symbol"),
-                    "side": row.get("side"),
-                    "win_probability_pct": row.get("current_win_probability_pct", row.get("win_probability_pct")),
-                    "reason": dropped_item.get("reason"),
-                }
-            )
             marked_row = _row_with_recheck_metadata(
-                row,
+                _mark_missing_undecided_row(
+                    row,
+                    now=now,
+                    reason=str(dropped_item.get("reason") or "khong con setup hop le trong du lieu moi nhat"),
+                ),
                 recheck_daily_index=recheck_daily_index,
                 recheck_slot=recheck_slot,
                 now=now,
                 local_now=local_now,
             )
+            output.append(marked_row)
             dropped_rows_summary.append(
                 {
                     "symbol": marked_row.get("symbol"),
@@ -2665,6 +2698,19 @@ def _recheck_undecided_pool(
                 "win_probability_pct": row.get("current_win_probability_pct", row.get("win_probability_pct")),
                 "reason": "khong tim thay setup hop le trong du lieu recheck moi nhat",
             }
+        )
+        output.append(
+            _row_with_recheck_metadata(
+                _mark_missing_undecided_row(
+                    row,
+                    now=now,
+                    reason="khong tim thay setup hop le trong du lieu recheck moi nhat",
+                ),
+                recheck_daily_index=recheck_daily_index,
+                recheck_slot=recheck_slot,
+                now=now,
+                local_now=local_now,
+            )
         )
     kept_rows = list(output)
     trimmed = False
@@ -2793,7 +2839,8 @@ def _update_lc_internal_pipeline_impl(
     candidates_by_symbol = {candidate.symbol: candidate for candidate in candidates}
     hourly_slot = _slot_key(config, now, 1)
     two_hour_slot = _slot_key(config, now, 2)
-    four_hour_slot = _slot_key(config, now, 4)
+    # The 4h aggregate is produced on each 2h boundary from the latest two 2h windows.
+    four_hour_slot = _slot_key(config, now, 2)
     undecided_recheck_slot = _fixed_interval_slot_key(
         config,
         now,
@@ -2802,7 +2849,7 @@ def _update_lc_internal_pipeline_impl(
     slot_tolerance_minutes = int(settings["slot_tolerance_minutes"])
     hourly_slot_open = _slot_is_open(config, now, hours=1, tolerance_minutes=slot_tolerance_minutes)
     two_hour_slot_open = _slot_is_open(config, now, hours=2, tolerance_minutes=slot_tolerance_minutes)
-    four_hour_slot_open = _slot_is_open(config, now, hours=4, tolerance_minutes=slot_tolerance_minutes)
+    four_hour_slot_open = _slot_is_open(config, now, hours=2, tolerance_minutes=slot_tolerance_minutes)
     undecided_recheck_due = _fixed_interval_slot_is_exact(
         config,
         now,
@@ -2906,6 +2953,12 @@ def _update_lc_internal_pipeline_impl(
         for window in aligned_hourly_events:
             combined.extend(window.get("approved") or [])
         refreshed_combined, two_hour_recheck = _recheck_rows_with_latest_market_data(config, combined, now=now)
+        _sync_state_after_recheck(
+            state,
+            hourly_slots=expected_hourly_slots,
+            refreshed_rows=refreshed_combined,
+            dropped=list(two_hour_recheck.get("dropped") or []),
+        )
         result["two_hour_recheck"] = two_hour_recheck
         eligible_two_hour = [
             row for row in refreshed_combined if _candidate_passes_lc_threshold(row, settings, phase="2h")
@@ -2986,7 +3039,7 @@ def _update_lc_internal_pipeline_impl(
         list(state.get("two_hour_history") or []),
         expected_two_hour_slots,
     )
-    has_four_hour_inputs = any(list(window.get("approved") or []) for window in aligned_two_hour_events)
+    has_four_hour_inputs = sum(1 for window in aligned_two_hour_events if list(window.get("approved") or [])) >= 2
     current_four_hour_event = _latest_event_for_slot(
         list(state.get("four_hour_history") or []),
         four_hour_slot,
@@ -3097,6 +3150,12 @@ def _update_lc_internal_pipeline_impl(
             now=now,
         )
 
+    if isinstance(result.get("two_hour_event"), dict):
+        state["internal_lc"] = _sort_saved_rows(
+            [row for row in result["two_hour_event"].get("approved") or [] if isinstance(row, dict)],
+            settings,
+            reverse=True,
+        )[: int(settings["internal_lc_max"])]
     result["undecided"] = _sort_saved_rows(state.get("undecided", []), settings, reverse=True)[
         : int(settings["undecided_max"])
     ]
@@ -3104,7 +3163,12 @@ def _update_lc_internal_pipeline_impl(
         : int(settings["internal_lc_max"])
     ]
     _save_state(config, state)
-    if settings["notify_one_hour_summary"] and isinstance(result.get("one_hour_event"), dict):
+    if (
+        settings["notify_one_hour_summary"]
+        and not settings["notify_two_hour_summary"]
+        and _should_push_one_hour_summary(config, now)
+        and isinstance(result.get("one_hour_event"), dict)
+    ):
         _notify_one_hour_summary(config, result["one_hour_event"])
     if settings["notify_two_hour_summary"] and isinstance(result.get("two_hour_event"), dict):
         _notify_two_hour_summary(config, result["two_hour_event"])

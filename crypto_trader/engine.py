@@ -35,6 +35,7 @@ from .risk import active_trades_summary, evaluate_candidate
 from .sizing import apply_position_sizing
 from .storage import (
     get_journal_state,
+    is_retryable_storage_error,
     latest_decision_payload,
     next_global_counter,
     open_pending_symbols,
@@ -68,6 +69,87 @@ def _ordered_unique(symbols: list[str]) -> list[str]:
         seen.add(clean)
         unique.append(clean)
     return unique
+
+
+def _storage_warning(label: str, exc: Exception) -> str:
+    return f"{label} unavailable: {exc}"
+
+
+def _is_degradable_storage_error(exc: Exception) -> bool:
+    if not is_retryable_storage_error(exc):
+        return False
+    message = str(exc).lower()
+    if exc.__class__.__name__ in {
+        "AutoReconnect",
+        "ConnectionFailure",
+        "ExecutionTimeout",
+        "NetworkTimeout",
+        "ServerSelectionTimeoutError",
+        "WaitQueueTimeoutError",
+    }:
+        return True
+    return any(
+        token in message
+        for token in (
+            "mongodb",
+            ".net:27017",
+            "journal_state",
+            "connection pool paused",
+            "wait queue timeout",
+        )
+    )
+
+
+def _best_effort_storage(
+    operation: Callable[[], Any],
+    *,
+    default: Any,
+    label: str,
+    warnings: list[str],
+) -> Any:
+    try:
+        return operation()
+    except Exception as exc:
+        if not _is_degradable_storage_error(exc):
+            raise
+        warnings.append(_storage_warning(label, exc))
+        return default
+
+
+def _block_candidates_for_storage_hold(
+    candidates: list[TradeCandidate],
+    *,
+    reason: str,
+) -> None:
+    for candidate in candidates:
+        candidate.margin_usdt = 0.0
+        candidate.order_usdt = 0.0
+        candidate.recovery_margin_usdt = None
+        candidate.warnings.append(reason)
+
+
+def _read_report_payload(config: dict[str, Any]) -> dict[str, Any] | None:
+    path = project_path(config, config.get("report_path", "reports/latest_decision.json"))
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _load_previous_payload(config: dict[str, Any], warnings: list[str]) -> dict[str, Any] | None:
+    try:
+        return latest_decision_payload(config)
+    except Exception as exc:
+        if not _is_degradable_storage_error(exc):
+            raise
+        fallback = _read_report_payload(config)
+        source = "local report fallback" if fallback else "no local fallback available"
+        warnings.append(_storage_warning(f"Previous decision memory ({source})", exc))
+        return fallback
 
 
 def _universe_uses_top_volume(config: dict[str, Any]) -> bool:
@@ -145,11 +227,22 @@ def _collect_realtime_scan_inputs(
     config: dict[str, Any],
     *,
     previous_payload: dict[str, Any] | None = None,
+    storage_warnings: list[str] | None = None,
     progress_callback: Callable[[str, dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
+    storage_warnings = storage_warnings if storage_warnings is not None else []
     old_symbols = _previous_symbols(previous_payload)
     _report_progress(progress_callback, "collect_realtime_scan_inputs.pending_symbols")
-    pending_symbols_before_scan = _ordered_unique(list(open_pending_symbols(config)))
+    pending_symbols_before_scan = _ordered_unique(
+        list(
+            _best_effort_storage(
+                lambda: open_pending_symbols(config),
+                default=set(),
+                label="Pending order memory",
+                warnings=storage_warnings,
+            )
+        )
+    )
     prefetched_market_data: dict[str, Any] | None = None
     if _universe_uses_top_volume(config):
         _report_progress(progress_callback, "collect_realtime_scan_inputs.prefetch_top_volume_market_data")
@@ -167,7 +260,7 @@ def _collect_realtime_scan_inputs(
     digest = collect_news(config)
     _report_progress(progress_callback, "collect_realtime_scan_inputs.fetch_market_snapshots", symbol_count=len(fetch_symbols))
     snapshots, market_warnings = fetch_market_snapshots(config, fetch_symbols, market_data=prefetched_market_data)
-    market_warnings = universe_warnings + market_warnings
+    market_warnings = storage_warnings + universe_warnings + market_warnings
     snapshots_by_symbol = {snapshot.symbol: snapshot for snapshot in snapshots}
     market_layers: dict[str, dict[str, Any]] = {}
     market_layer_warnings: list[str] = []
@@ -195,7 +288,16 @@ def _collect_realtime_scan_inputs(
         market_layers=market_layers,
     )
     _report_progress(progress_callback, "collect_realtime_scan_inputs.apply_position_sizing", candidate_count=len(all_new_candidates))
-    apply_position_sizing(config, all_new_candidates)
+    try:
+        apply_position_sizing(config, all_new_candidates)
+    except Exception as exc:
+        if not _is_degradable_storage_error(exc):
+            raise
+        storage_warnings.append(_storage_warning("Position sizing state", exc))
+        _block_candidates_for_storage_hold(
+            all_new_candidates,
+            reason="Position sizing state unavailable; holding new entries until storage recovers",
+        )
     _report_progress(progress_callback, "collect_realtime_scan_inputs.enrich_quantities", candidate_count=len(all_new_candidates))
     enrich_quantities(config, all_new_candidates)
     _report_progress(progress_callback, "collect_realtime_scan_inputs.detect_market_regime")
@@ -706,12 +808,14 @@ def run_once(
     progress_callback: Callable[[str, dict[str, Any] | None], None] | None = None,
 ) -> Decision:
     config = select_runtime_config(config)
+    storage_warnings: list[str] = []
     _report_progress(progress_callback, "load_previous_payload")
-    previous_payload = latest_decision_payload(config)
+    previous_payload = _load_previous_payload(config, storage_warnings)
     _report_progress(progress_callback, "collect_realtime_scan_inputs")
     scan_inputs = _collect_realtime_scan_inputs(
         config,
         previous_payload=previous_payload,
+        storage_warnings=storage_warnings,
         progress_callback=progress_callback,
     )
     strategy_symbols = list(scan_inputs["strategy_symbols"])
@@ -729,20 +833,40 @@ def run_once(
     all_new_candidates = list(scan_inputs["all_new_candidates"])
     market_regime = dict(scan_inputs["market_regime"])
     _report_progress(progress_callback, "record_trade_candidates", candidate_count=len(all_new_candidates))
-    record_trade_candidates(config, all_new_candidates)
+    _best_effort_storage(
+        lambda: record_trade_candidates(config, all_new_candidates),
+        default=0,
+        label="Trade candidate history",
+        warnings=storage_warnings,
+    )
     # Refresh the LC pipeline before Mini so the same cycle can advance
     # 1h -> 2h -> 4h before Mini snapshots the latest 4h pool.
     _report_progress(progress_callback, "update_lc_internal_pipeline")
-    lc_pipeline_state = update_lc_internal_pipeline(config, all_new_candidates)
+    lc_pipeline_state = _best_effort_storage(
+        lambda: update_lc_internal_pipeline(config, all_new_candidates),
+        default={"enabled": False, "warnings": ["LC pipeline update skipped because storage is unavailable"]},
+        label="LC internal pipeline",
+        warnings=storage_warnings,
+    )
     _report_progress(progress_callback, "run_internal_market_scan")
-    internal_market_scan = run_internal_market_scan_if_due(config)
+    internal_market_scan = _best_effort_storage(
+        lambda: run_internal_market_scan_if_due(config),
+        default=None,
+        label="Internal mini scan",
+        warnings=storage_warnings,
+    )
     _report_progress(progress_callback, "save_market_scan_observations")
     market_scan_storage = {
-        "saved_rows": save_market_scan_observations(
-            config,
-            all_new_candidates,
-            source="continuous_1m_5m_1h_scan",
-            limit=int(config.get("market_scan_memory", {}).get("max_saved_candidates_per_scan", 20) or 20),
+        "saved_rows": _best_effort_storage(
+            lambda: save_market_scan_observations(
+                config,
+                all_new_candidates,
+                source="continuous_1m_5m_1h_scan",
+                limit=int(config.get("market_scan_memory", {}).get("max_saved_candidates_per_scan", 20) or 20),
+            ),
+            default=0,
+            label="Market scan memory",
+            warnings=storage_warnings,
         ),
         "timeframes": [
             str(config.get("strategy", {}).get("timeframe", "1m")),
@@ -752,6 +876,8 @@ def run_once(
             ],
         ],
     }
+    if storage_warnings:
+        market_scan_storage["warnings"] = list(storage_warnings)
     if internal_market_scan:
         universe_context["internal_market_scan"] = {
             "created_at": internal_market_scan.get("created_at"),
@@ -799,7 +925,20 @@ def run_once(
             "warnings": market_layer_warnings,
         }
     _report_progress(progress_callback, "apply_position_sizing")
-    scan_comparison["position_sizing"] = apply_position_sizing(config, candidates)
+    try:
+        scan_comparison["position_sizing"] = apply_position_sizing(config, candidates)
+    except Exception as exc:
+        if not _is_degradable_storage_error(exc):
+            raise
+        storage_warnings.append(_storage_warning("Position sizing state", exc))
+        hold_reason = "Position sizing state unavailable; holding new entries until storage recovers"
+        _block_candidates_for_storage_hold(candidates, reason=hold_reason)
+        scan_comparison["position_sizing"] = {
+            "enabled": False,
+            "blocked": True,
+            "block_reason": hold_reason,
+            "warnings": [hold_reason],
+        }
 
     _report_progress(progress_callback, "enrich_quantities")
     quantity_warnings = enrich_quantities(config, candidates)
@@ -807,19 +946,37 @@ def run_once(
         candidates[0].warnings.extend(market_warnings + quantity_warnings + market_layer_warnings)
 
     _report_progress(progress_callback, "maintain_pending_orders")
-    ai_internal_before_pending = internal_lc_memory(config)
+    ai_internal_before_pending = _best_effort_storage(
+        lambda: internal_lc_memory(config),
+        default={},
+        label="Internal LC memory",
+        warnings=storage_warnings,
+    )
     scan_comparison["ai_internal_before_pending"] = ai_internal_before_pending
     review_candidates_by_key = {
         (candidate.symbol, candidate.side): candidate
         for candidate in [*all_new_candidates, *refreshed_previous, *candidates]
     }
-    pending_review = maintain_pending_orders(
-        config,
-        list(review_candidates_by_key.values()),
-        allow_release=execute,
-        market_layers=market_layers,
+    pending_review = _best_effort_storage(
+        lambda: maintain_pending_orders(
+            config,
+            list(review_candidates_by_key.values()),
+            allow_release=execute,
+            market_layers=market_layers,
+        ),
+        default={
+            "enabled": bool(config.get("pending_orders", {}).get("enabled", True)),
+            "warnings": ["Pending order maintenance skipped because storage is unavailable"],
+        },
+        label="Pending order maintenance",
+        warnings=storage_warnings,
     )
-    ai_internal_after_pending = internal_lc_memory(config)
+    ai_internal_after_pending = _best_effort_storage(
+        lambda: internal_lc_memory(config),
+        default={},
+        label="Internal LC memory",
+        warnings=storage_warnings,
+    )
     scan_comparison["ai_internal_after_pending"] = ai_internal_after_pending
     defer_new_vt_to_internal_lc = execute and should_defer_new_vt_to_internal_lc(config, ai_internal_before_pending)
     scan_comparison["ai_router"] = {
@@ -827,7 +984,12 @@ def run_once(
         "defer_new_vt_to_internal_lc": defer_new_vt_to_internal_lc,
         "priority": ["LC_OKX", "OPEN", "new_scan_candidate"],
     }
-    pending_symbols = open_pending_symbols(config)
+    pending_symbols = _best_effort_storage(
+        lambda: open_pending_symbols(config),
+        default=set(),
+        label="Pending order memory",
+        warnings=storage_warnings,
+    )
     active_summary = active_trades_summary(config)
     active_count, _active_symbols, active_warnings = active_summary
     max_active = int(config.get("risk", {}).get("max_active_trades", 1))
@@ -954,11 +1116,17 @@ def run_once(
             )
         elif execute:
             _report_progress(progress_callback, "pre_entry_check")
+            pre_entry_pending_symbols = _best_effort_storage(
+                lambda: open_pending_symbols(config),
+                default=set(),
+                label="Pending order memory",
+                warnings=storage_warnings,
+            )
             pre_entry_check = evaluate_candidate(
                 config,
                 selected,
                 active_summary=active_trades_summary(config),
-                extra_active_symbols=open_pending_symbols(config),
+                extra_active_symbols=pre_entry_pending_symbols,
             )
             scan_comparison["pre_entry_check"] = {
                 "enabled": True,
@@ -973,15 +1141,26 @@ def run_once(
                     selected,
                     pre_entry_check,
                     context={"route": "new_vt", "source": "scan_top_win_rate"},
-                    pending_memory=internal_lc_memory(config),
+                    pending_memory=_best_effort_storage(
+                        lambda: internal_lc_memory(config),
+                        default={},
+                        label="Internal LC memory",
+                        warnings=storage_warnings,
+                    ),
                 )
                 scan_comparison["ai_okx_approval"] = ai_decision
                 if ai_decision.get("approved"):
+                    final_validator_pending_symbols = _best_effort_storage(
+                        lambda: open_pending_symbols(config),
+                        default=set(),
+                        label="Pending order memory",
+                        warnings=storage_warnings,
+                    )
                     final_validator = evaluate_candidate(
                         config,
                         selected,
                         active_summary=active_trades_summary(config),
-                        extra_active_symbols=open_pending_symbols(config),
+                        extra_active_symbols=final_validator_pending_symbols,
                     )
                     scan_comparison["final_validator"] = {
                         "enabled": True,
@@ -1089,11 +1268,25 @@ def run_once(
         news_items=digest.items,
         scan_comparison={**scan_comparison, "pending_orders": pending_review},
     )
+    if storage_warnings:
+        decision.scan_comparison["storage_warnings"] = list(dict.fromkeys(storage_warnings))
+    _report_progress(progress_callback, "save_decision")
+    _best_effort_storage(
+        lambda: save_decision(config, decision),
+        default=None,
+        label="Decision history",
+        warnings=storage_warnings,
+    )
+    _report_progress(progress_callback, "record_ai_trade_decision")
+    _best_effort_storage(
+        lambda: record_ai_trade_decision(config, decision),
+        default=None,
+        label="AI trade history",
+        warnings=storage_warnings,
+    )
+    if storage_warnings:
+        decision.scan_comparison["storage_warnings"] = list(dict.fromkeys(storage_warnings))
     _report_progress(progress_callback, "write_report")
     write_report(config, decision)
-    _report_progress(progress_callback, "save_decision")
-    save_decision(config, decision)
-    _report_progress(progress_callback, "record_ai_trade_decision")
-    record_ai_trade_decision(config, decision)
     _report_progress(progress_callback, "completed", action=action)
     return decision

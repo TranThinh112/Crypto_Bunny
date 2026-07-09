@@ -1,0 +1,185 @@
+BÁO CÁO CÁC NỘI DUNG ĐÃ CHỈNH SỬA
+Ngày cập nhật: 09/07/2026
+
+1. Mục tiêu đã xử lý
+
+Trong quá trình làm việc, hệ thống đã được chỉnh theo các yêu cầu chính sau:
+
+- Điều chỉnh lại thứ tự chạy trong engine để pipeline LC nội bộ được cập nhật trước, sau đó mới đến bước market scan nội bộ.
+- Siết lại lịch lọc theo khung giờ cố định cho 1h, 2h, 4h và Mini, có tolerance nhỏ để tránh lệch slot.
+- Cho phép nhánh tổng hợp 2h và 4h vẫn được tạo đúng giờ dù chỉ có 1 pool con hợp lệ, thay vì phải chờ đủ toàn bộ pool con.
+- Khóa hướng lấy dữ liệu của 2h và 4h theo đúng các source slot được phép, tránh gom nhầm khung giờ cũ hoặc khung giờ tương lai.
+- Tách riêng luồng thông báo Telegram giữa “Thông báo nội bộ” và “Chưa duyệt”.
+- Bổ sung định dạng thông báo rõ ràng hơn cho nhánh Chưa duyệt, recheck, hồi sinh và đẩy lại vào LC nội bộ.
+- Siết lại logic của nhánh Chưa duyệt để tránh giữ cặp quá lâu, tránh giữ cặp dưới ngưỡng win rate, và tránh ghi đè sai dữ liệu confidence khi recheck.
+- Đồng bộ thêm một số logic Recovery Chain Manager để tránh lệch giữa `base_margin_usdt` và `next_margin_usdt`.
+- Tắt bớt các thông báo định kỳ của SC và guard, chỉ giữ lại các nhóm thông báo cần thiết hơn.
+- Reset timeline Telegram theo ngày hiện tại, không sổ lại tin cũ của ngày hôm trước.
+
+2. Những gì đã chỉnh sửa
+
+2.1. Điều phối pipeline LC
+
+- Đã đổi thứ tự gọi để LC internal pipeline chạy trước các bước scan nội bộ phía sau.
+- Mục đích là giữ đúng chuỗi xử lý 1h -> 1h -> 2h -> 1h -> 1h -> 2h -> 4h -> Mini trong cùng nhịp vận hành.
+- Việc này giúp hạn chế tình trạng scan sau chạy xong nhưng pool LC vẫn chưa cập nhật kịp.
+
+2.2. Lịch chạy 1h, 2h, 4h và Mini
+
+- Đã siết lịch tổng hợp theo slot cố định.
+- 1h chỉ được chạy đúng slot 1h của nó.
+- 2h chỉ được lấy từ đúng các khung 1h nguồn được phép.
+- 4h chỉ được lấy từ đúng các khung 2h nguồn được phép.
+- Delay cho slot được giới hạn nhỏ để tránh lệch giờ.
+- Mini đã được chỉnh theo hướng chỉ gọi khi thực sự có dữ liệu 4h phù hợp, không gọi tùy tiện theo thời điểm quét.
+
+2.3. Quy tắc tạo pool 2h và 4h
+
+- Đã chỉnh để khi đến giờ tạo 2h hoặc 4h, nếu chỉ có 1 pool con hợp lệ thì vẫn tạo pool tổng hợp đúng giờ.
+- Điều này không có nghĩa là lấy sai dữ liệu, mà là cho phép tổng hợp “không đủ 2 nguồn nhưng có 1 nguồn hợp lệ” để không bỏ lỡ nhịp xử lý.
+- Đồng thời vẫn khóa danh sách source slot hợp lệ, nên không bị kéo nhầm dữ liệu ngoài khung.
+
+2.4. Khóa lịch sử 1h, tránh 2h ghi đè ngược
+
+- Đã xử lý theo hướng giữ sự tách biệt giữa event 1h đã tạo và nhánh 2h tổng hợp.
+- Khi 2h recheck hoặc ghép lại dữ liệu, mục tiêu là chỉ cập nhật pool phục vụ 2h, không sửa ngược lịch sử hiển thị 1h đã chốt.
+- Điều này giúp phần theo dõi Telegram và phần điều tra sau này rõ ràng hơn.
+
+2.5. Chưa duyệt và recheck
+
+- Đã giữ hướng recheck theo mốc 90 phút cố định.
+- Recheck không được chạy sớm hơn mốc, và cũng không nên trôi linh tinh khỏi mốc chuẩn.
+- Đã chỉnh lại pruning để nhánh Chưa duyệt không giữ dữ liệu rác quá lâu.
+- Đã xử lý lỗi ghi đè confidence về 0 trong quá trình recheck LC, theo hướng recheck thì chỉ cập nhật dữ liệu cần thiết chứ không phá dữ liệu gốc.
+
+2.6. Mini scan
+
+- Universe của Mini không còn chỉ phụ thuộc vào top-volume source.
+- Mini đã được mở rộng để lấy thêm các symbol mới nhất đã lên 4h, giúp cặp vừa lên 4h không biến mất khỏi Mini chỉ vì volume tụt tạm thời.
+- Đồng thời Mini chỉ đẩy tối đa 1 cặp sang pending/OKX mỗi lượt.
+
+2.7. Telegram thông báo
+
+- “Thông báo nội bộ” hiện chỉ dành cho các pool lọc như 1h, 2h, 4h, Mini.
+- “Chưa duyệt” đã được tách thành luồng riêng.
+- Khi bấm vào nút Chưa duyệt, bot sẽ gửi 1 dòng tiêu đề trước, rồi mới sổ ra danh sách các tin liên quan đến Chưa duyệt, giống cơ chế của Thông báo nội bộ.
+- Đã reset timeline theo ngày, tức là mỗi ngày chỉ xem các tin của đúng ngày đó, không sổ các tin cũ của ngày trước.
+
+2.8. Recovery Chain Manager
+
+- Đã xử lý hướng đồng bộ để tránh trường hợp cấu hình live đặt một mức margin nhưng hệ thống lại tự nhảy về mức khác do cờ recovery nhận sai trạng thái.
+- Phần này nhằm giảm tình trạng người vận hành thấy config một kiểu nhưng lệnh tiếp theo lại đi bằng khối lượng khác.
+
+3. Đã hoạt động ổn chưa
+
+Hiện tại có thể đánh giá như sau:
+
+- Về mặt code: đã được chỉnh theo đúng hướng yêu cầu và đã được đẩy lên Railway.
+- Về mặt logic: các điểm lệch chính trước đây như trộn timeline, kéo nhầm source slot, giữ Chưa duyệt sai ngày, hoặc ghi đè confidence sai hướng đã được chặn đáng kể.
+- Về mặt vận hành: hệ thống đã ổn hơn rõ rệt so với trước, đặc biệt ở phần lịch lọc LC và Telegram.
+
+Tuy nhiên, để nói “ổn tuyệt đối” thì vẫn cần tiếp tục theo dõi thực tế trong các vòng chạy live, vì hệ thống này phụ thuộc vào:
+
+- dữ liệu thị trường trả về đúng giờ hay chậm,
+- thời gian thực thi toàn bộ `run_once()`,
+- mạng Railway,
+- độ ổn định của nguồn market snapshot,
+- và trạng thái dữ liệu tích lũy của journal/state.
+
+Nói ngắn gọn:
+
+- Logic chính đã đi đúng hướng và đã ổn hơn nhiều.
+- Chưa có dấu hiệu lỗi kiến trúc lớn ở các phần vừa sửa.
+- Nhưng vẫn nên tiếp tục quan sát live trong vài chu kỳ 1h -> 2h -> 4h -> Mini để xác nhận hết các case biên.
+
+4. Mỗi phần cần chỉnh gì thêm để hoạt động trơn tru nhất
+
+4.1. Phần lịch lọc 1h, 2h, 4h
+
+Cần làm thêm:
+
+- Tiếp tục giám sát xem source data có về trễ hơn tolerance không.
+- Nếu nguồn dữ liệu thường xuyên về sau mốc vài phút, nên tách rõ “giờ slot” và “giờ dữ liệu sẵn sàng” bằng một lớp kiểm tra readiness riêng.
+- Nên bổ sung log lý do bỏ slot thật rõ cho từng khung: thiếu source nào, source có nhưng lệch slot nào, hay source bị loại vì alignment.
+
+Lợi ích:
+
+- Giúp truy vết rất nhanh nếu lại có trường hợp “đã có 1h nhưng không tạo được 2h”.
+
+4.2. Phần Chưa duyệt
+
+Cần làm thêm:
+
+- Bổ sung job kiểm tra dọn dẹp trạng thái Chưa duyệt theo ngưỡng tuổi dữ liệu và win rate một cách cứng hơn.
+- Tách rõ log giữa “bị loại ngay”, “được giữ lại”, “gần đạt nhưng chưa đủ”, và “được hồi sinh”.
+- Đảm bảo mọi lần recheck chỉ update trường cần thiết, không thay đổi sai dữ liệu nguồn.
+
+Lợi ích:
+
+- Tránh việc operator nhìn pool thấy cặp tồn tại quá lâu hoặc dữ liệu không còn đúng trạng thái thực.
+
+4.3. Phần Telegram
+
+Cần làm thêm:
+
+- Duy trì chuẩn format thống nhất giữa 1h, 2h, 4h, Mini, Chưa duyệt và hồi sinh.
+- Nếu cần vận hành lâu dài, nên thêm giới hạn số block trả về theo ngày và theo từng nút, để tránh spam quá dài.
+- Có thể cân nhắc thêm dòng tổng kết đầu tiên cho mỗi timeline để người xem nắm nhanh số lượng pool và số lượng cặp.
+
+Lợi ích:
+
+- Bot dễ đọc hơn và hỗ trợ truy vết nhanh hơn.
+
+4.4. Phần Mini
+
+Cần làm thêm:
+
+- Theo dõi thực tế xem việc ưu tiên top-volume + latest 4h đã đủ ổn chưa.
+- Nếu số lượng symbol lớn dần, nên log rõ vì sao một cặp vào được Mini nhưng không được đẩy sang pending.
+- Nên kiểm tra lại định kỳ việc “mỗi lượt chỉ đẩy 1 cặp” có làm backlog tăng ở thời điểm thị trường mạnh không.
+
+Lợi ích:
+
+- Giữ Mini an toàn nhưng vẫn không bỏ sót cơ hội tốt.
+
+4.5. Phần Recovery Chain Manager
+
+Cần làm thêm:
+
+- Bổ sung log tường minh khi nào hệ thống coi là đang recovery, khi nào coi là thoát recovery.
+- Đồng bộ lại toàn bộ điểm đọc và ghi `base_margin_usdt`, `next_margin_usdt`, `recovery_step`, `cycle_pnl`.
+- Nếu cần an toàn hơn, nên thêm một bước validate state mỗi khi bot khởi động.
+
+Lợi ích:
+
+- Tránh lệch khối lượng lệnh giữa cấu hình người dùng thấy và trạng thái bot đang dùng thực tế.
+
+4.6. Phần hiệu năng tổng thể
+
+Cần làm thêm:
+
+- Đo lại chi tiết thời gian của từng bước trong `run_once()`.
+- Nếu tổng thời gian gần 60 giây, cần giảm tải ở các bước nặng như snapshot hoặc tách một số phần sang cập nhật ít thường xuyên hơn.
+- Nên log cảnh báo nếu một vòng chạy vượt ngưỡng dự kiến.
+
+Lợi ích:
+
+- Giảm nguy cơ chậm nhịp, trượt slot hoặc chồng vòng chạy.
+
+5. Kết luận
+
+Các phần trọng yếu theo yêu cầu đã được chỉnh sửa theo đúng hướng:
+
+- lịch LC được siết đúng slot hơn,
+- nhánh 2h và 4h không còn được phép gom sai nguồn,
+- Chưa duyệt được tách riêng và chuẩn hóa hơn,
+- Telegram rõ ràng hơn,
+- timeline nội bộ và Chưa duyệt đã reset theo ngày,
+- Mini an toàn hơn,
+- Recovery Chain bớt nguy cơ lệch trạng thái.
+
+Đánh giá hiện tại:
+
+- Có thể dùng vận hành tiếp.
+- Mức độ ổn định đã tốt hơn trước rõ rệt.
+- Để trơn tru nhất, vẫn nên tiếp tục theo dõi vài chu kỳ live và tăng thêm log chẩn đoán ở các điểm quyết định tạo pool, loại cặp và promote.

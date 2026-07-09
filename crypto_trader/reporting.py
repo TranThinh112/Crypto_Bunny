@@ -305,6 +305,8 @@ def format_scan_message(config: dict[str, Any], payload: dict[str, Any] | None, 
     lines.append("🏆 Top 5 cặp giao dịch tốt:")
     if candidates:
         lines.extend(_candidate_line(index, candidate) for index, candidate in enumerate(candidates[:5], 1))
+    elif result == "error" and status.get("error"):
+        lines.append("⚪ Chưa có danh sách ứng viên vì scan bị lỗi trước khi hoàn tất")
     else:
         lines.append("⚪ Không có ứng viên")
 

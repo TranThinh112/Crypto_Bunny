@@ -156,6 +156,10 @@ def _mongo_error_is_retryable(exc: Exception) -> bool:
     )
 
 
+def is_retryable_storage_error(exc: Exception) -> bool:
+    return _mongo_error_is_retryable(exc)
+
+
 def _mongo_call_with_retry(config: dict[str, Any], operation: Any) -> Any:
     attempts = _mongo_operation_retry_attempts(config)
     delay = _mongo_operation_retry_delay_seconds(config)

@@ -216,3 +216,49 @@ class EngineMiniQueueTest(TestCase):
             run_once(config, execute=False)
 
         self.assertEqual(call_order, ["lc", "mini"])
+
+    def test_run_once_falls_back_when_retryable_storage_calls_timeout(self) -> None:
+        config = self._config()
+        report_path = Path(self.tmpdir.name) / "reports" / "latest_decision.json"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text('{"action":"hold","candidates":[]}', encoding="utf-8")
+
+        timeout_error = RuntimeError(
+            "ac-jjoayb4-shard-00-02.mongodb.net:27017: read operation timed out"
+        )
+
+        with ExitStack() as stack:
+            stack.enter_context(patch("crypto_trader.engine.select_runtime_config", side_effect=lambda value: value))
+            stack.enter_context(patch("crypto_trader.engine.latest_decision_payload", side_effect=timeout_error))
+            stack.enter_context(patch("crypto_trader.engine.open_pending_symbols", return_value=set()))
+            stack.enter_context(patch("crypto_trader.engine._resolve_strategy_symbols", return_value=([], {}, [])))
+            stack.enter_context(patch("crypto_trader.engine.collect_news", return_value=SimpleNamespace(items=[])))
+            stack.enter_context(patch("crypto_trader.engine.fetch_market_snapshots", return_value=([], [])))
+            stack.enter_context(patch("crypto_trader.engine.market_guard_symbol_layers", return_value={}))
+            stack.enter_context(patch("crypto_trader.engine.build_candidates", return_value=[]))
+            stack.enter_context(patch("crypto_trader.engine.apply_position_sizing", side_effect=timeout_error))
+            stack.enter_context(patch("crypto_trader.engine.enrich_quantities", return_value=[]))
+            stack.enter_context(patch("crypto_trader.engine.detect_market_regime", return_value={}))
+            stack.enter_context(patch("crypto_trader.engine.record_trade_candidates", side_effect=timeout_error))
+            stack.enter_context(patch("crypto_trader.engine.update_lc_internal_pipeline", return_value={}))
+            stack.enter_context(patch("crypto_trader.engine.run_internal_market_scan_if_due", return_value=None))
+            stack.enter_context(patch("crypto_trader.engine.save_market_scan_observations", side_effect=timeout_error))
+            stack.enter_context(patch("crypto_trader.engine._merge_cycle_candidates", return_value=([], {})))
+            stack.enter_context(patch("crypto_trader.engine.internal_lc_memory", return_value={}))
+            stack.enter_context(patch("crypto_trader.engine.maintain_pending_orders", side_effect=timeout_error))
+            stack.enter_context(patch("crypto_trader.engine.should_defer_new_vt_to_internal_lc", return_value=False))
+            stack.enter_context(patch("crypto_trader.engine.active_trades_summary", return_value=(0, set(), [])))
+            stack.enter_context(patch("crypto_trader.engine.save_decision", side_effect=timeout_error))
+            stack.enter_context(patch("crypto_trader.engine.record_ai_trade_decision", side_effect=timeout_error))
+
+            decision = run_once(config, execute=False)
+
+        warnings = decision.scan_comparison.get("storage_warnings") or []
+        self.assertEqual(decision.action, "hold")
+        self.assertTrue(any("Previous decision memory" in item for item in warnings))
+        self.assertTrue(any("Trade candidate history" in item for item in warnings))
+        self.assertTrue(any("Market scan memory" in item for item in warnings))
+        self.assertTrue(any("Position sizing state" in item for item in warnings))
+        self.assertTrue(any("Pending order maintenance" in item for item in warnings))
+        self.assertTrue(any("Decision history" in item for item in warnings))
+        self.assertTrue(any("AI trade history" in item for item in warnings))
