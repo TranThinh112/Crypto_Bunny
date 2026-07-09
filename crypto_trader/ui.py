@@ -126,6 +126,9 @@ from .sizing import STATE_KEY as SIZING_STATE_KEY
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 PRICE_CACHE_TTL_SECONDS = 55
+TELEGRAM_VIEW_CACHE_TTL_SECONDS = 4
+TELEGRAM_TIMELINE_CACHE_TTL_SECONDS = 4
+TELEGRAM_COMMANDS_SYNC_INTERVAL_SECONDS = 600
 MIN_LEVERAGE = 5
 MAX_LEVERAGE = 25
 MIN_BASE_MARGIN_USDT = 1.0
@@ -1203,6 +1206,38 @@ def _telegram_action_message(config: dict[str, Any], action: str) -> str:
     return _telegram_action_response(config, action, config.get("_config_path") or ".")[1]
 
 
+def _telegram_cache_bucket(app: FastAPI | None) -> dict[str, Any] | None:
+    if app is None:
+        return None
+    cache = getattr(app.state, "telegram_view_cache", None)
+    if isinstance(cache, dict):
+        return cache
+    cache = {}
+    app.state.telegram_view_cache = cache
+    return cache
+
+
+def _telegram_cached_value(
+    app: FastAPI | None,
+    key: str,
+    *,
+    ttl_seconds: int,
+    builder: Any,
+) -> Any:
+    cache = _telegram_cache_bucket(app)
+    if cache is None:
+        return builder()
+    now = datetime.now(timezone.utc)
+    cached = cache.get(key)
+    if isinstance(cached, dict):
+        created_at = cached.get("created_at")
+        if isinstance(created_at, datetime) and (now - created_at).total_seconds() <= max(1, int(ttl_seconds)):
+            return cached.get("value")
+    value = builder()
+    cache[key] = {"created_at": now, "value": value}
+    return value
+
+
 def _send_timeline_sequence(
     config: dict[str, Any],
     chat_id: Any,
@@ -1246,46 +1281,88 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
         chat_id = chat.get("id")
         callback_id = str(callback.get("id") or "")
         action = str(callback.get("data") or "view_menu")
-        set_journal_state(
-            config,
-            "telegram_last_callback",
-            json.dumps(
-                {
-                    "action": action,
-                    "message_id": message.get("message_id"),
-                    "text": str(message.get("text") or "")[:120],
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                },
-                ensure_ascii=False,
-            ),
-        )
         if callback_id:
             answer_callback_query(config, callback_id, "Đang chạy scan..." if action == "scan_now" else "Đang lấy dữ liệu...")
+        try:
+            set_journal_state(
+                config,
+                "telegram_last_callback",
+                json.dumps(
+                    {
+                        "action": action,
+                        "message_id": message.get("message_id"),
+                        "text": str(message.get("text") or "")[:120],
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        except Exception:
+            pass
         if not _telegram_chat_allowed(config, chat_id):
             return
         thread_id = message.get("message_thread_id")
         message_id = message.get("message_id")
         if action == "view_internal_notifications":
+            timeline_messages = _telegram_cached_value(
+                app,
+                "timeline:view_internal_notifications",
+                ttl_seconds=TELEGRAM_TIMELINE_CACHE_TTL_SECONDS,
+                builder=lambda: internal_notification_timeline_messages(config),
+            )
             _send_timeline_sequence(
                 config,
                 chat_id,
                 thread_id=thread_id,
                 header_text="🔔 Thông báo nội bộ",
-                timeline_messages=internal_notification_timeline_messages(config),
+                timeline_messages=timeline_messages,
                 empty_text="🔔 Thông báo nội bộ: chưa có dữ liệu 1h/2h/4h/Mini.",
             )
             return
         if action == "view_undecided_lc":
+            timeline_messages = _telegram_cached_value(
+                app,
+                "timeline:view_undecided_lc",
+                ttl_seconds=TELEGRAM_TIMELINE_CACHE_TTL_SECONDS,
+                builder=lambda: undecided_notification_timeline_messages(config),
+            )
+            empty_text = _telegram_cached_value(
+                app,
+                "view:view_undecided_lc:empty",
+                ttl_seconds=TELEGRAM_VIEW_CACHE_TTL_SECONDS,
+                builder=lambda: format_undecided_lc_view(config),
+            )
             _send_timeline_sequence(
                 config,
                 chat_id,
                 thread_id=thread_id,
                 header_text="📋 Thông báo Chưa duyệt",
-                timeline_messages=undecided_notification_timeline_messages(config),
-                empty_text=format_undecided_lc_view(config),
+                timeline_messages=timeline_messages,
+                empty_text=empty_text,
             )
             return
-        response_config, response_text, reply_markup = _telegram_action_response(config, action, config_path, app)
+        response_config, response_text, reply_markup = _telegram_cached_value(
+            app,
+            f"view:{action}",
+            ttl_seconds=TELEGRAM_VIEW_CACHE_TTL_SECONDS,
+            builder=lambda: _telegram_action_response(config, action, config_path, app),
+        ) if action in {
+            "view_menu",
+            "view_guard",
+            "view_positions_account",
+            "view_vt",
+            "view_sd",
+            "view_lc",
+            "view_memory",
+            "view_ai",
+            "view_ai_more",
+            "view_pnl_sd",
+            "setup_menu",
+            "view_setup",
+            "set_order_usdt",
+            "set_leverage",
+            "set_max_positions",
+        } else _telegram_action_response(config, action, config_path, app)
         inline_view_actions = {
             "view_menu",
             "view_guard",
@@ -1482,6 +1559,9 @@ def _telegram_button_worker(app: FastAPI) -> None:
     try:
         config = load_config(app.state.config_path)
         sync_telegram_commands(config)
+        app.state.telegram_commands_next_sync_at = datetime.now(timezone.utc) + timedelta(
+            seconds=TELEGRAM_COMMANDS_SYNC_INTERVAL_SECONDS
+        )
         stored = get_journal_state(config, "telegram_update_offset")
         offset_value = int(stored) if stored else None
     except Exception:
@@ -1490,7 +1570,12 @@ def _telegram_button_worker(app: FastAPI) -> None:
     while not app.state.automation_stop.is_set():
         try:
             config = load_config(app.state.config_path)
-            sync_telegram_commands(config)
+            next_sync_at = getattr(app.state, "telegram_commands_next_sync_at", None)
+            if not isinstance(next_sync_at, datetime) or datetime.now(timezone.utc) >= next_sync_at:
+                sync_telegram_commands(config)
+                app.state.telegram_commands_next_sync_at = datetime.now(timezone.utc) + timedelta(
+                    seconds=TELEGRAM_COMMANDS_SYNC_INTERVAL_SECONDS
+                )
             if not _telegram_polling_enabled(config):
                 app.state.automation_stop.wait(5)
                 continue
@@ -1800,6 +1885,8 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
     app.state.lc_pipeline_candidate_cache = {}
     app.state.market_guard_status = None
     app.state.price_cache = None
+    app.state.telegram_view_cache = {}
+    app.state.telegram_commands_next_sync_at = None
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
