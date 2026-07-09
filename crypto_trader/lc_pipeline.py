@@ -2039,6 +2039,8 @@ def internal_notification_timeline_messages(config: dict[str, Any], *, limit_per
     for item in items:
         if not isinstance(item, dict):
             continue
+        if str(item.get("frame") or "") == "rc":
+            continue
         created_at_key = str(item.get("created_at") or "")
         if not created_at_key:
             continue
@@ -2048,6 +2050,26 @@ def internal_notification_timeline_messages(config: dict[str, Any], *, limit_per
     if not entries:
         return []
     timeline_limit = max(4, int(limit_per_frame) * 4)
+    timeline = sorted(entries, key=lambda item: item[0])[-timeline_limit:]
+    return [text for _, text in timeline]
+
+
+def undecided_notification_timeline_messages(config: dict[str, Any], *, limit_per_frame: int = 5) -> list[str]:
+    state = _load_state(config, datetime.now(timezone.utc), reset_for_new_day=False)
+    items = state.get("internal_notifications") if isinstance(state.get("internal_notifications"), list) else []
+    entries: list[tuple[str, str]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("frame") or "") != "rc":
+            continue
+        created_at_key = str(item.get("created_at") or "")
+        if not created_at_key:
+            continue
+        entries.append((created_at_key, _internal_notification_text(item, config)))
+    if not entries:
+        return []
+    timeline_limit = max(3, int(limit_per_frame) * 3)
     timeline = sorted(entries, key=lambda item: item[0])[-timeline_limit:]
     return [text for _, text in timeline]
 

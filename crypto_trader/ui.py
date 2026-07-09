@@ -65,6 +65,7 @@ from .lc_pipeline import (
     format_internal_notifications_view,
     internal_notification_timeline_messages,
     lc_pipeline_dashboard_payload,
+    undecided_notification_timeline_messages,
     update_lc_internal_pipeline,
 )
 from .market import create_exchange
@@ -1202,6 +1203,41 @@ def _telegram_action_message(config: dict[str, Any], action: str) -> str:
     return _telegram_action_response(config, action, config.get("_config_path") or ".")[1]
 
 
+def _send_timeline_sequence(
+    config: dict[str, Any],
+    chat_id: Any,
+    *,
+    thread_id: Any,
+    header_text: str,
+    timeline_messages: list[str],
+    empty_text: str,
+) -> None:
+    if not timeline_messages:
+        send_telegram_chat_message(
+            config,
+            chat_id,
+            empty_text,
+            message_thread_id=thread_id,
+            with_buttons=False,
+        )
+        return
+    send_telegram_chat_message(
+        config,
+        chat_id,
+        header_text,
+        message_thread_id=thread_id,
+        with_buttons=False,
+    )
+    for text in timeline_messages:
+        send_telegram_chat_message(
+            config,
+            chat_id,
+            text,
+            message_thread_id=thread_id,
+            with_buttons=False,
+        )
+
+
 def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], config_path: str | Path, app: FastAPI | None = None) -> None:
     callback = update.get("callback_query")
     if isinstance(callback, dict):
@@ -1230,31 +1266,24 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
         thread_id = message.get("message_thread_id")
         message_id = message.get("message_id")
         if action == "view_internal_notifications":
-            timeline_messages = internal_notification_timeline_messages(config)
-            if not timeline_messages:
-                send_telegram_chat_message(
-                    config,
-                    chat_id,
-                    "🔔 Thông báo nội bộ: chưa có dữ liệu 1h/2h/4h/Mini.",
-                    message_thread_id=thread_id,
-                    with_buttons=False,
-                )
-                return
-            send_telegram_chat_message(
+            _send_timeline_sequence(
                 config,
                 chat_id,
-                "🔔 Thông báo nội bộ",
-                message_thread_id=thread_id,
-                with_buttons=False,
+                thread_id=thread_id,
+                header_text="🔔 Thông báo nội bộ",
+                timeline_messages=internal_notification_timeline_messages(config),
+                empty_text="🔔 Thông báo nội bộ: chưa có dữ liệu 1h/2h/4h/Mini.",
             )
-            for text in timeline_messages:
-                send_telegram_chat_message(
-                    config,
-                    chat_id,
-                    text,
-                    message_thread_id=thread_id,
-                    with_buttons=False,
-                )
+            return
+        if action == "view_undecided_lc":
+            _send_timeline_sequence(
+                config,
+                chat_id,
+                thread_id=thread_id,
+                header_text="📋 Thông báo Chưa duyệt",
+                timeline_messages=undecided_notification_timeline_messages(config),
+                empty_text=format_undecided_lc_view(config),
+            )
             return
         response_config, response_text, reply_markup = _telegram_action_response(config, action, config_path, app)
         inline_view_actions = {
@@ -1419,31 +1448,24 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
     if not action:
         return
     if action == "view_internal_notifications":
-        timeline_messages = internal_notification_timeline_messages(config)
-        if not timeline_messages:
-            send_telegram_chat_message(
-                config,
-                chat_id,
-                "🔔 Thông báo nội bộ: chưa có dữ liệu 1h/2h/4h/Mini.",
-                message_thread_id=message.get("message_thread_id"),
-                with_buttons=False,
-            )
-            return
-        send_telegram_chat_message(
+        _send_timeline_sequence(
             config,
             chat_id,
-            "🔔 Thông báo nội bộ",
-            message_thread_id=message.get("message_thread_id"),
-            with_buttons=False,
+            thread_id=message.get("message_thread_id"),
+            header_text="🔔 Thông báo nội bộ",
+            timeline_messages=internal_notification_timeline_messages(config),
+            empty_text="🔔 Thông báo nội bộ: chưa có dữ liệu 1h/2h/4h/Mini.",
         )
-        for text in timeline_messages:
-            send_telegram_chat_message(
-                config,
-                chat_id,
-                text,
-                message_thread_id=message.get("message_thread_id"),
-                with_buttons=False,
-            )
+        return
+    if action == "view_undecided_lc":
+        _send_timeline_sequence(
+            config,
+            chat_id,
+            thread_id=message.get("message_thread_id"),
+            header_text="📋 Thông báo Chưa duyệt",
+            timeline_messages=undecided_notification_timeline_messages(config),
+            empty_text=format_undecided_lc_view(config),
+        )
         return
     response_config, response_text, reply_markup = _telegram_action_response(config, action, config_path, app)
     send_telegram_chat_message(
