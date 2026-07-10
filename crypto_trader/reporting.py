@@ -77,6 +77,10 @@ def date_time_label(value: datetime | None = None) -> str:
     return local_time(value).strftime("%d/%m/%Y %H:%M")
 
 
+def _date_time_seconds_label(value: datetime | None = None) -> str:
+    return local_time(value).strftime("%d/%m/%Y %H:%M:%S")
+
+
 def _parse_time(value: Any) -> datetime | None:
     if not value:
         return None
@@ -173,7 +177,9 @@ def _result_icon(value: Any) -> str:
 
 
 def _reason_vi(reason: Any) -> str:
-    text = str(reason or "")
+    text = str(reason or "").strip()
+    if not text:
+        return ""
     replacements = [
         (
             r"^No recent symbol-specific news confirmed the setup$",
@@ -251,6 +257,10 @@ def _reason_vi(reason: Any) -> str:
             "Setup lệnh chờ không còn đạt điều kiện sau lần scan mới",
         ),
         (
+            r"^Gi(?:á|\?) entry m(?:ới|\?i) l(?:ệ|\?)ch ([0-9.]+)% so v(?:ới|\?i) LC c(?:ũ|\?) \((?:ngưỡng|ng\?ng) ([0-9.]+)%\)$",
+            r"Giá entry mới lệch \1% so với LC cũ (ngưỡng \2%)",
+        ),
+        (
             r"^PNL/SD khong co trong dry_run$",
             "PNL/SD không có trong dry_run",
         ),
@@ -263,10 +273,18 @@ def _reason_vi(reason: Any) -> str:
             r"Đồng bộ bộ nhớ giao dịch thất bại: \1",
         ),
     ]
-    for pattern, replacement in replacements:
-        if re.search(pattern, text):
-            return re.sub(pattern, replacement, text)
-    return text
+    parts = [part.strip() for part in text.split(";") if part.strip()]
+    if not parts:
+        parts = [text]
+    translated_parts: list[str] = []
+    for part in parts:
+        translated = part
+        for pattern, replacement in replacements:
+            if re.search(pattern, translated):
+                translated = re.sub(pattern, replacement, translated)
+                break
+        translated_parts.append(translated)
+    return "; ".join(translated_parts)
 
 
 def _source_label(value: Any) -> str:
@@ -380,6 +398,70 @@ def format_execution_messages(payload: dict[str, Any] | None) -> list[str]:
     return ["\n".join(lines)]
 
 
+def _trade_execution_close_label(row: dict[str, Any]) -> str:
+    close_reason = str(row.get("close_reason") or "").strip().lower()
+    if close_reason in {"tp", "take_profit", "cham_tp", "hit_tp"}:
+        return "Chạm TP"
+    if close_reason in {"sl", "stop_loss", "cham_sl", "hit_sl"}:
+        return "Chạm SL"
+    if close_reason in {"manual", "tu_dong", "tudong", "self_closed", "user_closed"}:
+        return "Tự đóng"
+    status = str(row.get("status") or "").upper()
+    if status == "CLOSED":
+        return "Tự đóng"
+    if status == "WIN":
+        return "Đóng lãi"
+    if status == "LOSS":
+        return "Đóng lỗ"
+    if status == "BREAKEVEN":
+        return "Hòa vốn"
+    return "Đã đóng"
+
+
+def _trade_execution_payload(row: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(row.get("payload"), dict):
+        return row.get("payload") or {}
+    for key in ("payload_json", "snapshot_json"):
+        raw = row.get(key)
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(str(raw))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def _trade_execution_pnl_pct(row: dict[str, Any]) -> float | None:
+    pnl_pct = _float(row.get("pnl_pct"))
+    if pnl_pct is not None:
+        return pnl_pct
+    payload = _trade_execution_payload(row)
+    basis = _float(payload.get("order_usdt"))
+    if basis is None or basis <= 0:
+        basis = _float(payload.get("margin_usdt"))
+    pnl = _float(row.get("pnl"))
+    if pnl is None or basis is None or basis <= 0:
+        return None
+    return pnl / basis * 100
+
+
+def format_trade_execution_close_message(config: dict[str, Any], row: dict[str, Any]) -> str:
+    closed_at = _parse_time(row.get("closed_at"))
+    vt_id = row.get("id") or row.get("trade_execution_id") or "-"
+    pnl = _float(row.get("pnl"))
+    pnl_pct = _trade_execution_pnl_pct(row)
+    lines = [
+        f"{_pnl_icon(pnl)} VT #{vt_id} | {_trade_execution_close_label(row)}",
+        f"{_coin_icon(row.get('symbol'))} {_side_icon(row.get('side'))} Cặp: {row.get('symbol', '-')} {str(row.get('side', '-')).upper()}",
+        f"💰 Lợi nhuận: {_fmt_signed(pnl, 2)} USDT ({_fmt_signed(pnl_pct, 2, '%')})",
+        f"🕒 Đóng lúc: {_date_time_seconds_label(closed_at) if closed_at else '-'}",
+    ]
+    return "\n".join(lines)
+
+
 def format_pending_event_messages(payload: dict[str, Any] | None) -> list[str]:
     pending = ((payload or {}).get("scan_comparison") or {}).get("pending_orders") or {}
     messages: list[str] = []
@@ -389,9 +471,9 @@ def format_pending_event_messages(payload: dict[str, Any] | None) -> list[str]:
             messages.append(
                 "\n".join(
                     [
-                        f"OKX AI giu LC #{event.get('lc_id', '-')} {date_label()}",
-                        f"{_coin_icon(event.get('symbol'))} {_side_icon(event.get('side'))} Cap: {event.get('symbol', '-')} {str(event.get('side', '-')).upper()}",
-                        f"Ly do: {event.get('reason') or '-'}",
+                        f"OKX AI giữ LC #{event.get('lc_id', '-')} {date_label()}",
+                        f"{_coin_icon(event.get('symbol'))} {_side_icon(event.get('side'))} Cặp: {event.get('symbol', '-')} {str(event.get('side', '-')).upper()}",
+                        f"Lý do: {event.get('reason') or '-'}",
                     ]
                 )
             )
@@ -399,17 +481,17 @@ def format_pending_event_messages(payload: dict[str, Any] | None) -> list[str]:
         if event_type == "pending_converted":
             source = str(event.get("source") or "")
             from_status = str(event.get("from_status") or "")
-            source_label = "LC_OKX" if source.startswith("lc_okx") or from_status == "LC_OKX" else "LC noi bo"
+            source_label = "LC_OKX" if source.startswith("lc_okx") or from_status == "LC_OKX" else "LC nội bộ"
             action_label = (
-                "da duoc chuyen thanh VT"
+                "đã được chuyển thành VT"
                 if source_label == "LC_OKX"
-                else "da duoc chuyen thang thanh VT"
+                else "đã được chuyển thẳng thành VT"
             )
             messages.append(
                 "\n".join(
                     [
                         f"{source_label} #{event.get('lc_id', '-')} {date_label()} {action_label} #{event.get('vt_id', '-')}",
-                        f"{_coin_icon(event.get('symbol'))} {_side_icon(event.get('side'))} Cap: {event.get('symbol', '-')} {str(event.get('side', '-')).upper()}",
+                        f"{_coin_icon(event.get('symbol'))} {_side_icon(event.get('side'))} Cặp: {event.get('symbol', '-')} {str(event.get('side', '-')).upper()}",
                         f"OKX order ID: {event.get('exchange_order_id') or '-'}",
                     ]
                 )
@@ -419,10 +501,10 @@ def format_pending_event_messages(payload: dict[str, Any] | None) -> list[str]:
             messages.append(
                 "\n".join(
                     [
-                        f"LC_OKX #{event.get('lc_id', '-')} {date_label()} da duoc gui len OKX",
-                        f"{_coin_icon(event.get('symbol'))} {_side_icon(event.get('side'))} Cap: {event.get('symbol', '-')} {str(event.get('side', '-')).upper()}",
+                        f"LC_OKX #{event.get('lc_id', '-')} {date_label()} đã được gửi lên OKX",
+                        f"{_coin_icon(event.get('symbol'))} {_side_icon(event.get('side'))} Cặp: {event.get('symbol', '-')} {str(event.get('side', '-')).upper()}",
                         f"OKX order ID: {event.get('exchange_order_id') or '-'}",
-                        f"Tuoi LC noi bo: {float(event.get('local_age_hours') or 0):.1f} gio | Han OKX: {float(event.get('expires_in_days') or 1.5):.1f} ngay",
+                        f"Tuổi LC nội bộ: {float(event.get('local_age_hours') or 0):.1f} giờ | Hạn OKX: {float(event.get('expires_in_days') or 1.5):.1f} ngày",
                     ]
                 )
             )

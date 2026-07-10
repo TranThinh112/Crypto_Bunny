@@ -2329,6 +2329,48 @@ def _rc_recheck_row_line_v2(
     return " | ".join(parts)
 
 
+def _rc_recheck_row_line_v3(
+    config: dict[str, Any],
+    index: int,
+    row: dict[str, Any],
+    *,
+    now: datetime,
+    dropped: bool = False,
+) -> str:
+    side = str(row.get("side") or "-").upper()
+    try:
+        win_text = f"{float(row.get('win_probability_pct') or 0):.2f}%"
+    except (TypeError, ValueError):
+        win_text = "-"
+    try:
+        current_win_text = f"{float(row.get('current_win_probability_pct', row.get('win_probability_pct')) or 0):.2f}%"
+    except (TypeError, ValueError):
+        current_win_text = win_text
+    try:
+        previous_win_raw = row.get("previous_scan_win_probability_pct")
+        previous_win_text = f"{float(previous_win_raw):.2f}%" if previous_win_raw not in (None, "") else None
+    except (TypeError, ValueError):
+        previous_win_text = None
+    if dropped:
+        win_label = f"Win {previous_win_text} -> {current_win_text}" if previous_win_text else f"Win recheck {current_win_text}"
+    else:
+        win_label = f"Win {current_win_text}"
+    parts = [
+        f"{index}. {row.get('symbol', '-')}",
+        side,
+        win_label,
+        _rc_row_source_label(config, row),
+        f"sá»‘ng {_rc_row_age_label(row, now)}",
+    ]
+    if row.get("revived_at"):
+        parts.append(_revived_target_label(row))
+        revived_time = _revived_time_label(row)
+        if revived_time:
+            parts.append(f"Há»“i sinh {revived_time}")
+        parts.append("HS")
+    return " | ".join(parts)
+
+
 def _undecided_recheck_notification_text_v2(
     config: dict[str, Any],
     meta: dict[str, Any],
@@ -2348,13 +2390,13 @@ def _undecided_recheck_notification_text_v2(
     ]
     if kept_rows:
         lines.append("🟢 Giữ lại:")
-        lines.extend(_rc_recheck_row_line_v2(config, index, row, now=created_at) for index, row in enumerate(kept_rows[:3], 1))
+        lines.extend(_rc_recheck_row_line_v3(config, index, row, now=created_at) for index, row in enumerate(kept_rows[:3], 1))
     else:
         lines.append("🟢 Giữ lại: không còn cặp nào.")
     if dropped_rows:
         lines.append("🔴 Bị loại:")
         lines.extend(
-            _rc_recheck_row_line_v2(config, index, row, now=created_at, dropped=True)
+            _rc_recheck_row_line_v3(config, index, row, now=created_at, dropped=True)
             for index, row in enumerate(dropped_rows[:3], 1)
         )
     else:
@@ -2362,7 +2404,7 @@ def _undecided_recheck_notification_text_v2(
     if promoted_rows:
         lines.append("♻️ Đẩy lên LC nội bộ:")
         lines.extend(
-            _rc_recheck_row_line_v2(config, index, row, now=created_at)
+            _rc_recheck_row_line_v3(config, index, row, now=created_at)
             for index, row in enumerate(promoted_rows[:3], 1)
         )
         top = promoted_rows[0]
@@ -2498,7 +2540,16 @@ def _notify_undecided_recheck_summary(
 ) -> None:
     filtered_kept_rows = _filter_sample_rows(config, kept_rows)
     filtered_promoted_rows = _filter_sample_rows(config, promoted_rows)
-    filtered_dropped_rows = _filter_sample_rows(config, list(meta.get("dropped_rows") or []))
+    displayed_setup_keys = {
+        _setup_key(row)
+        for row in [*filtered_kept_rows, *filtered_promoted_rows]
+        if isinstance(row, dict)
+    }
+    filtered_dropped_rows = [
+        row
+        for row in _filter_sample_rows(config, list(meta.get("dropped_rows") or []))
+        if isinstance(row, dict) and _setup_key(row) not in displayed_setup_keys
+    ]
     filtered_input_count = len(filtered_kept_rows) + len(filtered_dropped_rows)
     if filtered_input_count <= 0:
         return
@@ -2878,15 +2929,9 @@ def _recheck_undecided_pool(
                 output.append(_mark_undecided_row(merged, now=now, settings=settings, status="soft_valid"))
             else:
                 reason = _undecided_drop_reason(merged, settings, now)
-                dropped_rows_summary.append(
-                    {
-                        "symbol": merged.get("symbol"),
-                        "side": merged.get("side"),
-                        "win_probability_pct": merged.get("win_probability_pct"),
-                        "reason": reason,
-                    }
-                )
-                output.append(_mark_undecided_row(merged, now=now, settings=settings, status="soft_invalid", reason=reason))
+                invalid_row = _mark_undecided_row(merged, now=now, settings=settings, status="soft_invalid", reason=reason)
+                dropped_rows_summary.append({**invalid_row, "reason": reason})
+                output.append(invalid_row)
             continue
         dropped_item = dropped_by_key.get(key)
         if dropped_item:
@@ -2903,38 +2948,22 @@ def _recheck_undecided_pool(
             )
             output.append(marked_row)
             dropped_rows_summary.append(
-                {
-                    "symbol": marked_row.get("symbol"),
-                    "side": marked_row.get("side"),
-                    "win_probability_pct": marked_row.get(
-                        "current_win_probability_pct",
-                        marked_row.get("win_probability_pct"),
-                    ),
-                    "reason": str(dropped_item.get("reason") or "khong con setup hop le trong du lieu moi nhat"),
-                }
+                {**marked_row, "reason": str(dropped_item.get("reason") or "khong con setup hop le trong du lieu moi nhat")}
             )
             continue
-        dropped_rows_summary.append(
-            {
-                "symbol": row.get("symbol"),
-                "side": row.get("side"),
-                "win_probability_pct": row.get("current_win_probability_pct", row.get("win_probability_pct")),
-                "reason": "khong tim thay setup hop le trong du lieu recheck moi nhat",
-            }
-        )
-        output.append(
-            _row_with_recheck_metadata(
-                _mark_missing_undecided_row(
-                    row,
-                    now=now,
-                    reason="khong tim thay setup hop le trong du lieu recheck moi nhat",
-                ),
-                recheck_daily_index=recheck_daily_index,
-                recheck_slot=recheck_slot,
+        marked_row = _row_with_recheck_metadata(
+            _mark_missing_undecided_row(
+                row,
                 now=now,
-                local_now=local_now,
-            )
+                reason="khong tim thay setup hop le trong du lieu recheck moi nhat",
+            ),
+            recheck_daily_index=recheck_daily_index,
+            recheck_slot=recheck_slot,
+            now=now,
+            local_now=local_now,
         )
+        dropped_rows_summary.append({**marked_row, "reason": "khong tim thay setup hop le trong du lieu recheck moi nhat"})
+        output.append(marked_row)
     kept_rows = list(output)
     trimmed = False
     if len(kept_rows) > int(settings["undecided_max"]):
@@ -3062,8 +3091,8 @@ def _update_lc_internal_pipeline_impl(
     candidates_by_symbol = {candidate.symbol: candidate for candidate in candidates}
     hourly_slot = _slot_key(config, now, 1)
     two_hour_slot = _slot_key(config, now, 2)
-    # The 4h aggregate is produced on each 2h boundary from the latest two 2h windows.
-    four_hour_slot = _slot_key(config, now, 2)
+    # Keep 4h on fixed local boundaries: 00/04/08/12/16/20.
+    four_hour_slot = _slot_key(config, now, 4)
     undecided_recheck_slot = _fixed_interval_slot_key(
         config,
         now,
@@ -3072,7 +3101,7 @@ def _update_lc_internal_pipeline_impl(
     slot_tolerance_minutes = int(settings["slot_tolerance_minutes"])
     hourly_slot_open = _slot_is_open(config, now, hours=1, tolerance_minutes=slot_tolerance_minutes)
     two_hour_slot_open = _slot_is_open(config, now, hours=2, tolerance_minutes=slot_tolerance_minutes)
-    four_hour_slot_open = _slot_is_open(config, now, hours=2, tolerance_minutes=slot_tolerance_minutes)
+    four_hour_slot_open = _slot_is_open(config, now, hours=4, tolerance_minutes=slot_tolerance_minutes)
     undecided_recheck_due = _fixed_interval_slot_is_exact(
         config,
         now,
@@ -3376,11 +3405,16 @@ def _update_lc_internal_pipeline_impl(
             settings=settings,
         )
         result["promoted"] = _promote_survivors(config, state, candidates_by_symbol, settings, now, blocked_symbols)
+        notification_kept_rows = [
+            row
+            for row in _sort_saved_rows(state.get("undecided", []), settings, reverse=True)
+            if isinstance(row, dict) and str(row.get("undecided_status") or "").lower() == "soft_valid"
+        ][: int(settings["undecided_max"])]
         _notify_undecided_recheck_summary(
             config,
             state,
             result["undecided_recheck"],
-            kept_rows=_sort_saved_rows(state.get("undecided", []), settings, reverse=True)[: int(settings["undecided_max"])],
+            kept_rows=notification_kept_rows,
             promoted_rows=result["promoted"],
             now=now,
         )

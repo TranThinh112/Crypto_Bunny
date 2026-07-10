@@ -18,6 +18,7 @@ from crypto_trader.notifier import telegram_command_list
 from crypto_trader.storage import get_journal_state, list_trade_execution_rows, save_market_scan_observations, set_journal_state
 from crypto_trader.ui import (
     SCAN_TELEGRAM_SLOT_KEY,
+    _format_ai_call_history_view,
     _handle_telegram_update,
     _market_guard_notification_status,
     _periodic_scan_notification_due,
@@ -33,6 +34,85 @@ class UiTest(TestCase):
         commands = {item["command"] for item in telegram_command_list()}
         self.assertIn("thongbao", commands)
         self.assertIn("noibo", commands)
+
+    @patch("crypto_trader.ui.recent_ai_call_history")
+    def test_ai_history_view_uses_short_vietnamese_mini_reasons(self, recent_history) -> None:
+        recent_history.return_value = [
+            {
+                "created_at": "2026-07-10T04:01:19+07:00",
+                "role": "mini",
+                "model": "gpt-5.4-mini",
+                "status": "MINI ĐỀ XUẤT LC",
+                "approved_symbols": ["KAITO/USDT:USDT"],
+                "setup_scores": {"KAITO/USDT:USDT": 78},
+                "candidate_details": [
+                    {
+                        "symbol": "KAITO/USDT:USDT",
+                        "side": "long",
+                        "win_probability_pct": 59.23,
+                        "confidence": 98.05,
+                        "risk_reward": 1.5,
+                        "reasons": [
+                            "Strategic long bias target 60/40 adds 5.0 point(s)",
+                            "Market regime is neutral: breadth 57% favors longs",
+                            "5M trend confirms long (EMA gap +0.03%, price vs EMA50 +0.22%)",
+                        ],
+                    }
+                ],
+                "reason": (
+                    "Aligned long bias with 1h/5m uptrend, modest RR 1.5, and no critical warnings; "
+                    "5m hesitation lowers confidence."
+                ),
+            }
+        ]
+
+        message = _format_ai_call_history_view({"timezone": "Asia/Ho_Chi_Minh"})
+
+        self.assertIn("Lý do gửi:", message)
+        self.assertEqual(message.count("   - "), 2)
+        self.assertIn("Mini chọn:", message)
+        self.assertIn("Nhận xét của mini:", message)
+        self.assertNotIn("Lý do AI:", message)
+        self.assertIn("Thiên hướng long chiến lược cộng thêm 5.0 điểm.", message)
+        self.assertIn("Xu hướng 5m xác nhận LONG.", message)
+        self.assertIn("Mini thấy LONG đồng thuận với xu hướng tăng 1h/5m, R:R 1.5, chưa có cảnh báo lớn.", message)
+
+    @patch("crypto_trader.ui.recent_ai_call_history")
+    def test_ai_history_view_translates_new_mini_comments_to_vietnamese(self, recent_history) -> None:
+        recent_history.return_value = [
+            {
+                "created_at": "2026-07-10T08:01:46+07:00",
+                "role": "mini",
+                "model": "gpt-5.4-mini",
+                "status": "MINI ĐỀ XUẤT LC",
+                "approved_symbols": ["AAVE/USDT:USDT"],
+                "setup_scores": {"AAVE/USDT:USDT": 72},
+                "candidate_details": [
+                    {
+                        "symbol": "AAVE/USDT:USDT",
+                        "side": "long",
+                        "win_probability_pct": 65.0,
+                        "confidence": 100.0,
+                        "risk_reward": 1.5,
+                        "reasons": [
+                            "Strategic long bias target 60/40 adds 5.0 point(s)",
+                            "5M trend confirms long (EMA gap +0.03%, price vs EMA50 +0.22%)",
+                        ],
+                    }
+                ],
+                "reason": (
+                    "Aligned 1h/5m bullish with volume support\n"
+                    "RR only 1.5 and no 4h data, but local policy approved it."
+                ),
+            }
+        ]
+
+        message = _format_ai_call_history_view({"timezone": "Asia/Ho_Chi_Minh"})
+
+        self.assertIn("1h/5m đang đồng thuận xu hướng tăng và có ủng hộ khối lượng.", message)
+        self.assertIn("R:R chỉ 1.5, chưa có dữ liệu 4h, nhưng vẫn được local policy duyệt.", message)
+        self.assertNotIn("Aligned 1h/5m bullish", message)
+        self.assertNotIn("RR only 1.5", message)
 
     def test_market_guard_notification_status_ignores_mild_positive_move(self) -> None:
         config = {
@@ -636,6 +716,111 @@ class UiTest(TestCase):
             ["🔔 Thông báo nội bộ", "msg-a", "msg-b"],
         )
 
+    @patch("crypto_trader.ui.answer_callback_query")
+    @patch("crypto_trader.ui.edit_telegram_chat_message")
+    @patch("crypto_trader.ui.send_telegram_chat_message")
+    @patch("crypto_trader.ui.recent_ai_call_history")
+    def test_ai_history_callback_sends_each_call_as_separate_messages(
+        self,
+        recent_history,
+        send_message,
+        edit_message,
+        answer_callback,
+    ) -> None:
+        recent_history.return_value = [
+            {
+                "created_at": "2026-07-10T08:01:46+07:00",
+                "role": "mini",
+                "model": "gpt-5.4-mini",
+                "status": "MINI ĐỀ XUẤT LC",
+                "approved_symbols": ["AAVE/USDT:USDT"],
+                "candidate_details": [{"symbol": "AAVE/USDT:USDT", "side": "long"}],
+                "reason": "Aligned 1h/5m bullish with volume support",
+            },
+            {
+                "created_at": "2026-07-10T12:02:23+07:00",
+                "role": "mini",
+                "model": "gpt-5.4-mini",
+                "status": "MINI ĐỀ XUẤT LC",
+                "approved_symbols": ["1INCH/USDT:USDT"],
+                "candidate_details": [{"symbol": "1INCH/USDT:USDT", "side": "long"}],
+                "reason": "1INCH lacks volume support and has mixed 1h bearish candle.",
+            },
+        ]
+        edit_message.return_value = True
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text("mode: dry_run\n", encoding="utf-8")
+            config = load_config(config_path)
+            update = {
+                "callback_query": {
+                    "id": "cb-ai",
+                    "data": "view_ai",
+                    "message": {
+                        "message_id": 321,
+                        "chat": {"id": 123},
+                    },
+                }
+            }
+
+            with patch.dict("os.environ", {"TELEGRAM_CHAT_ID": "123"}):
+                _handle_telegram_update(config, update, config_path)
+
+        answer_callback.assert_called_once()
+        edit_message.assert_called_once()
+        self.assertEqual(send_message.call_count, 2)
+        self.assertIn("AAVE/USDT:USDT", send_message.call_args_list[0].args[2])
+        self.assertIn("1INCH/USDT:USDT", send_message.call_args_list[1].args[2])
+        self.assertNotIn("1INCH/USDT:USDT", send_message.call_args_list[0].args[2])
+        self.assertNotIn("AAVE/USDT:USDT", send_message.call_args_list[1].args[2])
+
+    @patch("crypto_trader.ui.send_telegram_chat_message")
+    @patch("crypto_trader.ui.recent_ai_call_history")
+    def test_ai_history_command_sends_header_and_each_call_as_separate_messages(
+        self,
+        recent_history,
+        send_message,
+    ) -> None:
+        recent_history.return_value = [
+            {
+                "created_at": "2026-07-10T08:01:46+07:00",
+                "role": "mini",
+                "model": "gpt-5.4-mini",
+                "status": "MINI ĐỀ XUẤT LC",
+                "approved_symbols": ["AAVE/USDT:USDT"],
+                "candidate_details": [{"symbol": "AAVE/USDT:USDT", "side": "long"}],
+                "reason": "Aligned 1h/5m bullish with volume support",
+            },
+            {
+                "created_at": "2026-07-10T12:02:23+07:00",
+                "role": "mini",
+                "model": "gpt-5.4-mini",
+                "status": "MINI ĐỀ XUẤT LC",
+                "approved_symbols": ["1INCH/USDT:USDT"],
+                "candidate_details": [{"symbol": "1INCH/USDT:USDT", "side": "long"}],
+                "reason": "1INCH lacks volume support and has mixed 1h bearish candle.",
+            },
+        ]
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text("mode: dry_run\n", encoding="utf-8")
+            config = load_config(config_path)
+            update = {
+                "message": {
+                    "message_id": 1002,
+                    "chat": {"id": 123},
+                    "text": "/ai",
+                }
+            }
+
+            with patch.dict("os.environ", {"TELEGRAM_CHAT_ID": "123"}):
+                _handle_telegram_update(config, update, config_path)
+
+        self.assertEqual(send_message.call_count, 3)
+        self.assertIn("Lịch sử gọi AI gần nhất", send_message.call_args_list[0].args[2])
+        self.assertIn("AAVE/USDT:USDT", send_message.call_args_list[1].args[2])
+        self.assertIn("1INCH/USDT:USDT", send_message.call_args_list[2].args[2])
+
     @patch("crypto_trader.ui.system_health_dashboard")
     @patch("crypto_trader.ui.replay_dashboard_payload")
     @patch("crypto_trader.ui.analytics_dashboard")
@@ -961,3 +1146,28 @@ class UiTest(TestCase):
         self.assertIn("replayWinRate", stats)
         self.assertIn("replayProfitFactor", stats)
         self.assertIn("replayDrawdown", stats)
+
+    def test_trade_execution_close_endpoint_accepts_close_reason(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path, config = self._feature_config(tmpdir)
+            candidate = self._candidate()
+            candidate.confidence = 95
+            candidate.rule_score = 95
+            candidate.risk_reward = 3.0
+            execution = record_trade_execution(config, candidate)
+            client = TestClient(create_app(config_path))
+
+            response = client.post(
+                "/api/trade-executions/close",
+                json={
+                    "tradeExecutionId": execution["id"],
+                    "status": "CLOSED",
+                    "pnl": -1.25,
+                    "closeReason": "manual",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "CLOSED")
+        self.assertEqual(payload["close_reason"], "manual")

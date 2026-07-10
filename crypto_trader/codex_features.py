@@ -1653,6 +1653,7 @@ def record_trade_execution(
         "gpt_confidence": candidate.confidence,
         "status": execution_status,
         "pnl": None,
+        "close_reason": None,
         "reject_reason": None if execution_status in {"OPEN", "LC_PENDING"} else validation.get("reason"),
         "closed_at": None if execution_status in {"OPEN", "LC_PENDING"} else created_at,
         "payload_json": json.dumps(payload, ensure_ascii=False),
@@ -1768,7 +1769,13 @@ def try_slot_refill(config: dict[str, Any], position_slot: int) -> dict[str, Any
     return {"refilled": False, "reason": "No candidate passed refill validation"}
 
 
-def close_trade_execution(config: dict[str, Any], trade_execution_id: int, status: str, pnl: float) -> dict[str, Any]:
+def close_trade_execution(
+    config: dict[str, Any],
+    trade_execution_id: int,
+    status: str,
+    pnl: float,
+    close_reason: str | None = None,
+) -> dict[str, Any]:
     closed_at = _iso_now()
     normalized_status = str(status or "CLOSED").upper()
     row = get_trade_execution(config, trade_execution_id)
@@ -1780,6 +1787,7 @@ def close_trade_execution(config: dict[str, Any], trade_execution_id: int, statu
         {
             "status": normalized_status,
             "pnl": pnl,
+            "close_reason": str(close_reason or "").strip() or None,
             "closed_at": closed_at,
             "updated_at": closed_at,
         },
@@ -1789,6 +1797,18 @@ def close_trade_execution(config: dict[str, Any], trade_execution_id: int, statu
     refresh_bunny_health_state(config)
     refill = try_slot_refill(config, _safe_int(payload.get("position_slot"), 0)) if payload.get("position_slot") else {"refilled": False, "reason": "No slot"}
     payload["slotRefill"] = refill
+    try:
+        from .notifier import send_telegram_message
+        from .reporting import format_trade_execution_close_message
+
+        send_telegram_message(
+            config,
+            format_trade_execution_close_message(config, payload),
+            with_buttons=False,
+            replace_previous=False,
+        )
+    except Exception:
+        pass
     return payload
 
 

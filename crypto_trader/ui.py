@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import threading
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
@@ -952,6 +953,141 @@ def _telegram_side_label(value: Any) -> str:
     return str(value or "-").upper() if value else "-"
 
 
+def _mini_reason_parts(value: Any) -> list[str]:
+    parts: list[str] = []
+    for raw in str(value or "").replace("; ", "\n").splitlines():
+        text = raw.strip().lstrip("-").strip()
+        if text:
+            parts.append(text)
+    return parts
+
+
+def _mini_reason_score(text: str) -> tuple[int, int]:
+    lower = text.lower()
+    score = 0
+    if "strategic " in lower:
+        score += 5
+    if "trend confirms" in lower or "aligned " in lower:
+        score += 4
+    if "uptrend" in lower or "downtrend" in lower:
+        score += 4
+    if "volume support" in lower or "strong volume" in lower:
+        score += 3
+    if "market regime" in lower:
+        score += 3
+    if "candlestick supports" in lower or "no critical warnings" in lower:
+        score += 1
+    if "local policy approved" in lower:
+        score += 1
+    if "hesitation lowers confidence" in lower:
+        score -= 1
+    if "no 4h data" in lower:
+        score -= 1
+    if "lacks volume support" in lower or "mixed 1h bearish candle" in lower:
+        score -= 2
+    return score, -len(text)
+
+
+def _mini_reason_vi(text: str) -> str:
+    source = str(text or "").strip()
+    if not source:
+        return ""
+    if match := re.search(
+        r"Aligned 1h/5m (bullish|bearish) with volume support",
+        source,
+        re.IGNORECASE,
+    ):
+        direction = "tăng" if match.group(1).lower() == "bullish" else "giảm"
+        return f"1h/5m đang đồng thuận xu hướng {direction} và có ủng hộ khối lượng."
+    if match := re.search(
+        r"RR only ([0-9.]+) and no 4h data, but local policy approved it\.?",
+        source,
+        re.IGNORECASE,
+    ):
+        return f"R:R chỉ {match.group(1)}, chưa có dữ liệu 4h, nhưng vẫn được local policy duyệt."
+    if match := re.search(
+        r"([A-Z0-9]+) has aligned 1h/5m uptrend and strong volume\.?",
+        source,
+        re.IGNORECASE,
+    ):
+        return f"{match.group(1).upper()} đang đồng thuận xu hướng tăng 1h/5m và khối lượng mạnh."
+    if match := re.search(
+        r"([A-Z0-9]+) has aligned 1h/5m downtrend and strong volume\.?",
+        source,
+        re.IGNORECASE,
+    ):
+        return f"{match.group(1).upper()} đang đồng thuận xu hướng giảm 1h/5m và khối lượng mạnh."
+    if match := re.search(
+        r"([A-Z0-9]+) lacks volume support and has mixed 1h bearish candle\.?",
+        source,
+        re.IGNORECASE,
+    ):
+        return f"{match.group(1).upper()} thiếu ủng hộ khối lượng, nến 1h còn lẫn tín hiệu giảm."
+    if match := re.search(
+        r"([A-Z0-9]+) lacks volume support and has mixed 1h bullish candle\.?",
+        source,
+        re.IGNORECASE,
+    ):
+        return f"{match.group(1).upper()} thiếu ủng hộ khối lượng, nến 1h còn lẫn tín hiệu tăng."
+    if match := re.search(r"Strategic long bias target 60/40 adds ([0-9.]+) point", source, re.IGNORECASE):
+        return f"Thiên hướng long chiến lược cộng thêm {match.group(1)} điểm."
+    if match := re.search(r"Strategic long bias requires stronger short evidence \(([0-9.]+) point edge\)", source, re.IGNORECASE):
+        return f"Thiên hướng long đang mạnh, short cần thêm lợi thế {match.group(1)} điểm."
+    if match := re.search(r"Market regime is neutral: breadth ([0-9.]+)% favors longs", source, re.IGNORECASE):
+        return f"Thị trường trung tính, độ rộng {match.group(1)}% nghiêng về long."
+    if match := re.search(r"Market regime is bullish: breadth ([0-9.]+)% favors longs", source, re.IGNORECASE):
+        return f"Thị trường nghiêng tăng, độ rộng {match.group(1)}% ủng hộ long."
+    if match := re.search(r"Market regime is bearish: breadth ([0-9.]+)% allows shorts", source, re.IGNORECASE):
+        return f"Thị trường nghiêng giảm, độ rộng {match.group(1)}% cho phép short."
+    if re.search(r"5M trend confirms long", source, re.IGNORECASE):
+        return "Xu hướng 5m xác nhận LONG."
+    if re.search(r"5M trend confirms short", source, re.IGNORECASE):
+        return "Xu hướng 5m xác nhận SHORT."
+    if re.search(r"1H trend confirms long", source, re.IGNORECASE):
+        return "Xu hướng 1h xác nhận LONG."
+    if re.search(r"1H trend confirms short", source, re.IGNORECASE):
+        return "Xu hướng 1h xác nhận SHORT."
+    if re.search(r"1M candlestick supports LONG", source, re.IGNORECASE):
+        return "Nến 1m đang ủng hộ LONG."
+    if re.search(r"1M candlestick supports SHORT", source, re.IGNORECASE):
+        return "Nến 1m đang ủng hộ SHORT."
+    if match := re.search(
+        r"Aligned (long|short) bias with 1h/5m (uptrend|downtrend), modest RR ([0-9.]+), and no critical warnings",
+        source,
+        re.IGNORECASE,
+    ):
+        side = match.group(1).upper()
+        trend = "xu hướng tăng 1h/5m" if match.group(2).lower() == "uptrend" else "xu hướng giảm 1h/5m"
+        return f"Mini thấy {side} đồng thuận với {trend}, R:R {match.group(3)}, chưa có cảnh báo lớn."
+    if re.search(r"no critical warnings", source, re.IGNORECASE):
+        return "Chưa có cảnh báo lớn."
+    if match := re.search(r"modest RR ([0-9.]+)", source, re.IGNORECASE):
+        return f"R:R đang ở mức {match.group(1)}."
+    if re.search(r"5m hesitation lowers confidence", source, re.IGNORECASE):
+        return "Khung 5m còn do dự nên độ tin cậy bị giảm."
+    compact = source
+    replacements = {
+        "Market regime is neutral": "Thị trường trung tính",
+        "Market regime is bullish": "Thị trường nghiêng tăng",
+        "Market regime is bearish": "Thị trường nghiêng giảm",
+        "favors longs": "nghiêng về long",
+        "allows shorts": "cho phép short",
+        "trend confirms long": "xác nhận LONG",
+        "trend confirms short": "xác nhận SHORT",
+        "no critical warnings": "không có cảnh báo lớn",
+        "hesitation lowers confidence": "còn do dự nên giảm độ tin cậy",
+    }
+    for old, new in replacements.items():
+        compact = compact.replace(old, new)
+    return compact[:180]
+
+
+def _top_mini_reasons(reasons: list[str], limit: int = 2) -> list[str]:
+    ranked = sorted(enumerate(reasons), key=lambda item: (-_mini_reason_score(item[1])[0], _mini_reason_score(item[1])[1], item[0]))
+    selected = sorted(ranked[:limit], key=lambda item: item[0])
+    return [_mini_reason_vi(text) for _, text in selected if _mini_reason_vi(text)]
+
+
 def _ai_symbol_detail_lines(item: dict[str, Any]) -> list[str]:
     details = item.get("candidate_details") if isinstance(item.get("candidate_details"), list) else []
     approved = [str(symbol) for symbol in item.get("approved_symbols") or [] if str(symbol)]
@@ -996,37 +1132,98 @@ def _ai_symbol_detail_lines(item: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _format_ai_call_history_view(config: dict[str, Any], *, expanded: bool = False) -> str:
+def _ai_symbol_detail_lines_v2(item: dict[str, Any]) -> list[str]:
+    details = item.get("candidate_details") if isinstance(item.get("candidate_details"), list) else []
+    approved = [str(symbol) for symbol in item.get("approved_symbols") or [] if str(symbol)]
+    scores = item.get("setup_scores") if isinstance(item.get("setup_scores"), dict) else {}
+    lines: list[str] = []
+    if details:
+        lines.append("3 cặp mini đã đánh giá:")
+        for index, detail in enumerate(details[:3], start=1):
+            if not isinstance(detail, dict):
+                continue
+            symbol = str(detail.get("symbol") or "-")
+            chosen = " ✅ mini gửi LC" if symbol in approved else ""
+            metric_parts = []
+            if detail.get("win_probability_pct") is not None:
+                metric_parts.append(f"Win {_telegram_number(detail.get('win_probability_pct'), '%')}")
+            if detail.get("confidence") is not None:
+                metric_parts.append(f"Tin cậy {_telegram_number(detail.get('confidence'))}")
+            if detail.get("risk_reward") is not None:
+                metric_parts.append(f"R:R {_telegram_number(detail.get('risk_reward'))}")
+            if scores.get(symbol) is not None:
+                metric_parts.append(f"Điểm mini {_telegram_number(scores.get(symbol))}")
+            lines.append(f"{index}. {symbol} | {_telegram_side_label(detail.get('side'))}{chosen}")
+            if metric_parts:
+                lines.append("   " + " | ".join(metric_parts))
+            reasons = [str(reason) for reason in detail.get("reasons") or [] if str(reason)]
+            short_reasons = _top_mini_reasons(reasons, limit=2)
+            if short_reasons:
+                lines.append("   Lý do gửi:")
+                for reason in short_reasons:
+                    lines.append(f"   - {reason}")
+        if approved:
+            lines.append("Mini chọn:")
+            for symbol in approved[:3]:
+                lines.append(f"- {symbol}")
+        return lines
+
+    symbols = [str(symbol) for symbol in item.get("symbols") or [] if str(symbol)]
+    if symbols:
+        lines.append("Cặp giao dịch:")
+        for index, symbol in enumerate(symbols[:5], start=1):
+            marker = " ✅ mini gửi LC" if symbol in approved else ""
+            lines.append(f"{index}. {symbol}{marker}")
+    return lines
+
+
+def _mini_comment_lines(reason: Any, *, limit: int = 2) -> list[str]:
+    return _top_mini_reasons(_mini_reason_parts(reason), limit=limit)
+
+
+def _ai_history_header(*, expanded: bool) -> str:
+    return (
+        "🤖 Lịch sử gọi AI gần nhất (15 lần, mới nhất ở dưới)"
+        if expanded
+        else "🤖 Lịch sử gọi AI gần nhất (5 lần, mới nhất ở dưới)"
+    )
+
+
+def _format_ai_call_history_entry(config: dict[str, Any], item: dict[str, Any]) -> str:
+    role = str(item.get("role") or "ai").upper()
+    created_at = str(item.get("created_at") or "")
+    try:
+        created_label = datetime.fromisoformat(created_at.replace("Z", "+00:00")).astimezone(
+            _system_timezone(config)
+        ).strftime("%d/%m/%Y %H:%M:%S VN")
+    except ValueError:
+        created_label = created_at[:16] or "-"
+    lines = [
+        f"🕒 {created_label}",
+        f"Vai trò: {role}",
+        f"Model: {item.get('model', '-')}",
+        f"Trạng thái: {item.get('status', '-')}",
+    ]
+    lines.extend(_ai_symbol_detail_lines_v2(item))
+    reason = str(item.get("reason") or "")
+    if reason:
+        lines.append("Nhận xét của mini:")
+        for text in _mini_comment_lines(reason, limit=2):
+            lines.append(f"- {text[:180]}")
+    return "\n".join(lines)
+
+
+def ai_call_history_timeline_messages(config: dict[str, Any], *, expanded: bool = False) -> list[str]:
     limit = 15 if expanded else 5
     items = recent_ai_call_history(config, limit=limit)
+    return [_format_ai_call_history_entry(config, item) for item in items if isinstance(item, dict)]
+
+
+def _format_ai_call_history_view(config: dict[str, Any], *, expanded: bool = False) -> str:
+    items = ai_call_history_timeline_messages(config, expanded=expanded)
     if not items:
         return "🤖 AI: chưa có lịch sử gọi GPT nào được lưu."
-    title = "🤖 Lịch sử gọi AI gần nhất"
-    title += " (15 lần, mới nhất ở dưới)" if expanded else " (5 lần, mới nhất ở dưới)"
-    lines = [title]
-    for item in items:
-        role = str(item.get("role") or "ai").upper()
-        created_at = str(item.get("created_at") or "")
-        try:
-            created_label = datetime.fromisoformat(created_at.replace("Z", "+00:00")).astimezone(
-                _system_timezone(config)
-            ).strftime("%d/%m/%Y %H:%M:%S VN")
-        except ValueError:
-            created_label = created_at[:16] or "-"
-        lines.append("")
-        lines.append(f"🕒 {created_label}")
-        lines.append(f"Vai trò: {role}")
-        lines.append(f"Model: {item.get('model', '-')}")
-        lines.append(f"Trạng thái: {item.get('status', '-')}")
-        lines.extend(_ai_symbol_detail_lines(item))
-        reason = str(item.get("reason") or "")
-        if reason:
-            lines.append("Lý do AI:")
-            for part in reason.replace("; ", "\n").splitlines():
-                text = part.strip()
-                if text:
-                    lines.append(f"- {text[:220]}")
-    return "\n".join(lines)
+    return "\n\n".join([_ai_history_header(expanded=expanded), *items])
 
 def _telegram_number(value: Any, suffix: str = "") -> str:
     try:
@@ -1331,6 +1528,75 @@ def _send_timeline_sequence(
         )
 
 
+def _send_ai_history_sequence(
+    config: dict[str, Any],
+    chat_id: Any,
+    *,
+    thread_id: Any,
+    expanded: bool,
+    message_id: Any | None = None,
+) -> None:
+    timeline_messages = ai_call_history_timeline_messages(config, expanded=expanded)
+    has_more = len(recent_ai_call_history(config, limit=6)) > 5 if not expanded else False
+    reply_markup = _ai_history_keyboard(expanded=expanded, has_more=has_more)
+    if not timeline_messages:
+        empty_text = "🤖 AI: chưa có lịch sử gọi GPT nào được lưu."
+        if message_id is not None:
+            edited = edit_telegram_chat_message(
+                config,
+                chat_id,
+                message_id,
+                empty_text,
+                reply_markup=reply_markup,
+            )
+            if edited:
+                return
+        send_telegram_chat_message(
+            config,
+            chat_id,
+            empty_text,
+            message_thread_id=thread_id,
+            with_buttons=False,
+            reply_markup=reply_markup,
+        )
+        return
+    header_text = _ai_history_header(expanded=expanded)
+    if message_id is not None:
+        edited = edit_telegram_chat_message(
+            config,
+            chat_id,
+            message_id,
+            header_text,
+            reply_markup=reply_markup,
+        )
+        if not edited:
+            send_telegram_chat_message(
+                config,
+                chat_id,
+                header_text,
+                message_thread_id=thread_id,
+                with_buttons=False,
+                reply_markup=reply_markup,
+            )
+    else:
+        send_telegram_chat_message(
+            config,
+            chat_id,
+            header_text,
+            message_thread_id=thread_id,
+            with_buttons=False,
+            reply_markup=reply_markup,
+        )
+    for text in timeline_messages:
+        send_telegram_chat_message(
+            config,
+            chat_id,
+            text,
+            message_thread_id=thread_id,
+            with_buttons=False,
+        )
+
+
 def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], config_path: str | Path, app: FastAPI | None = None) -> None:
     callback = update.get("callback_query")
     if isinstance(callback, dict):
@@ -1397,6 +1663,15 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
                 header_text="📋 Thông báo Chưa duyệt",
                 timeline_messages=timeline_messages,
                 empty_text=empty_text,
+            )
+            return
+        if action in {"view_ai", "view_ai_more"}:
+            _send_ai_history_sequence(
+                config,
+                chat_id,
+                thread_id=thread_id,
+                expanded=action == "view_ai_more",
+                message_id=message_id,
             )
             return
         response_config, response_text, reply_markup = _telegram_cached_value(
@@ -1600,6 +1875,14 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
             header_text="📋 Thông báo Chưa duyệt",
             timeline_messages=undecided_notification_timeline_messages(config),
             empty_text=format_undecided_lc_view(config),
+        )
+        return
+    if action == "view_ai":
+        _send_ai_history_sequence(
+            config,
+            chat_id,
+            thread_id=message.get("message_thread_id"),
+            expanded=False,
         )
         return
     response_config, response_text, reply_markup = _telegram_action_response(config, action, config_path, app)
@@ -2674,8 +2957,9 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
         if status not in {"WIN", "LOSS", "BREAKEVEN", "CLOSED"}:
             raise HTTPException(status_code=400, detail="status must be WIN, LOSS, BREAKEVEN, or CLOSED")
         pnl = _safe_float(payload.get("pnl"), 0.0)
+        close_reason = payload.get("closeReason", payload.get("close_reason"))
         try:
-            return close_trade_execution(config, trade_execution_id, status, pnl)
+            return close_trade_execution(config, trade_execution_id, status, pnl, None if close_reason is None else str(close_reason))
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

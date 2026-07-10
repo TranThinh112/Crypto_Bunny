@@ -380,6 +380,30 @@ class LcPipelineTest(TestCase):
         self.assertTrue(result["created_four_hour"])
         self.assertEqual([row["symbol"] for row in result["two_hour_event"]["approved"]], ["AAA/USDT:USDT", "BBB/USDT:USDT"])
 
+    @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
+    def test_four_hour_does_not_run_on_non_four_hour_boundary(self, recheck_rows) -> None:
+        config = self._config()
+        start = datetime(2026, 7, 6, 22, 5, tzinfo=timezone.utc)
+        one_hour_candidates = [
+            _candidate("AAA/USDT:USDT", 58, volume=3),
+            _candidate("BBB/USDT:USDT", 57, volume=2),
+        ]
+        recheck_rows.return_value = (
+            [
+                {**_saved_row("AAA/USDT:USDT", 58, volume=3), "source_slot": "1h", "source_index": 1, "source_time": start.isoformat()},
+                {**_saved_row("BBB/USDT:USDT", 57, volume=2), "source_slot": "1h", "source_index": 1, "source_time": start.isoformat()},
+            ],
+            {"input_count": 2, "refreshed_count": 2, "dropped": [], "warnings": [], "sync_complete": True, "synchronized_count": 2},
+        )
+
+        update_lc_internal_pipeline(config, one_hour_candidates, now=start)
+        result = update_lc_internal_pipeline(config, [], now=start + timedelta(hours=1))
+
+        self.assertTrue(result["created_two_hour"])
+        self.assertFalse(result["created_four_hour"])
+        self.assertEqual(result["two_hour_slot"], "2026-07-07T06:00:00+07:00")
+        self.assertEqual(result["four_hour_slot"], "2026-07-07T04:00:00+07:00")
+
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_one_hour_summary_is_sent_only_after_state_save_succeeds(self, send_message) -> None:
         config = self._config()
@@ -443,7 +467,7 @@ class LcPipelineTest(TestCase):
     def test_mini_pool_uses_latest_four_hour_pairs(self, recheck_rows) -> None:
         config = self._config()
         config["ai"]["internal"]["lc_pipeline_recheck_interval_minutes"] = 999
-        start = datetime(2026, 7, 6, 0, 5, tzinfo=timezone.utc)
+        start = datetime(2026, 7, 6, 2, 5, tzinfo=timezone.utc)
         update_lc_internal_pipeline(
             config,
             [_candidate("AAA/USDT:USDT", 64), _candidate("BBB/USDT:USDT", 63), _candidate("CCC/USDT:USDT", 62)],
@@ -618,7 +642,7 @@ class LcPipelineTest(TestCase):
         config["ai"]["internal"]["lc_pipeline_two_hour_min_win_probability_pct"] = 62
         config["ai"]["internal"]["lc_pipeline_four_hour_min_win_probability_pct"] = 63
         config["ai"]["internal"]["lc_pipeline_recheck_interval_minutes"] = 999
-        start = datetime(2026, 7, 6, 0, 5, tzinfo=timezone.utc)
+        start = datetime(2026, 7, 6, 2, 5, tzinfo=timezone.utc)
 
         hour_one = update_lc_internal_pipeline(
             config,
@@ -754,7 +778,7 @@ class LcPipelineTest(TestCase):
     def test_four_hour_uses_rechecked_win_rate_before_selecting_top_three(self, recheck_rows) -> None:
         config = self._config()
         config["ai"]["internal"]["lc_pipeline_recheck_interval_minutes"] = 999
-        start = datetime(2026, 7, 6, 0, 5, tzinfo=timezone.utc)
+        start = datetime(2026, 7, 6, 2, 5, tzinfo=timezone.utc)
         update_lc_internal_pipeline(
             config,
             [_candidate("AAA/USDT:USDT", 90), _candidate("BBB/USDT:USDT", 89), _candidate("CCC/USDT:USDT", 88)],
@@ -771,14 +795,6 @@ class LcPipelineTest(TestCase):
                     _saved_row("FFF/USDT:USDT", 85),
                 ],
                 {"refreshed_count": 6, "dropped": [], "warnings": []},
-            ),
-            (
-                [
-                    _saved_row("AAA/USDT:USDT", 99, state="LC_NOI_BO"),
-                    _saved_row("BBB/USDT:USDT", 98, state="LC_NOI_BO"),
-                    _saved_row("CCC/USDT:USDT", 97, state="LC_NOI_BO"),
-                ],
-                {"refreshed_count": 3, "dropped": [], "warnings": []},
             ),
             (
                 [
@@ -907,7 +923,7 @@ class LcPipelineTest(TestCase):
     def test_pipeline_stores_hourly_two_hour_four_hour_history_with_lineage(self, recheck_rows) -> None:
         config = self._config()
         config["ai"]["internal"]["lc_pipeline_recheck_interval_minutes"] = 999
-        start = datetime(2026, 7, 6, 0, 5, tzinfo=timezone.utc)
+        start = datetime(2026, 7, 6, 2, 5, tzinfo=timezone.utc)
         recheck_rows.side_effect = [
             (
                 [
@@ -979,21 +995,21 @@ class LcPipelineTest(TestCase):
         state = json.loads(raw_state or "{}")
         self.assertEqual(state["daily_one_hour_counter"], 4)
         self.assertEqual(state["daily_two_hour_counter"], 2)
-        self.assertEqual(state["four_hour_counter"], 2)
+        self.assertEqual(state["four_hour_counter"], 1)
         self.assertEqual([event["daily_index"] for event in state["one_hour_history"]], [1, 2, 3, 4])
         self.assertEqual([event["daily_index"] for event in state["two_hour_history"]], [1, 2])
-        self.assertEqual([event["index"] for event in state["four_hour_history"]], [1, 2])
+        self.assertEqual([event["index"] for event in state["four_hour_history"]], [1])
         approved_four_hour = state["four_hour_history"][-1]["approved"]
         self.assertEqual([row["symbol"] for row in approved_four_hour], ["JJJ/USDT:USDT", "KKK/USDT:USDT", "LLL/USDT:USDT"])
         self.assertEqual(approved_four_hour[0]["source_slot"], "4h")
-        self.assertEqual(approved_four_hour[0]["source_index"], 2)
-        self.assertEqual(approved_four_hour[0]["origin_source_slot"], "2h")
-        self.assertEqual(approved_four_hour[0]["origin_source_index"], 2)
+        self.assertEqual(approved_four_hour[0]["source_index"], 1)
+        self.assertEqual(approved_four_hour[0]["origin_source_slot"], "4h")
+        self.assertEqual(approved_four_hour[0]["origin_source_index"], 1)
         undecided_by_symbol = {row["symbol"]: row for row in state["undecided"]}
-        self.assertEqual(undecided_by_symbol["DDD/USDT:USDT"]["source_slot"], "4h")
-        self.assertEqual(undecided_by_symbol["EEE/USDT:USDT"]["source_slot"], "4h")
-        self.assertEqual(undecided_by_symbol["FFF/USDT:USDT"]["source_slot"], "4h")
-        self.assertEqual(undecided_by_symbol["DDD/USDT:USDT"]["source_index"], 2)
+        self.assertEqual(undecided_by_symbol["GGG/USDT:USDT"]["source_slot"], "4h")
+        self.assertEqual(undecided_by_symbol["HHH/USDT:USDT"]["source_slot"], "4h")
+        self.assertEqual(undecided_by_symbol["III/USDT:USDT"]["source_slot"], "4h")
+        self.assertEqual(undecided_by_symbol["GGG/USDT:USDT"]["source_index"], 1)
 
     def test_history_cleanup_keeps_active_internal_state(self) -> None:
         config = self._config()
@@ -1301,6 +1317,99 @@ class LcPipelineTest(TestCase):
         saved_state = json.loads(raw_state or "{}")
         self.assertEqual(len(saved_state["undecided"]), 6)
 
+    @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_undecided_recheck_notification_does_not_show_same_symbol_as_kept_and_dropped(
+        self,
+        send_message,
+        recheck_rows,
+    ) -> None:
+        config = self._config()
+        config["ai"]["internal"]["lc_pipeline_notify_one_hour_summary"] = False
+        config["ai"]["internal"]["lc_pipeline_notify_two_hour_summary"] = False
+        config["ai"]["internal"]["lc_pipeline_notify_mini_pool_summary"] = False
+        state = {
+            "state_version": 3,
+            "day_key": "2026-07-06",
+            "undecided": [
+                {**_saved_row("XRP/USDT:USDT", 61, state="CHUA_DUYET"), "source_slot": "1h", "source_index": 4},
+            ],
+        }
+        set_journal_state(config, "lc_internal_pipeline_state", json.dumps(state, ensure_ascii=False))
+        recheck_rows.return_value = (
+            [],
+            {
+                "refreshed_count": 0,
+                "dropped": [
+                    {
+                        "symbol": "XRP/USDT:USDT",
+                        "old_side": "long",
+                        "reason": "khong con setup hop le trong du lieu moi nhat",
+                    }
+                ],
+                "warnings": [],
+            },
+        )
+
+        update_lc_internal_pipeline(config, [], now=datetime(2026, 7, 6, 2, 0, tzinfo=timezone.utc))
+
+        self.assertEqual(send_message.call_count, 1)
+        message = send_message.call_args.args[1]
+        self.assertIn("Kept 0 | Dropped 1 | Promoted 0", message)
+        self.assertIn("0", message)
+        self.assertIn("XRP/USDT:USDT", message)
+        self.assertEqual(message.count("XRP/USDT:USDT"), 1)
+        self.assertIn("Win 61.00% -> 0.00%", message)
+        self.assertIn("1h #4", message)
+        self.assertIn("2h00m", message)
+
+    @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_undecided_recheck_notification_uses_enriched_dropped_rows_and_hides_raw_duplicates(
+        self,
+        send_message,
+        recheck_rows,
+    ) -> None:
+        config = self._config()
+        config["ai"]["internal"]["lc_pipeline_notify_one_hour_summary"] = False
+        config["ai"]["internal"]["lc_pipeline_notify_two_hour_summary"] = False
+        config["ai"]["internal"]["lc_pipeline_notify_mini_pool_summary"] = False
+        state = {
+            "state_version": 3,
+            "day_key": "2026-07-06",
+            "undecided": [
+                {**_saved_row("ETC/USDT:USDT", 61, state="CHUA_DUYET"), "source_slot": "1h", "source_index": 11},
+                {**_saved_row("XRP/USDT:USDT", 60, state="CHUA_DUYET"), "source_slot": "1h", "source_index": 10},
+            ],
+        }
+        set_journal_state(config, "lc_internal_pipeline_state", json.dumps(state, ensure_ascii=False))
+        recheck_rows.return_value = (
+            [
+                {**_saved_row("ETC/USDT:USDT", 61, state="CHUA_DUYET"), "source_slot": "1h", "source_index": 11},
+                {**_saved_row("XRP/USDT:USDT", 60, state="CHUA_DUYET"), "source_slot": "1h", "source_index": 10},
+            ],
+            {
+                "refreshed_count": 2,
+                "dropped": [
+                    {"symbol": "ETC/USDT:USDT", "old_side": "long", "reason": "stale raw duplicate"},
+                    {"symbol": "XRP/USDT:USDT", "old_side": "long", "reason": "stale raw duplicate"},
+                ],
+                "warnings": [],
+            },
+        )
+
+        update_lc_internal_pipeline(config, [], now=datetime(2026, 7, 6, 2, 0, tzinfo=timezone.utc))
+
+        self.assertEqual(send_message.call_count, 1)
+        message = send_message.call_args.args[1]
+        self.assertIn("Kept 2 | Dropped 0 | Promoted 0", message)
+        self.assertIn("🟢 Giữ lại:", message)
+        self.assertIn("ETC/USDT:USDT", message)
+        self.assertIn("XRP/USDT:USDT", message)
+        self.assertIn("Gốc 🔵 1h #11", message)
+        self.assertIn("Gốc 🔵 1h #10", message)
+        self.assertIn("🔴 Bị loại: 0", message)
+
     def test_mini_pool_does_not_fallback_without_internal_lc(self) -> None:
         config = self._config()
         current = [
@@ -1537,7 +1646,7 @@ class LcPipelineTest(TestCase):
         config["ai"]["internal"]["lc_pipeline_notify_two_hour_summary"] = False
         config["ai"]["internal"]["lc_pipeline_notify_mini_pool_summary"] = False
         config["ai"]["internal"]["lc_pipeline_recheck_interval_minutes"] = 999
-        start = datetime(2026, 7, 7, 0, 5, tzinfo=timezone.utc)
+        start = datetime(2026, 7, 7, 2, 5, tzinfo=timezone.utc)
         update_lc_internal_pipeline(
             config,
             [_candidate("AAA/USDT:USDT", 64), _candidate("BBB/USDT:USDT", 63), _candidate("CCC/USDT:USDT", 62)],
@@ -1617,30 +1726,27 @@ class LcPipelineTest(TestCase):
 
         self.assertIn("mỗi khối là 1 thông báo đầy đủ", message)
         blocks = message.split("\n\n")
-        self.assertGreaterEqual(len(blocks), 11)
+        self.assertGreaterEqual(len(blocks), 10)
         self.assertEqual(blocks[0], "🔔 Thông báo nội bộ")
-        self.assertTrue(blocks[2].startswith("🔵 1h top 3 setup\n07/07/26 07:05:00"))
-        self.assertTrue(blocks[3].startswith("🔵 1h top 3 setup\n07/07/26 08:05:00"))
-        self.assertTrue(blocks[4].startswith("🟡 #1 LC nội bộ tổng hợp 2h\n07/07/26 08:05:00"))
-        self.assertTrue(blocks[5].startswith("🔴 #1 LC nội bộ tổng hợp 4h\n07/07/26 08:05:00"))
-        self.assertTrue(blocks[6].startswith("🔵 1h top 3 setup\n07/07/26 09:05:00"))
-        self.assertTrue(blocks[7].startswith("🔵 1h top 3 setup\n07/07/26 10:05:00"))
-        self.assertTrue(blocks[8].startswith("🟡 #2 LC nội bộ tổng hợp 2h\n07/07/26 10:05:00"))
-        self.assertTrue(blocks[9].startswith("🔴 #2 LC nội bộ tổng hợp 4h\n07/07/26 10:05:00"))
-        self.assertTrue(blocks[10].startswith("🟣 Mini #1\n07/07/26 10:15:00"))
-        self.assertIn("Khung 🔵 1h: #1 (07:05)", blocks[2])
-        self.assertIn("Khung 🟡 2h: #1 (08:05)", blocks[4])
-        self.assertIn("Gộp từ: 🔵 1h #1 (07:05), 🔵 1h #2 (08:05)", blocks[4])
-        self.assertIn("Gốc 🔵 1h #2 (08:05)", blocks[4])
-        self.assertIn("Khung 🔴 4h: #1 (08:05)", blocks[5])
-        self.assertIn("Gộp từ: 🟡 2h #1 (08:05)", blocks[5])
-        self.assertIn("Khung 🔴 4h: #2 (10:05)", blocks[9])
-        self.assertIn("Gộp từ: 🟡 2h #1 (08:05), 🟡 2h #2 (10:05)", blocks[9])
-        self.assertIn("Gốc 🔵 1h #4 (10:05)", blocks[9])
-        self.assertIn("Mini chọn: 2/3 cặp", blocks[10])
+        self.assertTrue(blocks[2].startswith("🔵 1h top 3 setup\n07/07/26 09:05:00"))
+        self.assertTrue(blocks[3].startswith("🔵 1h top 3 setup\n07/07/26 10:05:00"))
+        self.assertTrue(blocks[4].startswith("🟡 #1 LC nội bộ tổng hợp 2h\n07/07/26 10:05:00"))
+        self.assertTrue(blocks[5].startswith("🔵 1h top 3 setup\n07/07/26 11:05:00"))
+        self.assertTrue(blocks[6].startswith("🔵 1h top 3 setup\n07/07/26 12:05:00"))
+        self.assertTrue(blocks[7].startswith("🟡 #2 LC nội bộ tổng hợp 2h\n07/07/26 12:05:00"))
+        self.assertTrue(blocks[8].startswith("🔴 #1 LC nội bộ tổng hợp 4h\n07/07/26 12:05:00"))
+        self.assertTrue(blocks[9].startswith("🟣 Mini #1\n07/07/26 12:15:00"))
+        self.assertIn("Khung 🔵 1h: #1 (09:05)", blocks[2])
+        self.assertIn("Khung 🟡 2h: #1 (10:05)", blocks[4])
+        self.assertIn("Gộp từ: 🔵 1h #1 (09:05), 🔵 1h #2 (10:05)", blocks[4])
+        self.assertIn("Gốc 🔵 1h #2 (10:05)", blocks[4])
+        self.assertIn("Khung 🔴 4h: #1 (12:05)", blocks[8])
+        self.assertIn("Gộp từ: 🟡 2h #1 (10:05), 🟡 2h #2 (12:05)", blocks[8])
+        self.assertIn("Gốc 🔵 1h #4 (12:05)", blocks[8])
+        self.assertIn("Mini chọn: 2/3 cặp", blocks[9])
         self.assertIn("AAA/USDT:USDT", blocks[2])
         self.assertIn("DDD/USDT:USDT", blocks[4])
-        self.assertIn("JJJ/USDT:USDT", blocks[9])
+        self.assertIn("JJJ/USDT:USDT", blocks[8])
         send_message.assert_not_called()
 
     @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
@@ -1650,7 +1756,7 @@ class LcPipelineTest(TestCase):
         config["ai"]["internal"]["lc_pipeline_notify_two_hour_summary"] = True
         config["ai"]["internal"]["lc_pipeline_notify_mini_pool_summary"] = True
         config["ai"]["internal"]["lc_pipeline_recheck_interval_minutes"] = 999
-        start = datetime(2026, 7, 6, 0, 5, tzinfo=timezone.utc)
+        start = datetime(2026, 7, 6, 2, 5, tzinfo=timezone.utc)
 
         update_lc_internal_pipeline(
             config,
@@ -1729,9 +1835,9 @@ class LcPipelineTest(TestCase):
         )
 
         messages = "\n".join(call.args[1] for call in send_message.call_args_list)
-        self.assertEqual(send_message.call_count, 5)
+        self.assertEqual(send_message.call_count, 4)
         self.assertIn("LC nội bộ tổng hợp 2h", messages)
         self.assertIn("LC nội bộ tổng hợp 4h", messages)
-        self.assertIn("Gốc 🔵 1h #2 (08:05)", messages)
-        self.assertIn("Gốc 🔵 1h #4 (10:05)", messages)
+        self.assertIn("Khung 🟡 2h: #2 (12:05)", messages)
+        self.assertIn("Khung 🔴 4h: #1 (12:05)", messages)
         self.assertIn("Mini #1", messages)
