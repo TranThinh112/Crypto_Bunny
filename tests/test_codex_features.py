@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
 
-from crypto_trader.codex_features import call_openai_json
+from crypto_trader.codex_features import ai_trade_decision_stats, call_openai_json
 
 
 class _FakeOpenAIResponse:
@@ -132,3 +132,45 @@ class CodexFeaturesTest(TestCase):
             )
 
         urlopen.assert_not_called()
+
+    @patch("crypto_trader.codex_features.list_ai_trade_decision_rows")
+    def test_ai_trade_decision_stats_uses_lightweight_rows_without_json_parsing(self, list_rows) -> None:
+        list_rows.return_value = [
+            {
+                "decision": "ENTER_LONG",
+                "trade_status": "WIN",
+                "confidence": 91,
+                "pnl": 1.25,
+                "reason_json": "{not-valid-json",
+                "snapshot_json": "{not-valid-json",
+            },
+            {
+                "decision": "ENTER_SHORT",
+                "trade_status": "LOSS",
+                "confidence": 83,
+                "pnl": -0.5,
+                "reason_json": "{still-invalid",
+                "snapshot_json": "{still-invalid",
+            },
+            {
+                "decision": "NO_TRADE",
+                "trade_status": None,
+                "confidence": None,
+                "pnl": 0,
+            },
+        ]
+
+        stats = ai_trade_decision_stats(self._config())
+
+        self.assertEqual(stats["totalDecisions"], 3)
+        self.assertEqual(stats["longCount"], 1)
+        self.assertEqual(stats["shortCount"], 1)
+        self.assertEqual(stats["noTradeCount"], 1)
+        self.assertEqual(stats["longPercent"], 33.33)
+        self.assertEqual(stats["shortPercent"], 33.33)
+        self.assertEqual(stats["winrateLong"], 100.0)
+        self.assertEqual(stats["winrateShort"], 0.0)
+        self.assertEqual(stats["avgConfidenceLong"], 91.0)
+        self.assertEqual(stats["avgConfidenceShort"], 83.0)
+        self.assertEqual(stats["profitFactorLong"], 999.0)
+        self.assertEqual(stats["profitFactorShort"], 0.0)

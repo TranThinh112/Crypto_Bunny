@@ -1152,7 +1152,7 @@ def recent_ai_trade_decisions(config: dict[str, Any], limit: int = 50) -> list[d
 
 
 def ai_trade_decision_stats(config: dict[str, Any]) -> dict[str, Any]:
-    rows = recent_ai_trade_decisions(config, limit=5000)
+    rows = list_ai_trade_decision_rows(config, limit=5000)
     total = len(rows)
     long_rows = [row for row in rows if row.get("decision") == "ENTER_LONG"]
     short_rows = [row for row in rows if row.get("decision") == "ENTER_SHORT"]
