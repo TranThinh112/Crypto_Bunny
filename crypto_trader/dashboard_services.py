@@ -248,6 +248,15 @@ def _current_system_checklist_snapshot(config: dict[str, Any]) -> dict[str, Any]
     return payload if isinstance(payload, dict) else None
 
 
+def _latest_system_checklist_snapshot(config: dict[str, Any]) -> dict[str, Any] | None:
+    current = _current_system_checklist_snapshot(config)
+    if current is not None:
+        return current
+    history = system_checklist_history(config, limit=1)
+    latest = history[0] if history else None
+    return latest if isinstance(latest, dict) else None
+
+
 def _snapshot_age_seconds(payload: dict[str, Any]) -> float | None:
     created_at = _parse_time(payload.get("created_at"))
     if created_at is None:
@@ -946,12 +955,11 @@ def system_checklist_payload(
     force_refresh: bool = False,
     max_age_seconds: int | None = SYSTEM_CHECKLIST_DEFAULT_TTL_SECONDS,
 ) -> dict[str, Any]:
+    _ = max_age_seconds
     if not force_refresh:
-        snapshot = _current_system_checklist_snapshot(config)
+        snapshot = _latest_system_checklist_snapshot(config)
         if snapshot is not None:
-            age_seconds = _snapshot_age_seconds(snapshot)
-            if max_age_seconds is None or age_seconds is None or age_seconds <= max(0, int(max_age_seconds)):
-                return snapshot
+            return snapshot
     return refresh_system_checklist_snapshot(config, automation=automation)
 
 
