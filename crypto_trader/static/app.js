@@ -1139,11 +1139,11 @@ function moduleComparableValue(value) {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   const text = String(value ?? "").trim();
   if (!text || text === "-") return null;
-  if (text.toLowerCase() === "true") return 1;
-  if (text.toLowerCase() === "false") return 0;
-  const match = text.replace(/,/g, "").match(/-?\d+(\.\d+)?/);
-  if (!match) return null;
-  const parsed = Number(match[0]);
+  const normalized = text.replace(/,/g, "");
+  if (normalized.toLowerCase() === "true") return 1;
+  if (normalized.toLowerCase() === "false") return 0;
+  if (!/^-?\d+(\.\d+)?(%|x)?$/i.test(normalized)) return null;
+  const parsed = Number(normalized.replace(/(%|x)$/i, ""));
   return Number.isFinite(parsed) ? parsed : null;
 }
 
@@ -1152,11 +1152,11 @@ function moduleNumericValue(value) {
   if (typeof value === "number" && Number.isFinite(value)) return Math.abs(value);
   const text = String(value ?? "").trim();
   if (!text || text === "-") return null;
-  if (text.toLowerCase() === "true") return 1;
-  if (text.toLowerCase() === "false") return 0;
-  const match = text.replace(/,/g, "").match(/-?\d+(\.\d+)?/);
-  if (!match) return null;
-  const parsed = Number(match[0]);
+  const normalized = text.replace(/,/g, "");
+  if (normalized.toLowerCase() === "true") return 1;
+  if (normalized.toLowerCase() === "false") return 0;
+  if (!/^-?\d+(\.\d+)?(%|x)?$/i.test(normalized)) return null;
+  const parsed = Number(normalized.replace(/(%|x)$/i, ""));
   return Number.isFinite(parsed) ? Math.abs(parsed) : null;
 }
 
@@ -1214,7 +1214,7 @@ function moduleDeltaInfo(module, row) {
   const previousValue = moduleComparableValue(modulePreviousStatRow(module, row)?.value);
   const suffix = moduleDeltaSuffix(row);
   if (currentValue === null || previousValue === null) {
-    return { state: "flat", text: `0${suffix}` };
+    return { state: "na", text: "Chua co moc" };
   }
   const delta = currentValue - previousValue;
   if (Math.abs(delta) < 1e-9) {
@@ -2416,7 +2416,10 @@ async function loadSystemChecklist(date = "") {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const payload = await res.json();
-  state.previousSystemChecklistPayload = state.lastSystemChecklistPayload;
+  const backendPreviousPayload = payload && typeof payload.previous_snapshot === "object" ? payload.previous_snapshot : null;
+  const lastPayload = state.lastSystemChecklistPayload;
+  const sameDateAsLast = Boolean(lastPayload && payload?.date && lastPayload.date === payload.date);
+  state.previousSystemChecklistPayload = sameDateAsLast && lastPayload ? lastPayload : (backendPreviousPayload || lastPayload);
   state.lastSystemChecklistPayload = payload;
   renderSystemChecklist(payload);
   if (refs.systemChecklistDate && payload.date) refs.systemChecklistDate.value = payload.date;

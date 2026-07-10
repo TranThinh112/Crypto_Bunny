@@ -51,6 +51,7 @@ from .codex_features import (
     validate_entry,
 )
 from .dashboard_services import (
+    attach_previous_system_checklist_snapshot,
     analytics_dashboard,
     refresh_system_checklist_snapshot,
     replay_dashboard_payload,
@@ -2583,7 +2584,7 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
             snapshot = dashboard_system_checklist_snapshot(config, date)
             if snapshot is None:
                 raise HTTPException(status_code=404, detail=f"No system checklist snapshot for {date}")
-            return snapshot
+            return attach_previous_system_checklist_snapshot(config, snapshot)
         return system_checklist_payload(
             config,
             automation=_automation_status_payload(app),

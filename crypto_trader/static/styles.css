@@ -1797,6 +1797,11 @@ tr:last-child td {
   background: #7c4dff;
 }
 
+.module-chart-delta.na {
+  color: #32414b;
+  background: #dbe5ec;
+}
+
 .module-chart-legend-item p {
   margin: 3px 0 0;
   color: var(--muted);

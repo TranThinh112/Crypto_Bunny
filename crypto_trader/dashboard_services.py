@@ -37,6 +37,7 @@ from .storage import (
 )
 
 SYSTEM_CHECKLIST_CURRENT_KEY = "system_checklist_current"
+SYSTEM_CHECKLIST_PREVIOUS_KEY = "system_checklist_previous"
 SYSTEM_CHECKLIST_DEFAULT_TTL_SECONDS = 300
 DASHBOARD_SNAPSHOT_PREFIX = "dashboard_snapshot"
 DASHBOARD_DEFAULT_TTL_SECONDS = 300
@@ -322,9 +323,74 @@ def _get_or_build_cached_payload(
 
 
 def _persist_system_checklist_snapshot(config: dict[str, Any], payload: dict[str, Any]) -> None:
-    body = json.dumps(payload, ensure_ascii=False)
+    clean_payload = _strip_system_checklist_comparison_snapshot(payload)
+    current = _current_system_checklist_snapshot(config)
+    current_clean = _strip_system_checklist_comparison_snapshot(current) if isinstance(current, dict) else None
+    current_created_at = str((current_clean or {}).get("created_at") or "")
+    next_created_at = str(clean_payload.get("created_at") or "")
+    if current_clean and (current_created_at != next_created_at or current_clean != clean_payload):
+        set_journal_state(config, SYSTEM_CHECKLIST_PREVIOUS_KEY, json.dumps(current_clean, ensure_ascii=False))
+    body = json.dumps(clean_payload, ensure_ascii=False)
     set_journal_state(config, SYSTEM_CHECKLIST_CURRENT_KEY, body)
-    set_journal_state(config, f"system_checklist:{payload['date']}", body)
+    set_journal_state(config, f"system_checklist:{clean_payload['date']}", body)
+
+
+def _strip_system_checklist_comparison_snapshot(payload: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    clean_payload = dict(payload)
+    clean_payload.pop("previous_snapshot", None)
+    return clean_payload
+
+
+def _raw_previous_system_checklist_snapshot(config: dict[str, Any]) -> dict[str, Any] | None:
+    raw = get_journal_state(config, SYSTEM_CHECKLIST_PREVIOUS_KEY)
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _fallback_previous_system_checklist_snapshot(
+    config: dict[str, Any],
+    current_payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    current_date = str(current_payload.get("date") or "")
+    current_created_at = str(current_payload.get("created_at") or "")
+    history = system_checklist_history(config, limit=366)
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        item_date = str(item.get("date") or "")
+        item_created_at = str(item.get("created_at") or "")
+        if current_created_at and item_created_at == current_created_at:
+            continue
+        if current_date and item_date == current_date:
+            continue
+        return _strip_system_checklist_comparison_snapshot(item)
+    return None
+
+
+def attach_previous_system_checklist_snapshot(
+    config: dict[str, Any],
+    payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    clean_payload = _strip_system_checklist_comparison_snapshot(payload)
+    if not clean_payload:
+        return {}
+    previous = _raw_previous_system_checklist_snapshot(config)
+    previous_clean = _strip_system_checklist_comparison_snapshot(previous) if isinstance(previous, dict) else None
+    current_created_at = str(clean_payload.get("created_at") or "")
+    if previous_clean and str(previous_clean.get("created_at") or "") == current_created_at:
+        previous_clean = None
+    if previous_clean is None:
+        previous_clean = _fallback_previous_system_checklist_snapshot(config, clean_payload)
+    enriched = dict(clean_payload)
+    enriched["previous_snapshot"] = previous_clean
+    return enriched
 
 
 def system_checklist_summary(config: dict[str, Any], period: str) -> dict[str, Any]:
@@ -955,7 +1021,7 @@ def refresh_system_checklist_snapshot(
 ) -> dict[str, Any]:
     payload = _build_system_checklist_payload(config, automation=automation)
     _persist_system_checklist_snapshot(config, payload)
-    return payload
+    return attach_previous_system_checklist_snapshot(config, payload)
 
 
 def system_checklist_payload(
@@ -970,10 +1036,10 @@ def system_checklist_payload(
     if not force_refresh:
         snapshot = _preferred_system_checklist_snapshot(config, date_key)
         if snapshot is not None:
-            return snapshot
+            return attach_previous_system_checklist_snapshot(config, snapshot)
         snapshot = _latest_system_checklist_snapshot(config)
         if isinstance(snapshot, dict) and str(snapshot.get("date") or "") == date_key:
-            return snapshot
+            return attach_previous_system_checklist_snapshot(config, snapshot)
     return refresh_system_checklist_snapshot(config, automation=automation)
 
 
