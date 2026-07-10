@@ -233,7 +233,7 @@ notifications:
     button_cache_ttl_seconds: 15
     account_report_interval_seconds: 0
     daily_summary_enabled: false
-    startup_message_enabled: false
+    startup_message_enabled: true
     trade_memory_limit: 100
 
 execution:
