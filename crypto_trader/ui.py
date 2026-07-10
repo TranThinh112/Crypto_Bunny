@@ -62,7 +62,14 @@ from .dashboard_services import (
     system_health_dashboard,
     timeframe_state_dashboard,
 )
-from .engine import collect_lc_pipeline_candidates, force_mini_scan_from_latest_four_hour, load_lc_pipeline_candidate_cache, run_once
+from .engine import (
+    collect_lc_pipeline_candidates,
+    force_mini_scan_from_latest_four_hour,
+    format_wait_slot_notifications_view,
+    load_lc_pipeline_candidate_cache,
+    run_once,
+    wait_slot_notification_timeline_messages,
+)
 from .lc_pipeline import (
     format_internal_lc_view,
     format_internal_notifications_view,
@@ -1230,6 +1237,28 @@ def _ai_history_header(*, expanded: bool) -> str:
 
 
 def _format_ai_call_history_entry(config: dict[str, Any], item: dict[str, Any]) -> str:
+    if str(item.get("review_kind") or "") == "lc_okx_review":
+        try:
+            created_label = datetime.fromisoformat(str(item.get("created_at") or "").replace("Z", "+00:00")).astimezone(
+                _system_timezone(config)
+            ).strftime("%d/%m/%Y %H:%M:%S VN")
+        except ValueError:
+            created_label = str(item.get("created_at") or "-")
+        lc_id = item.get("lc_okx_id")
+        symbol = str(item.get("symbol") or ((item.get("symbols") or ["-"])[0]))
+        side = _telegram_side_label(item.get("side"))
+        lines = [
+            f"🕒 {created_label}",
+            f"Vai trò: OKX",
+            f"Model: {item.get('model', '-')}",
+            f"Trạng thái: {item.get('status', '-')}",
+            f"LC_OKX: #{lc_id if lc_id not in (None, '') else '-'}",
+            f"Cặp: {symbol} | {side}",
+            f"Lý do mở Market: {str(item.get('market_reason') or '-')[:180]}",
+            f"Lý do giữ setup: {str(item.get('keep_reason') or '-')[:180]}",
+            f"Lý do xóa setup: {str(item.get('delete_reason') or '-')[:180]}",
+        ]
+        return "\n".join(lines)
     role = str(item.get("role") or "ai").upper()
     created_at = str(item.get("created_at") or "")
     try:
@@ -1462,6 +1491,8 @@ def _telegram_action_response(
         return config, format_undecided_lc_view(config), None
     if action == "view_internal_notifications":
         return config, format_internal_notifications_view(config), telegram_control_keyboard()
+    if action == "view_wait_slot_notifications":
+        return config, format_wait_slot_notifications_view(config), telegram_control_keyboard()
     if action == "view_memory":
         return config, format_market_scan_memory_view(config), None
     if action == "view_ai":
@@ -1683,6 +1714,22 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
                 empty_text="🔔 Thông báo nội bộ: chưa có dữ liệu 1h/2h/4h/Mini.",
             )
             return
+        if action == "view_wait_slot_notifications":
+            timeline_messages = _telegram_cached_value(
+                app,
+                "timeline:view_wait_slot_notifications",
+                ttl_seconds=TELEGRAM_TIMELINE_CACHE_TTL_SECONDS,
+                builder=lambda: wait_slot_notification_timeline_messages(config),
+            )
+            _send_timeline_sequence(
+                config,
+                chat_id,
+                thread_id=thread_id,
+                header_text="🟡 Thông báo Wait Slot",
+                timeline_messages=timeline_messages,
+                empty_text="🟡 Wait Slot: chưa có thông báo nào.",
+            )
+            return
         if action == "view_undecided_lc":
             timeline_messages = _telegram_cached_value(
                 app,
@@ -1726,6 +1773,7 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
             "view_vt",
             "view_sd",
             "view_lc",
+            "view_wait_slot_notifications",
             "view_memory",
             "view_ai",
             "view_ai_more",
@@ -1741,6 +1789,7 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
             "view_guard",
             "view_lc",
             "view_undecided_lc",
+            "view_wait_slot_notifications",
             "view_memory",
             "view_ai",
             "view_ai_more",
@@ -1905,6 +1954,16 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
             header_text="🔔 Thông báo nội bộ",
             timeline_messages=internal_notification_timeline_messages(config),
             empty_text="🔔 Thông báo nội bộ: chưa có dữ liệu 1h/2h/4h/Mini.",
+        )
+        return
+    if action == "view_wait_slot_notifications":
+        _send_timeline_sequence(
+            config,
+            chat_id,
+            thread_id=message.get("message_thread_id"),
+            header_text="🟡 Thông báo Wait Slot",
+            timeline_messages=wait_slot_notification_timeline_messages(config),
+            empty_text="🟡 Wait Slot: chưa có thông báo nào.",
         )
         return
     if action == "view_undecided_lc":

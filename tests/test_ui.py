@@ -114,6 +114,32 @@ class UiTest(TestCase):
         self.assertNotIn("Aligned 1h/5m bullish", message)
         self.assertNotIn("RR only 1.5", message)
 
+    @patch("crypto_trader.ui.recent_ai_call_history")
+    def test_ai_history_view_formats_lc_okx_review_entry(self, recent_history) -> None:
+        recent_history.return_value = [
+            {
+                "created_at": "2026-07-10T18:55:12+07:00",
+                "role": "okx",
+                "review_kind": "lc_okx_review",
+                "model": "gpt-5.5",
+                "status": "DUYỆT MỞ MARKET",
+                "symbol": "BTC/USDT:USDT",
+                "side": "long",
+                "lc_okx_id": 25,
+                "market_reason": "Dong luc tang va volume on dinh, co the mo Market.",
+                "keep_reason": "-",
+                "delete_reason": "-",
+            }
+        ]
+
+        message = _format_ai_call_history_view({"timezone": "Asia/Ho_Chi_Minh"})
+
+        self.assertIn("LC_OKX: #25", message)
+        self.assertIn("Cặp: BTC/USDT:USDT | LONG", message)
+        self.assertIn("Lý do mở Market: Dong luc tang va volume on dinh, co the mo Market.", message)
+        self.assertIn("Lý do giữ setup: -", message)
+        self.assertIn("Lý do xóa setup: -", message)
+
     def test_market_guard_notification_status_ignores_mild_positive_move(self) -> None:
         config = {
             "market_guard": {
@@ -454,6 +480,7 @@ class UiTest(TestCase):
         self.assertIn("view_memory", callbacks)
         self.assertIn("view_undecided_lc", callbacks)
         self.assertIn("view_internal_notifications", callbacks)
+        self.assertIn("view_wait_slot_notifications", callbacks)
         self.assertIn("setup_menu", callbacks)
         self.assertNotIn("scan_now", callbacks)
         self.assertNotIn("view_sd", callbacks)
@@ -663,6 +690,44 @@ class UiTest(TestCase):
         ]
         self.assertIn("setup_menu", callbacks)
         self.assertNotIn("set_leverage", callbacks)
+
+    @patch("crypto_trader.ui.answer_callback_query")
+    @patch("crypto_trader.ui.edit_telegram_chat_message")
+    @patch("crypto_trader.ui.send_telegram_chat_message")
+    @patch("crypto_trader.ui.wait_slot_notification_timeline_messages")
+    def test_wait_slot_notifications_callback_sends_timeline_as_separate_messages(
+        self,
+        timeline_messages,
+        send_message,
+        edit_message,
+        answer_callback,
+    ) -> None:
+        timeline_messages.return_value = ["🟡 WAIT_SLOT #1_WS", "🟡 WAIT_SLOT #2_WS"]
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text("mode: dry_run\n", encoding="utf-8")
+            config = load_config(config_path)
+            update = {
+                "callback_query": {
+                    "id": "cb-ws",
+                    "data": "view_wait_slot_notifications",
+                    "message": {
+                        "message_id": 790,
+                        "chat": {"id": 123},
+                    },
+                }
+            }
+
+            with patch.dict("os.environ", {"TELEGRAM_CHAT_ID": "123"}):
+                _handle_telegram_update(config, update, config_path)
+
+        answer_callback.assert_called_once()
+        edit_message.assert_not_called()
+        self.assertEqual(send_message.call_count, 3)
+        self.assertEqual(
+            [call.args[2] for call in send_message.call_args_list],
+            ["🟡 Thông báo Wait Slot", "🟡 WAIT_SLOT #1_WS", "🟡 WAIT_SLOT #2_WS"],
+        )
 
     @patch("crypto_trader.ui.answer_callback_query")
     @patch("crypto_trader.ui.edit_telegram_chat_message")

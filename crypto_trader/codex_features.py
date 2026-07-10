@@ -454,7 +454,30 @@ def _record_ai_call_history(config: dict[str, Any], item: dict[str, Any]) -> Non
         return
 
 
+def _lc_okx_review_call_message(item: dict[str, Any]) -> str:
+    created_at = str(item.get("created_at") or _iso_now())
+    lc_id = item.get("lc_okx_id")
+    symbol = str(item.get("symbol") or ((item.get("symbols") or ["-"])[0]))
+    side = str(item.get("side") or "-").upper()
+    status = str(item.get("status") or "GIỮ SETUP")
+    market_reason = str(item.get("market_reason") or "-")
+    keep_reason = str(item.get("keep_reason") or "-")
+    delete_reason = str(item.get("delete_reason") or "-")
+    lines = [
+        f"🤖 5.5 DUYỆT LC_OKX #{lc_id if lc_id not in (None, '') else '-'}",
+        f"Cặp: {symbol} | {side}",
+        f"Duyệt lúc: {_local_time_label(created_at).split()[-1]}",
+        f"Kết quả: {status}",
+        f"Lý do mở Market: {market_reason[:700]}",
+        f"Lý do giữ setup: {keep_reason[:700]}",
+        f"Lý do xóa setup: {delete_reason[:700]}",
+    ]
+    return "\n".join(lines)
+
+
 def _ai_call_message(item: dict[str, Any]) -> str:
+    if str(item.get("review_kind") or "") == "lc_okx_review":
+        return _lc_okx_review_call_message(item)
     role = str(item.get("role") or "ai")
     status = str(item.get("status") or "-")
     symbols = ", ".join(str(symbol) for symbol in item.get("symbols") or []) or "-"
@@ -544,6 +567,25 @@ def _notify_openai_api_call(
     except Exception:
         return
 
+
+def record_ai_call_event(
+    config: dict[str, Any],
+    item: dict[str, Any],
+    *,
+    notify_telegram: bool = True,
+) -> None:
+    payload = dict(item)
+    payload.setdefault("created_at", _iso_now())
+    _record_ai_call_history(config, payload)
+    if not notify_telegram or not _telegram_notify_ai_api_calls(config):
+        return
+    try:
+        from .notifier import send_telegram_message
+
+        send_telegram_message(config, _ai_call_message(payload), with_buttons=False, replace_previous=False)
+    except Exception:
+        return
+
 def call_openai_json(
     config: dict[str, Any],
     role_config: dict[str, Any],
@@ -552,6 +594,8 @@ def call_openai_json(
     model_name: str,
     purpose: str | None = None,
     route: str | None = None,
+    record_history: bool = True,
+    notify_telegram: bool = True,
 ) -> dict[str, Any]:
     ai_settings = config.get("ai", {})
     purpose = str(purpose or "").strip()
@@ -579,7 +623,7 @@ def call_openai_json(
         if not bool(internal_config.get("market_scan_use_ai", True)):
             raise RuntimeError("OpenAI mini scan blocked: ai.internal.market_scan_use_ai=false")
     if purpose == "okx_final_approval":
-        allowed_routes = {"new_vt", "local_lc_release", "lc_okx_release"}
+        allowed_routes = {"new_vt", "local_lc_release", "lc_okx_release", "lc_okx_setup_review"}
         if route not in allowed_routes:
             raise RuntimeError(f"OpenAI OKX approval blocked by policy: route={route or '-'}")
         okx_config = ai_settings.get("okx", {})
@@ -614,22 +658,24 @@ def call_openai_json(
         detail = f"OpenAI HTTP {exc.code}"
         if body:
             detail = f"{detail}: {body[:500]}"
-        _notify_openai_api_call(
-            config,
-            model_name=model_name,
-            prompt_package=prompt_package,
-            success=False,
-            error=detail,
-        )
+        if record_history or notify_telegram:
+            _notify_openai_api_call(
+                config,
+                model_name=model_name,
+                prompt_package=prompt_package,
+                success=False,
+                error=detail,
+            )
         raise RuntimeError(detail) from exc
     except Exception as exc:
-        _notify_openai_api_call(
-            config,
-            model_name=model_name,
-            prompt_package=prompt_package,
-            success=False,
-            error=str(exc),
-        )
+        if record_history or notify_telegram:
+            _notify_openai_api_call(
+                config,
+                model_name=model_name,
+                prompt_package=prompt_package,
+                success=False,
+                error=str(exc),
+            )
         raise
     latency_ms = round((time.perf_counter() - start) * 1000, 2)
     content = raw["choices"][0]["message"]["content"]
@@ -648,15 +694,16 @@ def call_openai_json(
             "cache_hit_percent": prompt_package["estimated_cache_hit"],
         },
     )
-    _notify_openai_api_call(
-        config,
-        model_name=model_name,
-        prompt_package=prompt_package,
-        success=True,
-        latency_ms=latency_ms,
-        usage=usage,
-        parsed=parsed,
-    )
+    if record_history or notify_telegram:
+        _notify_openai_api_call(
+            config,
+            model_name=model_name,
+            prompt_package=prompt_package,
+            success=True,
+            latency_ms=latency_ms,
+            usage=usage,
+            parsed=parsed,
+        )
     register_model_version(
         config,
         model_name=model_name,

@@ -45,6 +45,7 @@ class EngineMiniQueueTest(TestCase):
         config["ai"]["internal"]["market_scan_to_pending"] = True
         config["ai"]["internal"]["market_scan_pending_limit"] = 1
         config["ai"]["internal"]["market_scan_require_ai_for_pending"] = True
+        config["ai"]["okx"]["provider"] = "local_policy"
         return config
 
     def tearDown(self) -> None:
@@ -54,6 +55,7 @@ class EngineMiniQueueTest(TestCase):
 
     def test_mini_scan_creates_only_best_lc_after_ai_review(self) -> None:
         config = self._config()
+        config["ai"]["internal"]["market_scan_pending_limit"] = 3
         candidates = [_candidate("BTC/USDT:USDT"), _candidate("ETH/USDT:USDT")]
         scan = {
             "provider": "openai",
@@ -66,6 +68,8 @@ class EngineMiniQueueTest(TestCase):
         result = _create_pending_from_internal_scan(config, candidates, scan, (5, set(), []), set())
 
         self.assertTrue(result["allowed"])
+        self.assertEqual(result["configured_limit"], 3)
+        self.assertEqual(result["limit"], 1)
         self.assertEqual(result["created"], 1)
         self.assertEqual(
             {order["symbol"] for order in list_pending_orders(config, status="OPEN")},
@@ -108,19 +112,23 @@ class EngineMiniQueueTest(TestCase):
             "ai_review": {"approved_symbols": ["BTC/USDT:USDT"]},
         }
 
-        with patch(
-            "crypto_trader.engine.execute_candidate",
-            return_value=ExecutionResult(
-                mode="demo",
-                submitted=True,
-                order_id="limit-123",
-                message="demo: limit order submitted",
-                journal_type="LC",
-                journal_id=1,
-            ),
-        ) as execute:
+        with (
+            patch(
+                "crypto_trader.engine.execute_candidate",
+                return_value=ExecutionResult(
+                    mode="demo",
+                    submitted=True,
+                    order_id="limit-123",
+                    message="demo: limit order submitted",
+                    journal_type="LC",
+                    journal_id=1,
+                ),
+            ) as execute,
+            patch("crypto_trader.engine.review_candidate_for_lc_okx", side_effect=lambda *args, **kwargs: (args[1], {"approved": True, "decision": "approve"})) as review,
+        ):
             result = _create_pending_from_internal_scan(config, candidates, scan, (5, set(), []), set())
 
+        review.assert_called_once()
         execute.assert_called_once()
         self.assertEqual(execute.call_args.kwargs["order_type_override"], "limit")
         self.assertEqual(execute.call_args.kwargs["entry_type"], "mini_lc_okx")
@@ -131,26 +139,72 @@ class EngineMiniQueueTest(TestCase):
         self.assertEqual(len(orders), 1)
         self.assertEqual(orders[0]["exchange_order_id"], "limit-123")
 
-    def test_mini_scan_queues_wait_slot_for_recheck_when_only_slot_is_full(self) -> None:
+    def test_mini_scan_rejects_lc_okx_when_gpt_55_blocks_setup(self) -> None:
         config = self._config()
-        candidate = _candidate("LIT/USDT:USDT")
+        config["mode"] = "demo"
         scan = {
             "provider": "openai",
             "model": "gpt-5.4-mini",
-            "approved_symbols": ["LIT/USDT:USDT"],
-            "selected_symbols": ["LIT/USDT:USDT"],
-            "pool_symbols": ["LIT/USDT:USDT"],
+            "selected_symbols": ["BTC/USDT:USDT"],
+            "approved_symbols": ["BTC/USDT:USDT"],
+            "ai_review": {"approved_symbols": ["BTC/USDT:USDT"]},
+        }
+
+        with (
+            patch("crypto_trader.engine.review_candidate_for_lc_okx", side_effect=lambda *args, **kwargs: (args[1], {"approved": False, "decision": "reject", "reason": "Setup khong du chat luong de vao Market"})),
+            patch("crypto_trader.engine.execute_candidate") as execute,
+        ):
+            result = _create_pending_from_internal_scan(config, [_candidate()], scan, (5, set(), []), set())
+
+        execute.assert_not_called()
+        self.assertEqual(result["created"], 0)
+        self.assertEqual(len(result["skipped"]), 1)
+        self.assertIn("Setup khong du chat luong", result["skipped"][0]["reason"])
+        self.assertEqual(list_pending_orders(config, status="LC_OKX"), [])
+
+    @patch("crypto_trader.notifier.send_telegram_message")
+    @patch("crypto_trader.engine.lc_pipeline_pool_rows")
+    def test_mini_scan_queues_wait_slot_for_recheck_when_only_slot_is_full(
+        self,
+        lc_pipeline_pool_rows,
+        send_telegram_message,
+    ) -> None:
+        config = self._config()
+        config["ai"]["internal"]["market_scan_pending_limit"] = 3
+        candidate = _candidate("LIT/USDT:USDT")
+        lc_pipeline_pool_rows.return_value = [
+            {
+                "symbol": "LIT/USDT:USDT",
+                "source_slot": "4h",
+                "source_index": 2,
+                "source_label": "10/07/26 16:00:00",
+            }
+        ]
+        scan = {
+            "provider": "openai",
+            "model": "gpt-5.4-mini",
+            "approved_symbols": ["LIT/USDT:USDT", "BTC/USDT:USDT"],
+            "selected_symbols": ["LIT/USDT:USDT", "BTC/USDT:USDT"],
+            "pool_symbols": ["LIT/USDT:USDT", "BTC/USDT:USDT"],
             "slot_id": "2026-07-06T20:00:00+00:00",
-            "ai_review": {"approved_symbols": ["LIT/USDT:USDT"]},
+            "ai_review": {"approved_symbols": ["LIT/USDT:USDT", "BTC/USDT:USDT"]},
         }
 
         with patch(
             "crypto_trader.engine.evaluate_candidate",
             return_value=RiskCheck(False, ["Da het slot: 2/2"], []),
         ):
-            result = _create_pending_from_internal_scan(config, [candidate], scan, (2, set(), []), set())
+            result = _create_pending_from_internal_scan(
+                config,
+                [candidate, _candidate("BTC/USDT:USDT")],
+                scan,
+                (2, set(), []),
+                set(),
+            )
 
         self.assertTrue(result["allowed"])
+        self.assertEqual(result["configured_limit"], 3)
+        self.assertEqual(result["limit"], 1)
         self.assertEqual(result["created"], 0)
         self.assertEqual(result["wait_slot"], 1)
         self.assertEqual(result["skipped"], [])
@@ -158,6 +212,14 @@ class EngineMiniQueueTest(TestCase):
         self.assertEqual(len(orders), 1)
         self.assertEqual(orders[0]["symbol"], "LIT/USDT:USDT")
         self.assertEqual(orders[0]["status"], "WAIT_SLOT")
+        self.assertEqual(result["wait_slot_orders"][0]["source"], "4h #2 (16:00:00)")
+        self.assertEqual(result["wait_slot_orders"][0]["wait_slot_id"], "#1_WS")
+        send_telegram_message.assert_called_once()
+        message = send_telegram_message.call_args.args[1]
+        self.assertIn("🟡 WAIT_SLOT #1_WS", message)
+        self.assertIn("Cặp: LIT/USDT:USDT | LONG", message)
+        self.assertIn("Nguồn lọc: 4h #2 (16:00:00)", message)
+        self.assertIn("Đã chuyển vào wait_slot lúc", message)
 
     def test_mini_scan_fallback_does_not_create_local_lc(self) -> None:
         config = self._config()

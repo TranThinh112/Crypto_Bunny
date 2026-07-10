@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import urllib.error
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -10,6 +11,7 @@ from .codex_features import (
     build_prompt,
     call_openai_json,
     get_bunny_health_state,
+    record_ai_call_event,
     get_trading_system_state,
 )
 from .lc_pipeline import (
@@ -867,6 +869,7 @@ def _openai_json_decision(
     pending_memory: dict[str, Any],
 ) -> dict[str, Any]:
     okx_config = ai_config(config).get("okx", {})
+    route = str((context or {}).get("route") or "")
     system_state = get_trading_system_state(config)
     health_state = get_bunny_health_state(config)
     runtime_state = _compact_runtime_state(system_state, health_state)
@@ -894,10 +897,12 @@ def _openai_json_decision(
         prompt_package,
         model_name=str(okx_config.get("model", "gpt-5.5")),
         purpose="okx_final_approval",
-        route=str(context.get("route") or ""),
+        route=route,
+        record_history=route not in {"lc_okx_setup_review", "lc_okx_release"},
+        notify_telegram=route not in {"lc_okx_setup_review", "lc_okx_release"},
     )
     decision = dict(response["parsed"])
-    return {
+    result = {
         "approved": bool(decision.get("approved")),
         "decision": str(decision.get("decision") or ("approve" if decision.get("approved") else "reject")),
         "reason": str(decision.get("reason") or ""),
@@ -915,6 +920,44 @@ def _openai_json_decision(
         "pending_memory": pending_memory,
         "raw": decision,
     }
+    if route in {"lc_okx_setup_review", "lc_okx_release"}:
+        review_status = "GIỮ SETUP"
+        market_reason = "-"
+        keep_reason = "-"
+        delete_reason = "-"
+        if route == "lc_okx_release" and result["approved"]:
+            review_status = "DUYỆT MỞ MARKET"
+            market_reason = result["reason"] or "5.5 xác nhận setup đủ điều kiện để đi tiếp vào Market."
+        elif result["approved"]:
+            review_status = "GIỮ SETUP"
+            keep_reason = result["reason"] or "5.5 giữ lại setup vì cấu trúc lệnh vẫn hợp lệ."
+        elif route == "lc_okx_setup_review":
+            review_status = "XÓA SETUP"
+            delete_reason = result["reason"] or "5.5 loại setup vì chưa đủ chất lượng."
+        else:
+            review_status = "GIỮ SETUP"
+            keep_reason = result["reason"] or "5.5 chưa cho phép mở Market, setup tiếp tục được giữ lại."
+        record_ai_call_event(
+            config,
+            {
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "role": "okx",
+                "review_kind": "lc_okx_review",
+                "model": str(okx_config.get("model", "gpt-5.5")),
+                "status": review_status,
+                "approved": bool(result["approved"]),
+                "decision": result["decision"],
+                "reason": result["reason"],
+                "symbol": candidate.symbol,
+                "symbols": [candidate.symbol],
+                "side": candidate.side,
+                "lc_okx_id": context.get("lc_id"),
+                "market_reason": market_reason,
+                "keep_reason": keep_reason,
+                "delete_reason": delete_reason,
+            },
+        )
+    return result
 
 
 def okx_ai_approval(
@@ -967,3 +1010,68 @@ def okx_ai_approval(
             "fallback": "local_policy",
             "external_error": str(exc),
         }
+
+
+def candidate_okx_review(candidate: TradeCandidate, *, route: str | None = None) -> dict[str, Any] | None:
+    metadata = candidate.decision_metadata if isinstance(candidate.decision_metadata, dict) else {}
+    review = metadata.get("okx_review")
+    if not isinstance(review, dict):
+        return None
+    if route and str(review.get("route") or "") != str(route):
+        return None
+    return review
+
+
+def attach_okx_review_metadata(
+    candidate: TradeCandidate,
+    decision: dict[str, Any],
+    *,
+    route: str,
+    context: dict[str, Any] | None = None,
+) -> TradeCandidate:
+    reviewed = deepcopy(candidate)
+    metadata = reviewed.decision_metadata if isinstance(reviewed.decision_metadata, dict) else {}
+    review_payload = {
+        "route": route,
+        "approved": bool(decision.get("approved")),
+        "decision": str(decision.get("decision") or ("approve" if decision.get("approved") else "reject")),
+        "reason": str(decision.get("reason") or ""),
+        "provider": decision.get("provider"),
+        "model": decision.get("model"),
+        "model_version": decision.get("model_version"),
+        "prompt_version": decision.get("prompt_version"),
+        "prompt_hash": decision.get("prompt_hash"),
+        "experiment_name": decision.get("experiment_name"),
+        "reviewed_at": datetime.now(timezone.utc).isoformat(),
+        "context": dict(context or {}),
+    }
+    reviewed.decision_metadata = {
+        **metadata,
+        "okx_review": review_payload,
+    }
+    return reviewed
+
+
+def review_candidate_for_lc_okx(
+    config: dict[str, Any],
+    candidate: TradeCandidate,
+    risk_check: RiskCheck,
+    *,
+    context: dict[str, Any] | None = None,
+    pending_memory: dict[str, Any] | None = None,
+    force: bool = False,
+) -> tuple[TradeCandidate, dict[str, Any]]:
+    review_context = dict(context or {})
+    route = str(review_context.get("route") or "lc_okx_setup_review")
+    review_context["route"] = route
+    existing = candidate_okx_review(candidate, route=route)
+    if existing is not None and not force:
+        return candidate, existing
+    decision = okx_ai_approval(
+        config,
+        candidate,
+        risk_check,
+        context=review_context,
+        pending_memory=pending_memory,
+    )
+    return attach_okx_review_metadata(candidate, decision, route=route, context=review_context), decision

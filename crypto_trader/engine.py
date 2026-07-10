@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import json
+import os
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from .ai_coordinator import (
+    candidate_okx_review,
     internal_lc_memory,
     internal_market_shortlist,
     okx_ai_approval,
+    review_candidate_for_lc_okx,
     run_internal_market_scan,
     run_internal_market_scan_if_due,
     should_defer_new_vt_to_internal_lc,
@@ -47,6 +51,8 @@ from .storage import (
 from .strategy import build_candidates, enrich_quantities
 
 LC_PIPELINE_CANDIDATE_CACHE_KEY = "lc_pipeline_candidate_cache_v1"
+WAIT_SLOT_NOTIFICATION_HISTORY_KEY = "wait_slot_notification_history_v1"
+WAIT_SLOT_NOTIFICATION_COUNTER_KEY = "wait_slot_notification_counter_v1"
 
 
 def _report_progress(
@@ -69,6 +75,202 @@ def _ordered_unique(symbols: list[str]) -> list[str]:
         seen.add(clean)
         unique.append(clean)
     return unique
+
+
+def _engine_timezone(config: dict[str, Any]) -> ZoneInfo:
+    timezone_name = (
+        config.get("ai", {}).get("internal", {}).get("market_scan_timezone")
+        or config.get("timezone")
+        or "Asia/Ho_Chi_Minh"
+    )
+    try:
+        return ZoneInfo(str(timezone_name))
+    except Exception:
+        return timezone(timedelta(hours=7))
+
+
+def _parse_iso_time(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def _wait_slot_source_label(row: dict[str, Any]) -> str:
+    source_slot = row.get("source_slot") or row.get("state") or "Mini"
+    source_index = row.get("source_index")
+    raw_label = str(row.get("source_label") or "").strip()
+    source_clock = None
+    if raw_label:
+        parts = raw_label.split()
+        source_clock = parts[-1] if parts else None
+    if not source_clock:
+        source_time = _parse_iso_time(row.get("source_time"))
+        source_clock = source_time.strftime("%H:%M:%S") if source_time else None
+    if source_index:
+        return f"{source_slot} #{source_index} ({source_clock})" if source_clock else f"{source_slot} #{source_index}"
+    return str(source_slot)
+
+
+def _wait_slot_source_meta(config: dict[str, Any], symbol: str) -> dict[str, Any]:
+    rows = lc_pipeline_pool_rows(config, [symbol])
+    row = rows[0] if rows and isinstance(rows[0], dict) else {}
+    return {
+        "source_slot": row.get("source_slot"),
+        "source_index": row.get("source_index"),
+        "source_time": row.get("source_time"),
+        "source_label": row.get("source_label"),
+        "source_text": _wait_slot_source_label(row) if row else "Mini scan",
+    }
+
+
+def _wait_slot_notification_text(
+    config: dict[str, Any],
+    candidate: TradeCandidate,
+    *,
+    wait_slot_index: Any = None,
+    source_text: str,
+    queued_at: Any,
+) -> str:
+    local_time = _parse_iso_time(queued_at) or datetime.now(timezone.utc)
+    local_time = local_time.astimezone(_engine_timezone(config))
+    side = str(candidate.side or "-").upper()
+    wait_slot_label = (
+        f"#{int(wait_slot_index)}_WS"
+        if str(wait_slot_index or "").strip().isdigit()
+        else "#-_WS"
+    )
+    lines = [
+        f"🟡 WAIT_SLOT {wait_slot_label}",
+        f"Cặp: {candidate.symbol} | {side}",
+        f"Nguồn lọc: {source_text}",
+        f"Đã chuyển vào wait_slot lúc {local_time.strftime('%H:%M:%S')}",
+    ]
+    return "\n".join(lines)
+
+
+def _next_wait_slot_notification_index(config: dict[str, Any]) -> int | None:
+    try:
+        raw = get_journal_state(config, WAIT_SLOT_NOTIFICATION_COUNTER_KEY)
+        current = int(str(raw or "0").strip() or "0")
+        next_value = current + 1
+        set_journal_state(config, WAIT_SLOT_NOTIFICATION_COUNTER_KEY, str(next_value))
+        return next_value
+    except Exception:
+        return None
+
+
+def _record_wait_slot_notification(
+    config: dict[str, Any],
+    candidate: TradeCandidate,
+    *,
+    source_text: str,
+    queued_at: Any,
+) -> dict[str, Any]:
+    wait_slot_index = _next_wait_slot_notification_index(config)
+    item = {
+        "created_at": str(queued_at or datetime.now(timezone.utc).isoformat()),
+        "index": wait_slot_index,
+        "label": f"#{wait_slot_index}_WS" if wait_slot_index is not None else "#-_WS",
+        "symbol": candidate.symbol,
+        "side": str(candidate.side or "").upper(),
+        "source_text": source_text,
+        "queued_at": str(queued_at or ""),
+    }
+    item["text"] = _wait_slot_notification_text(
+        config,
+        candidate,
+        wait_slot_index=wait_slot_index,
+        source_text=source_text,
+        queued_at=queued_at,
+    )
+    try:
+        raw = get_journal_state(config, WAIT_SLOT_NOTIFICATION_HISTORY_KEY)
+        history = json.loads(str(raw or "[]")) if raw else []
+        if not isinstance(history, list):
+            history = []
+        history.append(item)
+        set_journal_state(config, WAIT_SLOT_NOTIFICATION_HISTORY_KEY, json.dumps(history[-50:], ensure_ascii=False))
+    except Exception:
+        return item
+    return item
+
+
+def wait_slot_notification_timeline_messages(config: dict[str, Any], *, limit: int = 10) -> list[str]:
+    try:
+        raw = get_journal_state(config, WAIT_SLOT_NOTIFICATION_HISTORY_KEY)
+        items = json.loads(str(raw or "[]")) if raw else []
+    except Exception:
+        return []
+    if not isinstance(items, list):
+        return []
+    texts = [str(item.get("text") or "") for item in items if isinstance(item, dict) and str(item.get("text") or "").strip()]
+    return texts[-max(1, int(limit or 10)):]
+
+
+def format_wait_slot_notifications_view(config: dict[str, Any], *, limit: int = 10) -> str:
+    timeline_messages = wait_slot_notification_timeline_messages(config, limit=limit)
+    if not timeline_messages:
+        return "🟡 Wait Slot: chưa có thông báo nào."
+    blocks = [
+        "🟡 Thông báo Wait Slot",
+        "Timeline các cặp đã được đưa vào wait_slot, mới nhất nằm dưới cùng.",
+    ]
+    blocks.extend(timeline_messages)
+    return "\n\n".join(blocks)
+
+
+def _notify_wait_slot_queued(
+    config: dict[str, Any],
+    candidate: TradeCandidate,
+    *,
+    source_text: str,
+    queued_at: Any,
+) -> dict[str, Any]:
+    entry = _record_wait_slot_notification(
+        config,
+        candidate,
+        source_text=source_text,
+        queued_at=queued_at,
+    )
+    text = str(entry.get("text") or _wait_slot_notification_text(
+        config,
+        candidate,
+        source_text=source_text,
+        queued_at=queued_at,
+    ))
+    try:
+        from .notifier import send_telegram_message
+        send_telegram_message(
+            config,
+            text,
+            with_buttons=False,
+            replace_previous=False,
+        )
+        return entry
+    except Exception:
+        try:
+            from .notifier import _telegram_api_request
+        except Exception:
+            return entry
+        chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+        if not chat_id:
+            return entry
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": text[:3900],
+            "disable_web_page_preview": "true",
+        }
+        thread_id = os.getenv("TELEGRAM_MESSAGE_THREAD_ID", "").strip()
+        if thread_id:
+            payload["message_thread_id"] = thread_id
+        try:
+            _telegram_api_request(config, "sendMessage", payload)
+        except Exception:
+            return entry
+    return entry
 
 
 def _storage_warning(label: str, exc: Exception) -> str:
@@ -617,17 +819,24 @@ def _with_wait_slot_metadata(
     *,
     reason: str,
     internal_scan: dict[str, Any] | None,
+    source_meta: dict[str, Any] | None = None,
 ) -> TradeCandidate:
     queued = deepcopy(candidate)
+    queued_at = datetime.now(timezone.utc).isoformat()
     queued.decision_metadata = {
         **(queued.decision_metadata or {}),
         "wait_slot_queue": {
-            "queued_at": datetime.now(timezone.utc).isoformat(),
+            "queued_at": queued_at,
             "reason": reason,
             "scan_created_at": (internal_scan or {}).get("created_at"),
             "scan_slot_id": (internal_scan or {}).get("slot_id"),
             "pool_symbols": list((internal_scan or {}).get("pool_symbols") or []),
             "selected_symbols": list((internal_scan or {}).get("selected_symbols") or []),
+            "source_slot": (source_meta or {}).get("source_slot"),
+            "source_index": (source_meta or {}).get("source_index"),
+            "source_time": (source_meta or {}).get("source_time"),
+            "source_label": (source_meta or {}).get("source_label"),
+            "source_text": (source_meta or {}).get("source_text"),
         },
     }
     return queued
@@ -642,12 +851,15 @@ def _create_pending_from_internal_scan(
 ) -> dict[str, Any]:
     allowed, reason = _internal_scan_allows_pending(config, internal_scan)
     internal_config = config.get("ai", {}).get("internal", {})
-    pending_limit = max(1, min(3, int(internal_config.get("market_scan_pending_limit", 3) or 3)))
+    configured_pending_limit = max(1, min(3, int(internal_config.get("market_scan_pending_limit", 3) or 3)))
+    # Mini flow only promotes the single best symbol into the final LC_OKX step.
+    pending_limit = 1
     result: dict[str, Any] = {
         "enabled": _internal_scan_to_pending_enabled(config),
         "allowed": allowed,
         "reason": reason,
         "limit": pending_limit,
+        "configured_limit": configured_pending_limit,
         "created": 0,
         "created_orders": [],
         "wait_slot": 0,
@@ -658,6 +870,7 @@ def _create_pending_from_internal_scan(
         return result
 
     approved = [str(symbol) for symbol in (internal_scan or {}).get("selected_symbols") or [] if str(symbol)]
+    approved = approved[:pending_limit]
     current_candidates_by_symbol = {candidate.symbol: candidate for candidate in candidates}
     cached_candidates_by_symbol = _internal_lc_candidate_cache(config, approved)
     created_symbols = set(pending_symbols)
@@ -690,11 +903,13 @@ def _create_pending_from_internal_scan(
         if not check.passed:
             check_reason = "; ".join(check.reasons[:3]) or "risk check failed"
             if _is_wait_slot_only_rejection(check.reasons):
+                source_meta = _wait_slot_source_meta(config, candidate.symbol)
                 journal_id = next_global_counter(config, "LC") if config.get("mode") != "dry_run" else None
                 queued_candidate = _with_wait_slot_metadata(
                     candidate,
                     reason=check_reason,
                     internal_scan=internal_scan,
+                    source_meta=source_meta,
                 )
                 record = save_pending_order(
                     config,
@@ -706,6 +921,12 @@ def _create_pending_from_internal_scan(
                 )
                 result["wait_slot"] += 1
                 created_symbols.add(candidate.symbol)
+                notification_entry = _notify_wait_slot_queued(
+                    config,
+                    candidate,
+                    source_text=str(source_meta.get("source_text") or "Mini scan"),
+                    queued_at=(queued_candidate.decision_metadata or {}).get("wait_slot_queue", {}).get("queued_at"),
+                )
                 result["wait_slot_orders"].append(
                     {
                         "id": record.get("id"),
@@ -716,6 +937,11 @@ def _create_pending_from_internal_scan(
                         "reason": check_reason,
                         "win_probability_pct": candidate.win_probability_pct,
                         "confidence": candidate.confidence,
+                        "source": source_meta.get("source_text"),
+                        "queued_at": (
+                            (queued_candidate.decision_metadata or {}).get("wait_slot_queue", {}).get("queued_at")
+                        ),
+                        "wait_slot_id": notification_entry.get("label"),
                     }
                 )
                 continue
@@ -728,13 +954,35 @@ def _create_pending_from_internal_scan(
             )
             continue
         journal_id = next_global_counter(config, "LC") if config.get("mode") != "dry_run" else None
+        reviewed_candidate = candidate
+        if config.get("mode") != "dry_run":
+            reviewed_candidate, okx_review = review_candidate_for_lc_okx(
+                config,
+                candidate,
+                check,
+                context={
+                    "route": "lc_okx_setup_review",
+                    "lc_id": journal_id,
+                    "source": "mini_lc_okx",
+                    "from_status": "MINI_APPROVED",
+                },
+            )
+            if not okx_review.get("approved"):
+                result["skipped"].append(
+                    {
+                        "symbol": candidate.symbol,
+                        "side": candidate.side,
+                        "reason": str(okx_review.get("reason") or okx_review.get("decision") or "GPT-5.5 rejected LC_OKX setup"),
+                    }
+                )
+                continue
         exchange_order_id: str | None = None
         order_status = "OPEN"
         if config.get("mode") != "dry_run":
             order_type = str(config.get("pending_orders", {}).get("order_type", "limit") or "limit")
             execution = execute_candidate(
                 config,
-                candidate,
+                reviewed_candidate,
                 order_type_override=order_type,
                 entry_type="mini_lc_okx",
                 journal_type="LC",
@@ -753,7 +1001,7 @@ def _create_pending_from_internal_scan(
             order_status = "LC_OKX"
         record = save_pending_order(
             config,
-            candidate,
+            reviewed_candidate,
             exchange_order_id,
             max_age_days=float(config.get("pending_orders", {}).get("exchange_max_age_days", 1.5) or 1.5)
             if exchange_order_id
@@ -768,11 +1016,12 @@ def _create_pending_from_internal_scan(
                 "id": record.get("id"),
                 "lc_id": journal_id or record.get("id"),
                 "status": order_status,
-                "symbol": candidate.symbol,
-                "side": candidate.side,
+                "symbol": reviewed_candidate.symbol,
+                "side": reviewed_candidate.side,
                 "exchange_order_id": exchange_order_id,
-                "win_probability_pct": candidate.win_probability_pct,
-                "confidence": candidate.confidence,
+                "win_probability_pct": reviewed_candidate.win_probability_pct,
+                "confidence": reviewed_candidate.confidence,
+                "okx_review": candidate_okx_review(reviewed_candidate, route="lc_okx_setup_review"),
             }
         )
     return result
@@ -1077,7 +1326,7 @@ def run_once(
             order_id=None,
             message=(
                 f"{int((mini_pending_queue or {}).get('created') or 0)} GPT mini setup(s) submitted as LC_OKX; "
-                "GPT 5.5 will only review LC_OKX release when an active slot is available"
+                "GPT 5.5 da duyet setup truoc khi dua vao pipeline cho buoc kiem tra cuoi"
             ),
             raw={"lc_okx_pending": True, "mini_pending_queue": mini_pending_queue},
             journal_type="LC",

@@ -3,7 +3,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from .ai_coordinator import okx_ai_approval, prioritize_pending_records
+from .ai_coordinator import candidate_okx_review, okx_ai_approval, prioritize_pending_records, review_candidate_for_lc_okx
 from .codex_features import record_trade_execution
 from .executor import execute_candidate
 from .ledger import append_event
@@ -761,9 +761,37 @@ def maintain_pending_orders(
                 kept += 1
                 continue
 
-            execution = execute_candidate(
+            reviewed_candidate, setup_review = review_candidate_for_lc_okx(
                 config,
                 refreshed_candidate,
+                submit_check,
+                context={
+                    "route": "lc_okx_setup_review",
+                    "lc_id": lc_id,
+                    "from_status": "WAIT_SLOT",
+                    "source": "mini_wait_slot_release",
+                },
+            )
+            if not setup_review.get("approved"):
+                reason = str(setup_review.get("reason") or setup_review.get("decision") or "GPT-5.5 rejected LC_OKX setup")
+                close_pending_order(config, local_id, "CANCELED", reason)
+                events.append(
+                    {
+                        "type": "pending_canceled",
+                        "source": "mini_wait_slot_review",
+                        "lc_id": lc_id,
+                        "symbol": symbol,
+                        "side": str(record.get("side") or ""),
+                        "reason": reason,
+                        "comparison": comparison,
+                    }
+                )
+                canceled += 1
+                continue
+
+            execution = execute_candidate(
+                config,
+                reviewed_candidate,
                 order_type_override=str(lifecycle["order_type"]),
                 entry_type="mini_wait_slot_okx",
                 journal_type="LC",
@@ -773,7 +801,7 @@ def maintain_pending_orders(
                 refresh_pending_order(
                     config,
                     local_id,
-                    refreshed_candidate,
+                    reviewed_candidate,
                     status="WAIT_SLOT",
                     max_age_hours=float(lifecycle["local_max_age_hours"]),
                 )
@@ -784,7 +812,7 @@ def maintain_pending_orders(
             set_pending_order_exchange_order(
                 config,
                 local_id,
-                refreshed_candidate,
+                reviewed_candidate,
                 execution.order_id,
                 max_age_days=float(lifecycle["exchange_max_age_days"]),
             )
@@ -934,7 +962,12 @@ def maintain_pending_orders(
                         )
                         kept += 1
                         continue
-                    ai_decision = okx_ai_approval(
+                    stored_review = candidate_okx_review(candidate, route="lc_okx_setup_review")
+                    if stored_review is None:
+                        record_candidate = _candidate_from_record(record)
+                        if record_candidate is not None:
+                            stored_review = candidate_okx_review(record_candidate, route="lc_okx_setup_review")
+                    ai_decision = stored_review or okx_ai_approval(
                         config,
                         candidate,
                         release_check,
@@ -1094,9 +1127,35 @@ def maintain_pending_orders(
                         )
                         kept += 1
                         continue
-                    final_check = evaluate_candidate(
+                    reviewed_candidate, setup_review = review_candidate_for_lc_okx(
                         config,
                         candidate,
+                        submit_check,
+                        context={
+                            "route": "lc_okx_setup_review",
+                            "lc_id": lc_id,
+                            "from_status": "OPEN",
+                            "source": "local_pending_submit",
+                        },
+                    )
+                    if not setup_review.get("approved"):
+                        reason = str(setup_review.get("reason") or setup_review.get("decision") or "GPT-5.5 rejected LC_OKX setup")
+                        close_pending_order(config, local_id, "CANCELED", reason)
+                        events.append(
+                            {
+                                "type": "pending_canceled",
+                                "source": "local_pending_review",
+                                "lc_id": lc_id,
+                                "symbol": symbol,
+                                "side": str(record.get("side") or ""),
+                                "reason": reason,
+                            }
+                        )
+                        canceled += 1
+                        continue
+                    final_check = evaluate_candidate(
+                        config,
+                        reviewed_candidate,
                         check_active_trades=False,
                         check_order_limits=True,
                     )
@@ -1109,7 +1168,7 @@ def maintain_pending_orders(
                         continue
                     execution = execute_candidate(
                         config,
-                        candidate,
+                        reviewed_candidate,
                         order_type_override=str(lifecycle["order_type"]),
                         entry_type="pending_okx",
                         journal_type="LC",
@@ -1122,7 +1181,7 @@ def maintain_pending_orders(
                     set_pending_order_exchange_order(
                         config,
                         local_id,
-                        candidate,
+                        reviewed_candidate,
                         execution.order_id,
                         max_age_days=float(lifecycle["exchange_max_age_days"]),
                     )
