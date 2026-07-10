@@ -1,0 +1,12 @@
+Điểm quan trọng nhất của bản này là mọi hành động tiền thật đều đi theo chuỗi:
+
+Request
+→ Validate
+→ Persist intent
+→ Execute OKX
+→ Persist result
+→ Journal
+→ Event
+→ Reconcile
+
+Nhờ vậy bot không chỉ biết mở và đóng lệnh, mà còn có thể xử lý restart, timeout, fill một phần và request lặp mà không vô tình gửi trùng lện

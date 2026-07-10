@@ -1,0 +1,13 @@
+📈 Trading Execution
+
+├── Pending Setups
+├── Orders
+├── Open Positions
+├── Position Lifecycle
+├── Stop Loss & Break-even
+├── Trailing Stop
+├── Take Profit
+├── Early Exit
+├── Reconciliation
+├── Position Journal
+└── Execution Events

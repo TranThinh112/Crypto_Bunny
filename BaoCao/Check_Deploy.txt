@@ -1,0 +1,9 @@
+https://cryptobunny-production-8133.up.railway.app/api/version 
+
+Nếu Railway đã nhận code mới, bạn sẽ thấy các dấu hiệu này trong JSON:
+	feature_flags.four_hour_fixed_boundaries = true
+	feature_flags.trade_execution_close_reason = true
+	feature_flags.trade_execution_close_telegram_v2 = true
+	code_signature.combined_sha16
+
+nếu Railway cấp biến môi trường thì sẽ có thêm build.commit_sha và build.deployment_id
