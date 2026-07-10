@@ -21,6 +21,7 @@ from crypto_trader.storage import (
     save_decision,
     save_market_scan_observations,
     save_pending_order,
+    storage_stats,
 )
 
 
@@ -419,3 +420,36 @@ class StorageTest(TestCase):
         self.assertEqual(rows[0]["model_version"], "gpt-5.5-new")
         self.assertEqual(rows[0]["prompt_version"], "prompt-v2")
         self.assertEqual(rows[0]["prompt_hash"], "hash-b")
+
+    @patch("crypto_trader.storage._mongo_find_many", side_effect=AssertionError("storage_stats should not scan all rows in Python"))
+    def test_storage_stats_uses_server_side_payload_aggregation(self, _mongo_find_many) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config = self._config(tmpdir)
+            db = atlas_database(config)
+            db["decisions"].replace_one(
+                {"id": 1},
+                {
+                    "_id": 1,
+                    "id": 1,
+                    "payload_json": '{"a":1}',
+                },
+                upsert=True,
+            )
+            db["market_scan_observations"].replace_one(
+                {"id": 1},
+                {
+                    "_id": 1,
+                    "id": 1,
+                    "timeframe": "1m",
+                    "symbol": "BTC/USDT:USDT",
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "payload_json": '{"b":22}',
+                },
+                upsert=True,
+            )
+
+            stats = storage_stats(config)
+
+        self.assertGreaterEqual(stats["row_counts"]["decisions"], 1)
+        self.assertEqual(stats["payload_bytes"]["decisions"], len('{"a":1}'.encode("utf-8")))
+        self.assertEqual(stats["market_scan_by_timeframe"][0]["timeframe"], "1m")

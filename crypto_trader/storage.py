@@ -1555,28 +1555,66 @@ def storage_stats(config: dict[str, Any]) -> dict[str, Any]:
         "market_regime_history",
         "replay_history",
     ]
+
+    def _collection_row_count(table: str) -> int:
+        collection = _mongo_collection(config, table)
+        try:
+            return int(collection.estimated_document_count())
+        except Exception:
+            return int(collection.count_documents({}))
+
+    def _collection_payload_bytes(table: str) -> int:
+        collection = _mongo_collection(config, table)
+        try:
+            rows = list(
+                collection.aggregate(
+                    [
+                        {
+                            "$project": {
+                                "payload_size": {
+                                    "$strLenBytes": {
+                                        "$ifNull": ["$payload_json", ""],
+                                    }
+                                }
+                            }
+                        },
+                        {
+                            "$group": {
+                                "_id": None,
+                                "total_bytes": {"$sum": "$payload_size"},
+                            }
+                        },
+                    ]
+                )
+            )
+            return int((rows[0] if rows else {}).get("total_bytes") or 0)
+        except Exception:
+            total = 0
+            for row in collection.find({}, {"payload_json": 1}):
+                total += len(str(row.get("payload_json") or "").encode("utf-8"))
+            return total
+
     row_counts: dict[str, int] = {}
     payload_bytes: dict[str, int] = {}
     for table in tables:
-        row_counts[table] = int(_mongo_collection(config, table).count_documents({}))
-        payload_bytes[table] = sum(
-            len(str(row.get("payload_json") or "").encode("utf-8"))
-            for row in _mongo_find_many(config, table)
-            if "payload_json" in row
+        row_counts[table] = _collection_row_count(table)
+        payload_bytes[table] = _collection_payload_bytes(table)
+    try:
+        timeframe_rows = _mongo_collection(config, "market_scan_observations").aggregate(
+            [
+                {
+                    "$group": {
+                        "_id": "$timeframe",
+                        "rows": {"$sum": 1},
+                        "symbols": {"$addToSet": "$symbol"},
+                        "latest_at": {"$max": "$created_at"},
+                    }
+                },
+                {"$sort": {"_id": 1}},
+            ]
         )
-    timeframe_rows = _mongo_collection(config, "market_scan_observations").aggregate(
-        [
-            {
-                "$group": {
-                    "_id": "$timeframe",
-                    "rows": {"$sum": 1},
-                    "symbols": {"$addToSet": "$symbol"},
-                    "latest_at": {"$max": "$created_at"},
-                }
-            },
-            {"$sort": {"_id": 1}},
-        ]
-    )
+    except Exception:
+        timeframe_rows = []
     market_scan_by_timeframe = [
         {
             "timeframe": row.get("_id"),
