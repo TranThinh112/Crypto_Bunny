@@ -1226,6 +1226,16 @@ function moduleDeltaInfo(module, row) {
   };
 }
 
+function moduleChangedVariableCount(module, rows = null) {
+  const sourceRows = Array.isArray(rows)
+    ? rows
+    : moduleDisplayRows(module, Array.isArray(module?.stats) ? module.stats : []);
+  return sourceRows.reduce((count, row) => {
+    const delta = moduleDeltaInfo(module, row);
+    return delta.state === "up" || delta.state === "down" ? count + 1 : count;
+  }, 0);
+}
+
 function moduleDisplayRows(module, rows) {
   const moduleNumber = Number(module?.number || 0);
   if (moduleNumber !== 1) return Array.isArray(rows) ? rows : [];
@@ -1543,13 +1553,17 @@ function renderModuleDetail(module) {
   const auxRows = moduleAuxRows(module, allRows);
   const file = module.file || {};
   const runtimeUpdatedLabel = moduleUpdatedLabel(module);
+  const changedVariableCount = moduleChangedVariableCount(module, rows);
   refs.systemModuleOverlay.hidden = false;
   refs.systemModuleDetail.innerHTML = `
     <button id="systemModuleClose" class="module-close" type="button" aria-label="Đóng">×</button>
     <div class="module-detail-head">
       <div>
         <span class="module-number">Module ${escapeHtml(module.number || "-")}</span>
-        <h3 id="systemModuleTitle">${escapeHtml(module.name || "-")}</h3>
+        <div class="module-title-line">
+          <h3 id="systemModuleTitle">${escapeHtml(module.name || "-")}</h3>
+          ${changedVariableCount > 0 ? `<span class="module-change-count" title="${escapeHtml(String(changedVariableCount))} biáº¿n Ä‘ang thay Ä‘á»•i">${escapeHtml(String(changedVariableCount))}</span>` : ""}
+        </div>
         <p>${escapeHtml(module.purpose || "-")}</p>
       </div>
       <span class="status-pill ${module.status === "ok" ? "ok" : "warn"}">${moduleStatusLabel(module.status)}</span>
@@ -1681,6 +1695,7 @@ function groupedSystemModules(modules) {
       key: "ai-decision",
       icon: "🧠",
       title: "AI Decision",
+      subtitle_vi: "Ra quyết định AI",
       event_text: "Ghi nhớ sau mỗi quyết định",
       schedule_text: "Market Regime 2 giờ/lần, Replay & Strategy lúc 6h sáng",
       items: [
@@ -1694,6 +1709,7 @@ function groupedSystemModules(modules) {
       key: "risk-management",
       icon: "🛡",
       title: "Risk Management",
+      subtitle_vi: "Quản lý rủi ro",
       event_text: "Ngay khi lệnh đóng",
       schedule_text: "5 phút/lần để đối chiếu",
       items: [
@@ -1706,6 +1722,7 @@ function groupedSystemModules(modules) {
       key: "capital-management",
       icon: "💰",
       title: "Capital Management",
+      subtitle_vi: "Quản lý vốn",
       event_text: "Sau nạp/rút, sau lệnh đóng",
       schedule_text: "5 phút/lần đồng bộ OKX",
       items: capitalModules,
@@ -1714,6 +1731,7 @@ function groupedSystemModules(modules) {
       key: "ai-optimization",
       icon: "⚙️",
       title: "AI Optimization",
+      subtitle_vi: "Tối ưu AI",
       event_text: "Ghi token mỗi request",
       schedule_text: "Tổng hợp 6h sáng",
       items: [
@@ -1748,7 +1766,10 @@ function renderSystemModules(modules) {
     toggle.setAttribute("aria-expanded", "true");
     toggle.innerHTML = `
       <div class="module-group-head">
-        <strong>${escapeHtml(group.icon)} ${escapeHtml(group.title)}</strong>
+        <div class="module-group-title-block">
+          <strong>${escapeHtml(group.icon)} ${escapeHtml(group.title)}</strong>
+          <small class="module-group-subtitle">${escapeHtml(group.subtitle_vi || "")}</small>
+        </div>
         <span>${group.items.length}</span>
       </div>
       <div class="module-group-schedule">
@@ -1771,6 +1792,8 @@ function renderSystemModules(modules) {
       const updateIntervalLabel = module.update_interval || module.update_schedule || module.update_event || "-";
       const runtimeUpdatedLabel = moduleUpdatedLabel(module);
       const attentionRows = Array.isArray(module.stats) ? module.stats.filter((row) => row && row.attention) : [];
+      const displayRows = moduleDisplayRows(module, Array.isArray(module.stats) ? module.stats : []);
+      const changedVariableCount = moduleChangedVariableCount(module, displayRows);
       const attentionLabel = attentionRows.length
         ? `${attentionRows.length} biến cần chú ý`
         : module.status === "warn" ? "Cần kiểm tra" : "Ổn";
@@ -1783,7 +1806,10 @@ function renderSystemModules(modules) {
           <span class="module-item-status ${module.status || "warn"}">${moduleStatusLabel(module.status)}</span>
         </div>
         <div class="module-item-main">
-          <strong>${escapeHtml(module.name || "-")}</strong>
+          <div class="module-title-line">
+            <strong>${escapeHtml(module.name || "-")}</strong>
+            ${changedVariableCount > 0 ? `<span class="module-change-count" title="${escapeHtml(String(changedVariableCount))} biáº¿n Ä‘ang thay Ä‘á»•i">${escapeHtml(String(changedVariableCount))}</span>` : ""}
+          </div>
           <small>${escapeHtml(module.purpose || "-")}</small>
           <span class="module-update-note"><b>Thời gian cập nhật:</b> <span class="module-update-value">${escapeHtml(runtimeUpdatedLabel || "-")}</span><em class="module-update-badge">mỗi ${escapeHtml(updateIntervalLabel)}/1 lần</em></span>
           <span class="module-file"><b>File cấu hình:</b> <span class="module-file-value" title="${escapeHtml(configFileLabel)}">${escapeHtml(configFileLabel)}</span></span>
