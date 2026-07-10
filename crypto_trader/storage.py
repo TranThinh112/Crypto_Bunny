@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import re
 import threading
 import time
@@ -37,6 +38,7 @@ LOCAL_MARKET_SCAN_CACHE_FILENAME = "latest_market_scan_memory.json"
 
 _JOURNAL_STATE_CACHE_LOCK = threading.Lock()
 _JOURNAL_STATE_CACHE: dict[str, tuple[float, str]] = {}
+LOGGER = logging.getLogger(__name__)
 
 
 class _RetryingCollectionProxy:
@@ -1089,7 +1091,13 @@ def purge_deprecated_journal_state(config: dict[str, Any]) -> list[str]:
     removed: list[str] = []
     _ensure_mongo_write_allowed(config)
     for key in sorted(DEPRECATED_JOURNAL_STATE_KEYS):
-        result = _mongo_collection(config, "journal_state").delete_one({"key": key})
+        result = _best_effort_retryable_storage_side_effect(
+            config,
+            lambda key=key: _mongo_collection(config, "journal_state").delete_one({"_id": key}),
+        )
+        if result is None:
+            LOGGER.warning("Skipping deprecated journal_state purge for key '%s' due to transient Mongo issue.", key)
+            continue
         if int(result.deleted_count or 0) > 0:
             removed.append(key)
     return removed

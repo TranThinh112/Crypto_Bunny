@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -136,6 +137,7 @@ from .storage import (
 from .sizing import STATE_KEY as SIZING_STATE_KEY
 
 
+LOGGER = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 PRICE_CACHE_TTL_SECONDS = 55
 TELEGRAM_VIEW_CACHE_TTL_SECONDS = 4
@@ -2336,7 +2338,10 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
     @app.on_event("startup")
     def start_automation() -> None:
         config = load_config(app.state.config_path)
-        purge_deprecated_journal_state(config)
+        try:
+            purge_deprecated_journal_state(config)
+        except Exception as exc:
+            LOGGER.warning("Skipping deprecated journal state purge during startup: %s", exc)
         clear_dashboard_snapshot_cache(config)
         try:
             sync_runtime_state(config)
