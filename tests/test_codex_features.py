@@ -133,7 +133,7 @@ class CodexFeaturesTest(TestCase):
 
         urlopen.assert_not_called()
 
-    @patch("crypto_trader.codex_features.list_ai_trade_decision_rows")
+    @patch("crypto_trader.codex_features.list_ai_trade_decision_stat_rows")
     def test_ai_trade_decision_stats_uses_lightweight_rows_without_json_parsing(self, list_rows) -> None:
         list_rows.return_value = [
             {

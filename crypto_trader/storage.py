@@ -810,6 +810,32 @@ def prune_ai_trade_decisions(config: dict[str, Any], *, keep_days: float | None 
 def list_ai_trade_decision_rows(config: dict[str, Any], *, limit: int = 50) -> list[dict[str, Any]]:
     safe_limit = max(1, int(limit))
     return _mongo_find_many(config, "ai_trade_decisions", sort=[("created_at", -1), ("id", -1)], limit=safe_limit)
+
+
+def list_ai_trade_decision_stat_rows(config: dict[str, Any], *, limit: int = 50) -> list[dict[str, Any]]:
+    safe_limit = max(1, int(limit))
+
+    def _operation() -> list[dict[str, Any]]:
+        cursor = (
+            _mongo_collection(config, "ai_trade_decisions")
+            .find(
+                {},
+                {
+                    "_id": 0,
+                    "decision": 1,
+                    "trade_status": 1,
+                    "confidence": 1,
+                    "pnl": 1,
+                },
+            )
+            .sort([("created_at", -1), ("id", -1)])
+            .limit(safe_limit)
+        )
+        return [dict(row) for row in cursor]
+
+    return _mongo_call_with_retry(config, _operation)
+
+
 def mark_ai_trade_decisions_closed(
     config: dict[str, Any],
     *,
