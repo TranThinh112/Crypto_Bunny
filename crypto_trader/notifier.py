@@ -113,12 +113,12 @@ def telegram_control_keyboard() -> dict[str, Any]:
                 {"text": "\U0001f514 Thông báo nội bộ", "callback_data": "view_internal_notifications"},
             ],
             [
-                {"text": "\U0001f7e1 Wait Slot", "callback_data": "view_wait_slot_notifications"},
+                {"text": "\U0001f916 AI", "callback_data": "view_ai"},
             ],
             [
                 {"text": "\U0001f6e1 Guard", "callback_data": "view_guard"},
                 {"text": "\U0001f9e0 Memory", "callback_data": "view_memory"},
-                {"text": "\U0001f916 AI", "callback_data": "view_ai"},
+                {"text": "\U0001f7e1 Wait Slot", "callback_data": "view_wait_slot_notifications"},
             ],
             [
                 {"text": "\u2699\ufe0f Setup", "callback_data": "setup_menu"},

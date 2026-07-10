@@ -488,6 +488,25 @@ class UiTest(TestCase):
         self.assertNotIn("set_leverage", callbacks)
         self.assertNotIn("set_max_positions", callbacks)
 
+    def test_telegram_dashboard_swaps_ai_and_wait_slot_positions(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text("mode: dry_run\n", encoding="utf-8")
+            config = load_config(config_path)
+
+            _, _, keyboard = _telegram_action_response(config, "view_menu", config_path)
+
+        rows = keyboard["inline_keyboard"]
+        self.assertEqual(rows[2], [{"text": "🤖 AI", "callback_data": "view_ai"}])
+        self.assertEqual(
+            rows[3],
+            [
+                {"text": "🛡 Guard", "callback_data": "view_guard"},
+                {"text": "🧠 Memory", "callback_data": "view_memory"},
+                {"text": "🟡 Wait Slot", "callback_data": "view_wait_slot_notifications"},
+            ],
+        )
+
     def test_telegram_setup_menu_has_three_setup_actions(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             config_path = Path(tmpdir) / "config.yaml"
