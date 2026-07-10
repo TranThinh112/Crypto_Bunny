@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -132,6 +133,37 @@ PRICE_CACHE_TTL_SECONDS = 55
 TELEGRAM_VIEW_CACHE_TTL_SECONDS = 4
 
 
+def _file_signature(path: Path) -> str | None:
+    try:
+        payload = path.read_bytes()
+    except OSError:
+        return None
+    return hashlib.sha256(payload).hexdigest()[:12]
+
+
+def _code_signature() -> dict[str, Any]:
+    base_dir = Path(__file__).resolve().parent
+    targets = {
+        "ui": base_dir / "ui.py",
+        "lc_pipeline": base_dir / "lc_pipeline.py",
+        "reporting": base_dir / "reporting.py",
+        "codex_features": base_dir / "codex_features.py",
+    }
+    signatures: dict[str, Any] = {}
+    for key, path in targets.items():
+        signatures[key] = {
+            "file": path.name,
+            "sha12": _file_signature(path),
+        }
+    combined = hashlib.sha256(
+        "|".join(f"{key}:{item['sha12'] or '-'}" for key, item in signatures.items()).encode("utf-8")
+    ).hexdigest()[:16]
+    return {
+        "combined_sha16": combined,
+        "files": signatures,
+    }
+
+
 def _build_runtime_metadata() -> dict[str, Any]:
     return {
         "app_version": __version__,
@@ -139,6 +171,14 @@ def _build_runtime_metadata() -> dict[str, Any]:
             "commit_sha": os.getenv("RAILWAY_GIT_COMMIT_SHA") or os.getenv("SOURCE_COMMIT"),
             "deployment_id": os.getenv("RAILWAY_DEPLOYMENT_ID"),
             "public_domain": os.getenv("RAILWAY_PUBLIC_DOMAIN"),
+            "service_id": os.getenv("RAILWAY_SERVICE_ID"),
+            "environment": os.getenv("RAILWAY_ENVIRONMENT_NAME"),
+        },
+        "code_signature": _code_signature(),
+        "feature_flags": {
+            "four_hour_fixed_boundaries": True,
+            "trade_execution_close_reason": True,
+            "trade_execution_close_telegram_v2": True,
         },
     }
 TELEGRAM_TIMELINE_CACHE_TTL_SECONDS = 4
@@ -2332,6 +2372,19 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
             "mode": load_config(app.state.config_path).get("mode", "dry_run"),
             "automation": _automation_status_payload(app),
             "lc_pipeline_worker": _lc_pipeline_status_payload(app),
+        }
+        payload.update(_build_runtime_metadata())
+        return payload
+
+    @app.get("/api/version")
+    def api_version() -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        payload = {
+            "ok": True,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "mode": config.get("mode", "dry_run"),
+            "runtime_role": config.get("runtime", {}).get("instance_role", "primary"),
+            "config_file": Path(app.state.config_path).name,
         }
         payload.update(_build_runtime_metadata())
         return payload

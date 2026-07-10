@@ -235,6 +235,21 @@ class UiTest(TestCase):
         self.assertEqual(payload["ai"]["internal"]["model"], "gpt-5.4-mini")
         self.assertEqual(payload["ai"]["okx"]["model"], "gpt-5.5")
 
+    def test_version_endpoint_returns_code_signature_and_feature_flags(self) -> None:
+        client = TestClient(create_app("config.example.yaml"))
+
+        response = client.get("/api/version")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertIn("generated_at", payload)
+        self.assertIn("code_signature", payload)
+        self.assertIn("combined_sha16", payload["code_signature"])
+        self.assertTrue(payload["feature_flags"]["four_hour_fixed_boundaries"])
+        self.assertTrue(payload["feature_flags"]["trade_execution_close_reason"])
+        self.assertTrue(payload["feature_flags"]["trade_execution_close_telegram_v2"])
+
     def test_prices_endpoint_soft_fails_on_exchange_error(self) -> None:
         class FailingExchange:
             def load_markets(self) -> None:
