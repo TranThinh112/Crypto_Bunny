@@ -2577,14 +2577,18 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
         )
 
     @app.get("/api/system-checklist")
-    def system_checklist_endpoint(date: str | None = None) -> dict[str, Any]:
+    def system_checklist_endpoint(date: str | None = None, force_refresh: bool = False) -> dict[str, Any]:
         config = load_config(app.state.config_path)
         if date:
             snapshot = dashboard_system_checklist_snapshot(config, date)
             if snapshot is None:
                 raise HTTPException(status_code=404, detail=f"No system checklist snapshot for {date}")
             return snapshot
-        return system_checklist_payload(config, automation=_automation_status_payload(app))
+        return system_checklist_payload(
+            config,
+            automation=_automation_status_payload(app),
+            force_refresh=force_refresh,
+        )
 
     @app.get("/api/system-checklist/history")
     def system_checklist_history_endpoint(limit: int = 30) -> dict[str, Any]:
