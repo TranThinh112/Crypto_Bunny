@@ -14,6 +14,7 @@ from .storage import (
     list_pending_orders,
     list_trade_execution_rows,
     refresh_pending_order,
+    reclassify_unknown_trade_closures,
     save_pending_order,
     save_prompt_metric_snapshot,
     update_trade_execution,
@@ -61,7 +62,7 @@ def _close_stale_open_execution(
         config,
         int(row["id"]),
         {
-            "status": "CLOSED",
+            "status": "RECONCILED",
             "close_reason": reason,
             "closed_at": closed_at,
             "updated_at": closed_at,
@@ -222,6 +223,7 @@ def sync_exchange_runtime_state(
     if config.get("mode") == "dry_run":
         return {"enabled": False, "reason": "dry_run", "positions_synced": 0, "orders_synced": 0}
     snapshot = account_snapshot or _fetch_account_snapshot(config)
+    reclassified_executions = reclassify_unknown_trade_closures(config)
     created_at = str(snapshot.get("created_at") or datetime.now(timezone.utc).isoformat())
     position_rows = [item for item in (snapshot.get("positions") or []) if isinstance(item, dict)]
     open_orders = [item for item in (snapshot.get("open_orders") or []) if isinstance(item, dict)]
@@ -390,6 +392,7 @@ def sync_exchange_runtime_state(
         "orders_synced": orders_synced,
         "executions_closed": executions_closed,
         "duplicate_executions_closed": duplicate_executions_closed,
+        "reclassified_executions": reclassified_executions,
     }
 
 

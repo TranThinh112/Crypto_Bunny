@@ -124,9 +124,9 @@ class RuntimeSyncTest(TestCase):
 
         self.assertEqual(result["exchange"]["executions_closed"], 1)
         self.assertEqual(list_trade_execution_rows(config, statuses=["OPEN"]), [])
-        closed = list_trade_execution_rows(config, statuses=["CLOSED"])
-        self.assertEqual(closed[0]["close_reason"], "exchange_position_no_longer_open")
-        self.assertIsNone(closed[0]["position_slot"])
+        reconciled = list_trade_execution_rows(config, statuses=["RECONCILED"])
+        self.assertEqual(reconciled[0]["close_reason"], "exchange_position_no_longer_open")
+        self.assertIsNone(reconciled[0]["position_slot"])
 
     def test_sync_collapses_duplicate_open_executions_for_same_position(self) -> None:
         config = self._config()

@@ -971,6 +971,30 @@ def update_trade_execution(config: dict[str, Any], trade_execution_id: int, upda
     _ensure_mongo_write_allowed(config)
     _mongo_collection(config, "trade_executions").update_one({"id": int(trade_execution_id)}, {"$set": dict(updates)})
     return get_trade_execution(config, trade_execution_id)
+
+
+def reclassify_unknown_trade_closures(config: dict[str, Any]) -> int:
+    _ensure_mongo_write_allowed(config)
+    now = datetime.now(timezone.utc).isoformat()
+    result = _mongo_collection(config, "trade_executions").update_many(
+        {
+            "status": "CLOSED",
+            "close_reason": {
+                "$in": [
+                    "exchange_position_no_longer_open",
+                    "duplicate_open_execution_reconciled",
+                ]
+            },
+        },
+        {
+            "$set": {
+                "status": "RECONCILED",
+                "position_slot": None,
+                "updated_at": now,
+            }
+        },
+    )
+    return int(result.modified_count or 0)
 def close_latest_trade_execution_by_status(
     config: dict[str, Any],
     *,
