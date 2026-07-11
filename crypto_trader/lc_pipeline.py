@@ -550,6 +550,30 @@ def _peak_win_probability(*values: Any) -> float:
     return max(valid)
 
 
+def _latest_known_win_probability(row: dict[str, Any]) -> float:
+    ordered_candidates = (
+        row.get("current_win_probability_pct"),
+        row.get("win_probability_pct"),
+        row.get("previous_scan_win_probability_pct"),
+        row.get("peak_win_probability_pct"),
+    )
+    for value in ordered_candidates:
+        if value in (None, ""):
+            continue
+        parsed = _safe_float(value, float("-inf"))
+        if parsed == float("-inf"):
+            continue
+        if parsed > 0:
+            return parsed
+    for value in ordered_candidates:
+        if value in (None, ""):
+            continue
+        parsed = _safe_float(value, float("-inf"))
+        if parsed != float("-inf"):
+            return parsed
+    return 0.0
+
+
 def _row_age_hours(row: dict[str, Any], now: datetime) -> float | None:
     first_seen = _parse_time(row.get("first_seen_at"))
     if first_seen is None:
@@ -1752,6 +1776,15 @@ def _upsert_by_setup(rows: list[dict[str, Any]], record: dict[str, Any]) -> list
     return output
 
 
+def _union_rows_by_setup(rows: list[dict[str, Any]], incoming_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    output = list(rows)
+    for row in incoming_rows:
+        if not isinstance(row, dict):
+            continue
+        output = _upsert_by_setup(output, row)
+    return output
+
+
 def _prune_undecided(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     ranked = sorted(rows, key=_candidate_score, reverse=True)
     return ranked[:limit]
@@ -1877,6 +1910,35 @@ def _latest_four_hour_rows(state: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(latest_event, dict):
         return []
     return [row for row in latest_event.get("approved") or [] if isinstance(row, dict)]
+
+
+def _living_hs_internal_lc_rows(
+    state: dict[str, Any],
+    *,
+    settings: dict[str, Any],
+    now: datetime,
+    blocked_symbols: set[str],
+) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    max_age_hours = float(settings["undecided_max_age_hours"])
+    for row in _sort_saved_rows(list(state.get("internal_lc") or []), settings, reverse=True):
+        if not isinstance(row, dict):
+            continue
+        key = _setup_key(row)
+        symbol = str(row.get("symbol") or "")
+        if key in seen or not symbol or symbol in blocked_symbols:
+            continue
+        if not row.get("revived_at") and str(row.get("source_slot") or "").strip() != "HS":
+            continue
+        age_hours = _row_age_hours(row, now)
+        if age_hours is not None and age_hours > max_age_hours:
+            continue
+        if not _row_is_relaxed_valid(row, settings):
+            continue
+        output.append(row)
+        seen.add(key)
+    return output
 
 
 def _row_origin_label(row: dict[str, Any], *, config: dict[str, Any]) -> str | None:
@@ -2301,7 +2363,10 @@ def _rc_row_age_label(row: dict[str, Any], now: datetime) -> str:
     age_hours = _row_age_hours(row, now)
     if age_hours is None:
         return str(row.get("age_label") or "-")
-    return _age_label(age_hours)
+    label = _age_label(age_hours)
+    if age_hours >= 6.0:
+        return f"{label} (đủ slot LC)"
+    return label
 
 
 def _rc_row_source_label(config: dict[str, Any], row: dict[str, Any]) -> str:
@@ -2869,8 +2934,7 @@ def _mark_missing_undecided_row(
     reason: str,
 ) -> dict[str, Any]:
     record = {**row}
-    if "previous_scan_win_probability_pct" not in record:
-        record["previous_scan_win_probability_pct"] = record.get("win_probability_pct")
+    record["previous_scan_win_probability_pct"] = _latest_known_win_probability(record)
     record["win_probability_pct"] = 0.0
     record["current_win_probability_pct"] = 0.0
     record["peak_win_probability_pct"] = _peak_win_probability(
@@ -3015,7 +3079,7 @@ def _promote_survivors(
     internal_lc = list(state.get("internal_lc") or [])
     undecided: list[dict[str, Any]] = []
     local_now = _local_time(config, now)
-    revive_candidates: list[tuple[dict[str, Any], TradeCandidate, float]] = []
+    revive_candidates: list[tuple[dict[str, Any], dict[str, Any], TradeCandidate, float]] = []
     for row in state.get("undecided") or []:
         symbol = str(row.get("symbol") or "")
         first_seen = _parse_time(row.get("first_seen_at"))
@@ -3056,25 +3120,36 @@ def _promote_survivors(
                 "revived_age_label": _age_label(age_hours),
             }
             internal_lc = _upsert_by_symbol(internal_lc, record)
-            revive_candidates.append((record, candidate, age_hours))
+            revive_candidates.append((row, record, candidate, age_hours))
             continue
         undecided.append(row)
-    state["undecided"] = _trim_undecided(undecided, settings)
     state["internal_lc"] = _sort_saved_rows(internal_lc, settings, reverse=True)[: int(settings["internal_lc_max"])]
     for position, lc_row in enumerate(state["internal_lc"], 1):
         if isinstance(lc_row, dict) and lc_row.get("revived_at"):
             lc_row["revived_target_rank"] = position
-    survivor_symbols = {str(row.get("symbol") or "") for row in state["internal_lc"]}
-    for record, candidate, age_hours in revive_candidates:
-        symbol = str(record.get("symbol") or "")
-        if symbol not in survivor_symbols:
+    survivor_keys = {_setup_key(row) for row in state["internal_lc"] if isinstance(row, dict)}
+    promoted_to_notify: list[tuple[dict[str, Any], TradeCandidate, float]] = []
+    for original_row, record, candidate, age_hours in revive_candidates:
+        key = _setup_key(record)
+        if key not in survivor_keys:
+            kept_row = _mark_undecided_row(
+                original_row,
+                now=now,
+                settings=settings,
+                status="soft_valid",
+                reason="LC nội bộ đang đầy top 3, tiếp tục recheck",
+            )
+            undecided = _upsert_by_setup(undecided, kept_row)
             continue
         for lc_row in state["internal_lc"]:
-            if isinstance(lc_row, dict) and str(lc_row.get("symbol") or "") == symbol:
+            if isinstance(lc_row, dict) and _setup_key(lc_row) == key:
                 record["revived_target_rank"] = lc_row.get("revived_target_rank")
                 break
         promoted.append(record)
-        active_symbols.add(symbol)
+        active_symbols.add(str(record.get("symbol") or ""))
+        promoted_to_notify.append((record, candidate, age_hours))
+    state["undecided"] = _trim_undecided(undecided, settings)
+    for record, _candidate, age_hours in promoted_to_notify:
         _notify_promoted_lc_v2(config, record, age_hours=age_hours, remaining_count=len(state["undecided"]))
     return promoted
 
@@ -3103,6 +3178,12 @@ def _update_lc_internal_pipeline_impl(
     blocked_symbols = _active_symbol_blocklist(config)
     _prune_blocked_state(state, blocked_symbols)
     _prune_low_win_state(state, settings, now)
+    living_hs_internal_lc_rows = _living_hs_internal_lc_rows(
+        state,
+        settings=settings,
+        now=now,
+        blocked_symbols=blocked_symbols,
+    )
     top_limit = int(settings["top_limit"])
     candidates_by_symbol = {candidate.symbol: candidate for candidate in candidates}
     hourly_slot = _slot_key(config, now, 1)
@@ -3330,6 +3411,7 @@ def _update_lc_internal_pipeline_impl(
         combined_two_hour: list[dict[str, Any]] = []
         for window in aligned_two_hour_events:
             combined_two_hour.extend(window.get("approved") or [])
+        combined_two_hour = _union_rows_by_setup(combined_two_hour, living_hs_internal_lc_rows)
         refreshed_two_hour, four_hour_recheck = _recheck_rows_with_latest_market_data(config, combined_two_hour, now=now)
         _sync_state_after_recheck(
             state,
