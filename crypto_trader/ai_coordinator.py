@@ -1435,40 +1435,7 @@ def okx_ai_approval(
                 "fallback": "local_policy",
                 "external_error": str(exc),
             }
-    provider = str(okx_config.get("provider", "local_policy") or "local_policy")
-    if provider != "openai":
-        return local_decision
-    if not bool(okx_config.get("auto_openai_enabled", False)):
-        return {
-            **local_decision,
-            "decision": "auto_openai_disabled",
-            "reason": "Automatic OKX OpenAI approval is disabled; using local policy only",
-        }
-
-    if not bool(okx_config.get("approval_enabled", True)):
-        return {
-            **local_decision,
-            "decision": "approval_disabled",
-            "reason": "OKX AI approval is disabled; using local policy only",
-        }
-
-    try:
-        return _openai_json_decision(config, candidate, risk_check, context, pending_memory)
-    except (RuntimeError, urllib.error.URLError, urllib.error.HTTPError, KeyError, json.JSONDecodeError) as exc:
-        if bool(okx_config.get("require_external_approval", False)):
-            return {
-                "approved": False,
-                "decision": "external_ai_unavailable",
-                "reason": f"External OKX AI approval unavailable: {exc}",
-                "provider": "openai",
-                "model": str(okx_config.get("model", "gpt-5.5")),
-                "pending_memory": pending_memory,
-            }
-        return {
-            **local_decision,
-            "fallback": "local_policy",
-            "external_error": str(exc),
-        }
+    return local_decision
 
 
 def candidate_okx_review(candidate: TradeCandidate, *, route: str | None = None) -> dict[str, Any] | None:

@@ -131,28 +131,30 @@ class AiCoordinatorTest(TestCase):
 
     def test_okx_approval_disabled_uses_local_policy_without_calling_openai(self) -> None:
         config = self._config()
-        config["ai"]["okx"]["provider"] = "openai"
-        config["ai"]["okx"]["auto_openai_enabled"] = True
+        config["ai"]["okx"]["manual_openai_enabled"] = True
         config["ai"]["okx"]["approval_enabled"] = False
-        save_pending_order(config, _candidate("BTC/USDT:USDT"), "limit-1", journal_id=12)
         candidate = _candidate("SOL/USDT:USDT")
         check = RiskCheck(True, [], [])
 
         with patch("crypto_trader.ai_coordinator._openai_json_decision") as approval:
-            decision = okx_ai_approval(config, candidate, check, context={"route": "new_vt"})
+            decision = okx_ai_approval(
+                config,
+                candidate,
+                check,
+                context={"route": "new_vt", "manual_openai_once": True},
+            )
 
         approval.assert_not_called()
-        self.assertFalse(decision["approved"])
+        self.assertTrue(decision["approved"])
         self.assertEqual(decision["decision"], "approval_disabled")
         self.assertEqual(decision["provider"], "local_policy")
 
-    def test_okx_auto_openai_disabled_uses_local_policy_without_calling_openai(self) -> None:
+    def test_okx_auto_flow_never_calls_openai_even_if_auto_config_is_enabled(self) -> None:
         config = self._config()
         config["ai"]["okx"]["provider"] = "openai"
-        config["ai"]["okx"]["auto_openai_enabled"] = False
+        config["ai"]["okx"]["auto_openai_enabled"] = True
         config["ai"]["okx"]["manual_openai_enabled"] = True
         config["ai"]["okx"]["approval_enabled"] = True
-        save_pending_order(config, _candidate("BTC/USDT:USDT"), "limit-1", journal_id=12)
         candidate = _candidate("SOL/USDT:USDT")
         check = RiskCheck(True, [], [])
 
@@ -160,8 +162,8 @@ class AiCoordinatorTest(TestCase):
             decision = okx_ai_approval(config, candidate, check, context={"route": "new_vt"})
 
         approval.assert_not_called()
-        self.assertFalse(decision["approved"])
-        self.assertEqual(decision["decision"], "auto_openai_disabled")
+        self.assertTrue(decision["approved"])
+        self.assertEqual(decision["decision"], "approve")
         self.assertEqual(decision["provider"], "local_policy")
 
     def test_okx_manual_openai_once_calls_openai_even_when_auto_is_disabled(self) -> None:
