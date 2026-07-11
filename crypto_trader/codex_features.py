@@ -683,6 +683,8 @@ def call_openai_json(
         if route not in allowed_routes:
             raise RuntimeError(f"OpenAI OKX approval blocked by policy: route={route or '-'}")
         okx_config = ai_settings.get("okx", {})
+        if not bool(okx_config.get("auto_openai_enabled", False)):
+            raise RuntimeError("OpenAI OKX approval blocked: ai.okx.auto_openai_enabled=false")
         if not bool(okx_config.get("approval_enabled", True)):
             raise RuntimeError("OpenAI OKX approval blocked: ai.okx.approval_enabled=false")
     key_env, api_key = _role_api_key(config, role_config)

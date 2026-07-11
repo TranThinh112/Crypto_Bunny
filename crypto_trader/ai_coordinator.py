@@ -1397,6 +1397,12 @@ def okx_ai_approval(
     provider = str(okx_config.get("provider", "local_policy") or "local_policy")
     if provider != "openai":
         return local_decision
+    if not bool(okx_config.get("auto_openai_enabled", False)):
+        return {
+            **local_decision,
+            "decision": "auto_openai_disabled",
+            "reason": "Automatic OKX OpenAI approval is disabled; using local policy only",
+        }
 
     if not bool(okx_config.get("approval_enabled", True)):
         return {

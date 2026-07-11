@@ -133,6 +133,28 @@ class CodexFeaturesTest(TestCase):
 
         urlopen.assert_not_called()
 
+    @patch.dict(os.environ, {"OPENAI_API_KEY_TEST": "test-key"})
+    @patch("crypto_trader.codex_features.urllib.request.urlopen")
+    def test_openai_okx_final_approval_is_blocked_when_auto_okx_openai_disabled(self, urlopen) -> None:
+        config = self._config()
+        config["ai"]["okx"] = {
+            "auto_openai_enabled": False,
+            "approval_enabled": True,
+        }
+
+        with self.assertRaises(RuntimeError) as error:
+            call_openai_json(
+                config,
+                self._role_config(),
+                self._prompt_package(),
+                model_name="gpt-5.5",
+                purpose="okx_final_approval",
+                route="new_vt",
+            )
+
+        self.assertIn("auto_openai_enabled=false", str(error.exception))
+        urlopen.assert_not_called()
+
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_lc_okx_review_message_is_single_vietnamese_explanation(self, send_telegram_message) -> None:
         record_ai_call_event(

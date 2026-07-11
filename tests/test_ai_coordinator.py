@@ -132,6 +132,7 @@ class AiCoordinatorTest(TestCase):
     def test_okx_approval_disabled_uses_local_policy_without_calling_openai(self) -> None:
         config = self._config()
         config["ai"]["okx"]["provider"] = "openai"
+        config["ai"]["okx"]["auto_openai_enabled"] = True
         config["ai"]["okx"]["approval_enabled"] = False
         save_pending_order(config, _candidate("BTC/USDT:USDT"), "limit-1", journal_id=12)
         candidate = _candidate("SOL/USDT:USDT")
@@ -143,6 +144,23 @@ class AiCoordinatorTest(TestCase):
         approval.assert_not_called()
         self.assertFalse(decision["approved"])
         self.assertEqual(decision["decision"], "approval_disabled")
+        self.assertEqual(decision["provider"], "local_policy")
+
+    def test_okx_auto_openai_disabled_uses_local_policy_without_calling_openai(self) -> None:
+        config = self._config()
+        config["ai"]["okx"]["provider"] = "openai"
+        config["ai"]["okx"]["auto_openai_enabled"] = False
+        config["ai"]["okx"]["approval_enabled"] = True
+        save_pending_order(config, _candidate("BTC/USDT:USDT"), "limit-1", journal_id=12)
+        candidate = _candidate("SOL/USDT:USDT")
+        check = RiskCheck(True, [], [])
+
+        with patch("crypto_trader.ai_coordinator._openai_json_decision") as approval:
+            decision = okx_ai_approval(config, candidate, check, context={"route": "new_vt"})
+
+        approval.assert_not_called()
+        self.assertFalse(decision["approved"])
+        self.assertEqual(decision["decision"], "auto_openai_disabled")
         self.assertEqual(decision["provider"], "local_policy")
 
     def test_reuses_recent_rejected_okx_setup_review_without_recalling_ai(self) -> None:
