@@ -783,9 +783,12 @@ def _build_system_checklist_payload(
     payload_bytes = stats.get("payload_bytes", {})
     disk = stats.get("disk", {})
     free_percent = float(disk.get("free_percent") or 0)
+    disk_applicable = str(stats.get("backend") or "").lower() != "atlas"
+    disk_ok = free_percent > 2 if disk_applicable else True
+    disk_label = f"{free_percent}%" if disk_applicable else "N/A (MongoDB Atlas)"
     last_result = str(automation.get("last_result") or "")
     runtime_error = str(automation.get("error") or "")
-    runtime_ok = free_percent > 2 and "error" not in last_result.lower() and not runtime_error
+    runtime_ok = disk_ok and "error" not in last_result.lower() and not runtime_error
 
     try:
         ai_history = recent_ai_call_history(config, limit=20)
@@ -850,7 +853,7 @@ def _build_system_checklist_payload(
         _check_item(
             "Khong con loi runtime",
             runtime_ok,
-            f"last_result={last_result or '-'}, disk_free={free_percent}%",
+            f"last_result={last_result or '-'}, disk_free={disk_label}",
             evidence=[
                 _evidence_line("Ngay kiem tra", checked_date),
                 _evidence_line("Thoi gian local", checked_at_local.isoformat()),
@@ -858,7 +861,10 @@ def _build_system_checklist_payload(
                 _evidence_line("Nguon", "/healthz + automation_status + storage_stats"),
                 _evidence_line("Ket qua runtime gan nhat", last_result or "-"),
                 _evidence_line("Runtime error", runtime_error or "khong co"),
-                _evidence_line("Disk con trong", f"{free_percent}% ({disk.get('free_bytes', 0)} bytes)"),
+                _evidence_line(
+                    "Disk con trong",
+                    f"{free_percent}% ({disk.get('free_bytes', 0)} bytes)" if disk_applicable else "N/A - MongoDB Atlas",
+                ),
                 _evidence_line("DB path", stats.get("db_path")),
             ],
         ),
