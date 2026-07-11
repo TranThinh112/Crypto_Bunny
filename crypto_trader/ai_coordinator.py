@@ -39,6 +39,7 @@ _PENDING_STATUS_PRIORITY = {
     "WAIT_SLOT": 1,
     "OPEN": 2,
 }
+OKX_REVIEW_CACHE_STATE_KEY = "okx_review_cache"
 
 
 def _ordered_unique_symbols(symbols: list[Any]) -> list[str]:
@@ -71,6 +72,112 @@ def ai_config(config: dict[str, Any]) -> dict[str, Any]:
 
 def ai_enabled(config: dict[str, Any]) -> bool:
     return bool(ai_config(config).get("enabled", True))
+
+
+def _okx_review_reject_reuse_minutes(config: dict[str, Any]) -> int:
+    okx_config = ai_config(config).get("okx", {})
+    return max(0, int(okx_config.get("reject_reuse_minutes", 15) or 15))
+
+
+def _okx_review_cache_key(candidate: TradeCandidate, route: str) -> str:
+    return "|".join(
+        [
+            str(route or "").strip().lower(),
+            str(candidate.symbol or "").strip().upper(),
+            str(candidate.side or "").strip().upper(),
+        ]
+    )
+
+
+def _load_okx_review_cache(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    try:
+        from .storage import get_journal_state
+
+        raw = get_journal_state(config, OKX_REVIEW_CACHE_STATE_KEY)
+    except Exception:
+        return {}
+    try:
+        payload = json.loads(str(raw or "{}"))
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        str(key): value
+        for key, value in payload.items()
+        if isinstance(key, str) and isinstance(value, dict)
+    }
+
+
+def _save_okx_review_cache(config: dict[str, Any], cache: dict[str, dict[str, Any]]) -> None:
+    try:
+        from .storage import set_journal_state
+
+        set_journal_state(config, OKX_REVIEW_CACHE_STATE_KEY, json.dumps(cache, ensure_ascii=False))
+    except Exception:
+        return
+
+
+def _recent_rejected_okx_review(
+    config: dict[str, Any],
+    candidate: TradeCandidate,
+    *,
+    route: str,
+) -> dict[str, Any] | None:
+    if route != "lc_okx_setup_review":
+        return None
+    ttl_minutes = _okx_review_reject_reuse_minutes(config)
+    if ttl_minutes <= 0:
+        return None
+    cache = _load_okx_review_cache(config)
+    cache_key = _okx_review_cache_key(candidate, route)
+    entry = cache.get(cache_key)
+    if not isinstance(entry, dict):
+        return None
+    reviewed_at = _parse_time(entry.get("reviewed_at") or entry.get("created_at"))
+    if reviewed_at is None or (datetime.now(timezone.utc) - reviewed_at) > timedelta(minutes=ttl_minutes):
+        cache.pop(cache_key, None)
+        _save_okx_review_cache(config, cache)
+        return None
+    if bool(entry.get("approved")):
+        return None
+    return {
+        **entry,
+        "cached": True,
+        "cache_reason": f"Reused rejected 5.5 review for {ttl_minutes} minute(s)",
+    }
+
+
+def _remember_okx_review_cache(
+    config: dict[str, Any],
+    candidate: TradeCandidate,
+    *,
+    route: str,
+    decision: dict[str, Any],
+) -> None:
+    if route != "lc_okx_setup_review":
+        return
+    cache = _load_okx_review_cache(config)
+    cache_key = _okx_review_cache_key(candidate, route)
+    if bool(decision.get("approved")):
+        if cache.pop(cache_key, None) is not None:
+            _save_okx_review_cache(config, cache)
+        return
+    cache[cache_key] = {
+        "approved": bool(decision.get("approved")),
+        "decision": str(decision.get("decision") or ("approve" if decision.get("approved") else "reject")),
+        "reason": str(decision.get("reason") or ""),
+        "provider": decision.get("provider"),
+        "model": decision.get("model"),
+        "model_version": decision.get("model_version"),
+        "prompt_version": decision.get("prompt_version"),
+        "prompt_hash": decision.get("prompt_hash"),
+        "experiment_name": decision.get("experiment_name"),
+        "pending_memory": decision.get("pending_memory"),
+        "raw": decision.get("raw"),
+        "reviewed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _save_okx_review_cache(config, cache)
 
 
 def pending_priority_key(record: dict[str, Any]) -> tuple[int, float, int]:
@@ -236,6 +343,218 @@ def _compact_indicator_summary(summary: dict[str, Any] | None) -> dict[str, Any]
             if str(frame).lower() in {"5m", "15m", "1h", "4h"} and isinstance(data, dict)
         }
     return {key: value for key, value in compact.items() if value not in (None, {}, [])}
+
+
+def _pattern_supports_side(side: str, direction: Any) -> bool:
+    clean = str(direction or "").lower()
+    return (side == "long" and clean == "bullish") or (side == "short" and clean == "bearish")
+
+
+def _pattern_conflicts_side(side: str, direction: Any) -> bool:
+    clean = str(direction or "").lower()
+    return clean in {"bullish", "bearish"} and not _pattern_supports_side(side, clean)
+
+
+def _frame_context(candidate: TradeCandidate, frame_name: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    higher = candidate.higher_timeframes.get(frame_name) if isinstance(candidate.higher_timeframes, dict) else None
+    higher_payload = dict(higher) if isinstance(higher, dict) else {}
+    indicator = candidate.indicator_summary if isinstance(candidate.indicator_summary, dict) else {}
+    indicator_higher = indicator.get("higher_timeframes") if isinstance(indicator.get("higher_timeframes"), dict) else {}
+    indicator_frame = indicator_higher.get(frame_name) if isinstance(indicator_higher.get(frame_name), dict) else {}
+    merged_frame = {**indicator_frame, **higher_payload}
+
+    pattern = merged_frame.get("candlestick_patterns") if isinstance(merged_frame.get("candlestick_patterns"), dict) else None
+    indicator_patterns = indicator.get("candlestick_patterns") if isinstance(indicator.get("candlestick_patterns"), dict) else {}
+    if not isinstance(pattern, dict):
+        pattern = indicator_patterns.get(frame_name) if isinstance(indicator_patterns.get(frame_name), dict) else {}
+    return merged_frame, dict(pattern or {})
+
+
+def _frame_setup_check(
+    candidate: TradeCandidate,
+    frame_name: str,
+    *,
+    acceptable_statuses: set[str],
+) -> dict[str, Any]:
+    frame, pattern = _frame_context(candidate, frame_name)
+    side = str(candidate.side or "").lower()
+    trend = str(frame.get("trend") or "").lower()
+    pattern_direction = str(pattern.get("direction") or "").lower()
+    trend_supports = _side_matches_trend(side, trend)
+    trend_conflicts = trend in {"up", "down"} and not trend_supports
+    pattern_supports = _pattern_supports_side(side, pattern_direction)
+    pattern_conflicts = _pattern_conflicts_side(side, pattern_direction)
+    signal_summary = str(pattern.get("signal_summary") or "")
+    strongest = pattern.get("strongest_pattern")
+    patterns = pattern.get("patterns") if isinstance(pattern.get("patterns"), list) else []
+
+    if trend_supports and pattern_supports:
+        status = "confirmed"
+    elif trend_conflicts or pattern_conflicts:
+        status = "conflict"
+    elif trend_supports or pattern_supports:
+        status = "supportive"
+    elif trend or pattern_direction or signal_summary or patterns:
+        status = "neutral"
+    else:
+        status = "missing"
+    return {
+        "frame": frame_name,
+        "status": status,
+        "acceptable": status in acceptable_statuses,
+        "trend": trend or None,
+        "pattern_direction": pattern_direction or None,
+        "strongest_pattern": strongest,
+        "signal_summary": signal_summary or None,
+        "patterns": patterns[:2],
+    }
+
+
+def _volume_setup_check(candidate: TradeCandidate) -> dict[str, Any]:
+    indicator = candidate.indicator_summary if isinstance(candidate.indicator_summary, dict) else {}
+    ratio = _round_optional(indicator.get("volume_ratio"), 3)
+    try:
+        volume_ratio = float(indicator.get("volume_ratio") or 0.0)
+    except (TypeError, ValueError):
+        volume_ratio = 0.0
+    if volume_ratio >= 1.15:
+        status = "strong"
+        acceptable = True
+    elif volume_ratio >= 1.0:
+        status = "acceptable"
+        acceptable = True
+    elif volume_ratio > 0:
+        status = "weak"
+        acceptable = False
+    else:
+        status = "missing"
+        acceptable = False
+    return {
+        "status": status,
+        "acceptable": acceptable,
+        "volume_ratio": ratio,
+        "preferred_threshold": 1.15,
+        "minimum_threshold": 1.0,
+    }
+
+
+def _risk_reward_setup_check(config: dict[str, Any], candidate: TradeCandidate) -> dict[str, Any]:
+    strategy_threshold = float(config.get("strategy", {}).get("min_risk_reward", 1.5) or 1.5)
+    review_threshold = float(config.get("pending_orders", {}).get("review", {}).get("min_risk_reward", 1.5) or 1.5)
+    threshold = max(strategy_threshold, review_threshold)
+    rr = _round_optional(candidate.risk_reward, 2)
+    try:
+        risk_reward = float(candidate.risk_reward or 0.0)
+    except (TypeError, ValueError):
+        risk_reward = 0.0
+    if risk_reward >= threshold + 0.2:
+        status = "strong"
+        acceptable = True
+    elif risk_reward >= threshold:
+        status = "borderline"
+        acceptable = True
+    elif risk_reward > 0:
+        status = "weak"
+        acceptable = False
+    else:
+        status = "missing"
+        acceptable = False
+    return {
+        "status": status,
+        "acceptable": acceptable,
+        "risk_reward": rr,
+        "minimum_threshold": round(threshold, 2),
+    }
+
+
+def _spread_setup_check(config: dict[str, Any], candidate: TradeCandidate) -> dict[str, Any]:
+    indicator = candidate.indicator_summary if isinstance(candidate.indicator_summary, dict) else {}
+    raw_spread = candidate.spread_pct if candidate.spread_pct is not None else indicator.get("spread_pct")
+    max_spread = float(config.get("risk", {}).get("max_spread_pct", 0.15) or 0.15)
+    spread_pct = _round_optional(raw_spread, 4)
+    try:
+        spread_value = float(raw_spread)
+    except (TypeError, ValueError):
+        spread_value = -1.0
+    if spread_value < 0:
+        status = "missing"
+        acceptable = False
+    elif spread_value <= max_spread:
+        status = "ok"
+        acceptable = True
+    else:
+        status = "wide"
+        acceptable = False
+    return {
+        "status": status,
+        "acceptable": acceptable,
+        "spread_pct": spread_pct,
+        "max_spread_pct": round(max_spread, 4),
+    }
+
+
+def _news_setup_check(config: dict[str, Any], candidate: TradeCandidate) -> dict[str, Any]:
+    threshold = float(config.get("risk", {}).get("news_conflict_threshold", 2.0) or 2.0)
+    score = _round_optional(candidate.news_score, 2)
+    severity = abs(float(candidate.news_score or 0.0))
+    if severity >= threshold:
+        status = "conflict"
+        acceptable = False
+    elif candidate.news_count > 0:
+        status = "monitored"
+        acceptable = True
+    else:
+        status = "clean"
+        acceptable = True
+    return {
+        "status": status,
+        "acceptable": acceptable,
+        "news_score": score,
+        "news_count": int(candidate.news_count or 0),
+        "conflict_threshold": round(threshold, 2),
+    }
+
+
+def _setup_checks_summary(config: dict[str, Any], candidate: TradeCandidate) -> dict[str, Any]:
+    bias_4h = _frame_setup_check(candidate, "4h", acceptable_statuses={"confirmed", "supportive", "neutral"})
+    confirm_15m = _frame_setup_check(candidate, "15m", acceptable_statuses={"confirmed", "supportive"})
+    confirm_1h = _frame_setup_check(candidate, "1h", acceptable_statuses={"confirmed", "supportive"})
+    confirm_5m = _frame_setup_check(candidate, "5m", acceptable_statuses={"confirmed", "supportive"})
+    supportive_frames = [
+        check["frame"]
+        for check in (confirm_15m, confirm_1h, confirm_5m)
+        if check["status"] in {"confirmed", "supportive"}
+    ]
+    conflict_frames = [check["frame"] for check in (confirm_15m, confirm_1h, confirm_5m) if check["status"] == "conflict"]
+    missing_frames = [check["frame"] for check in (confirm_15m, confirm_1h, confirm_5m) if check["status"] == "missing"]
+    entry_ok = "15m" in supportive_frames and len(supportive_frames) >= 2 and not conflict_frames
+    if conflict_frames:
+        entry_status = "conflict"
+    elif entry_ok:
+        entry_status = "confirmed"
+    elif supportive_frames:
+        entry_status = "partial"
+    elif missing_frames:
+        entry_status = "missing"
+    else:
+        entry_status = "weak"
+    return {
+        "bias_4h": bias_4h,
+        "confirm_15m": confirm_15m,
+        "confirm_1h": confirm_1h,
+        "confirm_5m": confirm_5m,
+        "entry_confirmation": {
+            "status": entry_status,
+            "acceptable": entry_ok,
+            "supportive_frames": supportive_frames,
+            "conflict_frames": conflict_frames,
+            "missing_frames": missing_frames,
+        },
+        "volume": _volume_setup_check(candidate),
+        "risk_reward": _risk_reward_setup_check(config, candidate),
+        "spread": _spread_setup_check(config, candidate),
+        "news": _news_setup_check(config, candidate),
+    }
 
 
 def _side_matches_trend(side: str, trend: Any) -> bool:
@@ -850,7 +1169,8 @@ def should_defer_new_vt_to_internal_lc(config: dict[str, Any], memory: dict[str,
     return int(memory.get("pending_total") or 0) > 0
 
 
-def _candidate_summary(candidate: TradeCandidate) -> dict[str, Any]:
+def _candidate_summary(candidate: TradeCandidate, *, config: dict[str, Any] | None = None) -> dict[str, Any]:
+    effective_config = config or {}
     return {
         "symbol": candidate.symbol,
         "side": candidate.side,
@@ -860,11 +1180,9 @@ def _candidate_summary(candidate: TradeCandidate) -> dict[str, Any]:
         "entry": candidate.entry,
         "stop_loss": candidate.stop_loss,
         "take_profit": candidate.take_profit,
-        "quantity": candidate.quantity,
-        "order_usdt": candidate.order_usdt,
-        "planned_risk_usdt": round(candidate.planned_risk_usdt, 4),
         "indicator_summary": _compact_indicator_summary(candidate.indicator_summary),
-        "reasons": candidate.reasons[:3],
+        "setup_checks": _setup_checks_summary(effective_config, candidate),
+        "reasons": candidate.reasons[:2],
         "warnings": candidate.warnings[:2],
     }
 
@@ -924,10 +1242,10 @@ def _openai_json_decision(
     prompt_package = build_prompt(
         config,
         build_market_prompt_dto(
-            candidates=[_candidate_summary(candidate)],
+            candidates=[_candidate_summary(candidate, config=config)],
             market_snapshot={
                 "riskCheck": _compact_risk_check(risk_check),
-                "route": _compact_dict(context, ["route", "lc_id", "from_status", "source"]),
+                "route": _compact_dict(context, ["route", "from_status"]),
             },
             trading_system_state=runtime_state["system"],
             trading_health_state=runtime_state["health"],
@@ -1115,6 +1433,9 @@ def review_candidate_for_lc_okx(
     existing = candidate_okx_review(candidate, route=route)
     if existing is not None and not force:
         return candidate, existing
+    cached = _recent_rejected_okx_review(config, candidate, route=route)
+    if cached is not None and not force:
+        return attach_okx_review_metadata(candidate, cached, route=route, context=review_context), cached
     decision = okx_ai_approval(
         config,
         candidate,
@@ -1122,4 +1443,5 @@ def review_candidate_for_lc_okx(
         context=review_context,
         pending_memory=pending_memory,
     )
+    _remember_okx_review_cache(config, candidate, route=route, decision=decision)
     return attach_okx_review_metadata(candidate, decision, route=route, context=review_context), decision

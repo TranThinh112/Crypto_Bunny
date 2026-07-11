@@ -8,6 +8,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from crypto_trader.ai_coordinator import (
+    _candidate_summary,
     _candidate_market_summary,
     _local_market_scan_result,
     _mini_ai_reason_vi,
@@ -15,6 +16,7 @@ from crypto_trader.ai_coordinator import (
     internal_market_scan_due,
     internal_lc_memory,
     okx_ai_approval,
+    review_candidate_for_lc_okx,
     run_internal_market_scan,
 )
 from crypto_trader.config import DEFAULT_CONFIG
@@ -86,6 +88,45 @@ class AiCoordinatorTest(TestCase):
         self.assertFalse(new_vt["approved"])
         self.assertEqual(new_vt["decision"], "defer_to_internal_lc")
         self.assertTrue(pending_release["approved"])
+
+    def test_reuses_recent_rejected_okx_setup_review_without_recalling_ai(self) -> None:
+        config = self._config()
+        config["ai"]["okx"]["reject_reuse_minutes"] = 15
+        candidate = _candidate("SUI/USDT:USDT")
+        check = RiskCheck(True, [], [])
+        rejected = {
+            "approved": False,
+            "decision": "REJECT",
+            "reason": "Missing 4h bias and 15m confirmation; volume ratio 0.774 is weak",
+            "provider": "openai",
+            "model": "gpt-5.5",
+            "model_version": "gpt-5.5",
+            "prompt_version": "prompt-v1",
+            "prompt_hash": "abc123",
+            "experiment_name": None,
+        }
+
+        with patch("crypto_trader.ai_coordinator.okx_ai_approval", return_value=rejected) as approval:
+            first_candidate, first_decision = review_candidate_for_lc_okx(
+                config,
+                candidate,
+                check,
+                context={"route": "lc_okx_setup_review", "lc_id": 63},
+            )
+            second_candidate, second_decision = review_candidate_for_lc_okx(
+                config,
+                _candidate("SUI/USDT:USDT"),
+                check,
+                context={"route": "lc_okx_setup_review", "lc_id": 64},
+            )
+
+        approval.assert_called_once()
+        self.assertFalse(first_decision["approved"])
+        self.assertFalse(second_decision["approved"])
+        self.assertTrue(second_decision.get("cached"))
+        self.assertEqual(second_decision["reason"], rejected["reason"])
+        self.assertIsNotNone(first_candidate.decision_metadata.get("okx_review"))
+        self.assertIsNotNone(second_candidate.decision_metadata.get("okx_review"))
 
     def test_internal_market_scan_runs_once_per_fixed_slot(self) -> None:
         config = self._config()
@@ -442,6 +483,82 @@ class AiCoordinatorTest(TestCase):
         self.assertEqual(indicator["candlestick_patterns"]["4h"]["patterns"], ["morning_star", "hammer", "dragonfly_doji"])
         self.assertEqual(summary["reasons"], ["r1", "r2", "r3"])
         self.assertEqual(summary["warnings"], ["w1", "w2"])
+
+    def test_okx_candidate_summary_reduces_trade_fields_and_adds_setup_checks(self) -> None:
+        config = self._config()
+        candidate = _candidate("SUI/USDT:USDT")
+        candidate.spread_pct = 0.09
+        candidate.news_score = 0.5
+        candidate.news_count = 1
+        candidate.indicator_summary = {
+            "volume_ratio": 0.774,
+            "spread_pct": 0.09,
+            "higher_timeframes": {
+                "5m": {"trend": "up"},
+                "1h": {"trend": "up"},
+                "4h": {"trend": "down"},
+            },
+            "candlestick_patterns": {
+                "5m": {"direction": "bullish", "patterns": ["bullish_engulfing"], "signal_summary": "5m supports long"},
+                "1h": {"direction": "bullish", "patterns": ["morning_star"], "signal_summary": "1h supports long"},
+                "4h": {"direction": "bearish", "patterns": ["bearish_engulfing"], "signal_summary": "4h opposes long"},
+            },
+        }
+        candidate.higher_timeframes = {
+            "5m": {"trend": "up", "candlestick_patterns": {"direction": "bullish", "patterns": ["bullish_engulfing"]}},
+            "1h": {"trend": "up", "candlestick_patterns": {"direction": "bullish", "patterns": ["morning_star"]}},
+            "4h": {"trend": "down", "candlestick_patterns": {"direction": "bearish", "patterns": ["bearish_engulfing"]}},
+        }
+        candidate.reasons = ["r1", "r2", "r3"]
+        candidate.warnings = ["w1", "w2", "w3"]
+
+        summary = _candidate_summary(candidate, config=config)
+
+        self.assertNotIn("quantity", summary)
+        self.assertNotIn("order_usdt", summary)
+        self.assertNotIn("planned_risk_usdt", summary)
+        self.assertEqual(summary["reasons"], ["r1", "r2"])
+        checks = summary["setup_checks"]
+        self.assertEqual(checks["bias_4h"]["status"], "conflict")
+        self.assertFalse(checks["bias_4h"]["acceptable"])
+        self.assertEqual(checks["confirm_15m"]["status"], "missing")
+        self.assertFalse(checks["entry_confirmation"]["acceptable"])
+        self.assertEqual(checks["entry_confirmation"]["supportive_frames"], ["1h", "5m"])
+        self.assertEqual(checks["volume"]["status"], "weak")
+        self.assertFalse(checks["volume"]["acceptable"])
+        self.assertEqual(checks["risk_reward"]["status"], "borderline")
+        self.assertTrue(checks["risk_reward"]["acceptable"])
+        self.assertEqual(checks["spread"]["status"], "ok")
+        self.assertTrue(checks["news"]["acceptable"])
+
+    def test_okx_candidate_summary_marks_neutral_4h_as_acceptable_bias(self) -> None:
+        config = self._config()
+        candidate = _candidate("ETH/USDT:USDT")
+        candidate.indicator_summary = {
+            "volume_ratio": 1.3,
+            "higher_timeframes": {
+                "15m": {"trend": "up"},
+                "1h": {"trend": "up"},
+                "4h": {"trend": "mixed"},
+            },
+            "candlestick_patterns": {
+                "15m": {"direction": "bullish", "patterns": ["hammer"]},
+                "1h": {"direction": "bullish", "patterns": ["morning_star"]},
+                "4h": {"direction": "neutral", "patterns": ["doji"]},
+            },
+        }
+        candidate.higher_timeframes = {
+            "15m": {"trend": "up", "candlestick_patterns": {"direction": "bullish", "patterns": ["hammer"]}},
+            "1h": {"trend": "up", "candlestick_patterns": {"direction": "bullish", "patterns": ["morning_star"]}},
+            "4h": {"trend": "mixed", "candlestick_patterns": {"direction": "neutral", "patterns": ["doji"]}},
+        }
+
+        summary = _candidate_summary(candidate, config=config)
+
+        self.assertEqual(summary["setup_checks"]["bias_4h"]["status"], "neutral")
+        self.assertTrue(summary["setup_checks"]["bias_4h"]["acceptable"])
+        self.assertEqual(summary["setup_checks"]["confirm_15m"]["status"], "confirmed")
+        self.assertTrue(summary["setup_checks"]["entry_confirmation"]["acceptable"])
 
     def test_recent_market_scan_memory_reuses_previous_timeframe_scans(self) -> None:
         config = self._config()

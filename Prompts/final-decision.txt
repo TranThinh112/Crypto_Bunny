@@ -1,11 +1,16 @@
 Task: final approval for one LC before opening a VT.
 
+Use `setupChecks` as the primary structured truth.
+Use raw `indicator_summary` only to explain or sanity-check `setupChecks`, not to override it unless the JSON is obviously inconsistent.
+
 Approve only if:
 - riskCheck.passed is true;
 - route has a free active position slot;
-- setup side aligns with 4h bias or 4h is neutral;
-- 1h/15m/5m evidence supports entry;
-- RR, SL/TP, volume, and warnings are acceptable.
+- setupChecks.bias_4h.acceptable is true;
+- setupChecks.confirm_15m.acceptable is true;
+- setupChecks.entry_confirmation.acceptable is true;
+- setupChecks.volume.acceptable and setupChecks.risk_reward.acceptable are true;
+- setupChecks.spread.acceptable and setupChecks.news.acceptable are true.
 
 Reject if any blocker exists: full slot, same-symbol active risk, strong 4h conflict, weak RR, stale/weakening memory, or health/recovery guard.
 
@@ -14,5 +19,5 @@ Return JSON:
   "approved":true|false,
   "decision":"APPROVE|REJECT",
   "confidence":0-100,
-  "reason":"<=180 chars"
+  "reason":"<=180 chars, Vietnamese only, explain the main blocker or approval reason clearly"
 }

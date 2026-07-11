@@ -385,6 +385,66 @@ def _ai_call_role(model_name: str, prompt_package: dict[str, Any]) -> str:
     return "ai"
 
 
+def _okx_reason_vi(reason: Any) -> str:
+    text = re.sub(r"\s+", " ", str(reason or "").strip())
+    if not text or text == "-":
+        return "-"
+    replacements = [
+        (r"^Missing required 4h bias and 15m confirmation$", "Thiếu bias 4h và xác nhận 15m bắt buộc"),
+        (r"^Missing 4h bias and 15m confirmation$", "Thiếu bias 4h và xác nhận 15m"),
+        (r"^Missing 4h/15m confirmation$", "Thiếu xác nhận 4h/15m"),
+        (
+            r"^Cannot verify required 4h bias or 15m confirmation$",
+            "Chưa xác minh được bias 4h hoặc xác nhận 15m bắt buộc",
+        ),
+        (
+            r"^volume ratio ([0-9.]+) is not strong enough for final approval$",
+            r"volume ratio \1 chưa đủ mạnh để duyệt cuối",
+        ),
+        (
+            r"^volume ratio ([0-9.]+) is weak despite 1h/5m support$",
+            r"volume ratio \1 còn yếu dù 1h/5m đang ủng hộ",
+        ),
+        (
+            r"^volume ratio ([0-9.]+) is weak$",
+            r"volume ratio \1 còn yếu",
+        ),
+        (
+            r"^volume ratio ([0-9.]+) and RR ([0-9.]+) are only borderline despite clean risk/slot$",
+            r"volume ratio \1 và R:R \2 chỉ ở mức sát ngưỡng dù risk/slot đang sạch",
+        ),
+        (
+            r"^RR ([0-9.]+) is only borderline despite clean risk/slot$",
+            r"R:R \1 chỉ ở mức sát ngưỡng dù risk/slot đang sạch",
+        ),
+        (r"^approval criteria not fully met$", "chưa đạt đủ toàn bộ tiêu chí duyệt"),
+        (r"^clean risk/slot$", "risk/slot đang sạch"),
+    ]
+    parts = [part.strip(" .;") for part in re.split(r"\s*;\s*", text) if part.strip(" .;")]
+    translated_parts: list[str] = []
+    for part in parts or [text]:
+        translated = part
+        for pattern, replacement in replacements:
+            if re.search(pattern, translated, flags=re.IGNORECASE):
+                translated = re.sub(pattern, replacement, translated, flags=re.IGNORECASE)
+                break
+        translated = translated.replace("RR ", "R:R ").replace(" 4H ", " 4h ").replace(" 15M ", " 15m ")
+        translated_parts.append(translated[:220].rstrip(" ."))
+    return "; ".join(translated_parts) or "-"
+
+
+def okx_review_explanation_vi(item: dict[str, Any]) -> str:
+    status = str(item.get("status") or "").upper()
+    market_reason = _okx_reason_vi(item.get("market_reason"))
+    keep_reason = _okx_reason_vi(item.get("keep_reason"))
+    delete_reason = _okx_reason_vi(item.get("delete_reason"))
+    if "XÓA SETUP" in status:
+        return f"5.5 từ chối vì {delete_reason if delete_reason != '-' else 'setup chưa đạt duyệt cuối'}."
+    if "MỞ MARKET" in status:
+        return f"5.5 đồng ý mở Market vì {market_reason if market_reason != '-' else 'setup đã đủ điều kiện vào lệnh'}."
+    return f"5.5 chưa mở Market và giữ setup vì {keep_reason if keep_reason != '-' else 'setup cần chờ xác nhận thêm'}."
+
+
 def _extract_prompt_symbols(prompt_package: dict[str, Any], parsed: dict[str, Any] | None = None) -> list[str]:
     symbols: list[str] = []
     parsed = parsed or {}
@@ -461,17 +521,12 @@ def _lc_okx_review_call_message(item: dict[str, Any]) -> str:
     symbol = str(item.get("symbol") or ((item.get("symbols") or ["-"])[0]))
     side = str(item.get("side") or "-").upper()
     status = str(item.get("status") or "GIỮ SETUP")
-    market_reason = str(item.get("market_reason") or "-")
-    keep_reason = str(item.get("keep_reason") or "-")
-    delete_reason = str(item.get("delete_reason") or "-")
     lines = [
         f"🤖 5.5 DUYỆT LC_OKX #{lc_id if lc_id not in (None, '') else '-'}",
         f"Cặp: {symbol} | {side}",
         f"Duyệt lúc: {_local_time_label(created_at).split()[-1]}",
         f"Kết quả: {status}",
-        f"Lý do mở Market: {market_reason[:700]}",
-        f"Lý do giữ setup: {keep_reason[:700]}",
-        f"Lý do xóa setup: {delete_reason[:700]}",
+        f"Giải thích: {okx_review_explanation_vi(item)[:700]}",
     ]
     return "\n".join(lines)
 

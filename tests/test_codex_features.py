@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
 
-from crypto_trader.codex_features import ai_trade_decision_stats, call_openai_json
+from crypto_trader.codex_features import ai_trade_decision_stats, call_openai_json, record_ai_call_event
 
 
 class _FakeOpenAIResponse:
@@ -132,6 +132,35 @@ class CodexFeaturesTest(TestCase):
             )
 
         urlopen.assert_not_called()
+
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_lc_okx_review_message_is_single_vietnamese_explanation(self, send_telegram_message) -> None:
+        record_ai_call_event(
+            self._config(),
+            {
+                "created_at": "2026-07-12T05:23:21+07:00",
+                "role": "okx",
+                "review_kind": "lc_okx_review",
+                "model": "gpt-5.5",
+                "status": "XÓA SETUP",
+                "symbol": "SUI/USDT:USDT",
+                "side": "long",
+                "lc_okx_id": 63,
+                "market_reason": "-",
+                "keep_reason": "-",
+                "delete_reason": "Missing 4h bias and 15m confirmation; volume ratio 0.774 is weak",
+            },
+        )
+
+        send_telegram_message.assert_called_once()
+        message = send_telegram_message.call_args.args[1]
+        self.assertIn("Giải thích:", message)
+        self.assertIn("5.5 từ chối vì", message)
+        self.assertIn("Thiếu bias 4h và xác nhận 15m", message)
+        self.assertIn("volume ratio 0.774 còn yếu", message)
+        self.assertNotIn("Lý do mở Market", message)
+        self.assertNotIn("Lý do giữ setup", message)
+        self.assertNotIn("Lý do xóa setup", message)
 
     @patch("crypto_trader.codex_features.list_ai_trade_decision_stat_rows")
     def test_ai_trade_decision_stats_uses_lightweight_rows_without_json_parsing(self, list_rows) -> None:

@@ -227,6 +227,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "api_key_env": "OPENAI_API_KEY_OKX",
             "approval_enabled": True,
             "ask_internal_before_entry": True,
+            "reject_reuse_minutes": 15,
             "require_external_approval": False,
             "timeout_seconds": 20,
         },

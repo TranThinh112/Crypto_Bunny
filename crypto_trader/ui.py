@@ -40,6 +40,7 @@ from .codex_features import (
     list_ai_experiments,
     load_prompt_templates,
     market_regime_history,
+    okx_review_explanation_vi,
     prompt_history,
     prompt_status,
     recent_ai_trade_decisions,
@@ -1326,9 +1327,7 @@ def _format_ai_call_history_entry(config: dict[str, Any], item: dict[str, Any]) 
             f"Trạng thái: {item.get('status', '-')}",
             f"LC_OKX: #{lc_id if lc_id not in (None, '') else '-'}",
             f"Cặp: {symbol} | {side}",
-            f"Lý do mở Market: {str(item.get('market_reason') or '-')[:180]}",
-            f"Lý do giữ setup: {str(item.get('keep_reason') or '-')[:180]}",
-            f"Lý do xóa setup: {str(item.get('delete_reason') or '-')[:180]}",
+            f"Giải thích: {okx_review_explanation_vi(item)[:180]}",
         ]
         return "\n".join(lines)
     role = str(item.get("role") or "ai").upper()
