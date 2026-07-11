@@ -1280,6 +1280,8 @@ def _openai_json_decision(
     risk_check: RiskCheck,
     context: dict[str, Any],
     pending_memory: dict[str, Any],
+    *,
+    manual_trigger: bool = False,
 ) -> dict[str, Any]:
     okx_config = ai_config(config).get("okx", {})
     route = str((context or {}).get("route") or "")
@@ -1311,6 +1313,7 @@ def _openai_json_decision(
         model_name=str(okx_config.get("model", "gpt-5.5")),
         purpose="okx_final_approval",
         route=route,
+        manual_trigger=manual_trigger,
         record_history=route not in {"lc_okx_setup_review", "lc_okx_release"},
         notify_telegram=route not in {"lc_okx_setup_review", "lc_okx_release"},
     )
@@ -1394,6 +1397,44 @@ def okx_ai_approval(
     pending_memory = pending_memory or internal_lc_memory(config)
     local_decision = _local_okx_policy(config, candidate, risk_check, context, pending_memory)
     okx_config = ai_config(config).get("okx", {})
+    manual_openai_once = bool(context.get("manual_openai_once"))
+    if manual_openai_once:
+        if not bool(okx_config.get("manual_openai_enabled", False)):
+            return {
+                **local_decision,
+                "decision": "manual_openai_disabled",
+                "reason": "Manual OKX OpenAI approval is disabled; using local policy only",
+            }
+        if not bool(okx_config.get("approval_enabled", True)):
+            return {
+                **local_decision,
+                "decision": "approval_disabled",
+                "reason": "OKX AI approval is disabled; using local policy only",
+            }
+        try:
+            return _openai_json_decision(
+                config,
+                candidate,
+                risk_check,
+                context,
+                pending_memory,
+                manual_trigger=True,
+            )
+        except (RuntimeError, urllib.error.URLError, urllib.error.HTTPError, KeyError, json.JSONDecodeError) as exc:
+            if bool(okx_config.get("require_external_approval", False)):
+                return {
+                    "approved": False,
+                    "decision": "external_ai_unavailable",
+                    "reason": f"External OKX AI approval unavailable: {exc}",
+                    "provider": "openai",
+                    "model": str(okx_config.get("model", "gpt-5.5")),
+                    "pending_memory": pending_memory,
+                }
+            return {
+                **local_decision,
+                "fallback": "local_policy",
+                "external_error": str(exc),
+            }
     provider = str(okx_config.get("provider", "local_policy") or "local_policy")
     if provider != "openai":
         return local_decision

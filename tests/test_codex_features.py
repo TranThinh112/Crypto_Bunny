@@ -139,6 +139,7 @@ class CodexFeaturesTest(TestCase):
         config = self._config()
         config["ai"]["okx"] = {
             "auto_openai_enabled": False,
+            "manual_openai_enabled": True,
             "approval_enabled": True,
         }
 
@@ -154,6 +155,36 @@ class CodexFeaturesTest(TestCase):
 
         self.assertIn("auto_openai_enabled=false", str(error.exception))
         urlopen.assert_not_called()
+
+    @patch.dict(os.environ, {"OPENAI_API_KEY_TEST": "test-key"})
+    @patch("crypto_trader.notifier.send_telegram_message")
+    @patch("crypto_trader.codex_features.urllib.request.urlopen")
+    def test_openai_okx_final_approval_allows_manual_one_shot_when_manual_enabled(self, urlopen, _send_telegram_message) -> None:
+        config = self._config()
+        config["ai"]["okx"] = {
+            "auto_openai_enabled": False,
+            "manual_openai_enabled": True,
+            "approval_enabled": True,
+        }
+        urlopen.return_value = _FakeOpenAIResponse(
+            {
+                "choices": [{"message": {"content": "{\"approved\": true, \"decision\": \"APPROVE\"}"}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 4},
+            }
+        )
+
+        result = call_openai_json(
+            config,
+            self._role_config(),
+            self._prompt_package(),
+            model_name="gpt-5.5",
+            purpose="okx_final_approval",
+            route="lc_okx_setup_review",
+            manual_trigger=True,
+        )
+
+        self.assertTrue(result["parsed"]["approved"])
+        urlopen.assert_called_once()
 
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_lc_okx_review_message_is_single_vietnamese_explanation(self, send_telegram_message) -> None:

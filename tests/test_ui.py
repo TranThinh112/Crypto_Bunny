@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from crypto_trader.config import load_config
 from crypto_trader.codex_features import close_trade_execution, record_trade_candidates, record_trade_execution, try_slot_refill
-from crypto_trader.models import TradeCandidate
+from crypto_trader.models import RiskCheck, TradeCandidate
 from crypto_trader.notifier import telegram_command_list
 from crypto_trader.storage import get_journal_state, list_trade_execution_rows, save_market_scan_observations, set_journal_state
 from crypto_trader.ui import (
@@ -292,6 +292,53 @@ class UiTest(TestCase):
         self.assertEqual(payload["universe"]["max_symbols"], 50)
         self.assertEqual(payload["ai"]["internal"]["model"], "gpt-5.4-mini")
         self.assertEqual(payload["ai"]["okx"]["model"], "gpt-5.5")
+
+    @patch(
+        "crypto_trader.ui.okx_ai_approval",
+        return_value={"approved": True, "decision": "APPROVE", "reason": "manual one-shot", "provider": "openai"},
+    )
+    @patch("crypto_trader.ui.open_pending_symbols", return_value=set())
+    @patch("crypto_trader.ui.active_trades_summary", return_value=(0, set(), []))
+    @patch("crypto_trader.ui.evaluate_candidate", return_value=RiskCheck(True, [], []))
+    def test_manual_okx_review_endpoint_requires_manual_one_shot_context(
+        self,
+        _evaluate_candidate,
+        _active_trades_summary,
+        _open_pending_symbols,
+        okx_ai_approval,
+    ) -> None:
+        client = TestClient(create_app("config.example.yaml"))
+
+        response = client.post(
+            "/api/okx/manual-review-once",
+            json={
+                "route": "new_vt",
+                "candidate": {
+                    "symbol": "BTC/USDT:USDT",
+                    "base": "BTC",
+                    "side": "long",
+                    "confidence": 82.0,
+                    "win_probability_pct": 82.0,
+                    "entry": 100.0,
+                    "stop_loss": 97.5,
+                    "take_profit": 103.75,
+                    "risk_reward": 1.5,
+                    "order_usdt": 20.0,
+                    "quantity": 1.0,
+                    "spread_pct": 0.01,
+                    "news_score": 0.0,
+                    "news_count": 0,
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["manual_only"])
+        self.assertTrue(payload["one_shot"])
+        self.assertFalse(payload["persisted"])
+        okx_ai_approval.assert_called_once()
+        self.assertTrue(okx_ai_approval.call_args.kwargs["context"]["manual_openai_once"])
 
     def test_version_endpoint_returns_code_signature_and_feature_flags(self) -> None:
         client = TestClient(create_app("config.example.yaml"))

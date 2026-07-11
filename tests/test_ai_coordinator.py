@@ -150,6 +150,7 @@ class AiCoordinatorTest(TestCase):
         config = self._config()
         config["ai"]["okx"]["provider"] = "openai"
         config["ai"]["okx"]["auto_openai_enabled"] = False
+        config["ai"]["okx"]["manual_openai_enabled"] = True
         config["ai"]["okx"]["approval_enabled"] = True
         save_pending_order(config, _candidate("BTC/USDT:USDT"), "limit-1", journal_id=12)
         candidate = _candidate("SOL/USDT:USDT")
@@ -162,6 +163,35 @@ class AiCoordinatorTest(TestCase):
         self.assertFalse(decision["approved"])
         self.assertEqual(decision["decision"], "auto_openai_disabled")
         self.assertEqual(decision["provider"], "local_policy")
+
+    def test_okx_manual_openai_once_calls_openai_even_when_auto_is_disabled(self) -> None:
+        config = self._config()
+        config["ai"]["okx"]["provider"] = "local_policy"
+        config["ai"]["okx"]["auto_openai_enabled"] = False
+        config["ai"]["okx"]["manual_openai_enabled"] = True
+        config["ai"]["okx"]["approval_enabled"] = True
+        candidate = _candidate("SOL/USDT:USDT")
+        check = RiskCheck(True, [], [])
+        approved = {
+            "approved": True,
+            "decision": "APPROVE",
+            "reason": "Manual one-shot approval",
+            "provider": "openai",
+            "model": "gpt-5.5",
+        }
+
+        with patch("crypto_trader.ai_coordinator._openai_json_decision", return_value=approved) as approval:
+            decision = okx_ai_approval(
+                config,
+                candidate,
+                check,
+                context={"route": "lc_okx_setup_review", "manual_openai_once": True},
+            )
+
+        approval.assert_called_once()
+        self.assertTrue(decision["approved"])
+        self.assertEqual(decision["decision"], "APPROVE")
+        self.assertEqual(decision["provider"], "openai")
 
     def test_reuses_recent_rejected_okx_setup_review_without_recalling_ai(self) -> None:
         config = self._config()

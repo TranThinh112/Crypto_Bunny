@@ -21,13 +21,14 @@ from fastapi.staticfiles import StaticFiles
 from . import __version__
 from .atlas_mirror import atlas_runtime_is_primary, atlas_runtime_is_read_only
 from .config import DEFAULT_CONFIG, load_config, project_path
-from .ai_coordinator import next_internal_market_scan_at, run_internal_market_scan_if_due
+from .ai_coordinator import next_internal_market_scan_at, okx_ai_approval, review_candidate_for_lc_okx, run_internal_market_scan_if_due
 from .codex_features import (
     activate_strategy_version,
     ai_trade_decision_stats,
     build_market_prompt_dto,
     build_prompt,
     call_openai_json,
+    candidate_from_payload,
     close_trade_execution,
     create_ai_experiment,
     create_ai_trade_decision,
@@ -91,6 +92,7 @@ from .market_guard import (
     market_guard_notify_interval,
     run_market_guard,
 )
+from .models import RiskCheck
 from .models import to_jsonable
 from .notifier import (
     answer_callback_query,
@@ -123,10 +125,13 @@ from .reporting import (
     format_undecided_lc_view,
 )
 from .runtime_sync import sync_runtime_state
+from .risk import active_trades_summary, evaluate_candidate
 from .storage import (
     clear_dashboard_snapshot_cache,
     get_journal_state,
     latest_decision_payload,
+    list_pending_orders,
+    open_pending_symbols,
     list_paper_trades,
     prune_market_scan_observations,
     purge_deprecated_journal_state,
@@ -177,6 +182,34 @@ def _file_signature(path: Path) -> str | None:
     except OSError:
         return None
     return hashlib.sha256(payload).hexdigest()[:12]
+
+
+def _manual_okx_pending_record(config: dict[str, Any], lc_id: int) -> dict[str, Any] | None:
+    for record in list_pending_orders(config, status="ACTIVE", limit=500):
+        try:
+            journal_id = int(record.get("journal_id") or 0)
+        except (TypeError, ValueError):
+            journal_id = 0
+        try:
+            order_id = int(record.get("id") or 0)
+        except (TypeError, ValueError):
+            order_id = 0
+        if lc_id in {journal_id, order_id}:
+            return record
+    return None
+
+
+def _manual_okx_candidate_from_record(record: dict[str, Any]) -> Any | None:
+    try:
+        payload = json.loads(str(record.get("payload_json") or "{}"))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return candidate_from_payload(payload)
+    except Exception:
+        return None
 
 
 def _code_signature() -> dict[str, Any]:
@@ -2734,6 +2767,92 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
                 "open_orders": [],
                 "message": f"OKX position fetch failed: {exc}",
             }
+
+    @app.post("/api/okx/manual-review-once")
+    def okx_manual_review_once(payload: dict[str, Any]) -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        route = str(payload.get("route") or "lc_okx_setup_review")
+        allowed_routes = {"new_vt", "lc_okx_setup_review", "lc_okx_release", "local_lc_release"}
+        if route not in allowed_routes:
+            raise HTTPException(status_code=400, detail=f"route must be one of: {', '.join(sorted(allowed_routes))}")
+
+        context: dict[str, Any] = {
+            "route": route,
+            "source": "manual_api",
+            "manual_openai_once": True,
+        }
+        record = None
+        lc_id = payload.get("lc_id", payload.get("journal_id"))
+        if lc_id is not None:
+            try:
+                resolved_lc_id = int(lc_id)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="lc_id must be an integer")
+            record = _manual_okx_pending_record(config, resolved_lc_id)
+            if record is None:
+                raise HTTPException(status_code=404, detail=f"No active pending order found for lc_id={resolved_lc_id}")
+            context["lc_id"] = resolved_lc_id
+            context["from_status"] = str(record.get("status") or "")
+            candidate = _manual_okx_candidate_from_record(record)
+            if candidate is None:
+                raise HTTPException(status_code=400, detail="Pending order does not contain a valid candidate payload")
+        else:
+            candidate_payload = payload.get("candidate")
+            if not isinstance(candidate_payload, dict):
+                raise HTTPException(status_code=400, detail="candidate payload is required when lc_id is not provided")
+            try:
+                candidate = candidate_from_payload(candidate_payload)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid candidate payload: {exc}") from exc
+
+        if route == "new_vt":
+            risk_check = evaluate_candidate(
+                config,
+                candidate,
+                active_summary=active_trades_summary(config),
+                extra_active_symbols=open_pending_symbols(config),
+            )
+        else:
+            risk_check = evaluate_candidate(
+                config,
+                candidate,
+                check_active_trades=False,
+                check_order_limits=True,
+            )
+
+        if route == "lc_okx_setup_review":
+            reviewed_candidate, decision = review_candidate_for_lc_okx(
+                config,
+                candidate,
+                risk_check,
+                context=context,
+                force=bool(payload.get("force", False)),
+            )
+            reviewed_payload = to_jsonable(reviewed_candidate)
+        else:
+            decision = okx_ai_approval(
+                config,
+                candidate,
+                risk_check,
+                context=context,
+            )
+            reviewed_payload = to_jsonable(candidate)
+
+        return {
+            "ok": True,
+            "manual_only": True,
+            "one_shot": True,
+            "persisted": False,
+            "route": route,
+            "lc_id": context.get("lc_id"),
+            "candidate": reviewed_payload,
+            "risk_check": {
+                "passed": risk_check.passed,
+                "reasons": risk_check.reasons,
+                "warnings": risk_check.warnings,
+            },
+            "decision": decision,
+        }
 
     @app.post("/api/demo-trade-scan")
     def demo_trade_scan() -> dict[str, Any]:

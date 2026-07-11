@@ -96,8 +96,9 @@ ai:
     provider: local_policy
     model: gpt-5.5
     api_key_env: OPENAI_API_KEY_OKX
-    approval_enabled: false
+    approval_enabled: true
     auto_openai_enabled: false
+    manual_openai_enabled: true
     ask_internal_before_entry: true
     require_external_approval: false
     timeout_seconds: 20
