@@ -212,6 +212,23 @@ def _mongo_next_id(config: dict[str, Any], table: str) -> int:
     return int((row or {}).get("value") or 1)
 
 
+def _mongo_reserve_ids(config: dict[str, Any], table: str, count: int) -> list[int]:
+    from pymongo import ReturnDocument
+
+    safe_count = max(0, int(count))
+    if safe_count == 0:
+        return []
+    now = datetime.now(timezone.utc).isoformat()
+    row = _mongo_meta_collection(config).find_one_and_update(
+        {"_id": f"{table}:id"},
+        {"$inc": {"value": safe_count}, "$set": {"updated_at": now}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    end_id = int((row or {}).get("value") or safe_count)
+    return list(range(end_id - safe_count + 1, end_id + 1))
+
+
 def _next_pending_order_id(config: dict[str, Any]) -> int:
     from pymongo import ReturnDocument
 
@@ -1418,12 +1435,22 @@ def prune_decision_history(
     deleted_old = 0
     deleted_over_limit = 0
     _ensure_mongo_write_allowed(config)
-    rows = _mongo_find_many(config, "decisions", sort=[("created_at", -1), ("id", -1)])
+    rows = _mongo_find_many(
+        config,
+        "decisions",
+        sort=[("created_at", -1), ("id", -1)],
+        projection={"id": 1, "created_at": 1},
+    )
     latest_id = rows[0]["id"] if rows else None
     stale_ids = [row["id"] for row in rows if row.get("created_at", "") < cutoff and row.get("id") != latest_id]
     if stale_ids:
         deleted_old = int(_mongo_collection(config, "decisions").delete_many({"id": {"$in": stale_ids}}).deleted_count or 0)
-    rows = _mongo_find_many(config, "decisions", sort=[("created_at", -1), ("id", -1)])
+    rows = _mongo_find_many(
+        config,
+        "decisions",
+        sort=[("created_at", -1), ("id", -1)],
+        projection={"id": 1, "created_at": 1},
+    )
     overflow_ids = [row["id"] for row in rows[max(1, max_rows) :]]
     if overflow_ids:
         deleted_over_limit = int(
@@ -1498,33 +1525,32 @@ def save_market_scan_observations(
     _update_local_market_scan_cache(config, rows)
     _insert_market_scan_rows(config, rows)
     _best_effort_retryable_storage_side_effect(config, lambda: prune_market_scan_observations(config))
-    _best_effort_retryable_storage_side_effect(config, lambda: run_storage_maintenance(config, vacuum=False))
     return len(rows)
 
 
 def _insert_market_scan_rows(config: dict[str, Any], rows: list[tuple[Any, ...]]) -> None:
     _ensure_mongo_write_allowed(config)
-    for row in rows:
-        row_id = _mongo_next_id(config, "market_scan_observations")
-        _mongo_upsert_by_pk(
-            config,
-            "market_scan_observations",
-            "id",
-            {
-                "id": row_id,
-                "created_at": row[0],
-                "source": row[1],
-                "symbol": row[2],
-                "side": row[3],
-                "timeframe": row[4],
-                "confidence": row[5],
-                "win_probability_pct": row[6],
-                "risk_reward": row[7],
-                "score": row[8],
-                "indicator_json": row[9],
-                "payload_json": row[10],
-            },
-        )
+    ids = _mongo_reserve_ids(config, "market_scan_observations", len(rows))
+    documents = [
+        {
+            "_id": row_id,
+            "id": row_id,
+            "created_at": row[0],
+            "source": row[1],
+            "symbol": row[2],
+            "side": row[3],
+            "timeframe": row[4],
+            "confidence": row[5],
+            "win_probability_pct": row[6],
+            "risk_reward": row[7],
+            "score": row[8],
+            "indicator_json": row[9],
+            "payload_json": row[10],
+        }
+        for row_id, row in zip(ids, rows)
+    ]
+    if documents:
+        _mongo_collection(config, "market_scan_observations").insert_many(documents, ordered=False)
     return
 def prune_market_scan_observations(
     config: dict[str, Any],
@@ -1551,6 +1577,7 @@ def prune_market_scan_observations(
         config,
         "market_scan_observations",
         sort=[("symbol", 1), ("timeframe", 1), ("created_at", -1), ("id", -1)],
+        projection={"id": 1, "symbol": 1, "timeframe": 1, "created_at": 1},
     )
     counters: dict[tuple[str, str], int] = {}
     overflow_ids: list[int] = []
