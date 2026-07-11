@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -590,6 +591,9 @@ def _local_market_scan_result(config: dict[str, Any], candidates: list[TradeCand
 
 def _validated_ai_symbols(review: dict[str, Any], allowed_symbols: set[str], fallback_symbols: list[str], max_symbols: int) -> list[str]:
     raw = review.get("approved_symbols")
+    decision = str(review.get("decision") or "").strip().upper()
+    if decision in {"NO_TRADE", "NONE", "REJECTED", "REJECT"}:
+        return []
     minimum_symbols = 1
     if isinstance(review.get("minimum_approved_symbols"), int):
         minimum_symbols = max(1, int(review.get("minimum_approved_symbols") or 1))
@@ -600,7 +604,47 @@ def _validated_ai_symbols(review: dict[str, Any], allowed_symbols: set[str], fal
         symbol = str(item or "")
         if symbol in allowed_symbols and symbol not in symbols:
             symbols.append(symbol)
-    return symbols[:max_symbols] or fallback_symbols[:max(minimum_symbols, 1)]
+    # An explicit empty list means the AI rejected every setup. Fallback is
+    # reserved for malformed responses where approved_symbols is missing.
+    return symbols[:max_symbols]
+
+
+def _mini_ai_reason_vi(review: dict[str, Any], pool_symbols: list[str], selected_symbols: list[str]) -> str:
+    rejected = [symbol for symbol in pool_symbols if symbol not in selected_symbols]
+    scores = review.get("setup_scores") if isinstance(review.get("setup_scores"), dict) else {}
+    score_labels = [
+        f"{symbol.split('/')[0]} {scores[symbol]}/100"
+        for symbol in rejected
+        if symbol in scores
+    ]
+    if not selected_symbols:
+        names = ", ".join(symbol.split("/")[0] for symbol in rejected) or "toàn bộ setup"
+        result = f"Mini loại {names}"
+        if score_labels:
+            result += f" (điểm setup: {', '.join(score_labels)})"
+    else:
+        kept = ", ".join(symbol.split("/")[0] for symbol in selected_symbols)
+        result = f"Mini giữ {kept}"
+        if rejected:
+            result += "; loại " + ", ".join(symbol.split("/")[0] for symbol in rejected)
+
+    raw_reason = str(review.get("reason") or "").strip()
+    lowered = raw_reason.lower()
+    reasons: list[str] = []
+    if "critical health" in lowered:
+        reasons.append("sức khỏe hệ thống đang ở mức nghiêm trọng")
+    if "4h absent" in lowered or "missing 4h" in lowered:
+        reasons.append("thiếu dữ liệu hoặc xác nhận xu hướng 4h")
+    if "5m/1h conflict" in lowered or ("5m" in lowered and "1h" in lowered and "conflict" in lowered):
+        reasons.append("xu hướng 5m và 1h xung đột")
+    rr_match = re.search(r"\brr\s*([0-9.]+)", raw_reason, flags=re.IGNORECASE)
+    if rr_match:
+        reasons.append(f"RR {rr_match.group(1)} chưa đủ tốt")
+    if "missing volume" in lowered or "volume support" in lowered:
+        reasons.append("thiếu volume xác nhận")
+    if not reasons:
+        reasons.append("AI nội bộ đánh giá setup chưa đủ chất lượng để đi tiếp")
+    return result + ". Lý do: " + "; ".join(reasons) + "."
 
 
 def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
@@ -749,7 +793,11 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
     result["approved_symbols"] = list(result.get("selected_symbols") or [])
     result["status"] = "done" if has_mini_pool else "waiting_lc"
     result["decision_reason_vi"] = (
-        "Mini đã đối chiếu nhóm LC 4h bằng AI nội bộ và chỉ giữ lại các cặp còn mạnh nhất."
+        _mini_ai_reason_vi(
+            result["ai_review"],
+            list(result.get("pool_symbols") or []),
+            list(result.get("selected_symbols") or []),
+        )
         if result.get("ai_review")
         else (
             "Mini chưa chọn cặp nào vì hiện chưa có LC 4h đủ điều kiện."

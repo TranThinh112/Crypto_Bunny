@@ -1579,6 +1579,31 @@ class LcPipelineTest(TestCase):
         self.assertIn("Lý do: Mini chọn lại cặp mạnh nhất từ nhóm LC 4h.", message)
 
     @patch("crypto_trader.notifier.send_telegram_message")
+    def test_mini_pool_summary_sends_explicit_no_trade_reason(self, send_message) -> None:
+        config = self._config()
+        config["ai"]["internal"]["lc_pipeline_notify_mini_pool_summary"] = True
+
+        notify_mini_pool_summary(
+            config,
+            [],
+            scan={
+                "mini_index": 1,
+                "pool_symbols": ["CRV/USDT:USDT"],
+                "selected_symbols": [],
+                "decision_reason_vi": (
+                    "Mini loại CRV (điểm setup: CRV 34/100). "
+                    "Lý do: thiếu xác nhận 4h; xu hướng 5m và 1h xung đột."
+                ),
+            },
+            slot_id="slot-1",
+        )
+
+        message = send_message.call_args.args[1]
+        self.assertIn("Mini chọn: 0/3 cặp", message)
+        self.assertIn("Mini loại CRV", message)
+        self.assertIn("CRV 34/100", message)
+
+    @patch("crypto_trader.notifier.send_telegram_message")
     def test_mini_pool_summary_skips_sample_symbols_when_filter_enabled(self, send_message) -> None:
         config = self._config()
         config["ai"]["internal"]["lc_pipeline_drop_sample_symbols"] = True

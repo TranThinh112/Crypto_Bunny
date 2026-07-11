@@ -2771,7 +2771,11 @@ def notify_mini_pool_summary(
         created_at=now,
     )
     _save_state(config, state)
-    if not rows and not _symbol_list(scan.get("selected_symbols"), limit=3):
+    if (
+        not rows
+        and not _symbol_list(scan.get("selected_symbols"), limit=3)
+        and not _symbol_list(scan.get("pool_symbols"), limit=3)
+    ):
         return
     if not settings["notify_mini_pool_summary"]:
         return

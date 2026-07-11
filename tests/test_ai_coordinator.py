@@ -10,6 +10,7 @@ from unittest.mock import patch
 from crypto_trader.ai_coordinator import (
     _candidate_market_summary,
     _local_market_scan_result,
+    _mini_ai_reason_vi,
     _validated_ai_symbols,
     internal_market_scan_due,
     internal_lc_memory,
@@ -314,6 +315,35 @@ class AiCoordinatorTest(TestCase):
         )
 
         self.assertEqual(symbols, ["ETH/USDT:USDT"])
+
+    def test_validated_ai_symbols_keeps_explicit_no_trade_empty(self) -> None:
+        symbols = _validated_ai_symbols(
+            {"approved_symbols": [], "decision": "NO_TRADE"},
+            {"CRV/USDT:USDT"},
+            ["CRV/USDT:USDT"],
+            1,
+        )
+
+        self.assertEqual(symbols, [])
+
+    def test_mini_no_trade_reason_names_pair_score_and_reasons_in_vietnamese(self) -> None:
+        reason = _mini_ai_reason_vi(
+            {
+                "approved_symbols": [],
+                "decision": "NO_TRADE",
+                "setup_scores": {"CRV/USDT:USDT": 34},
+                "reason": "Critical health state; 4h absent and 5m/1h conflict. RR 1.5 with missing volume support; reject.",
+            },
+            ["CRV/USDT:USDT"],
+            [],
+        )
+
+        self.assertIn("Mini loại CRV", reason)
+        self.assertIn("CRV 34/100", reason)
+        self.assertIn("sức khỏe hệ thống đang ở mức nghiêm trọng", reason)
+        self.assertIn("thiếu dữ liệu hoặc xác nhận xu hướng 4h", reason)
+        self.assertIn("xu hướng 5m và 1h xung đột", reason)
+        self.assertIn("thiếu volume xác nhận", reason)
 
     def test_compact_candidate_summary_limits_payload_noise(self) -> None:
         candidate = _candidate("BTC/USDT:USDT")
