@@ -1272,15 +1272,21 @@ def _trading_risk_settings(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _slot_state(open_rows: list[dict[str, Any]], max_slots: int) -> tuple[int, list[int]]:
+    unique_rows: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in open_rows:
+        symbol = str(row.get("symbol") or "").strip()
+        side = str(row.get("side") or "").strip().upper()
+        key = (symbol, side) if symbol and side else (f"__row_{row.get('id')}", "")
+        unique_rows.setdefault(key, row)
     used = sorted(
         {
             _safe_int(row.get("position_slot"))
-            for row in open_rows
+            for row in unique_rows.values()
             if row.get("position_slot") is not None and _safe_int(row.get("position_slot")) > 0
         }
     )
     free = [slot for slot in range(1, max_slots + 1) if slot not in used]
-    return len(open_rows), free
+    return len(unique_rows), free
 
 
 def get_global_loss_streak(config: dict[str, Any]) -> int:

@@ -300,6 +300,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "replay_history_keep_days": 365,
         "paper_trades_keep_days": 365,
     },
+    "runtime_sync": {
+        "position_close_grace_seconds": 120,
+    },
     "market_regime": {
         "enabled": True,
         "history_limit": 200,

@@ -43,6 +43,33 @@ def _parse_time(value: Any) -> datetime | None:
         return None
 
 
+def _execution_key(row: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(row.get("symbol") or "").strip(),
+        str(row.get("side") or "").strip().upper(),
+    )
+
+
+def _close_stale_open_execution(
+    config: dict[str, Any],
+    row: dict[str, Any],
+    *,
+    closed_at: str,
+    reason: str,
+) -> None:
+    update_trade_execution(
+        config,
+        int(row["id"]),
+        {
+            "status": "CLOSED",
+            "close_reason": reason,
+            "closed_at": closed_at,
+            "updated_at": closed_at,
+            "position_slot": None,
+        },
+    )
+
+
 def _position_side(position: dict[str, Any]) -> str:
     info = position.get("info", {}) if isinstance(position.get("info"), dict) else {}
     side = position.get("side") or info.get("posSide")
@@ -229,7 +256,15 @@ def sync_exchange_runtime_state(
             )
         orders_synced += 1
 
-    open_execution_rows = list_trade_execution_rows(config, statuses=["OPEN", "LC_PENDING"], limit=1000)
+    open_execution_rows = list_trade_execution_rows(config, statuses=["OPEN"], limit=1000)
+    executions_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in open_execution_rows:
+        key = _execution_key(row)
+        if all(key):
+            executions_by_key.setdefault(key, []).append(row)
+
+    active_position_keys: set[tuple[str, str]] = set()
+    matched_execution_ids: set[int] = set()
     positions_synced = 0
     next_slot = 1
     for position in position_rows:
@@ -241,6 +276,8 @@ def sync_exchange_runtime_state(
         side = _position_side(position)
         if not symbol or side not in {"long", "short"}:
             continue
+        position_key = (symbol, side.upper())
+        active_position_keys.add(position_key)
         entry_price = _float(position.get("entry_price") or position.get("entryPrice") or info.get("avgPx"))
         mark_price = _float(position.get("mark_price") or position.get("markPrice") or info.get("markPx"))
         leverage = _safe_float(position.get("leverage") or info.get("lever"), _safe_float(config.get("exchange", {}).get("leverage"), 1.0))
@@ -251,13 +288,8 @@ def sync_exchange_runtime_state(
             "position": to_jsonable(position),
             "snapshot_created_at": created_at,
         }
-        matched = next(
-            (
-                row for row in open_execution_rows
-                if str(row.get("symbol") or "") == symbol and str(row.get("side") or "").upper() == side.upper()
-            ),
-            None,
-        )
+        matching_rows = executions_by_key.get(position_key, [])
+        matched = matching_rows[0] if matching_rows else None
         updates = {
             "updated_at": created_at,
             "status": "OPEN",
@@ -269,6 +301,7 @@ def sync_exchange_runtime_state(
         }
         if matched:
             update_trade_execution(config, int(matched["id"]), updates)
+            matched_execution_ids.add(int(matched["id"]))
         else:
             prompt_row = ensure_prompt_version(config)
             insert_trade_execution_row(
@@ -319,6 +352,33 @@ def sync_exchange_runtime_state(
             )
             next_slot += 1
         positions_synced += 1
+
+    # A successful OKX snapshot is authoritative. Close internal OPEN rows that
+    # no longer have a matching exchange position, and collapse duplicate rows.
+    snapshot_authoritative = snapshot.get("enabled", True) is not False
+    grace_seconds = max(0, int(config.get("runtime_sync", {}).get("position_close_grace_seconds", 120) or 0))
+    snapshot_time = _parse_time(created_at) or datetime.now(timezone.utc)
+    executions_closed = 0
+    duplicate_executions_closed = 0
+    for row in open_execution_rows:
+        row_id = int(row["id"])
+        key = _execution_key(row)
+        if row_id in matched_execution_ids:
+            continue
+        if not snapshot_authoritative:
+            continue
+        created_time = _parse_time(row.get("created_at"))
+        age_seconds = (snapshot_time - created_time).total_seconds() if created_time else grace_seconds + 1
+        if key not in active_position_keys and age_seconds < grace_seconds:
+            continue
+        if key in active_position_keys:
+            reason = "duplicate_open_execution_reconciled"
+            duplicate_executions_closed += 1
+        else:
+            reason = "exchange_position_no_longer_open"
+        _close_stale_open_execution(config, row, closed_at=created_at, reason=reason)
+        executions_closed += 1
+
     refresh_trading_system_state(config)
     refresh_bunny_health_state(config)
     return {
@@ -328,6 +388,8 @@ def sync_exchange_runtime_state(
         "open_orders_seen": len(open_orders),
         "positions_synced": positions_synced,
         "orders_synced": orders_synced,
+        "executions_closed": executions_closed,
+        "duplicate_executions_closed": duplicate_executions_closed,
     }
 
 

@@ -5,9 +5,10 @@ from copy import deepcopy
 from unittest import TestCase
 
 from crypto_trader.atlas_mirror import atlas_database
+from crypto_trader.codex_features import _slot_state
 from crypto_trader.config import DEFAULT_CONFIG
 from crypto_trader.runtime_sync import sync_runtime_state
-from crypto_trader.storage import list_pending_orders, list_trade_execution_rows
+from crypto_trader.storage import insert_trade_execution_row, list_pending_orders, list_trade_execution_rows
 
 
 class RuntimeSyncTest(TestCase):
@@ -38,6 +39,18 @@ class RuntimeSyncTest(TestCase):
         self.assertIsNotNone(metric)
         self.assertEqual(metric["total_requests"], 0)
         self.assertTrue(result["ai"]["seeded_prompt_metric"])
+
+    def test_slot_state_counts_duplicate_symbol_and_side_once(self) -> None:
+        open_count, free_slots = _slot_state(
+            [
+                {"id": 1, "symbol": "KAITO/USDT:USDT", "side": "LONG", "position_slot": 1},
+                {"id": 2, "symbol": "KAITO/USDT:USDT", "side": "LONG", "position_slot": 2},
+            ],
+            5,
+        )
+
+        self.assertEqual(open_count, 1)
+        self.assertEqual(free_slots, [2, 3, 4, 5])
 
     def test_sync_runtime_state_imports_positions_and_orders_without_duplicates(self) -> None:
         config = self._config()
@@ -84,3 +97,65 @@ class RuntimeSyncTest(TestCase):
         self.assertEqual(len(executions), 1)
         self.assertEqual(executions[0]["symbol"], "SOL/USDT:USDT")
         self.assertEqual(executions[0]["side"], "LONG")
+
+    def test_sync_closes_open_execution_when_position_disappears(self) -> None:
+        config = self._config()
+        snapshot = {
+            "enabled": True,
+            "mode": "demo",
+            "created_at": "2026-07-08T00:00:00+00:00",
+            "positions": [
+                {"symbol": "SOL/USDT:USDT", "side": "long", "contracts": 1, "entry_price": 80},
+            ],
+            "open_orders": [],
+        }
+        sync_runtime_state(config, account_snapshot=snapshot)
+
+        result = sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-07-08T00:03:00+00:00",
+                "positions": [],
+                "open_orders": [],
+            },
+        )
+
+        self.assertEqual(result["exchange"]["executions_closed"], 1)
+        self.assertEqual(list_trade_execution_rows(config, statuses=["OPEN"]), [])
+        closed = list_trade_execution_rows(config, statuses=["CLOSED"])
+        self.assertEqual(closed[0]["close_reason"], "exchange_position_no_longer_open")
+        self.assertIsNone(closed[0]["position_slot"])
+
+    def test_sync_collapses_duplicate_open_executions_for_same_position(self) -> None:
+        config = self._config()
+        for row_id in range(2):
+            insert_trade_execution_row(
+                config,
+                {
+                    "created_at": f"2026-07-07T23:5{row_id}:00+00:00",
+                    "updated_at": f"2026-07-07T23:5{row_id}:00+00:00",
+                    "symbol": "KAITO/USDT:USDT",
+                    "side": "LONG",
+                    "status": "OPEN",
+                    "position_slot": row_id + 1,
+                },
+            )
+
+        result = sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-07-08T00:00:00+00:00",
+                "positions": [
+                    {"symbol": "KAITO/USDT:USDT", "side": "long", "contracts": 1, "entry_price": 0.67},
+                ],
+                "open_orders": [],
+            },
+        )
+
+        open_rows = list_trade_execution_rows(config, statuses=["OPEN"])
+        self.assertEqual(len(open_rows), 1)
+        self.assertEqual(result["exchange"]["duplicate_executions_closed"], 1)

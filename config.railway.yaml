@@ -5,6 +5,9 @@ ledger_path: /tmp/trades.jsonl
 runtime:
   instance_role: primary
 
+runtime_sync:
+  position_close_grace_seconds: 120
+
 database:
   backend: atlas
   atlas:
