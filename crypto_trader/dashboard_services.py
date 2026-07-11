@@ -1051,7 +1051,8 @@ def _build_timeframe_state_dashboard(config: dict[str, Any], *, lookback_hours: 
         timeframes=configured_frames,
         lookback_hours=lookback_hours,
         per_symbol_timeframe_limit=10,
-        total_limit=5000,
+        total_limit=2000,
+        include_details=False,
     )
     flat_rows = _flatten_scan_memory(memory)
     latest_scan = latest_internal_market_scan(config) or {}
@@ -1138,7 +1139,8 @@ def _build_scan_memory_dashboard(
         timeframes=configured_frames,
         lookback_hours=lookback_hours,
         per_symbol_timeframe_limit=per_symbol_timeframe_limit,
-        total_limit=5000,
+        total_limit=1200,
+        include_details=False,
     )
     flat_rows = _flatten_scan_memory(memory)
     latest_scan = latest_internal_market_scan(config) or {}
@@ -1230,7 +1232,7 @@ def scan_memory_dashboard(
 
 def _build_analytics_dashboard(config: dict[str, Any], *, lookback_hours: int = 24) -> dict[str, Any]:
     lookback_hours = max(1, min(168, int(lookback_hours or 24)))
-    decisions = recent_ai_trade_decisions(config, limit=500)
+    decisions = recent_ai_trade_decisions(config, limit=100, include_details=False)
     decision_stats = ai_trade_decision_stats(config)
     ai_calls = recent_ai_call_history(config, limit=50)
     prompt = prompt_status(config)
@@ -1241,7 +1243,8 @@ def _build_analytics_dashboard(config: dict[str, Any], *, lookback_hours: int = 
     paper_trades = list_paper_trades(config, limit=200)
     trade_memory = list_trade_memory(config, limit=200)
     pending_total = count_pending_orders(config)
-    stats = storage_stats(config)
+    checklist = system_checklist_payload(config)
+    stats = checklist.get("storage") if isinstance(checklist.get("storage"), dict) else {}
     latest_scan = latest_internal_market_scan(config) or {}
     since = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
     guard_rows = list_market_guard_observations(config, limit=200, since=since)

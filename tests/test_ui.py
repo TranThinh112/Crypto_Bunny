@@ -21,6 +21,7 @@ from crypto_trader.ui import (
     _format_ai_call_history_view,
     _handle_telegram_update,
     _market_guard_notification_status,
+    _notify_system_error,
     _periodic_scan_notification_due,
     _remember_periodic_scan_notification,
     _run_automation_cycle,
@@ -30,6 +31,22 @@ from crypto_trader.ui import (
 
 
 class UiTest(TestCase):
+    @patch("crypto_trader.ui.send_telegram_message", return_value=True)
+    def test_system_error_notification_is_vietnamese_and_deduplicated(self, send_message) -> None:
+        config = {"timezone": "Asia/Ho_Chi_Minh"}
+        component = f"test-component-{id(self)}"
+
+        first = _notify_system_error(config, component, RuntimeError("Mongo timeout"))
+        second = _notify_system_error(config, component, RuntimeError("Mongo timeout"))
+
+        self.assertTrue(first)
+        self.assertFalse(second)
+        send_message.assert_called_once()
+        message = send_message.call_args.args[1]
+        self.assertIn("LỖI HỆ THỐNG", message)
+        self.assertIn(component, message)
+        self.assertIn("Mongo timeout", message)
+
     def test_telegram_command_list_includes_internal_notification_commands(self) -> None:
         commands = {item["command"] for item in telegram_command_list()}
         self.assertIn("thongbao", commands)

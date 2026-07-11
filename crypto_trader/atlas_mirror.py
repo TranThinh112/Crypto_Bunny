@@ -35,6 +35,10 @@ _ATLAS_COLLECTION_INDEX_SPECS: dict[str, list[list[tuple[str, int]]]] = {
         [("is_used", 1), ("created_at", -1), ("id", -1)],
         [("is_used", 1), ("rule_score", -1), ("gpt_confidence", -1), ("risk_reward", -1), ("id", 1)],
     ],
+    "ai_trade_decisions": [
+        [("created_at", -1), ("id", -1)],
+        [("decision", 1), ("trade_status", 1), ("created_at", -1), ("id", -1)],
+    ],
 }
 
 

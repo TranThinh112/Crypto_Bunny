@@ -1141,13 +1141,18 @@ def create_ai_trade_decision(config: dict[str, Any], payload: dict[str, Any]) ->
     return row
 
 
-def recent_ai_trade_decisions(config: dict[str, Any], limit: int = 50) -> list[dict[str, Any]]:
-    rows = list_ai_trade_decision_rows(config, limit=limit)
+def recent_ai_trade_decisions(
+    config: dict[str, Any],
+    limit: int = 50,
+    *,
+    include_details: bool = True,
+) -> list[dict[str, Any]]:
+    rows = list_ai_trade_decision_rows(config, limit=limit, include_details=include_details)
     result: list[dict[str, Any]] = []
     for row in rows:
         payload = dict(row)
-        payload["reason"] = _json_loads(payload.get("reason_json"), {})
-        payload["snapshot"] = _json_loads(payload.get("snapshot_json"), {})
+        payload["reason"] = _json_loads(payload.get("reason_json"), {}) if include_details else {}
+        payload["snapshot"] = _json_loads(payload.get("snapshot_json"), {}) if include_details else {}
         result.append(payload)
     return result
 

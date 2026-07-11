@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 import yaml
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -141,6 +141,33 @@ LOGGER = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 PRICE_CACHE_TTL_SECONDS = 55
 TELEGRAM_VIEW_CACHE_TTL_SECONDS = 4
+SYSTEM_ERROR_NOTIFY_COOLDOWN_SECONDS = 900
+_SYSTEM_ERROR_NOTIFY_LOCK = threading.Lock()
+_SYSTEM_ERROR_NOTIFICATIONS: dict[str, tuple[str, datetime]] = {}
+
+
+def _notify_system_error(config: dict[str, Any], component: str, error: Any) -> bool:
+    now = datetime.now(timezone.utc)
+    message_text = str(error or "Lỗi không xác định").strip() or "Lỗi không xác định"
+    fingerprint = hashlib.sha256(message_text.encode("utf-8", errors="replace")).hexdigest()[:16]
+    with _SYSTEM_ERROR_NOTIFY_LOCK:
+        previous = _SYSTEM_ERROR_NOTIFICATIONS.get(component)
+        if previous and previous[0] == fingerprint:
+            age_seconds = (now - previous[1]).total_seconds()
+            if age_seconds < SYSTEM_ERROR_NOTIFY_COOLDOWN_SECONDS:
+                return False
+        _SYSTEM_ERROR_NOTIFICATIONS[component] = (fingerprint, now)
+    LOGGER.error("%s failed: %s", component, message_text)
+    return send_telegram_message(
+        config,
+        "🚨 LỖI HỆ THỐNG\n"
+        f"Module: {component}\n"
+        f"Thời gian: {now.astimezone(_system_timezone(config)).strftime('%d/%m/%Y %H:%M:%S')}\n"
+        f"Lỗi: {message_text[:1200]}\n"
+        "Hệ thống sẽ tự động thử lại.",
+        with_buttons=False,
+        replace_previous=False,
+    )
 
 
 def _file_signature(path: Path) -> str | None:
@@ -679,6 +706,7 @@ def _run_automation_cycle(app: FastAPI) -> None:
         except Exception as sync_exc:
             status["runtime_sync_error"] = str(sync_exc)
             _publish_automation_status(app, status)
+            _notify_system_error(config, "Đồng bộ OKX/MongoDB", sync_exc)
 
         def _progress(phase: str, metadata: dict[str, Any] | None = None) -> None:
             _set_automation_phase(app, status, phase, metadata=metadata)
@@ -719,22 +747,33 @@ def _run_automation_cycle(app: FastAPI) -> None:
                 "error": str(exc),
             }
         )
+        _notify_system_error(config, "Automation", exc)
     finally:
         _publish_automation_status(app, status)
         app.state.lock.release()
 
     try:
-        refresh_system_checklist_snapshot(config, automation=status)
-    except Exception:
-        pass
+        checklist = refresh_system_checklist_snapshot(config, automation=status)
+        failed_modules = [
+            item for item in checklist.get("modules") or []
+            if str(item.get("status") or "").lower() == "fail"
+        ]
+        if failed_modules:
+            labels = ", ".join(
+                f"#{item.get('number')} {item.get('name')}"
+                for item in failed_modules
+            )
+            _notify_system_error(config, "Kiểm tra 8 module", f"Module đang FAIL: {labels}")
+    except Exception as exc:
+        _notify_system_error(config, "Cập nhật System Checklist", exc)
     try:
         timeframe_state_dashboard(config, force_refresh=True)
         scan_memory_dashboard(config, force_refresh=True)
         analytics_dashboard(config, force_refresh=True)
         replay_dashboard_payload(config, force_refresh=True)
         system_health_dashboard(config, force_refresh=True)
-    except Exception:
-        pass
+    except Exception as exc:
+        _notify_system_error(config, "Dashboard", exc)
 
     messages: list[str] = []
     should_notify_scan = telegram_notify_scans(config) and (
@@ -764,7 +803,13 @@ def _automation_worker(app: FastAPI) -> None:
             interval = _automation_interval(config)
         except Exception:
             interval = 60
-        _run_automation_cycle(app)
+        try:
+            _run_automation_cycle(app)
+        except Exception as exc:
+            try:
+                _notify_system_error(load_config(app.state.config_path), "Automation Worker", exc)
+            except Exception:
+                LOGGER.exception("Automation worker failed before Telegram notification")
         next_run_at = _next_automation_cycle_at(datetime.now(timezone.utc), interval)
         wait_seconds = max(1.0, (next_run_at - datetime.now(timezone.utc)).total_seconds())
         app.state.automation_stop.wait(wait_seconds)
@@ -822,6 +867,7 @@ def _run_lc_pipeline_worker_cycle(app: FastAPI) -> None:
                 "error": str(exc),
             }
         )
+        _notify_system_error(config, "LC Pipeline", exc)
     finally:
         app.state.lc_pipeline_status = status
         app.state.lc_pipeline_lock.release()
@@ -834,7 +880,13 @@ def _lc_pipeline_worker(app: FastAPI) -> None:
             interval = _lc_pipeline_worker_interval(config)
         except Exception:
             interval = 60
-        _run_lc_pipeline_worker_cycle(app)
+        try:
+            _run_lc_pipeline_worker_cycle(app)
+        except Exception as exc:
+            try:
+                _notify_system_error(load_config(app.state.config_path), "LC Pipeline Worker", exc)
+            except Exception:
+                LOGGER.exception("LC pipeline worker failed before Telegram notification")
         next_run_at = _next_automation_cycle_at(datetime.now(timezone.utc), interval)
         wait_seconds = max(1.0, (next_run_at - datetime.now(timezone.utc)).total_seconds())
         app.state.automation_stop.wait(wait_seconds)
@@ -925,6 +977,17 @@ def _run_lc_pipeline_slot_cycle(app: FastAPI) -> None:
                 }
             )
         app.state.lc_pipeline_status = current_status
+    except Exception as exc:
+        current_status = getattr(app.state, "lc_pipeline_status", {}).copy()
+        current_status.update(
+            {
+                "last_slot_check_at": now.isoformat(),
+                "last_result": "error",
+                "error": str(exc),
+            }
+        )
+        app.state.lc_pipeline_status = current_status
+        _notify_system_error(config, "Lịch pool 1h/2h/4h và Mini", exc)
     finally:
         app.state.lc_pipeline_slot_lock.release()
 
@@ -936,7 +999,13 @@ def _lc_pipeline_slot_worker(app: FastAPI) -> None:
             interval = _lc_pipeline_slot_poll_interval(config)
         except Exception:
             interval = 10
-        _run_lc_pipeline_slot_cycle(app)
+        try:
+            _run_lc_pipeline_slot_cycle(app)
+        except Exception as exc:
+            try:
+                _notify_system_error(load_config(app.state.config_path), "LC Slot Worker", exc)
+            except Exception:
+                LOGGER.exception("LC slot worker failed before Telegram notification")
         app.state.automation_stop.wait(interval)
 
 
@@ -1394,8 +1463,8 @@ def _telegram_dashboard_message(
     try:
         next_mini = _telegram_vn_time(config, next_internal_market_scan_at(config))
         lines.insert(4, f"🤖 Mini scan tiếp: {next_mini}")
-    except Exception:
-        pass
+    except Exception as exc:
+        _notify_system_error(config, "Tính lịch Mini", exc)
     if top:
         lines.append(
             "🏆 Top hiện tại: "
@@ -1999,6 +2068,7 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
 
 def _telegram_button_worker(app: FastAPI) -> None:
     offset_value = None
+    config: dict[str, Any] | None = None
     try:
         config = load_config(app.state.config_path)
         sync_telegram_commands(config)
@@ -2007,8 +2077,10 @@ def _telegram_button_worker(app: FastAPI) -> None:
         )
         stored = get_journal_state(config, "telegram_update_offset")
         offset_value = int(stored) if stored else None
-    except Exception:
+    except Exception as exc:
         offset_value = None
+        if config is not None:
+            _notify_system_error(config, "Telegram Polling khởi tạo", exc)
 
     while not app.state.automation_stop.is_set():
         try:
@@ -2031,7 +2103,9 @@ def _telegram_button_worker(app: FastAPI) -> None:
                 _handle_telegram_update(config, update, app.state.config_path, app)
             if not updates:
                 app.state.automation_stop.wait(1)
-        except Exception:
+        except Exception as exc:
+            if config is not None:
+                _notify_system_error(config, "Telegram Polling", exc)
             app.state.automation_stop.wait(5)
 
 
@@ -2134,6 +2208,8 @@ def _market_guard_worker(app: FastAPI) -> None:
                 "warnings": [f"Market guard error: {exc}"],
                 "block": None,
             }
+            if 'config' in locals():
+                _notify_system_error(config, "Market Guard", exc)
         app.state.automation_stop.wait(interval)
 
 
@@ -2335,6 +2411,16 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+    @app.exception_handler(Exception)
+    async def unhandled_application_error(request: Request, exc: Exception) -> JSONResponse:
+        LOGGER.exception("Unhandled API error on %s", request.url.path, exc_info=exc)
+        try:
+            config = load_config(app.state.config_path)
+            _notify_system_error(config, f"API {request.url.path}", exc)
+        except Exception:
+            LOGGER.exception("Could not send Telegram notification for API error")
+        return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
     @app.on_event("startup")
     def start_automation() -> None:
         config = load_config(app.state.config_path)
@@ -2345,8 +2431,8 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
         clear_dashboard_snapshot_cache(config)
         try:
             sync_runtime_state(config)
-        except Exception:
-            pass
+        except Exception as exc:
+            _notify_system_error(config, "Khởi động đồng bộ OKX/MongoDB", exc)
         sync_telegram_commands(config)
         initial_delay = max(0, int(config.get("automation", {}).get("initial_delay_seconds", 5) or 0))
         interval = _automation_interval(config)

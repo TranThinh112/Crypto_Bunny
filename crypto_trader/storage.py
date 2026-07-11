@@ -253,9 +253,11 @@ def _mongo_find_many(
     query: dict[str, Any] | None = None,
     sort: list[tuple[str, int]] | None = None,
     limit: int | None = None,
+    projection: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     def _operation() -> list[dict[str, Any]]:
-        cursor = _mongo_collection(config, table).find(query or {}, {"_id": 0})
+        selected_fields = {**(projection or {}), "_id": 0}
+        cursor = _mongo_collection(config, table).find(query or {}, selected_fields)
         if sort:
             cursor = cursor.sort(sort)
         if limit is not None:
@@ -809,9 +811,37 @@ def prune_ai_trade_decisions(config: dict[str, Any], *, keep_days: float | None 
     retention = _storage_retention(config)
     keep_days = float(keep_days or retention.get("ai_trade_decisions_keep_days", 365) or 365)
     return _prune_by_created_at(config, "ai_trade_decisions", keep_days=keep_days)
-def list_ai_trade_decision_rows(config: dict[str, Any], *, limit: int = 50) -> list[dict[str, Any]]:
+def list_ai_trade_decision_rows(
+    config: dict[str, Any],
+    *,
+    limit: int = 50,
+    include_details: bool = True,
+) -> list[dict[str, Any]]:
     safe_limit = max(1, int(limit))
-    return _mongo_find_many(config, "ai_trade_decisions", sort=[("created_at", -1), ("id", -1)], limit=safe_limit)
+    projection = None if include_details else {
+        "id": 1,
+        "created_at": 1,
+        "symbol": 1,
+        "timeframe": 1,
+        "decision": 1,
+        "confidence": 1,
+        "rule_score": 1,
+        "side": 1,
+        "trade_status": 1,
+        "pnl": 1,
+        "closed_at": 1,
+        "model_name": 1,
+        "model_version": 1,
+        "strategy_version": 1,
+        "market_regime": 1,
+    }
+    return _mongo_find_many(
+        config,
+        "ai_trade_decisions",
+        sort=[("created_at", -1), ("id", -1)],
+        limit=safe_limit,
+        projection=projection,
+    )
 
 
 def list_ai_trade_decision_stat_rows(config: dict[str, Any], *, limit: int = 50) -> list[dict[str, Any]]:
@@ -1748,6 +1778,7 @@ def recent_market_scan_memory(
     lookback_hours: int = 12,
     per_symbol_timeframe_limit: int = 3,
     total_limit: int = 1000,
+    include_details: bool = True,
 ) -> dict[str, dict[str, list[dict[str, Any]]]]:
     query: dict[str, Any] = {
         "created_at": {
@@ -1767,6 +1798,17 @@ def recent_market_scan_memory(
             query=query,
             sort=[("created_at", -1), ("id", -1)],
             limit=max(10, int(total_limit)),
+            projection=None if include_details else {
+                "created_at": 1,
+                "source": 1,
+                "side": 1,
+                "symbol": 1,
+                "timeframe": 1,
+                "confidence": 1,
+                "win_probability_pct": 1,
+                "risk_reward": 1,
+                "score": 1,
+            },
         )
         normalized_rows = [
             {
