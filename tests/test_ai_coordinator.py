@@ -18,7 +18,7 @@ from crypto_trader.ai_coordinator import (
     run_internal_market_scan,
 )
 from crypto_trader.config import DEFAULT_CONFIG
-from crypto_trader.lc_pipeline import save_lc_pipeline_mini_scan
+from crypto_trader.lc_pipeline import latest_lc_pipeline_mini_scan, save_lc_pipeline_mini_scan
 from crypto_trader.models import RiskCheck, TradeCandidate
 from crypto_trader.storage import recent_market_scan_memory, save_market_scan_observations, save_pending_order, set_journal_state
 
@@ -99,6 +99,47 @@ class AiCoordinatorTest(TestCase):
         )
 
         self.assertFalse(internal_market_scan_due(config, now=now))
+
+    def test_saved_no_trade_scan_cannot_reach_lc_okx(self) -> None:
+        config = self._config()
+        set_journal_state(
+            config,
+            "lc_internal_pipeline_state",
+            json.dumps(
+                {
+                    "state_version": 3,
+                    "day_key": "2026-07-12",
+                    "four_hour_history": [
+                        {
+                            "frame": "4h",
+                            "slot": "2026-07-12T00:00:00+07:00",
+                            "approved": [{"symbol": "CRV/USDT:USDT"}],
+                        }
+                    ],
+                    "latest_mini_scan": {
+                        "created_at": "2026-07-11T17:00:56+00:00",
+                        "slot_id": "2026-07-11T17:00:00+00:00",
+                        "status": "done",
+                        "pool_symbols": ["CRV/USDT:USDT"],
+                        "selected_symbols": ["CRV/USDT:USDT"],
+                        "approved_symbols": ["CRV/USDT:USDT"],
+                        "ai_review": {
+                            "decision": "NO_TRADE",
+                            "approved_symbols": [],
+                            "reason": "Setup rejected",
+                        },
+                    },
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+        scan = latest_lc_pipeline_mini_scan(config)
+
+        self.assertEqual(scan["status"], "ai_rejected")
+        self.assertEqual(scan["selected_symbols"], [])
+        self.assertEqual(scan["approved_symbols"], [])
+        self.assertIn("NO_TRADE", scan["skip_reason"])
 
     @patch("crypto_trader.ai_coordinator.notify_mini_pool_summary")
     @patch("crypto_trader.ai_coordinator.recent_market_scan_memory")

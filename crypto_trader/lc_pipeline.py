@@ -1683,19 +1683,31 @@ def latest_lc_pipeline_mini_scan(config: dict[str, Any]) -> dict[str, Any] | Non
         scan.get("selected_symbols") if isinstance(scan.get("selected_symbols"), list) else scan.get("approved_symbols"),
         limit=10,
     )
-    selected_symbols = [symbol for symbol in original_selected_symbols if symbol in current_symbols]
+    ai_review = scan.get("ai_review") if isinstance(scan.get("ai_review"), dict) else {}
+    ai_decision = str(ai_review.get("decision") or "").strip().upper()
+    ai_explicitly_rejected = (
+        ai_decision in {"NO_TRADE", "NONE", "REJECTED", "REJECT"}
+        or isinstance(ai_review.get("approved_symbols"), list) and not ai_review.get("approved_symbols")
+    )
+    selected_symbols = (
+        []
+        if ai_explicitly_rejected
+        else [symbol for symbol in original_selected_symbols if symbol in current_symbols]
+    )
     selection_stale = bool(original_selected_symbols and selected_symbols != original_selected_symbols)
-    status = "stale_selection" if selection_stale else scan.get("status")
+    status = "ai_rejected" if ai_explicitly_rejected else "stale_selection" if selection_stale else scan.get("status")
     skip_reason = scan.get("skip_reason")
-    if selection_stale and not selected_symbols:
+    if ai_explicitly_rejected:
+        skip_reason = "Mini AI returned NO_TRADE; no setup may continue to LC_OKX"
+    elif selection_stale and not selected_symbols:
         skip_reason = "Mini selection is stale because the current LC noi bo pool has changed"
     return {
         **scan,
         "status": status,
         "pool_symbols": current_symbols,
         "pool_count": len(current_symbols),
-        "approved_symbols": current_symbols,
-        "approved_count": len(current_symbols),
+        "approved_symbols": [] if ai_explicitly_rejected else current_symbols,
+        "approved_count": 0 if ai_explicitly_rejected else len(current_symbols),
         "selected_symbols": selected_symbols,
         "selected_count": len(selected_symbols),
         "selected_original_symbols": original_selected_symbols,
