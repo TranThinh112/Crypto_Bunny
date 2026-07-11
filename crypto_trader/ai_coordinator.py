@@ -258,12 +258,37 @@ def _compact_risk_check(risk_check: RiskCheck) -> dict[str, Any]:
 
 
 def _compact_lc_memory(memory: dict[str, Any]) -> dict[str, Any]:
+    preferred = memory.get("preferred") if isinstance(memory.get("preferred"), dict) else {}
+    orders = memory.get("orders") if isinstance(memory.get("orders"), list) else []
+    same_symbol_pending: dict[str, dict[str, Any]] = {}
+    for record in orders:
+        if not isinstance(record, dict):
+            continue
+        symbol = str(record.get("symbol") or "")
+        if not symbol:
+            continue
+        bucket = same_symbol_pending.setdefault(symbol, {"count": 0, "sides": set(), "statuses": []})
+        bucket["count"] += 1
+        side = str(record.get("side") or "")
+        status = str(record.get("status") or "")
+        if side:
+            bucket["sides"].add(side)
+        if status and status not in bucket["statuses"]:
+            bucket["statuses"].append(status)
     return {
         "pending_total": memory.get("pending_total"),
         "lc_okx_count": memory.get("lc_okx_count"),
+        "wait_slot_count": memory.get("wait_slot_count"),
         "local_lc_count": memory.get("local_lc_count"),
-        "preferred": memory.get("preferred"),
-        "orders": (memory.get("orders") or [])[:3],
+        "highest_priority": _compact_dict(preferred, ["status", "lc_id", "symbol", "side", "win_probability_pct"]),
+        "same_symbol_pending": {
+            symbol: {
+                "count": data["count"],
+                "sides": sorted(data["sides"]),
+                "statuses": data["statuses"][:2],
+            }
+            for symbol, data in same_symbol_pending.items()
+        },
     }
 
 
@@ -339,6 +364,33 @@ def _compact_indicator_summary(summary: dict[str, Any] | None) -> dict[str, Any]
     if isinstance(candlesticks, dict):
         compact["candlestick_patterns"] = {
             str(frame): _compact_pattern_summary(data)
+            for frame, data in candlesticks.items()
+            if str(frame).lower() in {"5m", "15m", "1h", "4h"} and isinstance(data, dict)
+        }
+    return {key: value for key, value in compact.items() if value not in (None, {}, [])}
+
+
+def _compact_okx_indicator_summary(summary: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(summary, dict):
+        return {}
+    compact = {
+        "trend": summary.get("trend"),
+        "rsi": _round_optional(summary.get("rsi"), 2),
+        "atr_pct": _round_optional(summary.get("atr_pct"), 3),
+        "volume_ratio": _round_optional(summary.get("volume_ratio"), 3),
+        "spread_pct": _round_optional(summary.get("spread_pct"), 4),
+    }
+    higher_timeframes = summary.get("higher_timeframes")
+    if isinstance(higher_timeframes, dict):
+        compact["higher_timeframes"] = {
+            str(frame): _compact_dict(data, ["trend"])
+            for frame, data in higher_timeframes.items()
+            if str(frame).lower() in {"5m", "15m", "1h", "4h"} and isinstance(data, dict)
+        }
+    candlesticks = summary.get("candlestick_patterns")
+    if isinstance(candlesticks, dict):
+        compact["candlestick_patterns"] = {
+            str(frame): _compact_dict(data, ["direction", "strongest_pattern"])
             for frame, data in candlesticks.items()
             if str(frame).lower() in {"5m", "15m", "1h", "4h"} and isinstance(data, dict)
         }
@@ -1177,13 +1229,8 @@ def _candidate_summary(candidate: TradeCandidate, *, config: dict[str, Any] | No
         "confidence": candidate.confidence,
         "win_probability_pct": candidate.win_probability_pct,
         "risk_reward": candidate.risk_reward,
-        "entry": candidate.entry,
-        "stop_loss": candidate.stop_loss,
-        "take_profit": candidate.take_profit,
-        "indicator_summary": _compact_indicator_summary(candidate.indicator_summary),
+        "indicator_summary": _compact_okx_indicator_summary(candidate.indicator_summary),
         "setup_checks": _setup_checks_summary(effective_config, candidate),
-        "reasons": candidate.reasons[:2],
-        "warnings": candidate.warnings[:2],
     }
 
 
@@ -1347,17 +1394,16 @@ def okx_ai_approval(
     pending_memory = pending_memory or internal_lc_memory(config)
     local_decision = _local_okx_policy(config, candidate, risk_check, context, pending_memory)
     okx_config = ai_config(config).get("okx", {})
-    if not bool(okx_config.get("approval_enabled", True)):
-        return {
-            **local_decision,
-            "approved": risk_check.passed,
-            "decision": "approval_disabled",
-            "reason": "OKX AI approval is disabled; using risk gate only",
-        }
-
     provider = str(okx_config.get("provider", "local_policy") or "local_policy")
     if provider != "openai":
         return local_decision
+
+    if not bool(okx_config.get("approval_enabled", True)):
+        return {
+            **local_decision,
+            "decision": "approval_disabled",
+            "reason": "OKX AI approval is disabled; using local policy only",
+        }
 
     try:
         return _openai_json_decision(config, candidate, risk_check, context, pending_memory)

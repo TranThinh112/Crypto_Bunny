@@ -8,6 +8,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from crypto_trader.ai_coordinator import (
+    _compact_lc_memory,
     _candidate_summary,
     _candidate_market_summary,
     _local_market_scan_result,
@@ -76,6 +77,45 @@ class AiCoordinatorTest(TestCase):
         self.assertEqual(memory["preferred"]["status"], "LC_OKX")
         self.assertEqual(memory["preferred"]["lc_id"], 12)
 
+    def test_okx_lc_memory_compacts_to_priority_and_same_symbol_summary(self) -> None:
+        compact = _compact_lc_memory(
+            {
+                "pending_total": 3,
+                "lc_okx_count": 1,
+                "wait_slot_count": 1,
+                "local_lc_count": 1,
+                "preferred": {
+                    "status": "LC_OKX",
+                    "lc_id": 12,
+                    "symbol": "LIT/USDT:USDT",
+                    "side": "long",
+                    "win_probability_pct": 62.0,
+                    "entry": 100.0,
+                },
+                "orders": [
+                    {"status": "LC_OKX", "lc_id": 12, "symbol": "LIT/USDT:USDT", "side": "long"},
+                    {"status": "WAIT_SLOT", "lc_id": 13, "symbol": "LIT/USDT:USDT", "side": "short"},
+                    {"status": "OPEN", "lc_id": 14, "symbol": "BTC/USDT:USDT", "side": "long"},
+                ],
+            }
+        )
+
+        self.assertNotIn("preferred", compact)
+        self.assertNotIn("orders", compact)
+        self.assertEqual(
+            compact["highest_priority"],
+            {
+                "status": "LC_OKX",
+                "lc_id": 12,
+                "symbol": "LIT/USDT:USDT",
+                "side": "long",
+                "win_probability_pct": 62.0,
+            },
+        )
+        self.assertEqual(compact["same_symbol_pending"]["LIT/USDT:USDT"]["count"], 2)
+        self.assertEqual(compact["same_symbol_pending"]["LIT/USDT:USDT"]["sides"], ["long", "short"])
+        self.assertEqual(compact["same_symbol_pending"]["LIT/USDT:USDT"]["statuses"], ["LC_OKX", "WAIT_SLOT"])
+
     def test_okx_ai_defers_new_vt_when_internal_lc_exists(self) -> None:
         config = self._config()
         save_pending_order(config, _candidate("BTC/USDT:USDT"), "limit-1", journal_id=12)
@@ -88,6 +128,22 @@ class AiCoordinatorTest(TestCase):
         self.assertFalse(new_vt["approved"])
         self.assertEqual(new_vt["decision"], "defer_to_internal_lc")
         self.assertTrue(pending_release["approved"])
+
+    def test_okx_approval_disabled_uses_local_policy_without_calling_openai(self) -> None:
+        config = self._config()
+        config["ai"]["okx"]["provider"] = "openai"
+        config["ai"]["okx"]["approval_enabled"] = False
+        save_pending_order(config, _candidate("BTC/USDT:USDT"), "limit-1", journal_id=12)
+        candidate = _candidate("SOL/USDT:USDT")
+        check = RiskCheck(True, [], [])
+
+        with patch("crypto_trader.ai_coordinator._openai_json_decision") as approval:
+            decision = okx_ai_approval(config, candidate, check, context={"route": "new_vt"})
+
+        approval.assert_not_called()
+        self.assertFalse(decision["approved"])
+        self.assertEqual(decision["decision"], "approval_disabled")
+        self.assertEqual(decision["provider"], "local_policy")
 
     def test_reuses_recent_rejected_okx_setup_review_without_recalling_ai(self) -> None:
         config = self._config()
@@ -517,7 +573,19 @@ class AiCoordinatorTest(TestCase):
         self.assertNotIn("quantity", summary)
         self.assertNotIn("order_usdt", summary)
         self.assertNotIn("planned_risk_usdt", summary)
-        self.assertEqual(summary["reasons"], ["r1", "r2"])
+        self.assertNotIn("entry", summary)
+        self.assertNotIn("stop_loss", summary)
+        self.assertNotIn("take_profit", summary)
+        self.assertNotIn("reasons", summary)
+        self.assertNotIn("warnings", summary)
+        indicator = summary["indicator_summary"]
+        self.assertEqual(indicator["volume_ratio"], 0.774)
+        self.assertEqual(indicator["spread_pct"], 0.09)
+        self.assertEqual(indicator["higher_timeframes"]["4h"], {"trend": "down"})
+        self.assertEqual(indicator["candlestick_patterns"]["4h"], {"direction": "bearish"})
+        self.assertNotIn("patterns", indicator["candlestick_patterns"]["4h"])
+        self.assertNotIn("signal_summary", indicator["candlestick_patterns"]["4h"])
+        self.assertNotIn("support_distance_pct", indicator)
         checks = summary["setup_checks"]
         self.assertEqual(checks["bias_4h"]["status"], "conflict")
         self.assertFalse(checks["bias_4h"]["acceptable"])
