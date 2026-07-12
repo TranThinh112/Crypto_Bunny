@@ -2374,6 +2374,8 @@ renderSystemSummaryChart = function renderSystemSummaryChartPatched(payload) {
 };
 
 async function loadSystemChecklist(date = "") {
+  if (!date && refs.systemChecklistStatus) refs.systemChecklistStatus.textContent = "Đang tải...";
+  if (!date && refs.systemModuleStatus) refs.systemModuleStatus.textContent = "Đang tải...";
   const url = date
     ? `/api/system-checklist?date=${encodeURIComponent(date)}&_=${Date.now()}`
     : `/api/system-checklist?force_refresh=true&_=${Date.now()}`;
@@ -2925,6 +2927,7 @@ loadConfigSummary().catch((err) => {
   setOrderMarginStatus(`Lỗi: ${err.message}`, "warn");
 });
 startLcPipelineRefresh();
+loadSystemChecklist().catch((err) => setStatus(`Lỗi system health: ${err.message}`));
 loadDecision()
   .then((exists) => {
     if (!exists) runAnalysis();
