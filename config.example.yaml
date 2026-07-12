@@ -10,6 +10,8 @@ database:
   atlas:
     uri_env: MONGODB_URI
     database_env: MONGODB_DATABASE
+    ai_database_env: MONGODB_AI_DATABASE
+    ai_database: AI_Bunny
     app_name: Crypto_Bunny
 runtime:
   interval_seconds: 60

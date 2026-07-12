@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from unittest import TestCase
 from unittest.mock import patch
 
-from crypto_trader.atlas_mirror import atlas_database
+from crypto_trader.atlas_mirror import atlas_database, atlas_database_for_collection
 from crypto_trader.models import Decision, RiskCheck, TradeCandidate
 from crypto_trader.storage import (
     compact_market_scan_observations,
@@ -221,7 +221,7 @@ class StorageTest(TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             config = self._config(tmpdir)
             now = datetime.now(timezone.utc)
-            collection = atlas_database(config)["decisions"]
+            collection = atlas_database_for_collection(config, "decisions")["decisions"]
             for index in range(6):
                 created_at = (now - timedelta(minutes=index)).isoformat()
                 collection.replace_one(
@@ -240,7 +240,7 @@ class StorageTest(TestCase):
                 )
 
             result = prune_decision_history(config, keep_hours=72, max_rows=3)
-            count = atlas_database(config)["decisions"].count_documents({})
+            count = atlas_database_for_collection(config, "decisions")["decisions"].count_documents({})
 
         self.assertEqual(result["deleted_over_limit"], 3)
         self.assertEqual(count, 3)
@@ -262,7 +262,7 @@ class StorageTest(TestCase):
             with patch("crypto_trader.storage.prune_decision_history", side_effect=RuntimeError("read operation timed out")):
                 row_id = save_decision(config, decision)
 
-            rows = list(atlas_database(config)["decisions"].find({}, {"_id": 0}))
+            rows = list(atlas_database_for_collection(config, "decisions")["decisions"].find({}, {"_id": 0}))
 
         self.assertEqual(row_id, 1)
         self.assertEqual(len(rows), 1)
@@ -366,12 +366,13 @@ class StorageTest(TestCase):
             config = self._config(tmpdir)
             now = datetime.now(timezone.utc)
             db = atlas_database(config)
-            db["prompt_versions"].replace_one(
+            ai_db = atlas_database_for_collection(config, "prompt_versions")
+            ai_db["prompt_versions"].replace_one(
                 {"version": "old-inactive"},
                 {"_id": "old-inactive", "id": 1, "version": "old-inactive", "created_at": (now - timedelta(days=400)).isoformat(), "is_active": 0},
                 upsert=True,
             )
-            db["prompt_versions"].replace_one(
+            ai_db["prompt_versions"].replace_one(
                 {"version": "old-active"},
                 {"_id": "old-active", "id": 2, "version": "old-active", "created_at": (now - timedelta(days=400)).isoformat(), "is_active": 1},
                 upsert=True,
@@ -392,7 +393,7 @@ class StorageTest(TestCase):
 
         self.assertEqual(prompt_result["deleted_old"], 1)
         self.assertEqual(strategy_result["deleted_old"], 1)
-        self.assertEqual(db["prompt_versions"].count_documents({}), 1)
+        self.assertEqual(ai_db["prompt_versions"].count_documents({}), 1)
         self.assertEqual(db["strategy_versions"].count_documents({}), 1)
 
     def test_ensure_ai_model_version_overwrites_existing_row_for_same_model_name(self) -> None:
@@ -414,7 +415,7 @@ class StorageTest(TestCase):
                 prompt_hash="hash-b",
                 created_at="2026-07-08T01:00:00+00:00",
             )
-            rows = list(atlas_database(config)["ai_model_versions"].find({}, {"_id": 0}))
+            rows = list(atlas_database_for_collection(config, "ai_model_versions")["ai_model_versions"].find({}, {"_id": 0}))
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["model_version"], "gpt-5.5-new")
@@ -426,7 +427,8 @@ class StorageTest(TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             config = self._config(tmpdir)
             db = atlas_database(config)
-            db["decisions"].replace_one(
+            ai_db = atlas_database_for_collection(config, "decisions")
+            ai_db["decisions"].replace_one(
                 {"id": 1},
                 {
                     "_id": 1,
@@ -453,3 +455,6 @@ class StorageTest(TestCase):
         self.assertGreaterEqual(stats["row_counts"]["decisions"], 1)
         self.assertEqual(stats["payload_bytes"]["decisions"], len('{"a":1}'.encode("utf-8")))
         self.assertEqual(stats["market_scan_by_timeframe"][0]["timeframe"], "1m")
+        self.assertTrue(stats["db_paths"]["runtime"].endswith(atlas_database(config).name))
+        self.assertTrue(stats["db_paths"]["ai"].endswith(atlas_database_for_collection(config, "decisions").name))
+        self.assertNotEqual(stats["collection_databases"]["decisions"], stats["collection_databases"]["market_scan_observations"])

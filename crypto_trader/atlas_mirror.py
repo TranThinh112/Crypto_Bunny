@@ -8,13 +8,39 @@ from typing import Any
 
 _ATLAS_LOCK = threading.RLock()
 _ATLAS_CLIENTS: dict[tuple[str, str], Any] = {}
-_ATLAS_INDEXES_READY: set[tuple[str, str]] = set()
+_ATLAS_INDEXES_READY: set[tuple[str, str, str]] = set()
 LOGGER = logging.getLogger(__name__)
+
+AI_DATABASE_COLLECTIONS = {
+    "decisions",
+    "ai_trade_decisions",
+    "prompt_metrics",
+    "prompt_versions",
+    "ai_model_versions",
+    "ai_experiments",
+    "replay_history",
+}
 
 _ATLAS_COLLECTION_INDEX_SPECS: dict[str, list[Any]] = {
     "decisions": [
         [("id", -1)],
         [("created_at", -1), ("id", -1)],
+    ],
+    "prompt_metrics": [
+        [("prompt_version", 1)],
+        [("updated_at", -1)],
+    ],
+    "prompt_versions": [
+        [("version", 1)],
+        [("created_at", -1), ("id", -1)],
+    ],
+    "ai_model_versions": [
+        [("model_name", 1)],
+        [("updated_at", -1)],
+    ],
+    "ai_experiments": [
+        [("name", 1)],
+        [("enabled", 1), ("created_at", -1), ("id", -1)],
     ],
     "market_scan_observations": [
         [("created_at", -1), ("id", -1)],
@@ -84,16 +110,62 @@ def atlas_env_requirements(config: dict[str, Any]) -> tuple[str, str]:
     return uri_env, database_env
 
 
-def _atlas_identity(config: dict[str, Any]) -> tuple[str, str]:
+def atlas_ai_database_env(config: dict[str, Any]) -> str:
+    atlas = config.get("database", {}).get("atlas", {})
+    return str(atlas.get("ai_database_env", "MONGODB_AI_DATABASE") or "MONGODB_AI_DATABASE")
+
+
+def _atlas_identity(config: dict[str, Any], *, database_name: str | None = None) -> tuple[str, str]:
     atlas = config.get("database", {}).get("atlas", {})
     uri_env, database_env = atlas_env_requirements(config)
     uri = os.getenv(uri_env, "").strip() or str(atlas.get("uri", "") or "").strip()
-    database_name = os.getenv(database_env, "").strip() or str(atlas.get("database", "") or "").strip()
+    resolved_database_name = (
+        str(database_name or "").strip()
+        or os.getenv(database_env, "").strip()
+        or str(atlas.get("database", "") or "").strip()
+    )
     if not uri:
         raise RuntimeError(f"Missing MongoDB Atlas connection string env: {uri_env}")
-    if not database_name:
+    if not resolved_database_name:
         raise RuntimeError(f"Missing MongoDB Atlas database name env: {database_env}")
-    return uri, database_name
+    return uri, resolved_database_name
+
+
+def atlas_database_name(config: dict[str, Any], *, role: str = "runtime") -> str:
+    atlas = config.get("database", {}).get("atlas", {})
+    if _test_mode_enabled(config):
+        base = config.get("_atlas_test_database")
+        if not base:
+            seed = str(config.get("_config_dir") or config.get("_config_path") or id(config))
+            base = f"crypto_bunny_test_{abs(hash(seed))}"
+        if role == "ai":
+            return str(config.get("_atlas_test_ai_database") or f"{base}_ai")
+        return str(base)
+    if role == "ai":
+        env_name = atlas_ai_database_env(config)
+        return (
+            os.getenv(env_name, "").strip()
+            or str(atlas.get("ai_database", "") or "").strip()
+            or str(atlas.get("database", "") or "").strip()
+        )
+    _, database_env = atlas_env_requirements(config)
+    return os.getenv(database_env, "").strip() or str(atlas.get("database", "") or "").strip()
+
+
+def atlas_collection_database_name(config: dict[str, Any], collection_name: str) -> str:
+    role = "ai" if str(collection_name or "") in AI_DATABASE_COLLECTIONS else "runtime"
+    return atlas_database_name(config, role=role)
+
+
+def _atlas_index_collections(config: dict[str, Any], database_name: str) -> set[str]:
+    runtime_database = atlas_database_name(config, role="runtime")
+    ai_database = atlas_database_name(config, role="ai")
+    all_collections = set(_ATLAS_COLLECTION_INDEX_SPECS)
+    if runtime_database == ai_database:
+        return all_collections
+    if database_name == ai_database:
+        return set(AI_DATABASE_COLLECTIONS)
+    return all_collections - set(AI_DATABASE_COLLECTIONS)
 
 
 def _test_mode_enabled(config: dict[str, Any]) -> bool:
@@ -114,14 +186,25 @@ def _atlas_write_blocked(exc: Exception) -> bool:
     return code == 8000 or "space quota" in message or "writes are blocked" in message
 
 
-def _ensure_atlas_indexes(database: Any, cache_key: tuple[str, str]) -> None:
-    if cache_key in _ATLAS_INDEXES_READY:
+def _ensure_atlas_indexes(database: Any, cache_key: tuple[str, str], collection_names: set[str]) -> None:
+    pending_collections = {
+        collection_name
+        for collection_name in collection_names
+        if (cache_key[0], cache_key[1], collection_name) not in _ATLAS_INDEXES_READY
+    }
+    if not pending_collections:
         return
     with _ATLAS_LOCK:
-        if cache_key in _ATLAS_INDEXES_READY:
+        pending_collections = {
+            collection_name
+            for collection_name in pending_collections
+            if (cache_key[0], cache_key[1], collection_name) not in _ATLAS_INDEXES_READY
+        }
+        if not pending_collections:
             return
         try:
-            for collection_name, index_specs in _ATLAS_COLLECTION_INDEX_SPECS.items():
+            for collection_name in sorted(pending_collections):
+                index_specs = _ATLAS_COLLECTION_INDEX_SPECS.get(collection_name, [])
                 collection = database[collection_name]
                 for index_spec in index_specs:
                     if isinstance(index_spec, dict):
@@ -138,12 +221,13 @@ def _ensure_atlas_indexes(database: Any, cache_key: tuple[str, str]) -> None:
                 "Skipping Atlas index ensure because cluster writes are blocked: %s",
                 exc,
             )
-        _ATLAS_INDEXES_READY.add(cache_key)
+        for collection_name in pending_collections:
+            _ATLAS_INDEXES_READY.add((cache_key[0], cache_key[1], collection_name))
 
 
-def atlas_database(config: dict[str, Any]) -> Any:
+def atlas_database(config: dict[str, Any], database_name: str | None = None) -> Any:
     if _test_mode_enabled(config):
-        default_name = config.get("_atlas_test_database")
+        default_name = database_name or config.get("_atlas_test_database")
         if not default_name:
             seed = str(config.get("_config_dir") or config.get("_config_path") or id(config))
             default_name = f"crypto_bunny_test_{abs(hash(seed))}"
@@ -166,11 +250,11 @@ def atlas_database(config: dict[str, Any]) -> Any:
                 raise RuntimeError("Test Atlas fallback requires mongomock to be installed.") from exc
             client = mongomock.MongoClient()
             database = client[database_name]
-            _ensure_atlas_indexes(database, cache_key)
+            _ensure_atlas_indexes(database, cache_key, _atlas_index_collections(config, database_name))
             _ATLAS_CLIENTS[cache_key] = database
             return database
 
-    uri, database_name = _atlas_identity(config)
+    uri, database_name = _atlas_identity(config, database_name=database_name)
     cache_key = (uri, database_name)
     cached = _ATLAS_CLIENTS.get(cache_key)
     if cached is not None:
@@ -191,6 +275,10 @@ def atlas_database(config: dict[str, Any]) -> Any:
         )
         client.admin.command("ping")
         database = client[database_name]
-        _ensure_atlas_indexes(database, cache_key)
+        _ensure_atlas_indexes(database, cache_key, _atlas_index_collections(config, database_name))
         _ATLAS_CLIENTS[cache_key] = database
         return database
+
+
+def atlas_database_for_collection(config: dict[str, Any], collection_name: str) -> Any:
+    return atlas_database(config, atlas_collection_database_name(config, collection_name))

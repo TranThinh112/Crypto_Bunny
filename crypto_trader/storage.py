@@ -13,6 +13,8 @@ from typing import Any
 
 from .atlas_mirror import (
     atlas_database,
+    atlas_database_for_collection,
+    atlas_collection_database_name,
     atlas_runtime_is_primary,
 )
 from .config import project_path
@@ -187,11 +189,12 @@ def _best_effort_retryable_storage_side_effect(config: dict[str, Any], operation
 
 
 def _mongo_collection(config: dict[str, Any], table: str) -> Any:
-    return _RetryingCollectionProxy(config, atlas_database(config)[table])
+    return _RetryingCollectionProxy(config, atlas_database_for_collection(config, table)[table])
 
 
-def _mongo_meta_collection(config: dict[str, Any]) -> Any:
-    return _RetryingCollectionProxy(config, atlas_database(config)["_meta_counters"])
+def _mongo_meta_collection(config: dict[str, Any], table: str | None = None) -> Any:
+    database = atlas_database_for_collection(config, table) if table else atlas_database(config)
+    return _RetryingCollectionProxy(config, database["_meta_counters"])
 
 
 def _ensure_mongo_write_allowed(config: dict[str, Any]) -> None:
@@ -203,7 +206,7 @@ def _mongo_next_id(config: dict[str, Any], table: str) -> int:
     from pymongo import ReturnDocument
 
     now = datetime.now(timezone.utc).isoformat()
-    row = _mongo_meta_collection(config).find_one_and_update(
+    row = _mongo_meta_collection(config, table).find_one_and_update(
         {"_id": f"{table}:id"},
         {"$inc": {"value": 1}, "$set": {"updated_at": now}},
         upsert=True,
@@ -219,7 +222,7 @@ def _mongo_reserve_ids(config: dict[str, Any], table: str, count: int) -> list[i
     if safe_count == 0:
         return []
     now = datetime.now(timezone.utc).isoformat()
-    row = _mongo_meta_collection(config).find_one_and_update(
+    row = _mongo_meta_collection(config, table).find_one_and_update(
         {"_id": f"{table}:id"},
         {"$inc": {"value": safe_count}, "$set": {"updated_at": now}},
         upsert=True,
@@ -1739,9 +1742,11 @@ def storage_stats(config: dict[str, Any]) -> dict[str, Any]:
 
     row_counts: dict[str, int] = {}
     payload_bytes: dict[str, int] = {}
+    collection_databases: dict[str, str] = {}
     for table in tables:
         row_counts[table] = _collection_row_count(table)
         payload_bytes[table] = _collection_payload_bytes(table)
+        collection_databases[table] = atlas_collection_database_name(config, table)
     try:
         timeframe_rows = _mongo_collection(config, "market_scan_observations").aggregate(
             [
@@ -1770,6 +1775,11 @@ def storage_stats(config: dict[str, Any]) -> dict[str, Any]:
     return {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "db_path": f"atlas:{atlas_database(config).name}",
+        "db_paths": {
+            "runtime": f"atlas:{atlas_database(config).name}",
+            "ai": f"atlas:{atlas_collection_database_name(config, 'ai_trade_decisions')}",
+        },
+        "collection_databases": collection_databases,
         "backend": "atlas",
         "files": {},
         "disk": {},

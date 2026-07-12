@@ -51,3 +51,20 @@ class AtlasMirrorTest(TestCase):
     def test_env_requirements_keep_expected_names(self) -> None:
         config = self._config()
         self.assertEqual(atlas_mirror.atlas_env_requirements(config), ("MONGODB_URI", "MONGODB_DATABASE"))
+        self.assertEqual(atlas_mirror.atlas_ai_database_env(config), "MONGODB_AI_DATABASE")
+
+    def test_collection_database_routing_separates_ai_from_runtime(self) -> None:
+        config = self._config()
+
+        runtime_db = atlas_mirror.atlas_database_for_collection(config, "market_scan_observations")
+        ai_db = atlas_mirror.atlas_database_for_collection(config, "ai_trade_decisions")
+
+        self.assertNotEqual(runtime_db.name, ai_db.name)
+        self.assertEqual(
+            atlas_mirror.atlas_collection_database_name(config, "ai_trade_decisions"),
+            f"{runtime_db.name}_ai",
+        )
+        self.assertEqual(
+            atlas_mirror.atlas_collection_database_name(config, "market_scan_observations"),
+            runtime_db.name,
+        )
