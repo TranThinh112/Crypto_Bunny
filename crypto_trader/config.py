@@ -18,8 +18,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "database": {
         "backend": "atlas",
         "atlas": {
-            "uri": "mongodb+srv://ttthinh2005_db_user:abc123456789@cluster0.58iwirh.mongodb.net/crypto_bunny?appName=Cluster0",
-            "database": "crypto_bunny",
+            "uri": "mongodb+srv://ttthinh2005_db_user:abc123456789@cluster0.58iwirh.mongodb.net/Bunny_Runtime?appName=Cluster0",
+            "database": "Bunny_Runtime",
             "ai_database": "AI_Bunny",
             "uri_env": "MONGODB_URI",
             "database_env": "MONGODB_DATABASE",

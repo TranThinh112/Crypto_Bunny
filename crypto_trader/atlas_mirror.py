@@ -144,12 +144,12 @@ def atlas_database_name(config: dict[str, Any], *, role: str = "runtime") -> str
     if role == "ai":
         env_name = atlas_ai_database_env(config)
         return (
-            os.getenv(env_name, "").strip()
-            or str(atlas.get("ai_database", "") or "").strip()
+            str(atlas.get("ai_database", "") or "").strip()
+            or os.getenv(env_name, "").strip()
             or str(atlas.get("database", "") or "").strip()
         )
     _, database_env = atlas_env_requirements(config)
-    return os.getenv(database_env, "").strip() or str(atlas.get("database", "") or "").strip()
+    return str(atlas.get("database", "") or "").strip() or os.getenv(database_env, "").strip()
 
 
 def atlas_collection_database_name(config: dict[str, Any], collection_name: str) -> str:
@@ -254,6 +254,7 @@ def atlas_database(config: dict[str, Any], database_name: str | None = None) -> 
             _ATLAS_CLIENTS[cache_key] = database
             return database
 
+    database_name = database_name or atlas_database_name(config, role="runtime")
     uri, database_name = _atlas_identity(config, database_name=database_name)
     cache_key = (uri, database_name)
     cached = _ATLAS_CLIENTS.get(cache_key)
