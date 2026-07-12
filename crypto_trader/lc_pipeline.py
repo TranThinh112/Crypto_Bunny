@@ -1300,6 +1300,7 @@ def _load_state(config: dict[str, Any], now: datetime, *, reset_for_new_day: boo
     state.setdefault("internal_lc", [])
     state.setdefault("telegram_events", [])
     state.setdefault("internal_notifications", [])
+    state.setdefault("rejected_setups", [])
     state.setdefault("daily_one_hour_counter", 0)
     state.setdefault("daily_two_hour_counter", 0)
     state.setdefault("daily_undecided_recheck_counter", 0)
@@ -1767,6 +1768,179 @@ def _upsert_by_symbol(rows: list[dict[str, Any]], record: dict[str, Any]) -> lis
 
 def _setup_key(row: dict[str, Any]) -> tuple[str, str]:
     return (str(row.get("symbol") or ""), str(row.get("side") or "").lower())
+
+
+def _setup_matches(row: dict[str, Any], symbol: str, side: str | None = None) -> bool:
+    if str(row.get("symbol") or "").strip().upper() != str(symbol or "").strip().upper():
+        return False
+    side_key = str(side or "").strip().lower()
+    if not side_key:
+        return True
+    row_side = str(row.get("side") or "").strip().lower()
+    return not row_side or row_side == side_key
+
+
+def _filter_setup_rows(rows: list[dict[str, Any]], symbol: str, side: str | None = None) -> tuple[list[dict[str, Any]], int]:
+    kept: list[dict[str, Any]] = []
+    removed = 0
+    for row in rows:
+        if isinstance(row, dict) and _setup_matches(row, symbol, side):
+            removed += 1
+            continue
+        if isinstance(row, dict):
+            kept.append(row)
+    return kept, removed
+
+
+def _filter_symbol_values(values: Any, symbol: str) -> list[Any]:
+    if not isinstance(values, list):
+        return []
+    symbol_key = str(symbol or "").strip().upper()
+    return [value for value in values if str(value or "").strip().upper() != symbol_key]
+
+
+def _filter_mini_scan_setup(scan: dict[str, Any], symbol: str, side: str | None = None) -> tuple[dict[str, Any], int]:
+    if not isinstance(scan, dict):
+        return {}, 0
+    output = dict(scan)
+    removed = 0
+    for key in ("source_symbols", "pool_symbols", "selected_symbols", "approved_symbols"):
+        before = list(output.get(key) or []) if isinstance(output.get(key), list) else []
+        after = _filter_symbol_values(before, symbol)
+        if len(after) != len(before):
+            removed += len(before) - len(after)
+            output[key] = after
+    candidates, removed_candidates = _filter_setup_rows(
+        [row for row in list(output.get("candidates") or []) if isinstance(row, dict)],
+        symbol,
+        side,
+    )
+    if removed_candidates or isinstance(output.get("candidates"), list):
+        output["candidates"] = candidates
+        removed += removed_candidates
+    for nested_key in ("local_policy", "ai_review"):
+        nested = output.get(nested_key)
+        if not isinstance(nested, dict):
+            continue
+        nested_output = dict(nested)
+        for key in ("qualified_symbols", "approved_symbols"):
+            before = list(nested_output.get(key) or []) if isinstance(nested_output.get(key), list) else []
+            after = _filter_symbol_values(before, symbol)
+            if len(after) != len(before):
+                removed += len(before) - len(after)
+                nested_output[key] = after
+        if "approved_count" in nested_output:
+            nested_output["approved_count"] = len(nested_output.get("approved_symbols") or [])
+        output[nested_key] = nested_output
+    if removed:
+        output["status"] = "setup_deleted_by_5_5"
+        output["skip_reason"] = "5.5 deleted this setup; removed from current Mini/LC pipeline"
+    return output, removed
+
+
+def _latest_four_hour_slot_from_state(state: dict[str, Any]) -> str | None:
+    four_hour_history = state.get("four_hour_history") or []
+    for event in reversed(four_hour_history):
+        if isinstance(event, dict) and str(event.get("slot") or "").strip():
+            return str(event.get("slot") or "")
+    return None
+
+
+def _active_rejected_setup_keys(state: dict[str, Any]) -> set[tuple[str, str]]:
+    latest_slot = _latest_four_hour_slot_from_state(state)
+    keys: set[tuple[str, str]] = set()
+    if not latest_slot:
+        return keys
+    for item in state.get("rejected_setups") or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("four_hour_slot") or "") != latest_slot:
+            continue
+        symbol = str(item.get("symbol") or "")
+        side = str(item.get("side") or "").lower()
+        if symbol:
+            keys.add((symbol, side))
+    return keys
+
+
+def reject_lc_pipeline_setup(
+    config: dict[str, Any],
+    symbol: str,
+    *,
+    side: str | None = None,
+    reason: str | None = None,
+    lc_id: Any = None,
+    route: str = "lc_okx_setup_review",
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    clean_symbol = str(symbol or "").strip()
+    if not clean_symbol:
+        return {"removed": 0, "reason": "missing_symbol"}
+    side_key = str(side or "").strip().lower()
+    now = now or datetime.now(timezone.utc)
+    state = _load_state(config, now, reset_for_new_day=False)
+    removed: dict[str, int] = {}
+
+    for key in ("undecided", "internal_lc"):
+        rows, count = _filter_setup_rows(list(state.get(key) or []), clean_symbol, side_key)
+        state[key] = rows
+        removed[key] = count
+    for key in ("one_hour_history", "two_hour_history", "four_hour_history", "two_hour_windows", "telegram_events"):
+        events = []
+        count = 0
+        for event in list(state.get(key) or []):
+            if not isinstance(event, dict):
+                continue
+            event = dict(event)
+            for rows_key in ("approved", "rejected", "top"):
+                rows, removed_count = _filter_setup_rows(list(event.get(rows_key) or []), clean_symbol, side_key)
+                if rows_key in event or removed_count:
+                    event[rows_key] = rows
+                count += removed_count
+            events.append(event)
+        state[key] = events
+        removed[key] = count
+    hourly_windows = []
+    hourly_removed = 0
+    for window in list(state.get("hourly_windows") or []):
+        if not isinstance(window, dict):
+            continue
+        rows, count = _filter_setup_rows(list(window.get("top") or []), clean_symbol, side_key)
+        hourly_windows.append({**window, "top": rows})
+        hourly_removed += count
+    state["hourly_windows"] = hourly_windows
+    removed["hourly_windows"] = hourly_removed
+    mini_scan, mini_removed = _filter_mini_scan_setup(state.get("latest_mini_scan") or {}, clean_symbol, side_key)
+    state["latest_mini_scan"] = mini_scan
+    removed["latest_mini_scan"] = mini_removed
+
+    four_hour_slot = _latest_four_hour_slot_from_state(state)
+    rejected_setups = [
+        item
+        for item in list(state.get("rejected_setups") or [])
+        if isinstance(item, dict)
+        and not (
+            str(item.get("symbol") or "").strip().upper() == clean_symbol.upper()
+            and str(item.get("side") or "").strip().lower() == side_key
+            and str(item.get("four_hour_slot") or "") == str(four_hour_slot or "")
+        )
+    ]
+    rejected_setups.append(
+        {
+            "symbol": clean_symbol,
+            "side": side_key,
+            "reason": str(reason or ""),
+            "route": route,
+            "lc_id": lc_id,
+            "four_hour_slot": four_hour_slot,
+            "mini_slot_id": (state.get("latest_mini_scan") or {}).get("slot_id"),
+            "rejected_at": now.isoformat(),
+        }
+    )
+    state["rejected_setups"] = rejected_setups[-50:]
+    _save_state(config, state)
+    total_removed = sum(int(value or 0) for value in removed.values())
+    return {"removed": total_removed, "removed_by_section": removed, "four_hour_slot": four_hour_slot}
 
 
 def _upsert_by_setup(rows: list[dict[str, Any]], record: dict[str, Any]) -> list[dict[str, Any]]:
@@ -3590,13 +3764,20 @@ def lc_pipeline_mini_pool(config: dict[str, Any], candidates: list[TradeCandidat
         return _rank_candidates(candidates, limit, settings=_phase_settings(settings, "4h"), phase="4h")
     state = _load_state(config, datetime.now(timezone.utc), reset_for_new_day=False)
     blocked_symbols = _active_symbol_blocklist(config)
+    rejected_keys = _active_rejected_setup_keys(state)
     candidates_by_symbol = {candidate.symbol: candidate for candidate in candidates}
     desired_symbols: list[str] = []
     for row in _latest_four_hour_rows(state):
         symbol = str(row.get("symbol") or "")
-        if symbol and symbol not in desired_symbols and symbol not in blocked_symbols:
+        row_key = _setup_key(row)
+        if symbol and symbol not in desired_symbols and symbol not in blocked_symbols and row_key not in rejected_keys:
             desired_symbols.append(symbol)
-    pool = [candidates_by_symbol[symbol] for symbol in desired_symbols if symbol in candidates_by_symbol]
+    pool = [
+        candidates_by_symbol[symbol]
+        for symbol in desired_symbols
+        if symbol in candidates_by_symbol
+        and (candidates_by_symbol[symbol].symbol, str(candidates_by_symbol[symbol].side or "").lower()) not in rejected_keys
+    ]
     return _rank_candidates(pool, limit, blocked_symbols=blocked_symbols, settings=_phase_settings(settings, "4h"), phase="4h")
 
 

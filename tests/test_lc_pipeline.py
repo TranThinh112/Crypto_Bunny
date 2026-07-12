@@ -18,6 +18,7 @@ from crypto_trader.lc_pipeline import (
     lc_pipeline_dashboard_payload,
     lc_pipeline_mini_pool,
     notify_mini_pool_summary,
+    reject_lc_pipeline_setup,
     _recheck_rows_with_latest_market_data,
     _two_hour_notification_text,
     update_lc_internal_pipeline,
@@ -655,6 +656,71 @@ class LcPipelineTest(TestCase):
         pool = lc_pipeline_mini_pool(config, current, limit=3)
 
         self.assertEqual([candidate.symbol for candidate in pool], ["JJJ/USDT:USDT", "KKK/USDT:USDT", "LLL/USDT:USDT"])
+
+    def test_rejected_okx_setup_is_removed_from_current_pipeline_and_mini_pool(self) -> None:
+        config = self._config()
+        state = {
+            "state_version": 3,
+            "day_key": "2026-07-13",
+            "undecided": [_saved_row("AAVE/USDT:USDT", 61, state="CHUA_DUYET")],
+            "internal_lc": [_saved_row("AAVE/USDT:USDT", 64, state="LC_NOI_BO")],
+            "four_hour_history": [
+                {
+                    "frame": "4h",
+                    "slot": "2026-07-13T00:00:00+07:00",
+                    "created_at": "2026-07-12T17:00:09+00:00",
+                    "index": 3,
+                    "approved": [
+                        {**_saved_row("AAVE/USDT:USDT", 64, state="LC_NOI_BO"), "source_slot": "4h", "source_index": 3},
+                        {**_saved_row("SOL/USDT:USDT", 63, state="LC_NOI_BO"), "source_slot": "4h", "source_index": 3},
+                    ],
+                    "rejected": [_saved_row("AAVE/USDT:USDT", 58, state="CHUA_DUYET")],
+                }
+            ],
+            "latest_mini_scan": {
+                "created_at": "2026-07-12T17:00:58+00:00",
+                "slot_id": "2026-07-12T17:00:00+00:00",
+                "pool_symbols": ["AAVE/USDT:USDT", "SOL/USDT:USDT"],
+                "selected_symbols": ["AAVE/USDT:USDT"],
+                "approved_symbols": ["AAVE/USDT:USDT"],
+                "candidates": [
+                    {"symbol": "AAVE/USDT:USDT", "side": "long", "win_probability_pct": 64},
+                    {"symbol": "SOL/USDT:USDT", "side": "long", "win_probability_pct": 63},
+                ],
+                "local_policy": {
+                    "qualified_symbols": ["AAVE/USDT:USDT", "SOL/USDT:USDT"],
+                    "approved_symbols": ["AAVE/USDT:USDT"],
+                    "approved_count": 1,
+                },
+                "ai_review": {"approved_symbols": ["AAVE/USDT:USDT"]},
+            },
+        }
+        set_journal_state(config, "lc_internal_pipeline_state", json.dumps(state, ensure_ascii=False))
+
+        result = reject_lc_pipeline_setup(
+            config,
+            "AAVE/USDT:USDT",
+            side="long",
+            reason="5.5 rejected setup",
+            lc_id=7,
+            now=datetime(2026, 7, 12, 17, 20, tzinfo=timezone.utc),
+        )
+        raw_state = get_journal_state(config, "lc_internal_pipeline_state")
+        saved_state = json.loads(raw_state or "{}")
+        pool = lc_pipeline_mini_pool(
+            config,
+            [_candidate("AAVE/USDT:USDT", 80), _candidate("SOL/USDT:USDT", 79)],
+            limit=3,
+        )
+
+        self.assertGreater(result["removed"], 0)
+        self.assertNotIn("AAVE/USDT:USDT", json.dumps(saved_state.get("undecided", []), ensure_ascii=False))
+        self.assertNotIn("AAVE/USDT:USDT", json.dumps(saved_state.get("internal_lc", []), ensure_ascii=False))
+        self.assertNotIn("AAVE/USDT:USDT", json.dumps(saved_state.get("four_hour_history", []), ensure_ascii=False))
+        self.assertNotIn("AAVE/USDT:USDT", saved_state["latest_mini_scan"].get("selected_symbols", []))
+        self.assertEqual([candidate.symbol for candidate in pool], ["SOL/USDT:USDT"])
+        self.assertEqual(saved_state["rejected_setups"][0]["lc_id"], 7)
+        self.assertEqual(saved_state["rejected_setups"][0]["four_hour_slot"], "2026-07-13T00:00:00+07:00")
 
     @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
     def test_two_hour_uses_rechecked_win_rate_before_selecting_top_three(self, recheck_rows) -> None:

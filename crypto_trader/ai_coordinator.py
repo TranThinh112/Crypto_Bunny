@@ -23,6 +23,7 @@ from .lc_pipeline import (
     latest_lc_pipeline_four_hour_event,
     latest_lc_pipeline_mini_scan,
     notify_mini_pool_summary,
+    reject_lc_pipeline_setup,
     save_lc_pipeline_mini_scan,
 )
 from .market import fetch_market_snapshots, fetch_top_volume_symbols, prefetch_market_data
@@ -1504,6 +1505,14 @@ def review_candidate_for_lc_okx(
         return candidate, existing
     cached = _recent_rejected_okx_review(config, candidate, route=route)
     if cached is not None and not force:
+        reject_lc_pipeline_setup(
+            config,
+            candidate.symbol,
+            side=candidate.side,
+            reason=str(cached.get("reason") or cached.get("decision") or "cached 5.5 rejection"),
+            lc_id=review_context.get("lc_id"),
+            route=route,
+        )
         return attach_okx_review_metadata(candidate, cached, route=route, context=review_context), cached
     decision = okx_ai_approval(
         config,
@@ -1513,4 +1522,13 @@ def review_candidate_for_lc_okx(
         pending_memory=pending_memory,
     )
     _remember_okx_review_cache(config, candidate, route=route, decision=decision)
+    if route == "lc_okx_setup_review" and not bool(decision.get("approved")):
+        reject_lc_pipeline_setup(
+            config,
+            candidate.symbol,
+            side=candidate.side,
+            reason=str(decision.get("reason") or decision.get("decision") or "5.5 rejected LC_OKX setup"),
+            lc_id=review_context.get("lc_id"),
+            route=route,
+        )
     return attach_okx_review_metadata(candidate, decision, route=route, context=review_context), decision
