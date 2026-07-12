@@ -29,6 +29,10 @@ def _private_exchange_available(config: dict[str, Any]) -> bool:
     return bool(key and secret and password)
 
 
+def _capital_reserve_check_is_advisory(config: dict[str, Any]) -> bool:
+    return str(config.get("mode") or "").strip().lower() == "dry_run" or bool(config.get("_atlas_test_mode"))
+
+
 ActiveSummary = tuple[int | None, set[str], list[str]]
 
 
@@ -86,6 +90,25 @@ def evaluate_candidate(
 
     if float(candidate.order_usdt or 0) <= 0:
         reasons.append("Order size is not positive")
+    if config.get("capital_reserve", {}).get("enabled", True):
+        required_margin = candidate.margin_usdt
+        if required_margin is None:
+            leverage = float(config.get("exchange", {}).get("leverage", 1) or 1)
+            required_margin = float(candidate.order_usdt or 0) / max(leverage, 1e-12)
+        try:
+            from .capital import check_capital_allocation
+
+            allocation = check_capital_allocation(config, required_margin)
+        except Exception as exc:
+            allocation = {"allowed": False, "reason": f"Capital reserve check failed: {exc}"}
+        if not allocation.get("allowed"):
+            reason = str(allocation.get("reason") or "Insufficient trading capital after reserve protection")
+            if _capital_reserve_check_is_advisory(config):
+                warnings.append(f"Capital reserve check advisory: {reason}")
+            else:
+                reasons.append(reason)
+        elif allocation.get("reason") and str(allocation.get("reason")) != "OK":
+            warnings.append(str(allocation.get("reason")))
 
     min_confidence = float(strategy_config.get("min_confidence", 75))
     if candidate.confidence < min_confidence:

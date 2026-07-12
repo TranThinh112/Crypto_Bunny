@@ -20,6 +20,23 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .atlas_mirror import atlas_runtime_is_primary, atlas_runtime_is_read_only
+from .capital import (
+    analyze_configuration_change,
+    apply_trading_config,
+    calculate_position_size,
+    check_capital_allocation,
+    configuration_impact_history,
+    configuration_versions,
+    current_trading_config,
+    latest_capital_reserve_state,
+    latest_capital_snapshot,
+    latest_position_size_calculation,
+    position_size_history,
+    refresh_capital_reserve_state,
+    save_configuration_impact_report,
+    save_position_size_calculation,
+    sync_capital_from_okx,
+)
 from .config import DEFAULT_CONFIG, load_config, project_path
 from .ai_coordinator import next_internal_market_scan_at, okx_ai_approval, review_candidate_for_lc_okx, run_internal_market_scan_if_due
 from .codex_features import (
@@ -2749,6 +2766,100 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
     def storage_stats_endpoint() -> dict[str, Any]:
         config = load_config(app.state.config_path)
         return storage_stats(config)
+
+    @app.get("/capital/snapshot/latest")
+    def capital_snapshot_latest_endpoint() -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        snapshot = latest_capital_snapshot(config)
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="No capital snapshot yet")
+        return snapshot
+
+    @app.post("/capital/sync")
+    def capital_sync_endpoint() -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        return sync_capital_from_okx(config)
+
+    @app.get("/capital-reserve/state")
+    def capital_reserve_state_endpoint() -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        state = latest_capital_reserve_state(config)
+        if state is None:
+            raise HTTPException(status_code=404, detail="No capital reserve state yet")
+        return state
+
+    @app.post("/capital-reserve/refresh")
+    def capital_reserve_refresh_endpoint(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        payload = payload or {}
+        return refresh_capital_reserve_state(
+            config,
+            mode=str(payload.get("mode") or "HEALTHY"),
+            used_trading_capital=payload.get("used_trading_capital"),
+        )
+
+    @app.post("/capital-reserve/check-allocation")
+    def capital_reserve_check_allocation_endpoint(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        payload = payload or {}
+        return check_capital_allocation(
+            config,
+            payload.get("required_margin"),
+            mode=str(payload.get("mode") or "HEALTHY"),
+        )
+
+    @app.post("/position-sizing/calculate")
+    def position_sizing_calculate_endpoint(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        result = calculate_position_size(config, payload or {})
+        return save_position_size_calculation(config, result)
+
+    @app.get("/position-sizing/latest")
+    def position_sizing_latest_endpoint() -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        row = latest_position_size_calculation(config)
+        if row is None:
+            raise HTTPException(status_code=404, detail="No position sizing calculation yet")
+        return row
+
+    @app.get("/position-sizing/history")
+    def position_sizing_history_endpoint(limit: int = 50) -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        return {"items": position_size_history(config, limit=limit)}
+
+    @app.get("/configuration/current")
+    def configuration_current_endpoint() -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        return current_trading_config(config)
+
+    @app.post("/configuration/impact/analyze")
+    def configuration_impact_analyze_endpoint(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        payload = payload or {}
+        report = analyze_configuration_change(config, payload.get("proposed_config") or payload)
+        save_configuration_impact_report(config, report)
+        return report
+
+    @app.post("/configuration/apply")
+    def configuration_apply_endpoint(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        payload = payload or {}
+        return apply_trading_config(
+            config,
+            payload.get("proposed_config") or {},
+            confirm=bool(payload.get("confirm", False)),
+            force=bool(payload.get("force", False)),
+        )
+
+    @app.get("/configuration/impact/history")
+    def configuration_impact_history_endpoint(limit: int = 50) -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        return {"items": configuration_impact_history(config, limit=limit)}
+
+    @app.get("/configuration/versions")
+    def configuration_versions_endpoint(limit: int = 50) -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        return {"items": configuration_versions(config, limit=limit)}
 
     @app.post("/api/storage/maintenance")
     def storage_maintenance_endpoint(payload: dict[str, Any] | None = None) -> dict[str, Any]:

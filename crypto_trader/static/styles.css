@@ -2182,13 +2182,19 @@ tr:last-child td {
 .module-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(260px, 1fr));
-  gap: 12px;
+  gap: 16px;
   align-items: start;
 }
 
 .module-group-card {
-  min-height: 420px;
-  background: #fbfcfc;
+  min-height: 440px;
+  background:
+    radial-gradient(circle at top left, rgba(14, 165, 164, 0.12), transparent 34%),
+    linear-gradient(180deg, #ffffff 0%, #f7fbfa 100%);
+  border: 1px solid #cfe1df;
+  border-radius: 18px;
+  box-shadow: 0 18px 44px rgba(16, 42, 67, 0.08);
+  overflow: hidden;
 }
 
 .module-card-body {
@@ -2209,22 +2215,29 @@ tr:last-child td {
   min-height: 250px;
   height: auto;
   border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 12px;
+  border-radius: 16px;
+  padding: 14px;
   background: #fff;
   text-align: left;
   cursor: pointer;
   overflow: visible !important;
+  position: relative;
+  isolation: isolate;
 }
 
 .module-card.ok {
-  border-color: #b9e2cf;
-  background: #f2fbf6;
+  border-color: #9ad7bf;
+  background: linear-gradient(145deg, #f2fbf6 0%, #ffffff 100%);
 }
 
 .module-card.warn {
-  border-color: #f0d393;
-  background: #fff8ea;
+  border-color: #efc76f;
+  background: linear-gradient(145deg, #fff8ea 0%, #fffdf7 100%);
+}
+
+.module-card.fail {
+  border-color: #eca49b;
+  background: linear-gradient(145deg, #fff3f1 0%, #fffafa 100%);
 }
 
 .module-card:hover,
@@ -2285,6 +2298,30 @@ tr:last-child td {
 .module-card .module-file b {
   color: var(--ink);
   min-width: max-content;
+}
+
+.module-group-toggle {
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.94), rgba(241, 248, 247, 0.94)),
+    linear-gradient(90deg, rgba(14, 165, 164, 0.16), transparent);
+}
+
+.module-group-head span {
+  border: 1px solid #d5e4e2;
+  background: #ffffff;
+  box-shadow: 0 8px 20px rgba(16, 42, 67, 0.08);
+}
+
+.module-card .module-file {
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.62);
+  border: 1px dashed rgba(70, 92, 104, 0.22);
+}
+
+.module-card .module-file-value {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .module-update-value {

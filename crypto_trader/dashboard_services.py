@@ -1,12 +1,23 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from .ai_coordinator import latest_internal_market_scan, next_internal_market_scan_at
+from .capital import (
+    analyze_configuration_change,
+    build_capital_snapshot,
+    calculate_capital_reserve_state,
+    calculate_position_size,
+    check_capital_allocation,
+    infer_capital_mode,
+    latest_capital_reserve_state,
+    latest_capital_snapshot,
+)
 from .config import project_path
 from .codex_features import (
     ai_trade_decision_stats,
@@ -457,19 +468,22 @@ def _module_file_index(config: dict[str, Any]) -> dict[int, dict[str, Any]]:
     files: dict[int, dict[str, Any]] = {}
     if not module_dir.exists():
         return files
-    for path in sorted(module_dir.glob("*.txt")):
-        prefix = str(path.name).split(".", 1)[0].strip()
-        if not prefix.isdigit():
+    for path in sorted(module_dir.rglob("*.txt")):
+        match = re.match(r"\s*(\d+)", path.name)
+        if not match:
             continue
-        number = int(prefix)
+        number = int(match.group(1))
         try:
             stat = path.stat()
             preview = path.read_text(encoding="utf-8", errors="replace").strip().splitlines()[:3]
         except OSError:
             stat = None
             preview = []
+        relative_path = str(path.relative_to(module_dir))
         files[number] = {
             "file_name": path.name,
+            "folder": path.parent.name,
+            "relative_path": relative_path,
             "path": str(path),
             "updated_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat() if stat else None,
             "size_bytes": stat.st_size if stat else None,
@@ -614,6 +628,47 @@ def system_modules_payload(
     )
     recovery_orphaned_block = recovery_blocked and open_count <= 0 and recovery_runtime_records <= 0
     recovery_status = "warn" if recovery_orphaned_block else "fail" if recovery_blocked else "ok" if sizing_state else "warn"
+    try:
+        capital_snapshot = latest_capital_snapshot(config) or build_capital_snapshot(config, use_cache=True)
+    except Exception as exc:
+        capital_snapshot = {"ok": False, "error": str(exc)}
+    capital_mode = infer_capital_mode(health=health, risk_state=risk_state, sizing_state=sizing_state or {})
+    try:
+        capital_reserve_state = latest_capital_reserve_state(config) or calculate_capital_reserve_state(
+            config,
+            mode=capital_mode,
+            snapshot=capital_snapshot if isinstance(capital_snapshot, dict) else None,
+        )
+    except Exception as exc:
+        capital_reserve_state = {"ok": False, "mode": capital_mode, "reason": str(exc)}
+    try:
+        capital_allocation_check = check_capital_allocation(
+            config,
+            config.get("position_sizing", {}).get("base_margin_usdt", 0),
+            mode=capital_mode,
+        )
+    except Exception as exc:
+        capital_allocation_check = {"allowed": False, "reason": str(exc)}
+    try:
+        capital_position_size = calculate_position_size(
+            config,
+            {
+                "symbol": "CHECK/USDT:USDT",
+                "side": "LONG",
+                "mode": capital_mode,
+                "leverage": config.get("exchange", {}).get("leverage", 1),
+            },
+        )
+    except Exception as exc:
+        capital_position_size = {"allowed": False, "reason": str(exc)}
+    try:
+        config_impact = analyze_configuration_change(config, {})
+    except Exception as exc:
+        config_impact = {"risk_level": "UNKNOWN", "is_safe": False, "summary": str(exc), "warnings": [str(exc)]}
+    capital_snapshot_ok = bool(capital_snapshot.get("ok", True)) and capital_snapshot.get("realized_capital") is not None
+    capital_reserve_ok = bool(capital_reserve_state.get("ok", True)) and capital_reserve_state.get("realized_capital") is not None
+    capital_position_ok = bool(capital_position_size.get("allowed"))
+    config_impact_safe = bool(config_impact.get("is_safe")) and str(config_impact.get("risk_level") or "").upper() not in {"HIGH", "CRITICAL"}
 
     definitions = [
         {
@@ -767,6 +822,89 @@ def system_modules_payload(
                 _module_row("runtime_trade_records", recovery_runtime_records, "Số record runtime dùng để xác định recovery block còn liên quan tới lệnh thật hay chỉ là state cũ."),
                 _module_row("last_loss_symbol", sizing_state.get("last_loss_symbol") if sizing_state else None, "Cặp giao dịch của lệnh lỗ gần nhất trong chain."),
                 _module_row("last_loss_side", sizing_state.get("last_loss_side") if sizing_state else None, "Hướng LONG/SHORT của lệnh lỗ gần nhất trong chain."),
+            ],
+        },
+        {
+            "number": 10,
+            "name": "Capital Sync",
+            "purpose": "Dong bo von thuc tu OKX va tinh realized capital, khong dung PnL tha noi de tang von giao dich.",
+            "status": "ok" if capital_snapshot_ok else "warn",
+            "update_event": "Sau nap/rut, sau lenh dong",
+            "update_schedule": "60 giay/lan hoac khi bam sync",
+            "update_interval": "60 giay",
+            "stats": [
+                _module_row("source", capital_snapshot.get("source") or config.get("capital_sync", {}).get("capital_source", "OKX"), "Nguon dong bo von."),
+                _module_row("quote_currency", capital_snapshot.get("quote_currency") or config.get("capital_sync", {}).get("quote_currency", "USDT"), "Dong tien quote dung de tinh von."),
+                _module_row("wallet_balance", capital_snapshot.get("wallet_balance"), "So du vi lay tu account snapshot."),
+                _module_row("unrealized_pnl", capital_snapshot.get("unrealized_pnl"), "PnL tha noi chi dung de tru ra khoi von thuc.", attention=True),
+                _module_row("realized_capital", capital_snapshot.get("realized_capital"), "Von thuc = wallet_balance - unrealized_pnl.", attention=True),
+                _module_row("use_realized_capital_only", _module_bool_percent(config.get("capital_sync", {}).get("use_realized_capital_only", True)), "100 nghia la chi dung realized capital."),
+                _module_row("exclude_unrealized_pnl", _module_bool_percent(config.get("capital_sync", {}).get("exclude_unrealized_pnl", True)), "100 nghia la khong dung PnL tha noi de tang von."),
+                _module_row("updated_at", capital_snapshot.get("created_at"), "Thoi diem snapshot von moi nhat."),
+                _module_row("error", capital_snapshot.get("error") or "-", "Loi dong bo von neu co.", attention=not capital_snapshot_ok),
+            ],
+        },
+        {
+            "number": 12,
+            "name": "Capital Reserve",
+            "purpose": "Tach realized capital thanh reserve capital va trading capital de khong dung toan bo von tai khoan.",
+            "status": "ok" if capital_reserve_ok and capital_allocation_check.get("allowed") else "warn",
+            "update_event": "Sau nap/rut, sau lenh dong, khi health/recovery doi mode",
+            "update_schedule": "5 phut/lan doi chieu",
+            "update_interval": "5 phut",
+            "stats": [
+                _module_row("mode", capital_reserve_state.get("mode") or capital_mode, "Mode von suy ra tu Health, Minimize Losses va Recovery Chain.", attention=True),
+                _module_row("realized_capital", capital_reserve_state.get("realized_capital"), "Von thuc dung lam nen tinh reserve."),
+                _module_row("reserve_percent", capital_reserve_state.get("reserve_percent"), "Phan tram von duoc giu lai lam quy du phong.", attention=True),
+                _module_row("reserve_amount", capital_reserve_state.get("reserve_amount"), "So von du phong khong dung de mo lenh moi."),
+                _module_row("trading_capital", capital_reserve_state.get("trading_capital"), "Von con lai duoc phep phan bo cho giao dich."),
+                _module_row("used_trading_capital", capital_reserve_state.get("used_trading_capital"), "Von trading da bi chiem boi pending/open noi bo."),
+                _module_row("available_trading_capital", capital_reserve_state.get("available_trading_capital"), "Von trading con co the cap margin.", attention=True),
+                _module_row("allow_reserve_usage", _module_bool_percent(capital_reserve_state.get("allow_reserve_usage")), "100 nghia la cho phep dung reserve; mac dinh phai la 0."),
+                _module_row("allocation_allowed", _module_bool_percent(capital_allocation_check.get("allowed")), "100 nghia la margin co so hien tai con duoc phep cap."),
+                _module_row("reason", capital_allocation_check.get("reason") or capital_reserve_state.get("reason") or "-", "Ly do cho phep/tu choi cap von.", attention=not bool(capital_allocation_check.get("allowed"))),
+            ],
+        },
+        {
+            "number": 13,
+            "name": "Position Sizing",
+            "purpose": "Tinh khoi luong vi the theo trading capital, reserve, risk percent, SL/TP, leverage va slot dang dung.",
+            "status": "ok" if capital_position_ok else "warn",
+            "update_event": "Khi chuan bi mo lenh hoac khi capital reserve thay doi",
+            "update_schedule": "Theo tung setup duoc duyet",
+            "update_interval": "event-driven",
+            "stats": [
+                _module_row("mode", capital_position_size.get("mode") or capital_mode, "Mode dung de chon risk percent."),
+                _module_row("risk_percent", capital_position_size.get("risk_percent"), "Risk percent theo mode hien tai.", attention=True),
+                _module_row("risk_amount", capital_position_size.get("risk_amount"), "So USDT rui ro toi da theo trading capital."),
+                _module_row("available_trading_capital", capital_position_size.get("available_trading_capital"), "Trading capital con trong de cap margin."),
+                _module_row("max_order_size_by_risk", capital_position_size.get("max_order_size_by_risk"), "Order size toi da theo risk."),
+                _module_row("max_order_size_by_capital", capital_position_size.get("max_order_size_by_capital"), "Order size toi da theo gioi han trading capital."),
+                _module_row("suggested_order_size", capital_position_size.get("suggested_order_size"), "Khoi luong vi the de xuat."),
+                _module_row("required_margin", capital_position_size.get("required_margin"), "Margin can dung cho suggested order."),
+                _module_row("allowed", _module_bool_percent(capital_position_size.get("allowed")), "100 nghia la sizing hien tai hop le."),
+                _module_row("reason", capital_position_size.get("reason") or "-", "Ly do sizing duoc chap nhan hoac bi tu choi.", attention=not capital_position_ok),
+            ],
+        },
+        {
+            "number": 9,
+            "name": "Configuration Impact",
+            "purpose": "Phan tich tac dong truoc khi ap dung thay doi cau hinh von, slot, sizing, recovery, SL/TP va leverage.",
+            "status": "ok" if config_impact_safe else "warn",
+            "update_event": "Khi nguoi dung de xuat doi cau hinh",
+            "update_schedule": "Chay truoc khi apply config",
+            "update_interval": "event-driven",
+            "stats": [
+                _module_row("realized_capital", config_impact.get("realized_capital"), "Von thuc dung de mo phong tac dong."),
+                _module_row("trading_capital_before", config_impact.get("trading_capital_before"), "Trading capital truoc thay doi."),
+                _module_row("trading_capital_after", config_impact.get("trading_capital_after"), "Trading capital sau thay doi."),
+                _module_row("required_capital_before", config_impact.get("required_capital_before"), "Von can truoc thay doi."),
+                _module_row("required_capital_after", config_impact.get("required_capital_after"), "Von can sau thay doi.", attention=True),
+                _module_row("max_safe_order_size", config_impact.get("max_safe_order_size"), "Order size toi da con an toan theo mo phong."),
+                _module_row("suggested_order_size", config_impact.get("suggested_order_size"), "Order size de xuat neu cau hinh hien tai khong an toan."),
+                _module_row("safety_score", config_impact.get("safety_score"), "Diem an toan 0-100.", attention=True),
+                _module_row("risk_level", config_impact.get("risk_level"), "LOW/MEDIUM/HIGH/CRITICAL.", attention=not config_impact_safe),
+                _module_row("summary", config_impact.get("summary"), "Tom tat tac dong cau hinh."),
             ],
         },
     ]

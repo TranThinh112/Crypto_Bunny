@@ -1552,6 +1552,7 @@ function renderModuleDetail(module) {
   const rows = moduleDisplayRows(module, allRows);
   const auxRows = moduleAuxRows(module, allRows);
   const file = module.file || {};
+  const fileLabel = file.relative_path || file.file_name || "Chưa có file";
   const runtimeUpdatedLabel = moduleUpdatedLabel(module);
   const changedVariableCount = moduleChangedVariableCount(module, rows);
   refs.systemModuleOverlay.hidden = false;
@@ -1570,7 +1571,7 @@ function renderModuleDetail(module) {
     </div>
     <div class="module-meta">
       <div><span>Ngày đọc</span><strong>${escapeHtml(timeLabel(file.updated_at) || "-")}</strong></div>
-      <div><span>File module</span><strong>${escapeHtml(file.file_name || "Chưa có file")}</strong></div>
+      <div><span>File module</span><strong>${escapeHtml(fileLabel)}</strong></div>
       <div><span>Kích thước</span><strong>${file.size_bytes === undefined || file.size_bytes === null ? "-" : bytesLabel(file.size_bytes)}</strong></div>
     </div>
     ${renderModuleChart(module, rows)}
@@ -1590,76 +1591,6 @@ function renderModuleDetail(module) {
   const closeBtn = refs.systemModuleDetail.querySelector(".module-close");
   if (closeBtn) closeBtn.addEventListener("click", closeSystemModuleDetail);
   bindModuleChartInteractions();
-}
-
-function capitalManagementModules() {
-  const now = new Date().toISOString();
-  return [
-    {
-      number: "C1",
-      name: "Capital Sync",
-      purpose: "Đồng bộ số dư vốn thực từ nguồn giao dịch để tách riêng vốn sử dụng và vốn dự phòng.",
-      status: "warn",
-      update_event: "Sau nạp/rút, sau lệnh đóng",
-      update_schedule: "5 phút/lần đồng bộ OKX",
-      update_interval: "5 phút",
-      has_file: false,
-      file: null,
-      stats: [
-        { label: "Trạng thái", value: "Chưa kết nối runtime", meaning: "UI đã dành chỗ nhưng backend đồng bộ vốn chưa được nối vào dashboard hiện tại.", attention: true },
-        { label: "Nguồn dữ liệu", value: "Chưa có", meaning: "Khi hoàn thiện sẽ lấy từ snapshot vốn thực tế của hệ thống." },
-        { label: "Cập nhật lúc", value: now, meaning: "Thời điểm dashboard dựng trạng thái hiện tại." },
-      ],
-    },
-    {
-      number: "C2",
-      name: "Capital Reserve",
-      purpose: "Theo dõi quỹ dự phòng vốn, phần vốn bảo vệ và phần vốn còn được phép dùng để giao dịch.",
-      status: "warn",
-      update_event: "Sau nạp/rút, sau lệnh đóng",
-      update_schedule: "5 phút/lần đồng bộ OKX",
-      update_interval: "5 phút",
-      has_file: false,
-      file: null,
-      stats: [
-        { label: "Trạng thái", value: "Chưa kết nối runtime", meaning: "Chưa có state vốn dự phòng thực chạy trong dashboard này.", attention: true },
-        { label: "Nguồn dữ liệu", value: "Chưa có", meaning: "Khi hoàn thiện sẽ lấy từ capital reserve state." },
-        { label: "Cập nhật lúc", value: now, meaning: "Thời điểm dashboard dựng trạng thái hiện tại." },
-      ],
-    },
-    {
-      number: "C3",
-      name: "Position Sizing",
-      purpose: "Quản lý sizing và biên độ margin dùng cho lệnh mới, bao gồm mức margin cơ sở và giới hạn recovery.",
-      status: "ok",
-      update_event: "Sau nạp/rút, sau lệnh đóng",
-      update_schedule: "5 phút/lần đồng bộ OKX",
-      update_interval: "5 phút",
-      has_file: false,
-      file: null,
-      stats: [
-        { label: "Trạng thái", value: "Đã có cấu hình", meaning: "Phần sizing đang có dữ liệu cấu hình trong hệ thống." },
-        { label: "Nguồn dữ liệu", value: "position_sizing", meaning: "Lấy từ cấu hình position sizing hiện hành." },
-        { label: "Cập nhật lúc", value: now, meaning: "Thời điểm dashboard dựng trạng thái hiện tại." },
-      ],
-    },
-    {
-      number: "C4",
-      name: "Configuration Impact",
-      purpose: "Phân tích tác động của thay đổi cấu hình trước khi áp dụng vào hệ thống giao dịch.",
-      status: "warn",
-      update_event: "Sau nạp/rút, sau lệnh đóng",
-      update_schedule: "5 phút/lần đồng bộ OKX",
-      update_interval: "5 phút",
-      has_file: false,
-      file: null,
-      stats: [
-        { label: "Trạng thái", value: "Chưa kết nối runtime", meaning: "Phần phân tích tác động cấu hình chưa được nối endpoint vào dashboard này.", attention: true },
-        { label: "Nguồn dữ liệu", value: "Chưa có", meaning: "Khi hoàn thiện sẽ lấy từ báo cáo phân tích cấu hình." },
-        { label: "Cập nhật lúc", value: now, meaning: "Thời điểm dashboard dựng trạng thái hiện tại." },
-      ],
-    },
-  ];
 }
 
 function groupedSystemModules(modules) {
@@ -1689,7 +1620,12 @@ function groupedSystemModules(modules) {
       ];
     }),
   );
-  const capitalModules = capitalManagementModules();
+  const capitalModules = [
+    realModules.get("Capital Sync"),
+    realModules.get("Capital Reserve"),
+    realModules.get("Position Sizing"),
+    realModules.get("Configuration Impact"),
+  ].filter(Boolean);
   return [
     {
       key: "ai-decision",
@@ -1788,7 +1724,7 @@ function renderSystemModules(modules) {
     });
 
     group.items.forEach((module) => {
-      const configFileLabel = module.has_file ? (module.file?.file_name || "-") : "Chưa có file .txt cấu hình";
+      const configFileLabel = module.has_file ? (module.file?.relative_path || module.file?.file_name || "-") : "Chưa có file .txt cấu hình";
       const updateIntervalLabel = module.update_interval || module.update_schedule || module.update_event || "-";
       const runtimeUpdatedLabel = moduleUpdatedLabel(module);
       const attentionRows = Array.isArray(module.stats) ? module.stats.filter((row) => row && row.attention) : [];
@@ -2438,8 +2374,10 @@ renderSystemSummaryChart = function renderSystemSummaryChartPatched(payload) {
 };
 
 async function loadSystemChecklist(date = "") {
-  const url = date ? `/api/system-checklist?date=${encodeURIComponent(date)}` : "/api/system-checklist";
-  const res = await fetch(url);
+  const url = date
+    ? `/api/system-checklist?date=${encodeURIComponent(date)}&_=${Date.now()}`
+    : `/api/system-checklist?force_refresh=true&_=${Date.now()}`;
+  const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const payload = await res.json();
   const backendPreviousPayload = payload && typeof payload.previous_snapshot === "object" ? payload.previous_snapshot : null;

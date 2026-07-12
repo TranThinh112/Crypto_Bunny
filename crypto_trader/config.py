@@ -411,6 +411,28 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "bootstrap_existing_history": False,
         "reset_orphaned_blocked_state": True,
     },
+    "capital_sync": {
+        "enabled": True,
+        "capital_source": "OKX",
+        "refresh_interval_seconds": 60,
+        "use_realized_capital_only": True,
+        "exclude_unrealized_pnl": True,
+        "quote_currency": "USDT",
+    },
+    "capital_reserve": {
+        "enabled": True,
+        "base_reserve_percent": 20,
+        "warning_reserve_percent": 25,
+        "recovery_reserve_percent": 30,
+        "critical_reserve_percent": 40,
+        "allow_reserve_usage": False,
+        "emergency_allow_reserve_usage": True,
+        "min_trading_capital": 10,
+    },
+    "configuration_impact": {
+        "high_leverage_threshold": 20,
+        "high_recovery_level_threshold": 4,
+    },
     "paper_trading": {
         "enabled": True,
         "auto_scan_enabled": True,

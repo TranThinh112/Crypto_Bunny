@@ -4,6 +4,7 @@ ledger_path: data/trades.jsonl
 
 runtime:
   instance_role: primary
+  interval_seconds: 60
 
 database:
   backend: atlas
@@ -14,8 +15,6 @@ database:
     ai_database_env: MONGODB_AI_DATABASE
     ai_database: AI_Bunny
     app_name: Crypto_Bunny
-runtime:
-  interval_seconds: 60
 news:
   lookback_hours: 24
   max_items_per_feed: 40

@@ -1700,6 +1700,11 @@ def storage_stats(config: dict[str, Any]) -> dict[str, Any]:
         "trade_candidates",
         "market_regime_history",
         "replay_history",
+        "capital_snapshots",
+        "capital_reserve_states",
+        "position_size_calculations",
+        "trading_config_versions",
+        "configuration_impact_reports",
     ]
 
     def _collection_row_count(table: str) -> int:

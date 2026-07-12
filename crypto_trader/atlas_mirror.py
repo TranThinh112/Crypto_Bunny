@@ -86,6 +86,25 @@ _ATLAS_COLLECTION_INDEX_SPECS: dict[str, list[Any]] = {
         [("status", 1), ("updated_at", -1), ("created_at", -1), ("id", -1)],
         {"fields": [("expires_at", 1)], "kwargs": {"expireAfterSeconds": 0}},
     ],
+    "capital_snapshots": [
+        [("created_at", -1), ("id", -1)],
+    ],
+    "capital_reserve_states": [
+        [("created_at", -1), ("id", -1)],
+        [("mode", 1), ("created_at", -1)],
+    ],
+    "position_size_calculations": [
+        [("created_at", -1), ("id", -1)],
+        [("symbol", 1), ("created_at", -1)],
+    ],
+    "trading_config_versions": [
+        [("is_active", 1), ("created_at", -1), ("id", -1)],
+        [("version", 1)],
+    ],
+    "configuration_impact_reports": [
+        [("created_at", -1), ("id", -1)],
+        [("risk_level", 1), ("created_at", -1)],
+    ],
 }
 
 

@@ -4,7 +4,7 @@ import tempfile
 from copy import deepcopy
 from unittest import TestCase
 
-from crypto_trader.atlas_mirror import atlas_database
+from crypto_trader.atlas_mirror import atlas_database_for_collection
 from crypto_trader.codex_features import _slot_state
 from crypto_trader.config import DEFAULT_CONFIG
 from crypto_trader.runtime_sync import sync_runtime_state
@@ -33,7 +33,7 @@ class RuntimeSyncTest(TestCase):
             account_snapshot={"enabled": True, "mode": "demo", "created_at": "2026-07-08T00:00:00+00:00", "positions": [], "open_orders": []},
         )
 
-        database = atlas_database(config)
+        database = atlas_database_for_collection(config, "ai_model_versions")
         self.assertEqual(database["ai_model_versions"].count_documents({}), 2)
         metric = database["prompt_metrics"].find_one({"prompt_version": "prompt-v1"}, {"_id": 0})
         self.assertIsNotNone(metric)
