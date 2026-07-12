@@ -9,6 +9,7 @@ from unittest.mock import patch
 from crypto_trader.config import DEFAULT_CONFIG
 from crypto_trader.models import TradeCandidate
 from crypto_trader.sizing import apply_position_sizing
+from crypto_trader.storage import set_journal_state
 
 
 def _candidate(
@@ -220,3 +221,36 @@ class SizingTest(TestCase):
 
         self.assertEqual(candidate.order_usdt, 0.0)
         self.assertTrue(any("4H RSI" in reason for reason in result["blocked_candidates"][0]["reasons"]))
+
+    def test_orphaned_blocked_state_resets_to_base_margin(self) -> None:
+        config = self._config()
+        config["position_sizing"]["bootstrap_existing_history"] = False
+        set_journal_state(
+            config,
+            "position_sizing:recovery_cycle",
+            (
+                '{"cycle_pnl_usdt": -222.396962, "recovery_step": 4, '
+                '"next_margin_usdt": 0.0, "processed_keys": ["old"], '
+                '"blocked": true, "block_reason": "Recovery step limit reached: 4/4"}'
+            ),
+        )
+        closed_history = [
+            {
+                "symbol": "OP/USDT:USDT",
+                "id": "old-loss",
+                "side": "long",
+                "pnl": -1.73,
+                "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
+            }
+        ]
+        candidates = [_candidate("ETH/USDT:USDT", "long")]
+
+        with patch("crypto_trader.sizing.storage_stats", return_value={"row_counts": {}}), patch(
+            "crypto_trader.sizing.create_exchange", return_value=FakeExchange(closed_history)
+        ):
+            result = apply_position_sizing(config, candidates)
+
+        self.assertFalse(result["blocked"])
+        self.assertEqual(result["recovery_step"], 0)
+        self.assertEqual(result["margin_usdt"], 2.0)
+        self.assertEqual(candidates[0].order_usdt, 50.0)

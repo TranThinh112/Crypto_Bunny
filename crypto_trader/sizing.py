@@ -6,7 +6,7 @@ from typing import Any
 
 from .market import create_exchange
 from .models import TradeCandidate
-from .storage import get_journal_state, set_journal_state
+from .storage import get_journal_state, set_journal_state, storage_stats
 
 
 STATE_KEY = "position_sizing:recovery_cycle"
@@ -112,6 +112,7 @@ def _sizing_config(config: dict[str, Any]) -> dict[str, Any]:
         "max_margin_usdt": float(raw.get("max_margin_usdt", 20) or 20),
         "max_cycle_loss_usdt": float(raw.get("max_cycle_loss_usdt", 10) or 10),
         "history_limit": int(raw.get("history_limit", 100) or 100),
+        "reset_orphaned_blocked_state": bool(raw.get("reset_orphaned_blocked_state", True)),
         "min_recovery_confidence": float(raw.get("min_recovery_confidence", 88) or 88),
         "min_recovery_win_probability_pct": float(raw.get("min_recovery_win_probability_pct", 58) or 58),
         "block_recovery_on_market_guard": bool(raw.get("block_recovery_on_market_guard", True)),
@@ -164,6 +165,39 @@ def _normalize_idle_state(state: dict[str, Any], base_margin: float) -> None:
     state["block_reason"] = None
 
 
+def _has_runtime_trade_records(config: dict[str, Any]) -> bool:
+    try:
+        row_counts = storage_stats(config).get("row_counts", {})
+    except Exception:
+        return True
+    for key in ("trade_executions", "pending_orders", "internal_pending_orders", "paper_trades", "trade_memory"):
+        try:
+            if int(row_counts.get(key) or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            return True
+    return False
+
+
+def _reset_orphaned_blocked_state(
+    config: dict[str, Any],
+    state: dict[str, Any],
+    base_margin: float,
+) -> tuple[dict[str, Any], bool]:
+    settings = config.get("position_sizing", {})
+    if not bool(settings.get("reset_orphaned_blocked_state", True)):
+        return state, False
+    if not bool(state.get("blocked")):
+        return state, False
+    if _has_runtime_trade_records(config):
+        return state, False
+    clean = _default_state(base_margin)
+    clean["auto_reset_reason"] = (
+        "Blocked recovery state had no runtime trade, pending order, paper trade, or trade memory records"
+    )
+    return clean, True
+
+
 def _load_state(config: dict[str, Any], base_margin: float) -> dict[str, Any]:
     raw = get_journal_state(config, STATE_KEY)
     if not raw:
@@ -180,8 +214,9 @@ def _load_state(config: dict[str, Any], base_margin: float) -> dict[str, Any]:
     default.update({key: value for key, value in state.items() if key in default})
     if not isinstance(default.get("processed_keys"), list):
         default["processed_keys"] = []
+    default, was_orphaned_reset = _reset_orphaned_blocked_state(config, default, base_margin)
     _normalize_idle_state(default, base_margin)
-    default["_is_new"] = False
+    default["_is_new"] = was_orphaned_reset
     return default
 
 

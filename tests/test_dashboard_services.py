@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
@@ -8,6 +9,7 @@ from crypto_trader.dashboard_services import (
     _persist_cached_payload,
     _persist_system_checklist_snapshot,
     attach_previous_system_checklist_snapshot,
+    system_modules_payload,
     system_checklist_payload,
 )
 
@@ -165,6 +167,66 @@ class SystemChecklistPayloadTests(unittest.TestCase):
             payload = attach_previous_system_checklist_snapshot({}, current)
 
         self.assertEqual(payload["previous_snapshot"], previous)
+
+    def test_recovery_module_warns_for_orphaned_blocked_state(self) -> None:
+        blocked_state = {
+            "blocked": True,
+            "block_reason": "Recovery step limit reached: 4/4",
+            "recovery_step": 4,
+            "cycle_pnl_usdt": -222.39,
+            "next_margin_usdt": 0.0,
+            "processed_keys": ["old"],
+        }
+
+        with patch("crypto_trader.dashboard_services.get_journal_state", return_value=json.dumps(blocked_state)):
+            modules = system_modules_payload(
+                {},
+                checked_date="2026-07-12",
+                checked_at_iso="2026-07-12T09:00:00+00:00",
+                ai_history=[],
+                replay={},
+                strategy={},
+                regime={},
+                health={},
+                risk_state={"openPositionsCount": 0, "maxConcurrentPositions": 5},
+                row_counts={
+                    "trade_executions": 0,
+                    "pending_orders": 0,
+                    "internal_pending_orders": 0,
+                    "paper_trades": 0,
+                    "trade_memory": 0,
+                },
+            )
+
+        recovery = next(item for item in modules if item["name"] == "Recovery Chain Manager")
+        self.assertEqual(recovery["status"], "warn")
+
+    def test_recovery_module_fails_for_blocked_state_with_trade_records(self) -> None:
+        blocked_state = {
+            "blocked": True,
+            "block_reason": "Recovery step limit reached: 4/4",
+            "recovery_step": 4,
+            "cycle_pnl_usdt": -222.39,
+            "next_margin_usdt": 0.0,
+            "processed_keys": ["old"],
+        }
+
+        with patch("crypto_trader.dashboard_services.get_journal_state", return_value=json.dumps(blocked_state)):
+            modules = system_modules_payload(
+                {},
+                checked_date="2026-07-12",
+                checked_at_iso="2026-07-12T09:00:00+00:00",
+                ai_history=[],
+                replay={},
+                strategy={},
+                regime={},
+                health={},
+                risk_state={"openPositionsCount": 0, "maxConcurrentPositions": 5},
+                row_counts={"trade_executions": 1},
+            )
+
+        recovery = next(item for item in modules if item["name"] == "Recovery Chain Manager")
+        self.assertEqual(recovery["status"], "fail")
 
 
 if __name__ == "__main__":

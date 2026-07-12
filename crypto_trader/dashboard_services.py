@@ -542,6 +542,7 @@ def system_modules_payload(
     regime: dict[str, Any],
     health: dict[str, Any],
     risk_state: dict[str, Any],
+    row_counts: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     files = _module_file_index(config)
     active_strategies = strategy.get("active") or []
@@ -605,6 +606,14 @@ def system_modules_payload(
     paused_minutes = _module_minutes_until(risk_state.get("pausedUntil"))
     prompt_updated_at = prompt_metrics.get("updated_at") if prompt_metrics else None
     processed_keys = sizing_state.get("processed_keys") if isinstance(sizing_state, dict) else []
+    row_counts = row_counts or {}
+    recovery_blocked = bool(sizing_state and sizing_state.get("blocked"))
+    recovery_runtime_records = sum(
+        _safe_int(row_counts.get(key))
+        for key in ("trade_executions", "pending_orders", "internal_pending_orders", "paper_trades", "trade_memory")
+    )
+    recovery_orphaned_block = recovery_blocked and open_count <= 0 and recovery_runtime_records <= 0
+    recovery_status = "warn" if recovery_orphaned_block else "fail" if recovery_blocked else "ok" if sizing_state else "warn"
 
     definitions = [
         {
@@ -743,7 +752,7 @@ def system_modules_payload(
             "number": 8,
             "name": "Recovery Chain Manager",
             "purpose": "Theo dõi state gỡ lỗ thực tế của từng chuỗi recovery đã được journal lưu.",
-            "status": "fail" if sizing_state and sizing_state.get("blocked") else "ok" if sizing_state else "warn",
+            "status": recovery_status,
             "stats": [
                 _module_row("recovery_step", sizing_state.get("recovery_step") if sizing_state else None, "Bước hiện tại của chuỗi gỡ lỗ.", attention=True),
                 _module_row("cycle_pnl_usdt", sizing_state.get("cycle_pnl_usdt") if sizing_state else None, "PnL lũy kế thực tế của chu kỳ recovery hiện tại.", attention=True),
@@ -754,6 +763,8 @@ def system_modules_payload(
                 _module_row("last_loss_recorded", _module_bool_percent(bool(sizing_state.get("last_loss_key"))) if sizing_state else None, "100 nghĩa là hệ thống đang có bản ghi lệnh lỗ gần nhất trong chain."),
                 _module_row("updated_at", sizing_state.get("updated_at") if sizing_state else None, "Thời điểm state recovery chain được cập nhật gần nhất."),
                 _module_row("block_reason", sizing_state.get("block_reason") if sizing_state else "Chưa có dữ liệu thu thập", "Lý do block recovery chain nếu có.", attention=True),
+                _module_row("orphaned_block_state", _module_bool_percent(recovery_orphaned_block), "100 nghĩa là recovery đang block nhưng runtime DB không còn lệnh/pending/trade record."),
+                _module_row("runtime_trade_records", recovery_runtime_records, "Số record runtime dùng để xác định recovery block còn liên quan tới lệnh thật hay chỉ là state cũ."),
                 _module_row("last_loss_symbol", sizing_state.get("last_loss_symbol") if sizing_state else None, "Cặp giao dịch của lệnh lỗ gần nhất trong chain."),
                 _module_row("last_loss_side", sizing_state.get("last_loss_side") if sizing_state else None, "Hướng LONG/SHORT của lệnh lỗ gần nhất trong chain."),
             ],
@@ -1002,6 +1013,7 @@ def _build_system_checklist_payload(
         regime=regime,
         health=health,
         risk_state=risk_state,
+        row_counts=row_counts,
     )
     ok_count = sum(1 for item in criteria if item["ok"])
     payload = {

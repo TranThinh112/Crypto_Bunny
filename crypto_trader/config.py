@@ -409,6 +409,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "base_margin_presets_usdt": [2, 3, 5, 10, 15, 20, 30, 50],
         "history_limit": 100,
         "bootstrap_existing_history": False,
+        "reset_orphaned_blocked_state": True,
     },
     "paper_trading": {
         "enabled": True,
