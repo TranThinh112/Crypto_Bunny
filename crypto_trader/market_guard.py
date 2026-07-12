@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .market import create_exchange
+from .models import to_jsonable
 from .storage import (
     get_journal_state,
     list_market_guard_observations,
@@ -197,7 +198,7 @@ def _candle_alert(
 
 
 def _store_latest_status(config: dict[str, Any], status: dict[str, Any]) -> None:
-    set_journal_state(config, LATEST_STATUS_KEY, json.dumps(status, ensure_ascii=False))
+    set_journal_state(config, LATEST_STATUS_KEY, json.dumps(to_jsonable(status), ensure_ascii=False))
 
 
 def latest_market_guard_status(config: dict[str, Any]) -> dict[str, Any] | None:
