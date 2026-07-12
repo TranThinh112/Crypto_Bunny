@@ -15,6 +15,8 @@ const state = {
   currentPositionsPayload: null,
   lastSystemChecklistPayload: null,
   previousSystemChecklistPayload: null,
+  systemChecklistRefreshInFlight: false,
+  lastSystemChecklistRefreshMs: 0,
   running: false,
 };
 
@@ -2374,11 +2376,12 @@ renderSystemSummaryChart = function renderSystemSummaryChartPatched(payload) {
 };
 
 async function loadSystemChecklist(date = "") {
-  if (!date && refs.systemChecklistStatus) refs.systemChecklistStatus.textContent = "Đang tải...";
-  if (!date && refs.systemModuleStatus) refs.systemModuleStatus.textContent = "Đang tải...";
+  const hasExistingPayload = Boolean(state.lastSystemChecklistPayload);
+  if (!date && !hasExistingPayload && refs.systemChecklistStatus) refs.systemChecklistStatus.textContent = "Đang tải...";
+  if (!date && !hasExistingPayload && refs.systemModuleStatus) refs.systemModuleStatus.textContent = "Đang tải...";
   const url = date
     ? `/api/system-checklist?date=${encodeURIComponent(date)}&_=${Date.now()}`
-    : `/api/system-checklist?force_refresh=true&_=${Date.now()}`;
+    : `/api/system-checklist?_=${Date.now()}`;
   const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const payload = await res.json();
@@ -2389,6 +2392,30 @@ async function loadSystemChecklist(date = "") {
   state.lastSystemChecklistPayload = payload;
   renderSystemChecklist(payload);
   if (refs.systemChecklistDate && payload.date) refs.systemChecklistDate.value = payload.date;
+  if (!date) refreshSystemChecklistInBackground();
+}
+
+function refreshSystemChecklistInBackground() {
+  const now = Date.now();
+  if (state.systemChecklistRefreshInFlight || now - state.lastSystemChecklistRefreshMs < 5 * 60 * 1000) return;
+  state.systemChecklistRefreshInFlight = true;
+  state.lastSystemChecklistRefreshMs = now;
+  fetch(`/api/system-checklist?force_refresh=true&_=${now}`, { cache: "no-store" })
+    .then((res) => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    })
+    .then((payload) => {
+      const previous = state.lastSystemChecklistPayload;
+      state.previousSystemChecklistPayload = previous || state.previousSystemChecklistPayload;
+      state.lastSystemChecklistPayload = payload;
+      renderSystemChecklist(payload);
+      if (refs.systemChecklistDate && payload.date) refs.systemChecklistDate.value = payload.date;
+    })
+    .catch((err) => setStatus(`Lỗi system health: ${err.message}`))
+    .finally(() => {
+      state.systemChecklistRefreshInFlight = false;
+    });
 }
 
 async function loadLcPipeline() {
