@@ -151,6 +151,40 @@ class StorageTest(TestCase):
         self.assertEqual(len(rows), 2)
         self.assertEqual({(row["symbol"], row["timeframe"]) for row in rows}, {("BTC/USDT:USDT", "1m")})
 
+    def test_prune_market_scan_observations_limits_overflow_batch(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config = self._config(tmpdir)
+            config["market_scan_memory"]["prune_overflow_batch_limit"] = 1
+            now = datetime.now(timezone.utc)
+            collection = atlas_database(config)["market_scan_observations"]
+            for index in range(5):
+                collection.replace_one(
+                    {"id": index + 1},
+                    {
+                        "_id": index + 1,
+                        "id": index + 1,
+                        "created_at": (now - timedelta(minutes=index)).isoformat(),
+                        "source": "test",
+                        "symbol": "BTC/USDT:USDT",
+                        "side": "long",
+                        "timeframe": "1m",
+                        "confidence": 90,
+                        "win_probability_pct": 80,
+                        "risk_reward": 1.5,
+                        "score": 80,
+                        "indicator_json": "{}",
+                        "payload_json": "{}",
+                    },
+                    upsert=True,
+                )
+
+            result = prune_market_scan_observations(config)
+            count = collection.count_documents({})
+
+        self.assertEqual(result["deleted_old"], 0)
+        self.assertEqual(result["deleted_over_limit"], 1)
+        self.assertEqual(count, 4)
+
     def test_save_market_scan_observations_stores_compact_payloads(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             config = self._config(tmpdir)

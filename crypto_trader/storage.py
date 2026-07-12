@@ -1620,37 +1620,75 @@ def prune_market_scan_observations(
         or memory_config.get("max_rows_per_symbol_timeframe", 200)
         or 200
     )
+    overflow_batch_limit = max(1, int(memory_config.get("prune_overflow_batch_limit", 500) or 500))
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=max(1, keep_hours))).isoformat()
     deleted_old = 0
     deleted_over_limit = 0
     _ensure_mongo_write_allowed(config)
-    deleted_old = int(
-        _mongo_collection(config, "market_scan_observations").delete_many({"created_at": {"$lt": cutoff}}).deleted_count
-        or 0
-    )
-    rows = _mongo_find_many(
+    collection = _mongo_collection(config, "market_scan_observations")
+    has_old_row = _mongo_call_with_retry(
         config,
-        "market_scan_observations",
-        sort=[("symbol", 1), ("timeframe", 1), ("created_at", -1), ("id", -1)],
-        projection={"id": 1, "symbol": 1, "timeframe": 1, "created_at": 1},
+        lambda: collection.find_one(
+            {"created_at": {"$lt": cutoff}},
+            {"_id": 0, "id": 1},
+            sort=[("created_at", 1), ("id", 1)],
+        ),
     )
-    counters: dict[tuple[str, str], int] = {}
-    overflow_ids: list[int] = []
-    for row in rows:
-        key = (str(row.get("symbol") or ""), str(row.get("timeframe") or ""))
-        counters[key] = counters.get(key, 0) + 1
-        if counters[key] > max(1, max_rows):
-            overflow_ids.append(int(row["id"]))
-    if overflow_ids:
-        deleted_over_limit = int(
-            _mongo_collection(config, "market_scan_observations").delete_many({"id": {"$in": overflow_ids}}).deleted_count
-            or 0
+    if has_old_row:
+        deleted_old = int(collection.delete_many({"created_at": {"$lt": cutoff}}).deleted_count or 0)
+
+    def _group_counts() -> list[dict[str, Any]]:
+        return list(
+            collection.aggregate(
+                [
+                    {
+                        "$group": {
+                            "_id": {"symbol": "$symbol", "timeframe": "$timeframe"},
+                            "count": {"$sum": 1},
+                        }
+                    },
+                    {"$match": {"count": {"$gt": max(1, max_rows)}}},
+                    {"$sort": {"_id.symbol": 1, "_id.timeframe": 1}},
+                ]
+            )
         )
+
+    groups = _mongo_call_with_retry(config, _group_counts)
+    overflow_ids: list[int] = []
+    remaining = overflow_batch_limit
+    for group in groups:
+        if remaining <= 0:
+            break
+        group_key = group.get("_id") if isinstance(group.get("_id"), dict) else {}
+        symbol = str(group_key.get("symbol") or "")
+        timeframe = str(group_key.get("timeframe") or "")
+        if not symbol or not timeframe:
+            continue
+
+        def _overflow_rows(symbol: str = symbol, timeframe: str = timeframe, remaining: int = remaining) -> list[dict[str, Any]]:
+            cursor = (
+                collection.find(
+                    {"symbol": symbol, "timeframe": timeframe},
+                    {"_id": 0, "id": 1},
+                )
+                .sort([("created_at", -1), ("id", -1)])
+                .skip(max(1, max_rows))
+                .limit(remaining)
+            )
+            return [dict(row) for row in cursor]
+
+        rows = _mongo_call_with_retry(config, _overflow_rows)
+        for row in rows:
+            if row.get("id") is not None:
+                overflow_ids.append(int(row["id"]))
+        remaining = max(0, overflow_batch_limit - len(overflow_ids))
+    if overflow_ids:
+        deleted_over_limit = int(collection.delete_many({"id": {"$in": overflow_ids}}).deleted_count or 0)
     return {
         "deleted_old": deleted_old,
         "deleted_over_limit": deleted_over_limit,
     }
-def compact_market_scan_observations(config: dict[str, Any], *, batch_limit: int = 5000) -> dict[str, int]:
+def compact_market_scan_observations(config: dict[str, Any], *, batch_limit: int = 200) -> dict[str, int]:
     memory_config = config.get("market_scan_memory", {})
     max_json_bytes = int(memory_config.get("max_json_bytes", DEFAULT_MARKET_SCAN_MAX_JSON_BYTES) or DEFAULT_MARKET_SCAN_MAX_JSON_BYTES)
     checked = 0
