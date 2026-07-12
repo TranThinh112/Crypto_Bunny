@@ -1,12 +1,53 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
-from crypto_trader.dashboard_services import attach_previous_system_checklist_snapshot, system_checklist_payload
+from crypto_trader.dashboard_services import (
+    _persist_cached_payload,
+    _persist_system_checklist_snapshot,
+    attach_previous_system_checklist_snapshot,
+    system_checklist_payload,
+)
 
 
 class SystemChecklistPayloadTests(unittest.TestCase):
+    def test_cached_payload_storage_converts_datetimes_to_iso_strings(self) -> None:
+        payload = {
+            "generated_at": datetime(2026, 7, 12, 3, 15, tzinfo=timezone.utc),
+            "items": [{"expires_at": datetime(2026, 7, 14, 0, 0, tzinfo=timezone.utc)}],
+        }
+
+        with patch("crypto_trader.dashboard_services.set_journal_state") as set_state:
+            _persist_cached_payload({}, "dashboard:test", payload)
+
+        stored_body = set_state.call_args.args[2]
+        self.assertIn("2026-07-12T03:15:00+00:00", stored_body)
+        self.assertIn("2026-07-14T00:00:00+00:00", stored_body)
+
+    def test_system_checklist_snapshot_storage_converts_datetimes_to_iso_strings(self) -> None:
+        payload = {
+            "date": "2026-07-12",
+            "created_at": datetime(2026, 7, 12, 3, 30, tzinfo=timezone.utc),
+            "modules": [
+                {
+                    "number": 1,
+                    "name": "Storage",
+                    "details": {"expires_at": datetime(2026, 7, 13, 0, 0, tzinfo=timezone.utc)},
+                }
+            ],
+        }
+
+        with patch("crypto_trader.dashboard_services._current_system_checklist_snapshot", return_value=None), patch(
+            "crypto_trader.dashboard_services.set_journal_state"
+        ) as set_state:
+            _persist_system_checklist_snapshot({}, payload)
+
+        stored_bodies = [call.args[2] for call in set_state.call_args_list]
+        self.assertTrue(any("2026-07-12T03:30:00+00:00" in body for body in stored_bodies))
+        self.assertTrue(any("2026-07-13T00:00:00+00:00" in body for body in stored_bodies))
+
     def test_returns_current_snapshot_for_today_without_rebuilding(self) -> None:
         snapshot = {
             "date": "2026-07-10",

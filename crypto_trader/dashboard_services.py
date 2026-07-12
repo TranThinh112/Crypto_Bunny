@@ -21,6 +21,7 @@ from .codex_features import (
     replay_stats,
 )
 from .market_guard import market_guard_block_status
+from .models import to_jsonable
 from .sizing import STATE_KEY as SIZING_STATE_KEY
 from .storage import (
     count_pending_orders,
@@ -300,7 +301,7 @@ def _cached_payload(config: dict[str, Any], key: str) -> dict[str, Any] | None:
 
 
 def _persist_cached_payload(config: dict[str, Any], key: str, payload: dict[str, Any]) -> None:
-    set_journal_state(config, key, json.dumps(payload, ensure_ascii=False))
+    set_journal_state(config, key, json.dumps(to_jsonable(payload), ensure_ascii=False))
 
 
 def _get_or_build_cached_payload(
@@ -323,9 +324,13 @@ def _get_or_build_cached_payload(
 
 
 def _persist_system_checklist_snapshot(config: dict[str, Any], payload: dict[str, Any]) -> None:
-    clean_payload = _strip_system_checklist_comparison_snapshot(payload)
+    clean_payload = to_jsonable(_strip_system_checklist_comparison_snapshot(payload))
     current = _current_system_checklist_snapshot(config)
-    current_clean = _strip_system_checklist_comparison_snapshot(current) if isinstance(current, dict) else None
+    current_clean = (
+        to_jsonable(_strip_system_checklist_comparison_snapshot(current))
+        if isinstance(current, dict)
+        else None
+    )
     current_created_at = str((current_clean or {}).get("created_at") or "")
     next_created_at = str(clean_payload.get("created_at") or "")
     if current_clean and (current_created_at != next_created_at or current_clean != clean_payload):
