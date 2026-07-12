@@ -1282,6 +1282,7 @@ def _openai_json_decision(
     pending_memory: dict[str, Any],
     *,
     manual_trigger: bool = False,
+    lc_okx_review_once: bool = False,
 ) -> dict[str, Any]:
     okx_config = ai_config(config).get("okx", {})
     route = str((context or {}).get("route") or "")
@@ -1314,6 +1315,7 @@ def _openai_json_decision(
         purpose="okx_final_approval",
         route=route,
         manual_trigger=manual_trigger,
+        lc_okx_review_once=lc_okx_review_once,
         record_history=route not in {"lc_okx_setup_review", "lc_okx_release"},
         notify_telegram=route not in {"lc_okx_setup_review", "lc_okx_release"},
     )
@@ -1398,8 +1400,14 @@ def okx_ai_approval(
     local_decision = _local_okx_policy(config, candidate, risk_check, context, pending_memory)
     okx_config = ai_config(config).get("okx", {})
     manual_openai_once = bool(context.get("manual_openai_once"))
-    if manual_openai_once:
-        if not bool(okx_config.get("manual_openai_enabled", False)):
+    route = str(context.get("route") or "")
+    lc_okx_review_once = (
+        route == "lc_okx_setup_review"
+        and not manual_openai_once
+        and bool(okx_config.get("auto_lc_okx_review_once_enabled", False))
+    )
+    if manual_openai_once or lc_okx_review_once:
+        if manual_openai_once and not bool(okx_config.get("manual_openai_enabled", False)):
             return {
                 **local_decision,
                 "decision": "manual_openai_disabled",
@@ -1418,7 +1426,8 @@ def okx_ai_approval(
                 risk_check,
                 context,
                 pending_memory,
-                manual_trigger=True,
+                manual_trigger=manual_openai_once,
+                lc_okx_review_once=lc_okx_review_once,
             )
         except (RuntimeError, urllib.error.URLError, urllib.error.HTTPError, KeyError, json.JSONDecodeError) as exc:
             if bool(okx_config.get("require_external_approval", False)):

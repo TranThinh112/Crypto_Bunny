@@ -195,6 +195,43 @@ class AiCoordinatorTest(TestCase):
         self.assertEqual(decision["decision"], "APPROVE")
         self.assertEqual(decision["provider"], "openai")
 
+    def test_lc_okx_setup_review_auto_one_shot_calls_openai_once_gate(self) -> None:
+        config = self._config()
+        config["ai"]["okx"]["provider"] = "local_policy"
+        config["ai"]["okx"]["auto_openai_enabled"] = False
+        config["ai"]["okx"]["auto_lc_okx_review_once_enabled"] = True
+        config["ai"]["okx"]["approval_enabled"] = True
+        candidate = _candidate("SOL/USDT:USDT")
+        check = RiskCheck(True, [], [])
+        approved = {
+            "approved": True,
+            "decision": "APPROVE",
+            "reason": "LC_OKX setup is valid",
+            "provider": "openai",
+            "model": "gpt-5.5",
+        }
+
+        with patch("crypto_trader.ai_coordinator._openai_json_decision", return_value=approved) as approval:
+            reviewed, decision = review_candidate_for_lc_okx(
+                config,
+                candidate,
+                check,
+                context={"route": "lc_okx_setup_review", "lc_id": 88, "source": "mini_lc_okx"},
+            )
+            reused, second_decision = review_candidate_for_lc_okx(
+                config,
+                reviewed,
+                check,
+                context={"route": "lc_okx_setup_review", "lc_id": 88, "source": "mini_lc_okx"},
+            )
+
+        approval.assert_called_once()
+        self.assertFalse(approval.call_args.kwargs["manual_trigger"])
+        self.assertTrue(approval.call_args.kwargs["lc_okx_review_once"])
+        self.assertTrue(decision["approved"])
+        self.assertEqual(second_decision["decision"], "APPROVE")
+        self.assertIs(reused, reviewed)
+
     def test_reuses_recent_rejected_okx_setup_review_without_recalling_ai(self) -> None:
         config = self._config()
         config["ai"]["okx"]["reject_reuse_minutes"] = 15

@@ -744,6 +744,7 @@ def call_openai_json(
     purpose: str | None = None,
     route: str | None = None,
     manual_trigger: bool = False,
+    lc_okx_review_once: bool = False,
     record_history: bool = True,
     notify_telegram: bool = True,
 ) -> dict[str, Any]:
@@ -780,6 +781,11 @@ def call_openai_json(
         if manual_trigger:
             if not bool(okx_config.get("manual_openai_enabled", False)):
                 raise RuntimeError("OpenAI OKX approval blocked: ai.okx.manual_openai_enabled=false")
+        elif lc_okx_review_once:
+            if route != "lc_okx_setup_review":
+                raise RuntimeError(f"OpenAI OKX LC_OKX one-shot blocked by policy: route={route or '-'}")
+            if not bool(okx_config.get("auto_lc_okx_review_once_enabled", False)):
+                raise RuntimeError("OpenAI OKX approval blocked: ai.okx.auto_lc_okx_review_once_enabled=false")
         elif not bool(okx_config.get("auto_openai_enabled", False)):
             raise RuntimeError("OpenAI OKX approval blocked: ai.okx.auto_openai_enabled=false")
         if not bool(okx_config.get("approval_enabled", True)):
