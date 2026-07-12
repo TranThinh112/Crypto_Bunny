@@ -299,6 +299,22 @@ def _storage_retention(config: dict[str, Any]) -> dict[str, Any]:
     return config.get("storage_retention", {})
 
 
+def _retention_days(config: dict[str, Any], key: str, default: float) -> float:
+    raw = _storage_retention(config).get(key, default)
+    try:
+        return max(0.1, float(raw or default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _retention_expiry_days(days: float) -> datetime:
+    return datetime.now(timezone.utc) + timedelta(days=max(0.1, float(days)))
+
+
+def _retention_expiry_hours(hours: float) -> datetime:
+    return datetime.now(timezone.utc) + timedelta(hours=max(1.0, float(hours)))
+
+
 def _market_scan_memory_cache_path(config: dict[str, Any]) -> Path:
     memory_config = config.get("market_scan_memory", {})
     configured_path = memory_config.get("cache_path")
@@ -575,14 +591,14 @@ def save_prompt_version(config: dict[str, Any], row: dict[str, Any]) -> dict[str
     _ensure_mongo_write_allowed(config)
     payload["id"] = int((existing or {}).get("id") or _mongo_next_id(config, "prompt_versions"))
     _mongo_upsert_by_pk(config, "prompt_versions", "version", payload)
+    _best_effort_retryable_storage_side_effect(config, lambda: prune_prompt_versions(config))
     return payload
 def list_prompt_versions(config: dict[str, Any]) -> list[dict[str, Any]]:
     return _mongo_find_many(config, "prompt_versions", sort=[("created_at", -1), ("id", -1)])
 
 
 def prune_prompt_versions(config: dict[str, Any], *, keep_days: float | None = None) -> dict[str, int]:
-    retention = _storage_retention(config)
-    keep_days = float(keep_days or retention.get("prompt_versions_keep_days", 365) or 365)
+    keep_days = float(keep_days or _retention_days(config, "prompt_versions_keep_days", 365))
     return _prune_by_created_at(config, "prompt_versions", keep_days=keep_days, preserve_query={"is_active": 1})
 def get_prompt_metric(config: dict[str, Any], prompt_version: str) -> dict[str, Any] | None:
     return _mongo_find_one(config, "prompt_metrics", query={"prompt_version": prompt_version})
@@ -664,12 +680,12 @@ def save_ai_experiment(config: dict[str, Any], row: dict[str, Any]) -> dict[str,
         "created_at": str((existing or {}).get("created_at") or row.get("created_at") or datetime.now(timezone.utc).isoformat()),
     }
     _mongo_upsert_by_pk(config, "ai_experiments", "name", payload)
+    _best_effort_retryable_storage_side_effect(config, lambda: prune_ai_experiments(config))
     return payload
 
 
 def prune_ai_experiments(config: dict[str, Any], *, keep_days: float | None = None) -> dict[str, int]:
-    retention = _storage_retention(config)
-    keep_days = float(keep_days or retention.get("ai_experiments_keep_days", 365) or 365)
+    keep_days = float(keep_days or _retention_days(config, "ai_experiments_keep_days", 365))
     return _prune_by_created_at(config, "ai_experiments", keep_days=keep_days, preserve_query={"enabled": 1})
 def list_ai_experiment_rows(config: dict[str, Any], *, enabled_only: bool = False) -> list[dict[str, Any]]:
     query = {"enabled": 1} if enabled_only else None
@@ -703,6 +719,7 @@ def save_strategy_version(config: dict[str, Any], row: dict[str, Any], *, deacti
         collection.update_many({}, {"$set": {"is_active": 0}})
     payload["id"] = int((existing or {}).get("id") or _mongo_next_id(config, "strategy_versions"))
     _mongo_upsert_by_pk(config, "strategy_versions", "version", payload)
+    _best_effort_retryable_storage_side_effect(config, lambda: prune_strategy_versions(config))
     return payload
 def activate_strategy_version_record(config: dict[str, Any], version: str) -> dict[str, Any] | None:
     row = get_strategy_version(config, version)
@@ -734,8 +751,7 @@ def list_strategy_versions(
 
 
 def prune_strategy_versions(config: dict[str, Any], *, keep_days: float | None = None) -> dict[str, int]:
-    retention = _storage_retention(config)
-    keep_days = float(keep_days or retention.get("strategy_versions_keep_days", 365) or 365)
+    keep_days = float(keep_days or _retention_days(config, "strategy_versions_keep_days", 365))
     return _prune_by_created_at(config, "strategy_versions", keep_days=keep_days, preserve_query={"is_active": 1})
 def insert_market_regime_history(config: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
     payload = {
@@ -744,10 +760,12 @@ def insert_market_regime_history(config: dict[str, Any], row: dict[str, Any]) ->
         "confidence": row.get("confidence") or 0,
         "indicators_json": row.get("indicators_json") or "{}",
         "reason": row.get("reason") or "",
+        "expires_at": _retention_expiry_days(_retention_days(config, "market_regime_history_keep_days", 14)),
     }
     _ensure_mongo_write_allowed(config)
     payload["id"] = _mongo_next_id(config, "market_regime_history")
     _mongo_upsert_by_pk(config, "market_regime_history", "id", payload)
+    _best_effort_retryable_storage_side_effect(config, lambda: prune_market_regime_history(config))
     return payload
 def latest_market_regime_history(config: dict[str, Any]) -> dict[str, Any] | None:
     return _mongo_find_one(config, "market_regime_history", sort=[("created_at", -1), ("id", -1)])
@@ -759,6 +777,11 @@ def list_market_regime_rows(config: dict[str, Any], *, limit: int = 100) -> list
         sort=[("created_at", -1), ("id", -1)],
         limit=safe_limit,
     )
+
+
+def prune_market_regime_history(config: dict[str, Any], *, keep_days: float | None = None) -> dict[str, int]:
+    keep_days = float(keep_days or _retention_days(config, "market_regime_history_keep_days", 14))
+    return _prune_by_created_at(config, "market_regime_history", keep_days=keep_days)
 def insert_trade_candidate_rows(config: dict[str, Any], rows: list[dict[str, Any]]) -> int:
     if not rows:
         return 0
@@ -769,15 +792,16 @@ def insert_trade_candidate_rows(config: dict[str, Any], rows: list[dict[str, Any
         payload = dict(row)
         payload["id"] = _mongo_next_id(config, "trade_candidates")
         payload["is_used"] = int(payload.get("is_used", 0) or 0)
+        payload.setdefault("expires_at", _retention_expiry_days(_retention_days(config, "trade_candidates_keep_days", 2)))
         documents.append(payload)
     if documents:
         collection.insert_many([{**doc, "_id": doc["id"]} for doc in documents], ordered=True)
+        _best_effort_retryable_storage_side_effect(config, lambda: prune_trade_candidates(config))
     return len(documents)
 
 
 def prune_trade_candidates(config: dict[str, Any], *, keep_days: float | None = None) -> dict[str, int]:
-    retention = _storage_retention(config)
-    keep_days = float(keep_days or retention.get("trade_candidates_keep_days", 7) or 7)
+    keep_days = float(keep_days or _retention_days(config, "trade_candidates_keep_days", 2))
     return _prune_by_created_at(config, "trade_candidates", keep_days=keep_days)
 def list_trade_candidate_rows(
     config: dict[str, Any],
@@ -820,13 +844,14 @@ def insert_ai_trade_decision_row(config: dict[str, Any], row: dict[str, Any]) ->
     _ensure_mongo_write_allowed(config)
     payload = dict(row)
     payload["id"] = _mongo_next_id(config, "ai_trade_decisions")
+    payload.setdefault("expires_at", _retention_expiry_days(_retention_days(config, "ai_trade_decisions_keep_days", 180)))
     _mongo_upsert_by_pk(config, "ai_trade_decisions", "id", payload)
+    _best_effort_retryable_storage_side_effect(config, lambda: prune_ai_trade_decisions(config))
     return int(payload["id"])
 
 
 def prune_ai_trade_decisions(config: dict[str, Any], *, keep_days: float | None = None) -> dict[str, int]:
-    retention = _storage_retention(config)
-    keep_days = float(keep_days or retention.get("ai_trade_decisions_keep_days", 365) or 365)
+    keep_days = float(keep_days or _retention_days(config, "ai_trade_decisions_keep_days", 180))
     return _prune_by_created_at(config, "ai_trade_decisions", keep_days=keep_days)
 def list_ai_trade_decision_rows(
     config: dict[str, Any],
@@ -910,12 +935,12 @@ def insert_trade_execution_row(config: dict[str, Any], row: dict[str, Any]) -> d
     payload = dict(row)
     payload["id"] = _mongo_next_id(config, "trade_executions")
     _mongo_upsert_by_pk(config, "trade_executions", "id", payload)
+    _best_effort_retryable_storage_side_effect(config, lambda: prune_trade_executions(config))
     return payload
 
 
 def prune_trade_executions(config: dict[str, Any], *, keep_days: float | None = None) -> dict[str, int]:
-    retention = _storage_retention(config)
-    keep_days = float(keep_days or retention.get("trade_executions_keep_days", 365) or 365)
+    keep_days = float(keep_days or _retention_days(config, "trade_executions_keep_days", 365))
     cutoff = _iso_cutoff_days(keep_days)
     _ensure_mongo_write_allowed(config)
     deleted = int(
@@ -1047,13 +1072,14 @@ def insert_replay_history_row(config: dict[str, Any], row: dict[str, Any]) -> di
     _ensure_mongo_write_allowed(config)
     payload = dict(row)
     payload["id"] = _mongo_next_id(config, "replay_history")
+    payload["expires_at"] = _retention_expiry_days(_retention_days(config, "replay_history_keep_days", 30))
     _mongo_upsert_by_pk(config, "replay_history", "id", payload)
+    _best_effort_retryable_storage_side_effect(config, lambda: prune_replay_history(config))
     return payload
 
 
 def prune_replay_history(config: dict[str, Any], *, keep_days: float | None = None) -> dict[str, int]:
-    retention = _storage_retention(config)
-    keep_days = float(keep_days or retention.get("replay_history_keep_days", 365) or 365)
+    keep_days = float(keep_days or _retention_days(config, "replay_history_keep_days", 30))
     cutoff = _iso_cutoff_days(keep_days)
     _ensure_mongo_write_allowed(config)
     deleted = int(
@@ -1555,6 +1581,7 @@ def save_market_scan_observations(
 def _insert_market_scan_rows(config: dict[str, Any], rows: list[tuple[Any, ...]]) -> None:
     _ensure_mongo_write_allowed(config)
     ids = _mongo_reserve_ids(config, "market_scan_observations", len(rows))
+    expires_at = _retention_expiry_hours(float(config.get("market_scan_memory", {}).get("keep_hours", 24) or 24))
     documents = [
         {
             "_id": row_id,
@@ -1570,6 +1597,7 @@ def _insert_market_scan_rows(config: dict[str, Any], rows: list[tuple[Any, ...]]
             "score": row[8],
             "indicator_json": row[9],
             "payload_json": row[10],
+            "expires_at": expires_at,
         }
         for row_id, row in zip(ids, rows)
     ]
@@ -1761,6 +1789,7 @@ def run_storage_maintenance(
     *,
     vacuum: bool = False,
     emergency: bool = False,
+    include_stats: bool = True,
 ) -> dict[str, Any]:
     memory_config = config.get("market_scan_memory", {})
     decision_config = config.get("decision_history", {})
@@ -1791,6 +1820,7 @@ def run_storage_maintenance(
             "internal_pending_orders": prune_internal_pending_orders(config),
             "trade_candidates": prune_trade_candidates(config),
             "ai_trade_decisions": prune_ai_trade_decisions(config),
+            "market_regime_history": prune_market_regime_history(config),
             "trade_executions": prune_trade_executions(config),
             "prompt_versions": prune_prompt_versions(config),
             "strategy_versions": prune_strategy_versions(config),
@@ -1819,7 +1849,7 @@ def run_storage_maintenance(
         "optimized": True,
         "vacuumed": False,
         "errors": errors,
-        "stats": storage_stats(config),
+        "stats": storage_stats(config) if include_stats else None,
     }
 def recent_market_scan_memory(
     config: dict[str, Any],
@@ -1970,8 +2000,7 @@ def _pending_expiry(now: datetime, *, max_age_days: float = 3, max_age_hours: fl
 
 def prune_pending_orders(config: dict[str, Any], *, keep_days: float | None = None) -> dict[str, int]:
     migrate_legacy_pending_orders(config)
-    retention = _storage_retention(config)
-    keep_days = float(keep_days or retention.get("pending_orders_keep_days", 5) or 5)
+    keep_days = float(keep_days or _retention_days(config, "pending_orders_keep_days", 5))
     cutoff = _iso_cutoff_days(keep_days)
     _ensure_mongo_write_allowed(config)
     deleted = int(_mongo_collection(config, PENDING_OKX_COLLECTION).delete_many({"created_at": {"$lt": cutoff}}).deleted_count or 0)
@@ -1980,10 +2009,12 @@ def prune_pending_orders(config: dict[str, Any], *, keep_days: float | None = No
 
 def prune_internal_pending_orders(config: dict[str, Any], *, keep_days: float | None = None) -> dict[str, int]:
     migrate_legacy_pending_orders(config)
-    retention = _storage_retention(config)
     keep_days = float(
         keep_days
-        or retention.get("internal_pending_orders_keep_days", retention.get("pending_orders_keep_days", 5))
+        or _storage_retention(config).get(
+            "internal_pending_orders_keep_days",
+            _storage_retention(config).get("pending_orders_keep_days", 5),
+        )
         or 5
     )
     cutoff = _iso_cutoff_days(keep_days)
@@ -2173,6 +2204,7 @@ def save_market_guard_observation(config: dict[str, Any], observation: dict[str,
         query={"symbol": symbol, "observed_at": observed_at},
         sort=[("id", -1)],
     )
+    keep_hours = float(config.get("market_guard", {}).get("memory_keep_hours", 24) or 24)
     row_id = int(existing["id"]) if existing else _mongo_next_id(config, "market_guard_observations")
     _mongo_upsert_by_pk(
         config,
@@ -2191,7 +2223,12 @@ def save_market_guard_observation(config: dict[str, Any], observation: dict[str,
             "volume_ratio": observation.get("volume_ratio"),
             "severity": str(observation.get("severity") or "normal"),
             "alert_reasons_json": json.dumps(reasons, ensure_ascii=False),
+            "expires_at": _retention_expiry_hours(keep_hours),
         },
+    )
+    _best_effort_retryable_storage_side_effect(
+        config,
+        lambda: prune_market_guard_observations(config, keep_hours=max(1, int(keep_hours))),
     )
     return
 def list_market_guard_observations(
@@ -2286,8 +2323,10 @@ def open_paper_trade(config: dict[str, Any], candidate: TradeCandidate) -> dict[
         "close_reason": None,
         "pnl_pct": None,
         "payload_json": json.dumps(payload, ensure_ascii=False),
+        "expires_at": None,
     }
     _mongo_upsert_by_pk(config, "paper_trades", "id", row)
+    _best_effort_retryable_storage_side_effect(config, lambda: prune_paper_trades(config))
     return row
 def close_paper_trade(config: dict[str, Any], trade_id: int, close_price: float, reason: str) -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
@@ -2311,16 +2350,17 @@ def close_paper_trade(config: dict[str, Any], trade_id: int, close_price: float,
                 "close_price": close_price,
                 "close_reason": reason,
                 "pnl_pct": round(pnl_pct, 4),
+                "expires_at": _retention_expiry_days(_retention_days(config, "paper_trades_keep_days", 30)),
             }
         },
     )
+    _best_effort_retryable_storage_side_effect(config, lambda: prune_paper_trades(config))
     updated = _mongo_find_one(config, "paper_trades", query={"id": trade_id})
     return updated or {}
 
 
 def prune_paper_trades(config: dict[str, Any], *, keep_days: float | None = None) -> dict[str, int]:
-    retention = _storage_retention(config)
-    keep_days = float(keep_days or retention.get("paper_trades_keep_days", 365) or 365)
+    keep_days = float(keep_days or _retention_days(config, "paper_trades_keep_days", 30))
     cutoff = _iso_cutoff_days(keep_days)
     _ensure_mongo_write_allowed(config)
     deleted = int(

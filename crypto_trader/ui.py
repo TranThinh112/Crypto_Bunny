@@ -705,6 +705,61 @@ def _set_automation_phase(
 
 
 
+def _storage_maintenance_settings(config: dict[str, Any]) -> dict[str, Any]:
+    return config.get("storage_maintenance", {})
+
+
+def _storage_maintenance_enabled(config: dict[str, Any]) -> bool:
+    return bool(_storage_maintenance_settings(config).get("enabled", True))
+
+
+def _storage_maintenance_interval(config: dict[str, Any]) -> int:
+    raw = _storage_maintenance_settings(config).get("interval_seconds", 900)
+    try:
+        return max(60, int(raw or 900))
+    except (TypeError, ValueError):
+        return 900
+
+
+def _maybe_run_storage_maintenance(
+    app: FastAPI,
+    config: dict[str, Any],
+    *,
+    now: datetime,
+    source: str,
+) -> None:
+    if not atlas_runtime_is_primary(config) or not _storage_maintenance_enabled(config):
+        return
+    interval = _storage_maintenance_interval(config)
+    last_started_at = getattr(app.state, "storage_maintenance_started_at", None)
+    if isinstance(last_started_at, datetime) and (now - last_started_at).total_seconds() < interval:
+        return
+    lock = getattr(app.state, "storage_maintenance_lock", None)
+    if lock is None or not lock.acquire(blocking=False):
+        return
+    app.state.storage_maintenance_started_at = now
+    try:
+        result = run_storage_maintenance(
+            config,
+            emergency=bool(_storage_maintenance_settings(config).get("emergency", False)),
+            include_stats=False,
+        )
+        app.state.storage_maintenance_finished_at = datetime.now(timezone.utc)
+        app.state.storage_maintenance_last_result = result
+        if result.get("errors"):
+            LOGGER.warning("Storage maintenance (%s) completed with errors: %s", source, result["errors"])
+    except Exception as exc:
+        app.state.storage_maintenance_last_result = {
+            "ok": False,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "source": source,
+            "error": str(exc),
+        }
+        _notify_system_error(config, f"Storage maintenance ({source})", exc)
+    finally:
+        lock.release()
+
+
 def _run_automation_cycle(app: FastAPI) -> None:
     now = datetime.now(timezone.utc)
     config = load_config(app.state.config_path)
@@ -718,6 +773,7 @@ def _run_automation_cycle(app: FastAPI) -> None:
         "last_started_at": now.isoformat(),
         "next_scan_at": next_scan_at.isoformat(),
     }
+    _maybe_run_storage_maintenance(app, config, now=now, source="automation")
     if not status["enabled"]:
         status["last_result"] = "disabled"
         app.state.automation_status = status
@@ -2426,6 +2482,10 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
     app.state.automation_stop = threading.Event()
     app.state.lc_pipeline_lock = threading.Lock()
     app.state.lc_pipeline_slot_lock = threading.Lock()
+    app.state.storage_maintenance_lock = threading.Lock()
+    app.state.storage_maintenance_started_at = None
+    app.state.storage_maintenance_finished_at = None
+    app.state.storage_maintenance_last_result = None
     app.state.automation_status = {
         "enabled": False,
         "last_result": "not_started",

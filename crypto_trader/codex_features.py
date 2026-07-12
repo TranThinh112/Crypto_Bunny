@@ -147,6 +147,99 @@ def _candidate_payload(candidate: TradeCandidate) -> dict[str, Any]:
     return payload
 
 
+def _trim_text(value: Any, limit: int) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if len(text) <= limit:
+        return text
+    return f"{text[: max(0, limit - 12)].rstrip()}...[trimmed]"
+
+
+def _compact_candidate_indicator(indicator: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(indicator, dict):
+        return {}
+    fields = (
+        "timeframe",
+        "last",
+        "trend",
+        "rsi",
+        "macd_signal",
+        "volume_ratio",
+        "spread_pct",
+        "funding_rate",
+        "open_interest_change",
+        "signal_summary",
+        "direction",
+        "rule_score",
+    )
+    return {
+        key: indicator.get(key)
+        for key in fields
+        if indicator.get(key) not in (None, "", [], {})
+    }
+
+
+def _compact_candidate_storage_payload(candidate: TradeCandidate) -> dict[str, Any]:
+    payload = _candidate_payload(candidate)
+    return {
+        "symbol": candidate.symbol,
+        "base": candidate.base,
+        "side": candidate.side,
+        "confidence": round(float(candidate.confidence or 0), 3),
+        "rule_score": round(float(_candidate_rule_score(candidate) or 0), 3),
+        "entry": round(float(candidate.entry or 0), 8),
+        "stop_loss": round(float(candidate.stop_loss or 0), 8),
+        "take_profit": round(float(candidate.take_profit or 0), 8),
+        "risk_reward": round(float(candidate.risk_reward or 0), 4),
+        "order_usdt": round(float(candidate.order_usdt or 0), 4),
+        "quantity": None if candidate.quantity is None else round(float(candidate.quantity), 8),
+        "spread_pct": None if candidate.spread_pct is None else round(float(candidate.spread_pct), 5),
+        "news_score": round(float(candidate.news_score or 0), 4),
+        "news_count": int(candidate.news_count or 0),
+        "win_probability_pct": None if candidate.win_probability_pct is None else round(float(candidate.win_probability_pct), 3),
+        "target_mode": candidate.target_mode,
+        "take_profit_pct": None if candidate.take_profit_pct is None else round(float(candidate.take_profit_pct), 3),
+        "stop_loss_pct": None if candidate.stop_loss_pct is None else round(float(candidate.stop_loss_pct), 3),
+        "price_take_profit_pct": None if candidate.price_take_profit_pct is None else round(float(candidate.price_take_profit_pct), 4),
+        "price_stop_loss_pct": None if candidate.price_stop_loss_pct is None else round(float(candidate.price_stop_loss_pct), 4),
+        "scan_source": candidate.scan_source,
+        "setup_quality": candidate.setup_quality,
+        "market_regime": candidate.market_regime,
+        "regime_confidence": None if candidate.regime_confidence is None else round(float(candidate.regime_confidence), 3),
+        "indicator_summary": _compact_candidate_indicator(payload.get("indicator_summary") or candidate.indicator_summary),
+        "reasons": [str(item) for item in (payload.get("reasons") or [])[:3]],
+        "warnings": [str(item) for item in (payload.get("warnings") or [])[:2]],
+    }
+
+
+def _compact_decision_reason_payload(decision: Decision, selected: TradeCandidate | None) -> dict[str, Any]:
+    return {
+        "risk_reasons": [str(item) for item in (decision.risk_check.reasons or [])[:3]],
+        "risk_warnings": [str(item) for item in (decision.risk_check.warnings or [])[:2]],
+        "candidate_reasons": [str(item) for item in ((selected.reasons if selected else []) or [])[:4]],
+        "candidate_warnings": [str(item) for item in ((selected.warnings if selected else []) or [])[:3]],
+    }
+
+
+def _compact_decision_payload(decision: Decision) -> dict[str, Any]:
+    selected = decision.selected
+    candidates = decision.candidates or []
+    return {
+        "created_at": to_jsonable(decision.created_at),
+        "mode": decision.mode,
+        "action": decision.action,
+        "selected_symbol": selected.symbol if selected else None,
+        "selected_side": selected.side if selected else None,
+        "selected_confidence": float(selected.confidence) if selected else None,
+        "candidate_count": len(candidates),
+        "top_symbols": [str(item.symbol) for item in candidates[:3]],
+        "risk_passed": bool(decision.risk_check.passed),
+        "execution_submitted": bool(decision.execution.submitted) if decision.execution else False,
+        "execution_order_id": decision.execution.order_id if decision.execution else None,
+    }
+
+
 def _candidate_from_payload(payload: dict[str, Any]) -> TradeCandidate:
     return TradeCandidate(
         symbol=str(payload.get("symbol") or ""),
@@ -1051,7 +1144,7 @@ def record_trade_candidates(config: dict[str, Any], candidates: list[TradeCandid
     now = _iso_now()
     rows: list[dict[str, Any]] = []
     for candidate in candidates:
-        payload = _candidate_payload(candidate)
+        payload = _compact_candidate_storage_payload(candidate)
         rows.append(
             {
                 "created_at": now,
@@ -1095,13 +1188,13 @@ def _decision_ai_metadata(decision: Decision) -> dict[str, Any]:
 def record_ai_trade_decision(config: dict[str, Any], decision: Decision) -> int:
     selected = decision.selected
     metadata = _decision_ai_metadata(decision)
-    candidate_payload = _candidate_payload(selected) if selected else {}
+    candidate_payload = _compact_candidate_storage_payload(selected) if selected else {}
     indicator = candidate_payload.get("indicator_summary") if isinstance(candidate_payload, dict) else {}
     entry = selected.entry if selected else None
     scan = decision.scan_comparison or {}
     execution = decision.execution or None
     market_regime = ((scan.get("market_regime") or {}) if isinstance(scan.get("market_regime"), dict) else {}) or {}
-    payload_json = json.dumps(to_jsonable(decision), ensure_ascii=False)
+    payload_json = json.dumps(_compact_decision_payload(decision), ensure_ascii=False)
     return insert_ai_trade_decision_row(
         config,
         {
@@ -1124,17 +1217,9 @@ def record_ai_trade_decision(config: dict[str, Any], decision: Decision) -> int:
             "trend": indicator.get("trend") if isinstance(indicator, dict) else None,
             "volume_change": _safe_float(indicator.get("volume_ratio")) if isinstance(indicator, dict) else None,
             "news_score": float(selected.news_score) if selected else None,
-            "reason_json": json.dumps(
-                {
-                    "risk_reasons": decision.risk_check.reasons,
-                    "risk_warnings": decision.risk_check.warnings,
-                    "candidate_reasons": selected.reasons if selected else [],
-                    "candidate_warnings": selected.warnings if selected else [],
-                },
-                ensure_ascii=False,
-            ),
-            "raw_prompt": metadata.get("raw_prompt"),
-            "raw_response": metadata.get("raw_response"),
+            "reason_json": json.dumps(_compact_decision_reason_payload(decision, selected), ensure_ascii=False),
+            "raw_prompt": _trim_text(metadata.get("raw_prompt"), 800),
+            "raw_response": _trim_text(metadata.get("raw_response"), 1200),
             "order_id": execution.order_id if execution else None,
             "trade_status": None,
             "pnl": None,
@@ -1157,6 +1242,25 @@ def record_ai_trade_decision(config: dict[str, Any], decision: Decision) -> int:
 
 
 def create_ai_trade_decision(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    snapshot_payload = payload.get("snapshot_json") if isinstance(payload.get("snapshot_json"), dict) else {}
+    if not snapshot_payload and isinstance(payload.get("snapshot"), dict):
+        snapshot_payload = dict(payload.get("snapshot") or {})
+    compact_snapshot = {}
+    if isinstance(snapshot_payload, dict) and snapshot_payload:
+        try:
+            compact_snapshot = _compact_candidate_storage_payload(candidate_from_payload(snapshot_payload))
+        except Exception:
+            compact_snapshot = snapshot_payload
+    compact_payload = payload.get("payload_json")
+    if not isinstance(compact_payload, dict):
+        compact_payload = {
+            "created_at": payload.get("created_at"),
+            "decision": payload.get("decision"),
+            "symbol": payload.get("symbol"),
+            "side": payload.get("side"),
+            "confidence": payload.get("confidence"),
+            "trade_status": payload.get("trade_status"),
+        }
     row = {
         "created_at": str(payload.get("created_at") or _iso_now()),
         "symbol": payload.get("symbol"),
@@ -1178,8 +1282,8 @@ def create_ai_trade_decision(config: dict[str, Any], payload: dict[str, Any]) ->
         "volume_change": payload.get("volume_change"),
         "news_score": payload.get("news_score"),
         "reason_json": json.dumps(payload.get("reason_json") or {}, ensure_ascii=False),
-        "raw_prompt": payload.get("raw_prompt"),
-        "raw_response": payload.get("raw_response"),
+        "raw_prompt": _trim_text(payload.get("raw_prompt"), 800),
+        "raw_response": _trim_text(payload.get("raw_response"), 1200),
         "order_id": payload.get("order_id"),
         "trade_status": payload.get("trade_status"),
         "pnl": payload.get("pnl"),
@@ -1195,8 +1299,8 @@ def create_ai_trade_decision(config: dict[str, Any], payload: dict[str, Any]) ->
         "experiment_name": payload.get("experiment_name"),
         "market_regime": payload.get("market_regime"),
         "regime_confidence": payload.get("regime_confidence"),
-        "snapshot_json": json.dumps(payload.get("snapshot_json") or {}, ensure_ascii=False),
-        "payload_json": json.dumps(payload, ensure_ascii=False),
+        "snapshot_json": json.dumps(compact_snapshot, ensure_ascii=False),
+        "payload_json": json.dumps(compact_payload, ensure_ascii=False),
     }
     row["id"] = insert_ai_trade_decision_row(config, row)
     return row

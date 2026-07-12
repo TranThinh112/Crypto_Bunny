@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from typing import Any
@@ -8,8 +9,9 @@ from typing import Any
 _ATLAS_LOCK = threading.RLock()
 _ATLAS_CLIENTS: dict[tuple[str, str], Any] = {}
 _ATLAS_INDEXES_READY: set[tuple[str, str]] = set()
+LOGGER = logging.getLogger(__name__)
 
-_ATLAS_COLLECTION_INDEX_SPECS: dict[str, list[list[tuple[str, int]]]] = {
+_ATLAS_COLLECTION_INDEX_SPECS: dict[str, list[Any]] = {
     "decisions": [
         [("id", -1)],
         [("created_at", -1), ("id", -1)],
@@ -18,6 +20,7 @@ _ATLAS_COLLECTION_INDEX_SPECS: dict[str, list[list[tuple[str, int]]]] = {
         [("created_at", -1), ("id", -1)],
         [("timeframe", 1), ("created_at", -1), ("id", -1)],
         [("symbol", 1), ("timeframe", 1), ("created_at", -1), ("id", -1)],
+        {"fields": [("expires_at", 1)], "kwargs": {"expireAfterSeconds": 0}},
     ],
     "pending_orders": [
         [("status", 1), ("updated_at", -1), ("created_at", -1), ("id", -1)],
@@ -34,10 +37,28 @@ _ATLAS_COLLECTION_INDEX_SPECS: dict[str, list[list[tuple[str, int]]]] = {
     "trade_candidates": [
         [("is_used", 1), ("created_at", -1), ("id", -1)],
         [("is_used", 1), ("rule_score", -1), ("gpt_confidence", -1), ("risk_reward", -1), ("id", 1)],
+        {"fields": [("expires_at", 1)], "kwargs": {"expireAfterSeconds": 0}},
     ],
     "ai_trade_decisions": [
         [("created_at", -1), ("id", -1)],
         [("decision", 1), ("trade_status", 1), ("created_at", -1), ("id", -1)],
+        {"fields": [("expires_at", 1)], "kwargs": {"expireAfterSeconds": 0}},
+    ],
+    "market_guard_observations": [
+        [("observed_at", -1), ("id", -1)],
+        {"fields": [("expires_at", 1)], "kwargs": {"expireAfterSeconds": 0}},
+    ],
+    "market_regime_history": [
+        [("created_at", -1), ("id", -1)],
+        {"fields": [("expires_at", 1)], "kwargs": {"expireAfterSeconds": 0}},
+    ],
+    "replay_history": [
+        [("replay_at", -1), ("id", -1)],
+        {"fields": [("expires_at", 1)], "kwargs": {"expireAfterSeconds": 0}},
+    ],
+    "paper_trades": [
+        [("status", 1), ("updated_at", -1), ("created_at", -1), ("id", -1)],
+        {"fields": [("expires_at", 1)], "kwargs": {"expireAfterSeconds": 0}},
     ],
 }
 
@@ -87,16 +108,36 @@ def _load_pymongo() -> Any:
     return MongoClient
 
 
+def _atlas_write_blocked(exc: Exception) -> bool:
+    code = getattr(exc, "code", None)
+    message = str(exc).lower()
+    return code == 8000 or "space quota" in message or "writes are blocked" in message
+
+
 def _ensure_atlas_indexes(database: Any, cache_key: tuple[str, str]) -> None:
     if cache_key in _ATLAS_INDEXES_READY:
         return
     with _ATLAS_LOCK:
         if cache_key in _ATLAS_INDEXES_READY:
             return
-        for collection_name, index_specs in _ATLAS_COLLECTION_INDEX_SPECS.items():
-            collection = database[collection_name]
-            for index_fields in index_specs:
-                collection.create_index(index_fields)
+        try:
+            for collection_name, index_specs in _ATLAS_COLLECTION_INDEX_SPECS.items():
+                collection = database[collection_name]
+                for index_spec in index_specs:
+                    if isinstance(index_spec, dict):
+                        index_fields = index_spec.get("fields") or []
+                        index_kwargs = dict(index_spec.get("kwargs") or {})
+                    else:
+                        index_fields = index_spec
+                        index_kwargs = {}
+                    collection.create_index(index_fields, **index_kwargs)
+        except Exception as exc:
+            if not _atlas_write_blocked(exc):
+                raise
+            LOGGER.warning(
+                "Skipping Atlas index ensure because cluster writes are blocked: %s",
+                exc,
+            )
         _ATLAS_INDEXES_READY.add(cache_key)
 
 
