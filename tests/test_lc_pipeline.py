@@ -97,6 +97,33 @@ class LcPipelineTest(TestCase):
         if tmpdir:
             tmpdir.cleanup()
 
+    def test_pipeline_result_explains_skipped_slots(self) -> None:
+        config = self._config()
+        now = datetime(2026, 7, 7, 0, 5, tzinfo=timezone.utc)
+
+        result = update_lc_internal_pipeline(config, [], now=now)
+
+        self.assertIn("no_candidates", result["skip_reasons"]["hourly"])
+        self.assertIn("slot_closed", result["skip_reasons"]["two_hour"])
+        self.assertIn("waiting_for_aligned_1h_input", result["skip_reasons"]["two_hour"])
+        self.assertEqual(
+            result["two_hour_sources"]["expected_slots"],
+            ["2026-07-07T05:00:00+07:00", "2026-07-07T06:00:00+07:00"],
+        )
+        self.assertEqual(result["two_hour_sources"]["aligned_input_count"], 0)
+        self.assertIn("slot_closed", result["skip_reasons"]["four_hour"])
+        self.assertIn("waiting_for_aligned_2h_input", result["skip_reasons"]["four_hour"])
+
+    def test_pipeline_result_explains_already_created_hourly_slot(self) -> None:
+        config = self._config()
+        now = datetime(2026, 7, 7, 0, 5, tzinfo=timezone.utc)
+
+        update_lc_internal_pipeline(config, [_candidate("BTC/USDT:USDT", 65)], now=now)
+        result = update_lc_internal_pipeline(config, [_candidate("ETH/USDT:USDT", 66)], now=now)
+
+        self.assertIn("slot_already_created", result["skip_reasons"]["hourly"])
+        self.assertFalse(result["created_hourly"])
+
     def test_two_hour_notification_infers_source_windows_from_one_hour_history(self) -> None:
         config = self._config()
         state = {

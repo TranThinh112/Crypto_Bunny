@@ -3220,8 +3220,20 @@ def _update_lc_internal_pipeline_impl(
         "created_four_hour": False,
         "promoted": [],
         "blocked_symbols": sorted(blocked_symbols),
+        "skip_reasons": {
+            "hourly": [],
+            "two_hour": [],
+            "four_hour": [],
+            "undecided_recheck": [],
+        },
     }
 
+    if not candidates:
+        result["skip_reasons"]["hourly"].append("no_candidates")
+    if not hourly_slot_open:
+        result["skip_reasons"]["hourly"].append("slot_closed")
+    if state.get("last_hourly_slot") == hourly_slot:
+        result["skip_reasons"]["hourly"].append("slot_already_created")
     if candidates and hourly_slot_open and state.get("last_hourly_slot") != hourly_slot:
         local_now = _local_time(config, now)
         next_hourly_index = int(state.get("daily_one_hour_counter") or 0) + 1
@@ -3303,6 +3315,18 @@ def _update_lc_internal_pipeline_impl(
         config=config,
         require_aligned_sources=True,
     )
+    result["two_hour_sources"] = {
+        "expected_slots": expected_hourly_slots,
+        "aligned_slots": [str(window.get("slot") or "") for window in aligned_hourly_events if isinstance(window, dict)],
+        "aligned_event_count": len(aligned_hourly_events),
+        "aligned_input_count": aligned_hourly_input_count,
+    }
+    if not two_hour_slot_open:
+        result["skip_reasons"]["two_hour"].append("slot_closed")
+    if not has_two_hour_inputs:
+        result["skip_reasons"]["two_hour"].append("waiting_for_aligned_1h_input")
+    if current_two_hour_event is not None:
+        result["skip_reasons"]["two_hour"].append("slot_already_created")
     if two_hour_slot_open and has_two_hour_inputs and current_two_hour_event is None:
         combined: list[dict[str, Any]] = []
         for window in aligned_hourly_events:
@@ -3407,6 +3431,18 @@ def _update_lc_internal_pipeline_impl(
         config=config,
         require_aligned_sources=True,
     )
+    result["four_hour_sources"] = {
+        "expected_slots": expected_two_hour_slots,
+        "aligned_slots": [str(window.get("slot") or "") for window in aligned_two_hour_events if isinstance(window, dict)],
+        "aligned_event_count": len(aligned_two_hour_events),
+        "aligned_input_count": aligned_two_hour_input_count,
+    }
+    if not four_hour_slot_open:
+        result["skip_reasons"]["four_hour"].append("slot_closed")
+    if not has_four_hour_inputs:
+        result["skip_reasons"]["four_hour"].append("waiting_for_aligned_2h_input")
+    if current_four_hour_event is not None:
+        result["skip_reasons"]["four_hour"].append("slot_already_created")
     if four_hour_slot_open and has_four_hour_inputs and current_four_hour_event is None:
         combined_two_hour: list[dict[str, Any]] = []
         for window in aligned_two_hour_events:
@@ -3492,6 +3528,11 @@ def _update_lc_internal_pipeline_impl(
         result["created_four_hour"] = True
         result["four_hour_event"] = four_hour_event
         result["four_hour_recheck"] = four_hour_recheck
+    if not undecided_recheck_due:
+        if state.get("last_undecided_recheck_slot") == undecided_recheck_slot:
+            result["skip_reasons"]["undecided_recheck"].append("slot_already_rechecked")
+        else:
+            result["skip_reasons"]["undecided_recheck"].append("not_due")
     if undecided_recheck_due:
         state["last_recheck_at"] = now.isoformat()
         state["last_undecided_recheck_slot"] = undecided_recheck_slot
