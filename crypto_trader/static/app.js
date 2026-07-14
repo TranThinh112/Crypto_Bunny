@@ -1602,11 +1602,11 @@ function renderAiDecisionModuleChart(module, rows) {
   const totalRow = aiDecisionRow(rows, "total_decisions");
   const longPercent = aiDecisionRow(rows, "long_percent");
   const shortPercent = aiDecisionRow(rows, "short_percent");
-  const distributionRows = [
+  const entryDirectionRows = [
     aiDecisionChartRow(rows, "long_count", 1, 1, `Số LONG: ${aiDecisionRow(rows, "long_count")?.value ?? "-"} | Tỷ lệ LONG: ${longPercent?.value ?? "-"}`),
     aiDecisionChartRow(rows, "short_count", 2, 2, `Số SHORT: ${aiDecisionRow(rows, "short_count")?.value ?? "-"} | Tỷ lệ SHORT: ${shortPercent?.value ?? "-"}`),
-    aiDecisionChartRow(rows, "no_trade_count", 3, 3),
   ];
+  const entryTotal = entryDirectionRows.filter(Boolean).reduce((sum, row) => sum + Number(row.rawNumericValue || 0), 0);
   const winrateRows = [
     aiDecisionChartRow(rows, "winrate_long", 6, 6),
     aiDecisionChartRow(rows, "winrate_short", 7, 7),
@@ -1623,7 +1623,7 @@ function renderAiDecisionModuleChart(module, rows) {
     <section class="module-chart-panel module-chart-panel-compact module-ai-decision-panel">
       <div class="module-chart-legend module-ai-chart-stack">
         ${renderAiDecisionKpi(totalRow)}
-        ${renderAiDecisionDonut(distributionRows, "Decision Distribution", "AI", "decision")}
+        ${renderAiDecisionDonut(entryDirectionRows, "Entry Direction", entryTotal ? String(entryTotal) : "0", "LONG/SHORT")}
         ${renderAiDecisionBarSvg(winrateRows, "Decision Performance · Winrate", "LONG vs SHORT", "ai-winrate")}
         ${renderAiDecisionBarSvg(profitRows, "Decision Performance · Profit Factor", "LONG vs SHORT", "ai-profit")}
         ${renderAiDecisionBarSvg(confidenceRows, "AI Confidence", "LONG vs SHORT", "ai-confidence")}
