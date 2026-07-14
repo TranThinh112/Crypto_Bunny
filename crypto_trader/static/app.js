@@ -1013,7 +1013,10 @@ function moduleStatusLabel(status) {
 
 function closeSystemModuleDetail() {
   if (refs.systemModuleOverlay) refs.systemModuleOverlay.hidden = true;
-  if (refs.systemModuleDetail) refs.systemModuleDetail.innerHTML = "";
+  if (refs.systemModuleDetail) {
+    refs.systemModuleDetail.classList.remove("module-detail-chart-scroll");
+    refs.systemModuleDetail.innerHTML = "";
+  }
   if (refs.systemModuleGrid) {
     refs.systemModuleGrid.querySelectorAll(".module-item").forEach((item) => item.classList.remove("selected"));
   }
@@ -1026,6 +1029,7 @@ function renderHealthCriterionDetail(item) {
   if (!refs.systemModuleDetail || !refs.systemModuleOverlay || !item) return;
   const evidence = Array.isArray(item.evidence) ? item.evidence : [];
   refs.systemModuleOverlay.hidden = false;
+  refs.systemModuleDetail.classList.remove("module-detail-chart-scroll");
   refs.systemModuleDetail.innerHTML = `
     <button class="module-close" type="button" aria-label="Đóng">×</button>
     <div class="module-detail-head">
@@ -1848,6 +1852,7 @@ function renderModuleDetail(module) {
   const runtimeUpdatedLabel = moduleUpdatedLabel(module);
   const changedVariableCount = moduleChangedVariableCount(module, rows);
   refs.systemModuleOverlay.hidden = false;
+  refs.systemModuleDetail.classList.add("module-detail-chart-scroll");
   refs.systemModuleDetail.innerHTML = `
     <button id="systemModuleClose" class="module-close" type="button" aria-label="Đóng">×</button>
     <div class="module-detail-head">
@@ -1866,12 +1871,14 @@ function renderModuleDetail(module) {
       <div><span>File module</span><strong>${escapeHtml(fileLabel)}</strong></div>
       <div><span>Kích thước</span><strong>${file.size_bytes === undefined || file.size_bytes === null ? "-" : bytesLabel(file.size_bytes)}</strong></div>
     </div>
-    ${renderModuleChart(module, rows)}
-    ${auxRows.length ? `
-      <div class="module-chart-meta">
-        ${auxRows.map((row) => `<div><span>${escapeHtml(row.label || "-")}</span><strong>${escapeHtml(formatCardValue(row.label, row.value))}</strong></div>`).join("")}
-      </div>
-    ` : ""}
+    <div class="module-chart-scroll">
+      ${renderModuleChart(module, rows)}
+      ${auxRows.length ? `
+        <div class="module-chart-meta">
+          ${auxRows.map((row) => `<div><span>${escapeHtml(row.label || "-")}</span><strong>${escapeHtml(formatCardValue(row.label, row.value))}</strong></div>`).join("")}
+        </div>
+      ` : ""}
+    </div>
   `;
   const metaBlocks = refs.systemModuleDetail.querySelectorAll(".module-meta > div");
   if (metaBlocks[0]) {

@@ -1467,6 +1467,30 @@ tr:last-child td {
   overflow: auto;
 }
 
+.module-detail.module-detail-chart-scroll {
+  display: flex;
+  flex-direction: column;
+  height: min(900px, calc(100vh - 48px));
+  overflow: hidden;
+}
+
+.module-detail-chart-scroll .module-detail-head,
+.module-detail-chart-scroll > .module-meta {
+  flex: 0 0 auto;
+}
+
+.module-chart-scroll {
+  flex: 1 1 auto;
+  min-height: 260px;
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 8px;
+  margin-right: -8px;
+  scrollbar-gutter: stable;
+}
+
 .module-close {
   position: absolute;
   top: 12px;
@@ -1925,6 +1949,14 @@ tr:last-child td {
 
   .module-stat-table > div:last-child {
     border-bottom: 0;
+  }
+
+  .module-detail.module-detail-chart-scroll {
+    height: calc(100vh - 48px);
+  }
+
+  .module-chart-scroll {
+    min-height: 220px;
   }
 }
 
