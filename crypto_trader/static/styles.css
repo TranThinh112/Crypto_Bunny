@@ -1623,6 +1623,29 @@ tr:last-child td {
   grid-template-columns: minmax(380px, 1.35fr) minmax(280px, 1fr);
 }
 
+.module-ai-decision-panel {
+  align-items: stretch;
+}
+
+.module-ai-chart-stack,
+.module-ai-variable-list {
+  max-height: min(620px, calc(100vh - 260px));
+  min-height: 500px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 8px;
+  scrollbar-gutter: stable;
+}
+
+.module-ai-chart-stack {
+  align-content: start;
+  overflow-x: hidden;
+}
+
+.module-ai-variable-list {
+  max-height: min(620px, calc(100vh - 260px)) !important;
+}
+
 .module-chart-wrap {
   display: grid;
   place-items: center;
@@ -1957,6 +1980,12 @@ tr:last-child td {
 
   .module-chart-scroll {
     min-height: 220px;
+  }
+
+  .module-ai-chart-stack,
+  .module-ai-variable-list {
+    max-height: 520px;
+    min-height: 420px;
   }
 }
 

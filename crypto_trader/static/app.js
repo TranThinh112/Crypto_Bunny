@@ -1620,15 +1620,15 @@ function renderAiDecisionModuleChart(module, rows) {
     aiDecisionChartRow(rows, "avg_confidence_short", 9, 9),
   ];
   return `
-    <section class="module-chart-panel module-chart-panel-compact">
-      <div class="module-chart-legend">
+    <section class="module-chart-panel module-chart-panel-compact module-ai-decision-panel">
+      <div class="module-chart-legend module-ai-chart-stack">
         ${renderAiDecisionKpi(totalRow)}
         ${renderAiDecisionDonut(distributionRows, "Decision Distribution", "AI", "decision")}
         ${renderAiDecisionBarSvg(winrateRows, "Decision Performance · Winrate", "LONG vs SHORT", "ai-winrate")}
         ${renderAiDecisionBarSvg(profitRows, "Decision Performance · Profit Factor", "LONG vs SHORT", "ai-profit")}
         ${renderAiDecisionBarSvg(confidenceRows, "AI Confidence", "LONG vs SHORT", "ai-confidence")}
       </div>
-      <div class="module-chart-legend compact">${renderModuleVariableRows(module, aiDecisionLegendRows(rows), false)}</div>
+      <div class="module-chart-legend compact module-ai-variable-list">${renderModuleVariableRows(module, aiDecisionLegendRows(rows), false)}</div>
     </section>
   `;
 }
