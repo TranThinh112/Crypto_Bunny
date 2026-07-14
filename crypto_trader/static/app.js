@@ -1246,7 +1246,7 @@ const AI_DECISION_ROW_CONFIG = [
   ["total_decisions", "Tổng số decision", "Tổng số quyết định AI giao dịch đã được ghi nhận vào hệ thống.", "AI đã đưa ra nhiều quyết định hơn.", "AI đưa ra ít quyết định hơn."],
   ["long_count", "Số LONG", "Số lần AI quyết định ENTER_LONG.", "AI ưu tiên LONG nhiều hơn.", "AI giảm số quyết định LONG."],
   ["short_count", "Số SHORT", "Số lần AI quyết định ENTER_SHORT.", "AI ưu tiên SHORT nhiều hơn.", "AI giảm số quyết định SHORT."],
-  ["no_trade_count", "Số NO_TRADE", "Số lần AI quyết định NO_TRADE.", "AI giao dịch thận trọng hơn.", "AI sẵn sàng vào lệnh nhiều hơn."],
+  ["no_trade_count", "5.5 từ chối/xóa setup", "Số lần GPT-5.5 từ chối vào lệnh hoặc xóa setup; không tính các lần giữ setup.", "5.5 từ chối/xóa setup nhiều hơn.", "5.5 từ chối/xóa setup ít hơn."],
   ["long_percent", "Tỷ lệ LONG", "Tỷ lệ quyết định LONG trên tổng số decision.", "AI đang thiên về LONG.", "AI giảm xu hướng LONG."],
   ["short_percent", "Tỷ lệ SHORT", "Tỷ lệ quyết định SHORT trên tổng số decision.", "AI đang thiên về SHORT.", "AI giảm xu hướng SHORT."],
   ["winrate_long", "Winrate LONG", "Tỷ lệ thắng của các lệnh LONG.", "LONG đang hoạt động hiệu quả hơn.", "Hiệu quả LONG giảm."],

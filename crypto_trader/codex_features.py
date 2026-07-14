@@ -5,6 +5,7 @@ import json
 import random
 import re
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from collections import Counter
@@ -73,6 +74,7 @@ OPEN_EXECUTION_STATUSES = {"OPEN"}
 CLOSED_EXECUTION_STATUSES = {"WIN", "LOSS", "BREAKEVEN", "CLOSED"}
 STATE_VERSION = "python-codex-v1"
 AI_CALL_HISTORY_STATE_KEY = "ai_call_history"
+AI_CALL_STATUS_STATS_STATE_KEY = "ai_call_status_stats"
 
 
 def _utcnow() -> datetime:
@@ -599,6 +601,91 @@ def recent_ai_call_history(config: dict[str, Any], limit: int = 10) -> list[dict
     return [item for item in items if isinstance(item, dict)][-limit:]
 
 
+def _ascii_fold(value: Any) -> str:
+    text = str(value or "").lower()
+    normalized = unicodedata.normalize("NFKD", text)
+    return "".join(char for char in normalized if not unicodedata.combining(char))
+
+
+def _is_gpt55_review_call(item: dict[str, Any]) -> bool:
+    model = _ascii_fold(item.get("model"))
+    role = _ascii_fold(item.get("role"))
+    review_kind = _ascii_fold(item.get("review_kind"))
+    route = _ascii_fold(item.get("route"))
+    return (
+        "5.5" in model
+        or role == "okx"
+        or review_kind == "lc_okx_review"
+        or "lc_okx" in route
+    )
+
+
+def _is_gpt55_no_trade_rejection(item: dict[str, Any]) -> bool:
+    if not _is_gpt55_review_call(item):
+        return False
+    status = _ascii_fold(item.get("status") or item.get("decision") or item.get("result"))
+    if not status:
+        return False
+    if any(pattern in status for pattern in ("giu setup", "giu theo doi", "giu lai setup", "keep", "watchlist")):
+        return False
+    return any(
+        pattern in status
+        for pattern in (
+            "xoa setup",
+            "khong vao lenh",
+            "no_trade",
+            "no trade",
+            "tu choi",
+            "reject",
+            "rejected",
+            "delete",
+            "cancel",
+            "canceled",
+            "cancelled",
+        )
+    )
+
+
+def _ai_call_status_stats_from_history(items: list[dict[str, Any]]) -> dict[str, Any]:
+    no_trade_count = sum(1 for item in items if _is_gpt55_no_trade_rejection(item))
+    return {
+        "version": 1,
+        "no_trade_count": no_trade_count,
+    }
+
+
+def _load_ai_call_status_stats(config: dict[str, Any], *, seed_from_history: bool = True) -> dict[str, Any]:
+    raw = get_journal_state(config, AI_CALL_STATUS_STATS_STATE_KEY)
+    if raw:
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            payload = {}
+        if isinstance(payload, dict):
+            return {
+                "version": int(payload.get("version") or 1),
+                "no_trade_count": max(0, int(payload.get("no_trade_count") or 0)),
+                "updated_at": payload.get("updated_at"),
+            }
+    if not seed_from_history:
+        return {"version": 1, "no_trade_count": 0}
+    stats = _ai_call_status_stats_from_history(recent_ai_call_history(config, limit=50))
+    stats["updated_at"] = _iso_now()
+    set_journal_state(config, AI_CALL_STATUS_STATS_STATE_KEY, json.dumps(stats, ensure_ascii=False))
+    return stats
+
+
+def _record_ai_call_status_stats(config: dict[str, Any], item: dict[str, Any]) -> None:
+    try:
+        stats = _load_ai_call_status_stats(config, seed_from_history=True)
+        if _is_gpt55_no_trade_rejection(item):
+            stats["no_trade_count"] = max(0, int(stats.get("no_trade_count") or 0)) + 1
+        stats["updated_at"] = _iso_now()
+        set_journal_state(config, AI_CALL_STATUS_STATS_STATE_KEY, json.dumps(stats, ensure_ascii=False))
+    except Exception:
+        return
+
+
 def _record_ai_call_history(config: dict[str, Any], item: dict[str, Any]) -> None:
     try:
         history = recent_ai_call_history(config, limit=50)
@@ -694,6 +781,7 @@ def _notify_openai_api_call(
         "prompt_tokens": _safe_int((usage or {}).get("prompt_tokens")),
         "completion_tokens": _safe_int((usage or {}).get("completion_tokens")),
     }
+    _record_ai_call_status_stats(config, item)
     _record_ai_call_history(config, item)
     if not _telegram_notify_ai_api_calls(config):
         return
@@ -725,6 +813,7 @@ def record_ai_call_event(
 ) -> None:
     payload = dict(item)
     payload.setdefault("created_at", _iso_now())
+    _record_ai_call_status_stats(config, payload)
     _record_ai_call_history(config, payload)
     if not notify_telegram or not _telegram_notify_ai_api_calls(config):
         return
@@ -1333,7 +1422,8 @@ def ai_trade_decision_stats(config: dict[str, Any]) -> dict[str, Any]:
     total = len(rows)
     long_rows = [row for row in rows if row.get("decision") == "ENTER_LONG"]
     short_rows = [row for row in rows if row.get("decision") == "ENTER_SHORT"]
-    no_trade_rows = [row for row in rows if row.get("decision") == "NO_TRADE"]
+    ai_call_stats = _load_ai_call_status_stats(config)
+    no_trade_count = max(0, int(ai_call_stats.get("no_trade_count") or 0))
 
     def winrate(items: list[dict[str, Any]]) -> float:
         closed = [row for row in items if row.get("trade_status") in {"WIN", "LOSS", "BREAKEVEN"}]
@@ -1362,7 +1452,7 @@ def ai_trade_decision_stats(config: dict[str, Any]) -> dict[str, Any]:
         "totalDecisions": total,
         "longCount": len(long_rows),
         "shortCount": len(short_rows),
-        "noTradeCount": len(no_trade_rows),
+        "noTradeCount": no_trade_count,
         "longPercent": long_ratio,
         "shortPercent": short_ratio,
         "winrateLong": winrate(long_rows),

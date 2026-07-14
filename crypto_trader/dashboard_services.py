@@ -683,7 +683,7 @@ def system_modules_payload(
                 _module_row("total_decisions", decision_stats.get("totalDecisions"), "Tổng số quyết định AI giao dịch đã được hệ thống ghi vào DB.", attention=True),
                 _module_row("long_count", decision_stats.get("longCount"), "Số quyết định vào lệnh LONG đã được ghi nhận."),
                 _module_row("short_count", decision_stats.get("shortCount"), "Số quyết định vào lệnh SHORT đã được ghi nhận."),
-                _module_row("no_trade_count", decision_stats.get("noTradeCount"), "Số lần AI chọn không vào lệnh."),
+                _module_row("no_trade_count", decision_stats.get("noTradeCount"), "Số lần GPT-5.5 từ chối vào lệnh hoặc xóa setup; không tính các lần giữ setup."),
                 _module_row("long_percent", decision_stats.get("longPercent"), "Tỷ trọng LONG trong toàn bộ quyết định AI.", attention=True),
                 _module_row("short_percent", decision_stats.get("shortPercent"), "Tỷ trọng SHORT trong toàn bộ quyết định AI.", attention=True),
                 _module_row("winrate_long", decision_stats.get("winrateLong"), "Win rate của nhóm quyết định LONG đã đóng lệnh.", attention=True),

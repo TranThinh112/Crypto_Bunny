@@ -36,6 +36,8 @@ class CodexFeaturesTest(TestCase):
     def _config(self) -> dict:
         return {
             "_atlas_test_mode": True,
+            "_config_path": str(Path(self._tmpdir.name) / "config.yaml"),
+            "_config_dir": self._tmpdir.name,
             "notifications": {
                 "telegram": {
                     "enabled": True,
@@ -282,7 +284,7 @@ class CodexFeaturesTest(TestCase):
         self.assertEqual(stats["totalDecisions"], 3)
         self.assertEqual(stats["longCount"], 1)
         self.assertEqual(stats["shortCount"], 1)
-        self.assertEqual(stats["noTradeCount"], 1)
+        self.assertEqual(stats["noTradeCount"], 0)
         self.assertEqual(stats["longPercent"], 33.33)
         self.assertEqual(stats["shortPercent"], 33.33)
         self.assertEqual(stats["winrateLong"], 100.0)
@@ -291,3 +293,50 @@ class CodexFeaturesTest(TestCase):
         self.assertEqual(stats["avgConfidenceShort"], 83.0)
         self.assertEqual(stats["profitFactorLong"], 999.0)
         self.assertEqual(stats["profitFactorShort"], 0.0)
+
+    @patch("crypto_trader.codex_features.list_ai_trade_decision_stat_rows")
+    def test_ai_trade_decision_stats_counts_only_gpt55_delete_or_reject_as_no_trade(self, list_rows) -> None:
+        config = self._config()
+        list_rows.return_value = [
+            {"decision": "ENTER_LONG", "trade_status": None, "confidence": 91, "pnl": 0},
+            {"decision": "ENTER_SHORT", "trade_status": None, "confidence": 83, "pnl": 0},
+            {"decision": "NO_TRADE", "trade_status": None, "confidence": None, "pnl": 0},
+        ]
+
+        record_ai_call_event(
+            config,
+            {"role": "okx", "review_kind": "lc_okx_review", "model": "gpt-5.5", "status": "GIỮ SETUP"},
+            notify_telegram=False,
+        )
+        record_ai_call_event(
+            config,
+            {"role": "okx", "review_kind": "lc_okx_review", "model": "gpt-5.5", "status": "GIỮ THEO DÕI"},
+            notify_telegram=False,
+        )
+        record_ai_call_event(
+            config,
+            {"role": "okx", "review_kind": "lc_okx_review", "model": "gpt-5.5", "status": "XÓA SETUP"},
+            notify_telegram=False,
+        )
+        record_ai_call_event(
+            config,
+            {"role": "okx", "model": "gpt-5.5", "status": "KHÔNG VÀO LỆNH"},
+            notify_telegram=False,
+        )
+        record_ai_call_event(
+            config,
+            {"role": "okx", "model": "gpt-5.5", "status": "NO_TRADE"},
+            notify_telegram=False,
+        )
+        record_ai_call_event(
+            config,
+            {"role": "mini", "model": "gpt-5.4-mini", "status": "NO_TRADE"},
+            notify_telegram=False,
+        )
+
+        stats = ai_trade_decision_stats(config)
+
+        self.assertEqual(stats["totalDecisions"], 3)
+        self.assertEqual(stats["longCount"], 1)
+        self.assertEqual(stats["shortCount"], 1)
+        self.assertEqual(stats["noTradeCount"], 3)
