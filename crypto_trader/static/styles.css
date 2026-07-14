@@ -1821,6 +1821,13 @@ tr:last-child td {
   border-radius: 7px;
   background: #fff;
   padding: 8px 10px;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
+}
+
+.module-chart-meta.active .module-total-anchor {
+  border-color: var(--teal);
+  box-shadow: 0 6px 16px rgba(10, 31, 68, 0.1);
+  transform: translateY(-1px);
 }
 
 .module-chart-meta span {

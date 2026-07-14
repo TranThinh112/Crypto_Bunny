@@ -1415,6 +1415,8 @@ function formatBiasWarningValue(value) {
 function renderModuleVariableRows(module, chartRows, showShare = false) {
   return chartRows.map((row, index) => {
     const chartIndex = row.chartIndex ?? index;
+    const aiKey = row.aiDecisionKey ? String(row.aiDecisionKey) : "";
+    const totalTarget = aiKey === "total_decisions" ? "ai-entry-total" : "";
     const trend = {
       ...moduleTrendMeaning(row),
       ...(row.trendUp ? { up: row.trendUp } : {}),
@@ -1427,7 +1429,7 @@ function renderModuleVariableRows(module, chartRows, showShare = false) {
       ? `<small class="module-chart-value-line"><span>Hiển thị:</span><span class="module-chart-delta flat">${escapeHtml(formatBiasWarningValue(row.value))}</span></small>`
       : `<small class="module-chart-value-line"><span>Giá trị hiện tại: ${escapeHtml(currentValue)}</span><span class="module-chart-delta ${delta.state}">${escapeHtml(delta.text)}</span></small>`;
     return `
-      <button class="module-chart-legend-item ${row.attention ? "attention" : ""}" type="button" data-chart-index="${chartIndex}" title="${escapeHtml(row.label || "-")}: ${escapeHtml(currentValue)}">
+      <button class="module-chart-legend-item ${row.attention ? "attention" : ""}" type="button" data-chart-index="${chartIndex}" ${aiKey ? `data-ai-key="${escapeHtml(aiKey)}"` : ""} ${totalTarget ? `data-chart-total-target="${totalTarget}"` : ""} title="${escapeHtml(row.label || "-")}: ${escapeHtml(currentValue)}">
         <span class="module-chart-swatch" style="background:${row.color}"></span>
         <div>
           <strong>${escapeHtml(row.label || "-")}</strong>
@@ -1487,8 +1489,8 @@ function aiDecisionLegendRows(rows) {
 function renderAiDecisionKpi(row) {
   if (!row) return "";
   return `
-    <div class="module-chart-meta">
-      <div>
+    <div class="module-chart-meta" data-chart-total-target="ai-entry-total">
+      <div class="module-total-anchor">
         <span>${escapeHtml(row.label || "Tổng số decision")}</span>
         <strong>${escapeHtml(moduleLegendCurrentValue(row))}</strong>
       </div>
@@ -1517,7 +1519,7 @@ function renderAiDecisionDonut(rows, title, centerLabel, caption) {
     <div>
       <strong>${escapeHtml(title)}</strong>
       <div class="module-chart-wrap">
-        <svg class="module-donut" viewBox="0 0 200 200" role="img" aria-label="${escapeHtml(title)}">
+        <svg class="module-donut" data-chart-total-target="ai-entry-total" viewBox="0 0 200 200" role="img" aria-label="${escapeHtml(title)}">
           ${segments}
           <circle cx="100" cy="100" r="39" fill="#fbfcfc"></circle>
           <text x="100" y="96" text-anchor="middle" class="module-donut-total">${escapeHtml(centerLabel)}</text>
@@ -1814,8 +1816,43 @@ function bindModuleChartInteractions() {
     calloutText.setAttribute("x", String(targetX + 8));
     calloutText.setAttribute("y", String(targetY + 15));
   };
+  const showTotalCallout = (item) => {
+    const target = item.getAttribute("data-chart-total-target");
+    if (!target) return false;
+    const svg = detail.querySelector(`.module-donut[data-chart-total-target="${target}"]`);
+    if (!svg) return false;
+    const callout = svg.querySelector(".module-chart-callout");
+    const calloutLine = svg.querySelector(".module-chart-callout-line");
+    const calloutBox = svg.querySelector(".module-chart-callout-box");
+    const calloutText = svg.querySelector(".module-chart-callout-text");
+    if (!callout || !calloutLine || !calloutBox || !calloutText) return false;
+    const label = item.querySelector("strong")?.textContent || item.getAttribute("title") || "Total";
+    const viewWidth = svg.viewBox.baseVal.width || 200;
+    const boxWidth = Math.min(viewWidth - 16, Math.max(102, String(label).length * 6.8 + 16));
+    const targetX = Math.max(8, (viewWidth - boxWidth) / 2);
+    const targetY = 10;
+    detail.querySelectorAll(`.module-chart-segment`).forEach((segment) => {
+      if (segment.ownerSVGElement === svg) segment.classList.add("active");
+    });
+    detail.querySelectorAll(`.module-chart-meta[data-chart-total-target="${target}"]`).forEach((node) => {
+      node.classList.add("active");
+    });
+    callout.hidden = false;
+    calloutLine.setAttribute("x1", "100");
+    calloutLine.setAttribute("y1", "58");
+    calloutLine.setAttribute("x2", String(targetX + boxWidth / 2));
+    calloutLine.setAttribute("y2", String(targetY + 22));
+    calloutBox.setAttribute("x", String(targetX));
+    calloutBox.setAttribute("y", String(targetY));
+    calloutBox.setAttribute("width", String(boxWidth));
+    calloutBox.setAttribute("height", "22");
+    calloutText.textContent = label;
+    calloutText.setAttribute("x", String(targetX + 8));
+    calloutText.setAttribute("y", String(targetY + 15));
+    return true;
+  };
   const clearActive = () => {
-    detail.querySelectorAll(".module-chart-segment.active, .module-chart-legend-item.active").forEach((node) => {
+    detail.querySelectorAll(".module-chart-segment.active, .module-chart-legend-item.active, .module-chart-meta.active").forEach((node) => {
       node.classList.remove("active");
     });
     detail.querySelectorAll(".module-chart-callout").forEach((node) => {
@@ -1829,6 +1866,7 @@ function bindModuleChartInteractions() {
       clearActive();
       if (alreadyActive) return;
       item.classList.add("active");
+      if (showTotalCallout(item)) return;
       detail.querySelectorAll(`.module-chart-segment[data-chart-index="${index}"]`).forEach((segment) => {
         segment.classList.add("active");
         const label = item.getAttribute("title") || "";
