@@ -68,7 +68,7 @@ strategy:
     enabled: true
     mode: top_volume_24h
     quote: USDT
-    max_symbols: 50
+    max_symbols: 30
     asset_class: crypto
   symbols:
   - BTC/USDT:USDT
@@ -106,7 +106,7 @@ ai:
     market_scan_enabled: true
     market_scan_interval_seconds: 14400
     market_scan_slot_tolerance_minutes: 3
-    market_scan_source_symbols: 50
+    market_scan_source_symbols: 30
     market_scan_max_symbols: 3
     market_scan_min_win_probability_pct: 80
     market_scan_use_ai: true
@@ -163,7 +163,7 @@ market_guard:
   wick_body_ratio: 2.5
   volume_ratio: 2.5
   pause_new_entries_seconds: 900
-  max_symbols: 50
+  max_symbols: 30
   layer_5m_samples: 5
   layer_20m_samples: 20
   memory_keep_hours: 24

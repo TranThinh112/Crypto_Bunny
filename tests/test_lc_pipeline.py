@@ -1802,6 +1802,33 @@ class LcPipelineTest(TestCase):
         self.assertIn("hồi sinh thành LC nội bộ", messages)
         self.assertIn("Chưa Duyệt còn", messages)
 
+    @patch("crypto_trader.lc_pipeline.open_pending_symbols", return_value=set())
+    def test_dropped_undecided_pair_does_not_revive_when_candidate_reappears(self, _open_pending_symbols) -> None:
+        config = self._config()
+        settings = lc_pipeline_module._pipeline_config(config)
+        now = datetime(2026, 7, 6, 7, 0, tzinfo=timezone.utc)
+        dropped = {
+            **_saved_row("SUI/USDT:USDT", 59, state="CHUA_DUYET", side="short"),
+            "first_seen_at": "2026-07-06T00:00:00+00:00",
+            "undecided_status": "missing_setup",
+            "undecided_reason": "khong con setup hop le trong du lieu moi nhat",
+        }
+        state = {"internal_lc": [], "undecided": [dropped]}
+
+        promoted = lc_pipeline_module._promote_survivors(
+            config,
+            state,
+            {"SUI/USDT:USDT": _candidate("SUI/USDT:USDT", 65, side="short")},
+            settings,
+            now,
+            blocked_symbols=set(),
+        )
+
+        self.assertEqual(promoted, [])
+        self.assertEqual(state["internal_lc"], [])
+        self.assertEqual(state["undecided"][0]["symbol"], "SUI/USDT:USDT")
+        self.assertEqual(state["undecided"][0]["undecided_status"], "missing_setup")
+
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_mini_pool_summary_notes_source_and_hs(self, send_message) -> None:
         config = self._config()

@@ -37,7 +37,16 @@ from .capital import (
     save_position_size_calculation,
     sync_capital_from_okx,
 )
-from .config import DEFAULT_CONFIG, load_config, project_path
+from .config import (
+    DEFAULT_CONFIG,
+    RUNTIME_CONFIG_OVERRIDES_STATE_KEY,
+    deep_merge,
+    invalidate_runtime_config_overrides_cache,
+    load_config,
+    project_path,
+    runtime_config_override_payload,
+    runtime_config_overrides_should_attempt,
+)
 from .ai_coordinator import next_internal_market_scan_at, okx_ai_approval, review_candidate_for_lc_okx, run_internal_market_scan_if_due
 from .codex_features import (
     activate_strategy_version,
@@ -298,17 +307,41 @@ def _config_file(path: str | Path) -> Path:
     return config_path.resolve()
 
 
+def _persist_runtime_config_overrides(config: dict[str, Any], overrides: dict[str, Any], *, source: str) -> None:
+    if not runtime_config_overrides_should_attempt(config):
+        return
+    raw = get_journal_state(config, RUNTIME_CONFIG_OVERRIDES_STATE_KEY)
+    existing_overrides: dict[str, Any] = {}
+    if raw:
+        try:
+            payload = json.loads(raw)
+            if isinstance(payload, dict) and isinstance(payload.get("overrides"), dict):
+                existing_overrides = payload["overrides"]
+        except json.JSONDecodeError:
+            existing_overrides = {}
+    merged = deep_merge(existing_overrides, overrides)
+    set_journal_state(config, RUNTIME_CONFIG_OVERRIDES_STATE_KEY, runtime_config_override_payload(merged, source=source))
+    invalidate_runtime_config_overrides_cache(config)
+
+
 def _save_leverage(config_path: str | Path, leverage: int) -> dict[str, Any]:
     path = _config_file(config_path)
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"Config file not found: {path}")
+    current_config = load_config(path)
     with path.open("r", encoding="utf-8") as handle:
         user_config = yaml.safe_load(handle) or {}
     exchange = user_config.setdefault("exchange", {})
     exchange["leverage"] = leverage
     sizing = user_config.setdefault("position_sizing", {})
     try:
-        base_margin = float(sizing.get("base_margin_usdt", DEFAULT_CONFIG["position_sizing"]["base_margin_usdt"]) or 0)
+        base_margin = float(
+            current_config.get("position_sizing", {}).get(
+                "base_margin_usdt",
+                sizing.get("base_margin_usdt", DEFAULT_CONFIG["position_sizing"]["base_margin_usdt"]),
+            )
+            or 0
+        )
     except (TypeError, ValueError):
         base_margin = float(DEFAULT_CONFIG["position_sizing"]["base_margin_usdt"])
     if base_margin > 0:
@@ -319,6 +352,15 @@ def _save_leverage(config_path: str | Path, leverage: int) -> dict[str, Any]:
     with tmp_path.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(user_config, handle, sort_keys=False, allow_unicode=True)
     tmp_path.replace(path)
+    updated = load_config(path)
+    _persist_runtime_config_overrides(
+        updated,
+        {
+            "exchange": {"leverage": leverage},
+            "risk": {"order_usdt": round(base_margin * leverage, 4)},
+        },
+        source="ui.leverage",
+    )
     return load_config(path)
 
 
@@ -335,12 +377,19 @@ def _save_base_margin(config_path: str | Path, margin_usdt: float) -> dict[str, 
     path = _config_file(config_path)
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"Config file not found: {path}")
+    current_config = load_config(path)
     with path.open("r", encoding="utf-8") as handle:
         user_config = yaml.safe_load(handle) or {}
     sizing = user_config.setdefault("position_sizing", {})
     sizing["base_margin_usdt"] = round(margin_usdt, 4)
     try:
-        leverage = float(user_config.get("exchange", {}).get("leverage", DEFAULT_CONFIG["exchange"]["leverage"]) or 1)
+        leverage = float(
+            current_config.get("exchange", {}).get(
+                "leverage",
+                user_config.get("exchange", {}).get("leverage", DEFAULT_CONFIG["exchange"]["leverage"]),
+            )
+            or 1
+        )
     except (TypeError, ValueError):
         leverage = float(DEFAULT_CONFIG["exchange"]["leverage"])
     risk = user_config.setdefault("risk", {})
@@ -350,6 +399,15 @@ def _save_base_margin(config_path: str | Path, margin_usdt: float) -> dict[str, 
     with tmp_path.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(user_config, handle, sort_keys=False, allow_unicode=True)
     tmp_path.replace(path)
+    updated = load_config(path)
+    _persist_runtime_config_overrides(
+        updated,
+        {
+            "position_sizing": {"base_margin_usdt": round(margin_usdt, 4)},
+            "risk": {"order_usdt": round(margin_usdt * leverage, 4)},
+        },
+        source="ui.order_usdt",
+    )
     return load_config(path)
 
 
@@ -370,6 +428,16 @@ def _save_max_positions(config_path: str | Path, max_positions: int) -> dict[str
     with tmp_path.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(user_config, handle, sort_keys=False, allow_unicode=True)
     tmp_path.replace(path)
+    updated = load_config(path)
+    _persist_runtime_config_overrides(
+        updated,
+        {
+            "risk": {"max_active_trades": max_positions},
+            "paper_trading": {"max_active_trades": max_positions},
+            "trading_risk": {"max_concurrent_positions": max_positions},
+        },
+        source="ui.max_positions",
+    )
     return load_config(path)
 
 

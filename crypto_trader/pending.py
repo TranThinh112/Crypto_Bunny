@@ -3,7 +3,13 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from .ai_coordinator import candidate_okx_review, okx_ai_approval, prioritize_pending_records, review_candidate_for_lc_okx
+from .ai_coordinator import (
+    OKX_REJECTION_WATCHLIST,
+    candidate_okx_review,
+    okx_ai_approval,
+    prioritize_pending_records,
+    review_candidate_for_lc_okx,
+)
 from .codex_features import record_trade_execution
 from .executor import execute_candidate
 from .ledger import append_event
@@ -774,6 +780,30 @@ def maintain_pending_orders(
             )
             if not setup_review.get("approved"):
                 reason = str(setup_review.get("reason") or setup_review.get("decision") or "GPT-5.5 rejected LC_OKX setup")
+                if setup_review.get("rejection_policy") == OKX_REJECTION_WATCHLIST:
+                    refresh_pending_order(
+                        config,
+                        local_id,
+                        reviewed_candidate,
+                        status="WAIT_SLOT",
+                        max_age_hours=float(lifecycle["local_max_age_hours"]),
+                    )
+                    events.append(
+                        {
+                            "type": "pending_kept",
+                            "source": "mini_wait_slot_review",
+                            "status": "WAIT_SLOT",
+                            "lc_id": lc_id,
+                            "symbol": symbol,
+                            "side": str(record.get("side") or ""),
+                            "reason": reason,
+                            "rejection_policy": setup_review.get("rejection_policy"),
+                            "recheck_after_minutes": setup_review.get("recheck_after_minutes"),
+                            "comparison": comparison,
+                        }
+                    )
+                    kept += 1
+                    continue
                 close_pending_order(config, local_id, "CANCELED", reason)
                 events.append(
                     {
@@ -1140,6 +1170,28 @@ def maintain_pending_orders(
                     )
                     if not setup_review.get("approved"):
                         reason = str(setup_review.get("reason") or setup_review.get("decision") or "GPT-5.5 rejected LC_OKX setup")
+                        if setup_review.get("rejection_policy") == OKX_REJECTION_WATCHLIST:
+                            refresh_pending_order(
+                                config,
+                                local_id,
+                                reviewed_candidate,
+                                status=str(record.get("status") or "OPEN"),
+                                max_age_hours=float(lifecycle["local_max_age_hours"]),
+                            )
+                            events.append(
+                                {
+                                    "type": "pending_kept",
+                                    "source": "local_pending_review",
+                                    "lc_id": lc_id,
+                                    "symbol": symbol,
+                                    "side": str(record.get("side") or ""),
+                                    "reason": reason,
+                                    "rejection_policy": setup_review.get("rejection_policy"),
+                                    "recheck_after_minutes": setup_review.get("recheck_after_minutes"),
+                                }
+                            )
+                            kept += 1
+                            continue
                         close_pending_order(config, local_id, "CANCELED", reason)
                         events.append(
                             {

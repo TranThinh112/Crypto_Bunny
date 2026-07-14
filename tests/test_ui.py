@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from crypto_trader.config import load_config
+from crypto_trader.config import RUNTIME_CONFIG_OVERRIDES_STATE_KEY, load_config
 from crypto_trader.codex_features import close_trade_execution, record_trade_candidates, record_trade_execution, try_slot_refill
 from crypto_trader.models import RiskCheck, TradeCandidate
 from crypto_trader.notifier import telegram_command_list
@@ -289,7 +289,7 @@ class UiTest(TestCase):
         self.assertEqual(payload["order_usdt"], 30.0)
         self.assertEqual(payload["position_sizing"]["max_margin_usdt"], 50)
         self.assertEqual(payload["universe"]["mode"], "top_volume_24h")
-        self.assertEqual(payload["universe"]["max_symbols"], 50)
+        self.assertEqual(payload["universe"]["max_symbols"], 30)
         self.assertEqual(payload["ai"]["internal"]["model"], "gpt-5.4-mini")
         self.assertEqual(payload["ai"]["okx"]["model"], "gpt-5.5")
 
@@ -438,20 +438,23 @@ class UiTest(TestCase):
     def test_order_usdt_endpoint_limits_and_persists_base_margin(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             config_path = Path(tmpdir) / "config.yaml"
-            config_path.write_text(
+            deployed_config = (
                 "mode: dry_run\n"
                 "exchange:\n"
                 "  leverage: 25\n"
                 "position_sizing:\n"
                 "  base_margin_usdt: 2\n"
-                "  max_margin_usdt: 20\n",
-                encoding="utf-8",
+                "  max_margin_usdt: 20\n"
             )
+            config_path.write_text(deployed_config, encoding="utf-8")
             client = TestClient(create_app(str(config_path)))
 
             low_response = client.post("/api/config/order-usdt", json={"margin_usdt": 0.5})
             high_response = client.post("/api/config/order-usdt", json={"margin_usdt": 25})
             ok_response = client.post("/api/config/order-usdt", json={"margin_usdt": 5})
+            config_path.write_text(deployed_config, encoding="utf-8")
+            reloaded_after_deploy = load_config(config_path)
+            persisted_override = get_journal_state(reloaded_after_deploy, RUNTIME_CONFIG_OVERRIDES_STATE_KEY)
 
         self.assertEqual(low_response.status_code, 400)
         self.assertEqual(high_response.status_code, 400)
@@ -459,6 +462,9 @@ class UiTest(TestCase):
         payload = ok_response.json()
         self.assertEqual(payload["position_sizing"]["base_margin_usdt"], 5)
         self.assertEqual(payload["estimated_notional_usdt"], 125)
+        self.assertIsNotNone(persisted_override)
+        self.assertEqual(reloaded_after_deploy["position_sizing"]["base_margin_usdt"], 5)
+        self.assertEqual(reloaded_after_deploy["risk"]["order_usdt"], 125)
 
     def test_trading_risk_state_endpoint_exposes_recovery_snapshot(self) -> None:
         client = TestClient(create_app("config.example.yaml"))

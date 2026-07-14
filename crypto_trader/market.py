@@ -18,6 +18,7 @@ NON_CRYPTO_BASES = {
     "AMD",
     "AMZN",
     "BRENT",
+    "COPPER",
     "COIN",
     "DJI",
     "DXY",
@@ -37,9 +38,11 @@ NON_CRYPTO_BASES = {
     "UKOIL",
     "USOIL",
     "WTI",
+    "XBR",
     "XAG",
     "XAU",
     "XAUT",
+    "XTI",
 }
 NON_CRYPTO_KEYWORDS = {
     "STOCK",
@@ -141,13 +144,15 @@ def _ticker_quote_volume(ticker: dict[str, Any]) -> float:
         ticker,
         "quoteVolume",
         "quote_volume",
-        "volCcy24h",
+        "volCcyQuote24h",
+        "volUsd24h",
         "turnover",
         "turnover24h",
     )
     if quote_volume is not None:
         return max(0.0, quote_volume)
-    base_volume = _ticker_number(ticker, "baseVolume", "base_volume", "vol24h")
+
+    base_volume = _ticker_number(ticker, "volCcy24h", "baseVolume", "base_volume", "vol24h")
     last = _ticker_number(ticker, "last", "close")
     if base_volume is not None and last is not None:
         return max(0.0, base_volume * last)
@@ -172,6 +177,9 @@ def _is_crypto_market(
     if base in (excluded_bases or set()):
         return False
     info = market.get("info") if isinstance(market.get("info"), dict) else {}
+    category = str(info.get("instCategory") or info.get("category") or "").strip()
+    if category and category != "1":
+        return False
     text = " ".join(
         str(value or "").upper()
         for value in (
@@ -237,7 +245,7 @@ def select_top_volume_symbols_from_tickers(
     excluded_bases: list[str] | set[str] | None = None,
     excluded_keywords: list[str] | set[str] | None = None,
 ) -> list[str]:
-    max_symbols = max(1, min(50, int(limit or 50)))
+    max_symbols = max(1, min(30, int(limit or 30)))
     ranked: list[tuple[float, str]] = []
     excluded_base_set = {item.upper() for item in (excluded_bases or NON_CRYPTO_BASES)}
     excluded_keyword_set = {item.upper() for item in (excluded_keywords or NON_CRYPTO_KEYWORDS)}
@@ -286,7 +294,7 @@ def fetch_top_volume_symbols(
 ) -> tuple[list[str], list[str]]:
     strategy_config = config.get("strategy", {})
     universe = strategy_config.get("universe", {})
-    limit = max(1, min(50, int(universe.get("max_symbols", 50) or 50)))
+    limit = max(1, min(30, int(universe.get("max_symbols", 30) or 30)))
     quote = str(universe.get("quote", config.get("exchange", {}).get("default_settle", "USDT")) or "USDT")
     account_type = str(config.get("exchange", {}).get("account_type", "swap") or "swap")
     asset_class = str(universe.get("asset_class", "crypto") or "crypto")

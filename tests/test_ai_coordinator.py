@@ -8,6 +8,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from crypto_trader.ai_coordinator import (
+    OKX_REVIEW_CACHE_STATE_KEY,
     _compact_lc_memory,
     _candidate_summary,
     _candidate_market_summary,
@@ -234,7 +235,6 @@ class AiCoordinatorTest(TestCase):
 
     def test_reuses_recent_rejected_okx_setup_review_without_recalling_ai(self) -> None:
         config = self._config()
-        config["ai"]["okx"]["reject_reuse_minutes"] = 15
         candidate = _candidate("SUI/USDT:USDT")
         check = RiskCheck(True, [], [])
         rejected = {
@@ -249,7 +249,10 @@ class AiCoordinatorTest(TestCase):
             "experiment_name": None,
         }
 
-        with patch("crypto_trader.ai_coordinator.okx_ai_approval", return_value=rejected) as approval:
+        with (
+            patch("crypto_trader.ai_coordinator.okx_ai_approval", return_value=rejected) as approval,
+            patch("crypto_trader.ai_coordinator.reject_lc_pipeline_setup") as reject_setup,
+        ):
             first_candidate, first_decision = review_candidate_for_lc_okx(
                 config,
                 candidate,
@@ -264,12 +267,88 @@ class AiCoordinatorTest(TestCase):
             )
 
         approval.assert_called_once()
+        reject_setup.assert_not_called()
         self.assertFalse(first_decision["approved"])
         self.assertFalse(second_decision["approved"])
         self.assertTrue(second_decision.get("cached"))
+        self.assertEqual(second_decision.get("rejection_policy"), "watchlist")
         self.assertEqual(second_decision["reason"], rejected["reason"])
         self.assertIsNotNone(first_candidate.decision_metadata.get("okx_review"))
         self.assertIsNotNone(second_candidate.decision_metadata.get("okx_review"))
+
+    def test_reuses_old_hard_rejected_okx_setup_review_without_recalling_ai(self) -> None:
+        config = self._config()
+        candidate = _candidate("CRV/USDT:USDT")
+        check = RiskCheck(True, [], [])
+        rejected = {
+            "approved": False,
+            "decision": "REJECT",
+            "reason": "Thiếu bias 4h/confirm 15m, entry xung đột và volume quá yếu",
+            "reason": "Entry conflict with higher timeframe and volume 0",
+            "provider": "openai",
+            "model": "gpt-5.5",
+            "reviewed_at": "2026-07-14T01:02:50+00:00",
+        }
+        set_journal_state(
+            config,
+            OKX_REVIEW_CACHE_STATE_KEY,
+            json.dumps({"lc_okx_setup_review|CRV/USDT:USDT|LONG": rejected}, ensure_ascii=False),
+        )
+
+        with (
+            patch("crypto_trader.ai_coordinator.okx_ai_approval") as approval,
+            patch("crypto_trader.ai_coordinator.reject_lc_pipeline_setup") as reject_setup,
+        ):
+            reviewed, decision = review_candidate_for_lc_okx(
+                config,
+                candidate,
+                check,
+                context={"route": "lc_okx_setup_review", "lc_id": 26},
+            )
+
+        approval.assert_not_called()
+        reject_setup.assert_called_once()
+        self.assertFalse(decision["approved"])
+        self.assertTrue(decision.get("cached"))
+        self.assertEqual(decision["reason"], rejected["reason"])
+        self.assertIsNotNone(reviewed.decision_metadata.get("okx_review"))
+
+    def test_old_soft_rejected_okx_setup_review_rechecks_ai_after_cooldown(self) -> None:
+        config = self._config()
+        candidate = _candidate("AAVE/USDT:USDT")
+        check = RiskCheck(True, [], [])
+        rejected = {
+            "approved": False,
+            "decision": "REJECT",
+            "reason": "Missing 4h bias and 15m confirmation; volume ratio 0.774 is weak",
+            "provider": "openai",
+            "model": "gpt-5.5",
+            "reviewed_at": "2026-07-14T01:02:50+00:00",
+        }
+        approved = {
+            "approved": True,
+            "decision": "APPROVE",
+            "reason": "Fresh 4h/15m confirmation is now aligned",
+            "provider": "openai",
+            "model": "gpt-5.5",
+        }
+        set_journal_state(
+            config,
+            OKX_REVIEW_CACHE_STATE_KEY,
+            json.dumps({"lc_okx_setup_review|AAVE/USDT:USDT|LONG": rejected}, ensure_ascii=False),
+        )
+
+        with patch("crypto_trader.ai_coordinator.okx_ai_approval", return_value=approved) as approval:
+            _, decision = review_candidate_for_lc_okx(
+                config,
+                candidate,
+                check,
+                context={"route": "lc_okx_setup_review", "lc_id": 27},
+            )
+
+        approval.assert_called_once()
+        self.assertTrue(decision["approved"])
+        self.assertEqual(decision["decision"], "APPROVE")
 
     def test_internal_market_scan_runs_once_per_fixed_slot(self) -> None:
         config = self._config()

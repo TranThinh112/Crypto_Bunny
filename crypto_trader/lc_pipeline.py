@@ -3256,6 +3256,10 @@ def _promote_survivors(
     revive_candidates: list[tuple[dict[str, Any], dict[str, Any], TradeCandidate, float]] = []
     for row in state.get("undecided") or []:
         symbol = str(row.get("symbol") or "")
+        undecided_status = str(row.get("undecided_status") or "").strip().lower()
+        if undecided_status in {"soft_invalid", "missing_setup"}:
+            undecided.append(row)
+            continue
         first_seen = _parse_time(row.get("first_seen_at"))
         candidate = candidates_by_symbol.get(symbol)
         if not first_seen or not candidate:

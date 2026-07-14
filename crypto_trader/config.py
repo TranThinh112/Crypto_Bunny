@@ -1,10 +1,24 @@
 from __future__ import annotations
 
+import base64
+import json
+import logging
+import os
+import threading
+import time
+import zlib
 from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+
+LOGGER = logging.getLogger(__name__)
+RUNTIME_CONFIG_OVERRIDES_STATE_KEY = "runtime_config_overrides"
+_RUNTIME_CONFIG_OVERRIDES_CACHE: dict[str, tuple[float, dict[str, Any] | None]] = {}
+_RUNTIME_CONFIG_OVERRIDES_LOCK = threading.Lock()
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -14,6 +28,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "runtime": {
         "interval_seconds": 60,
         "instance_role": "primary",
+    },
+    "runtime_config_overrides": {
+        "enabled": True,
+        "state_key": RUNTIME_CONFIG_OVERRIDES_STATE_KEY,
+        "cache_ttl_seconds": 5,
+        "allow_embedded_atlas_uri": False,
     },
     "database": {
         "backend": "atlas",
@@ -99,7 +119,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "enabled": True,
             "mode": "top_volume_24h",
             "quote": "USDT",
-            "max_symbols": 40,
+            "max_symbols": 30,
             "asset_class": "crypto",
             "exclude_bases": [],
             "exclude_keywords": [],
@@ -188,7 +208,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "market_scan_fixed_schedule": True,
             "market_scan_slot_tolerance_minutes": 3,
             "market_scan_timezone": "Asia/Ho_Chi_Minh",
-            "market_scan_source_symbols": 40,
+            "market_scan_source_symbols": 30,
             "market_scan_max_symbols": 3,
             "market_scan_min_approved_symbols": 1,
             "market_scan_min_win_probability_pct": 63,
@@ -232,7 +252,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "auto_lc_okx_review_once_enabled": True,
             "manual_openai_enabled": True,
             "ask_internal_before_entry": True,
-            "reject_reuse_minutes": 15,
             "require_external_approval": False,
             "timeout_seconds": 20,
         },
@@ -273,7 +292,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "wick_body_ratio": 2.5,
         "volume_ratio": 2.5,
         "pause_new_entries_seconds": 900,
-        "max_symbols": 50,
+        "max_symbols": 30,
         "layer_5m_samples": 5,
         "layer_20m_samples": 20,
         "memory_keep_hours": 6,
@@ -453,6 +472,159 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
     return merged
 
 
+def _safe_bool(value: Any, default: bool = True) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() not in {"0", "false", "no", "off", "disabled"}
+
+
+def _runtime_config_overrides_settings(config: dict[str, Any]) -> dict[str, Any]:
+    settings = config.get("runtime_config_overrides", {})
+    return settings if isinstance(settings, dict) else {}
+
+
+def runtime_config_overrides_should_attempt(config: dict[str, Any]) -> bool:
+    settings = _runtime_config_overrides_settings(config)
+    if not _safe_bool(settings.get("enabled"), True):
+        return False
+    database = config.get("database", {})
+    if str(database.get("backend", "atlas") or "atlas").strip().lower() != "atlas":
+        return False
+    if os.getenv("PYTEST_CURRENT_TEST") or config.get("_atlas_test_mode"):
+        return True
+    atlas = database.get("atlas", {}) if isinstance(database.get("atlas"), dict) else {}
+    uri_env = str(atlas.get("uri_env", "MONGODB_URI") or "MONGODB_URI")
+    if os.getenv(uri_env, "").strip():
+        return True
+    if any(os.getenv(name, "").strip() for name in ("RAILWAY_ENVIRONMENT_NAME", "RAILWAY_SERVICE_ID", "RAILWAY_DEPLOYMENT_ID")):
+        return True
+    return bool(_safe_bool(settings.get("allow_embedded_atlas_uri"), False) and str(atlas.get("uri", "") or "").strip())
+
+
+def _runtime_config_overrides_cache_ttl(config: dict[str, Any]) -> float:
+    settings = _runtime_config_overrides_settings(config)
+    try:
+        return max(0.0, float(settings.get("cache_ttl_seconds", 5) or 0))
+    except (TypeError, ValueError):
+        return 5.0
+
+
+def _runtime_config_overrides_cache_key(config: dict[str, Any]) -> str:
+    atlas = config.get("database", {}).get("atlas", {})
+    return str(
+        config.get("_config_path")
+        or config.get("_config_dir")
+        or atlas.get("database")
+        or "default"
+    )
+
+
+def invalidate_runtime_config_overrides_cache(config: dict[str, Any] | None = None) -> None:
+    with _RUNTIME_CONFIG_OVERRIDES_LOCK:
+        if config is None:
+            _RUNTIME_CONFIG_OVERRIDES_CACHE.clear()
+            return
+        _RUNTIME_CONFIG_OVERRIDES_CACHE.pop(_runtime_config_overrides_cache_key(config), None)
+
+
+def _decode_journal_state_value(row: dict[str, Any] | None) -> str | None:
+    if not row:
+        return None
+    if row.get("value_compressed") and row.get("value_encoding") == "zlib+base64":
+        try:
+            raw = zlib.decompress(base64.b64decode(str(row.get("value_compressed"))))
+            return raw.decode("utf-8")
+        except Exception:
+            return None
+    value = row.get("value")
+    return None if value is None else str(value)
+
+
+def _runtime_config_overrides_allowed(overrides: dict[str, Any]) -> dict[str, Any]:
+    clean: dict[str, Any] = {}
+    if not isinstance(overrides, dict):
+        return clean
+
+    position_sizing = overrides.get("position_sizing")
+    if isinstance(position_sizing, dict) and "base_margin_usdt" in position_sizing:
+        clean.setdefault("position_sizing", {})["base_margin_usdt"] = position_sizing["base_margin_usdt"]
+
+    risk = overrides.get("risk")
+    if isinstance(risk, dict):
+        allowed_risk = {
+            key: risk[key]
+            for key in ("order_usdt", "max_active_trades")
+            if key in risk
+        }
+        if allowed_risk:
+            clean["risk"] = allowed_risk
+
+    exchange = overrides.get("exchange")
+    if isinstance(exchange, dict) and "leverage" in exchange:
+        clean.setdefault("exchange", {})["leverage"] = exchange["leverage"]
+
+    paper_trading = overrides.get("paper_trading")
+    if isinstance(paper_trading, dict) and "max_active_trades" in paper_trading:
+        clean.setdefault("paper_trading", {})["max_active_trades"] = paper_trading["max_active_trades"]
+
+    trading_risk = overrides.get("trading_risk")
+    if isinstance(trading_risk, dict) and "max_concurrent_positions" in trading_risk:
+        clean.setdefault("trading_risk", {})["max_concurrent_positions"] = trading_risk["max_concurrent_positions"]
+
+    return clean
+
+
+def _load_runtime_config_overrides(config: dict[str, Any]) -> dict[str, Any] | None:
+    if not runtime_config_overrides_should_attempt(config):
+        return None
+
+    cache_key = _runtime_config_overrides_cache_key(config)
+    ttl = _runtime_config_overrides_cache_ttl(config)
+    now = time.monotonic()
+    if ttl > 0:
+        with _RUNTIME_CONFIG_OVERRIDES_LOCK:
+            cached = _RUNTIME_CONFIG_OVERRIDES_CACHE.get(cache_key)
+            if cached and cached[0] > now:
+                return deepcopy(cached[1])
+
+    try:
+        from .atlas_mirror import atlas_database_for_collection
+
+        settings = _runtime_config_overrides_settings(config)
+        state_key = str(settings.get("state_key", RUNTIME_CONFIG_OVERRIDES_STATE_KEY) or RUNTIME_CONFIG_OVERRIDES_STATE_KEY)
+        row = atlas_database_for_collection(config, "journal_state")["journal_state"].find_one(
+            {"_id": state_key},
+            {"_id": 0, "value": 1, "value_compressed": 1, "value_encoding": 1},
+        )
+        raw = _decode_journal_state_value(row)
+        payload = json.loads(raw) if raw else {}
+        overrides = payload.get("overrides") if isinstance(payload, dict) else {}
+        clean = _runtime_config_overrides_allowed(overrides if isinstance(overrides, dict) else {})
+    except Exception as exc:
+        LOGGER.warning("Skipping runtime config overrides: %s", exc)
+        clean = None
+
+    if ttl > 0:
+        with _RUNTIME_CONFIG_OVERRIDES_LOCK:
+            _RUNTIME_CONFIG_OVERRIDES_CACHE[cache_key] = (now + ttl, deepcopy(clean))
+    return clean
+
+
+def runtime_config_override_payload(overrides: dict[str, Any], *, source: str = "ui") -> str:
+    clean = _runtime_config_overrides_allowed(overrides)
+    return json.dumps(
+        {
+            "version": 1,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "source": source,
+            "overrides": clean,
+        },
+        ensure_ascii=False,
+    )
+
+
 def load_config(path: str | Path | None) -> dict[str, Any]:
     if path is None:
         return deepcopy(DEFAULT_CONFIG)
@@ -462,6 +634,11 @@ def load_config(path: str | Path | None) -> dict[str, Any]:
         user_config = yaml.safe_load(handle) or {}
     config = deep_merge(DEFAULT_CONFIG, user_config)
     config["_config_dir"] = str(config_path.resolve().parent)
+    config["_config_path"] = str(config_path.resolve())
+    runtime_overrides = _load_runtime_config_overrides(config)
+    if runtime_overrides:
+        config = deep_merge(config, runtime_overrides)
+        config["_runtime_config_overrides_applied"] = True
     return config
 
 
