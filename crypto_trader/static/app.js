@@ -1304,10 +1304,10 @@ const AI_DECISION_ROW_CONFIG = [
   ["short_percent", "Tỷ lệ SHORT", "Tỷ lệ quyết định SHORT trên tổng số decision.", "AI đang thiên về SHORT.", "AI giảm xu hướng SHORT."],
   ["winrate_long", "Winrate LONG", "Tỷ lệ thắng của các lệnh LONG.", "LONG đang hoạt động hiệu quả hơn.", "Hiệu quả LONG giảm."],
   ["winrate_short", "Winrate SHORT", "Tỷ lệ thắng của các lệnh SHORT.", "SHORT đang hoạt động hiệu quả hơn.", "Hiệu quả SHORT giảm."],
-  ["avg_confidence_long", "Confidence LONG", "Mức độ tự tin trung bình của AI khi quyết định LONG.", "AI tự tin hơn với LONG.", "AI ít tự tin hơn với LONG."],
-  ["avg_confidence_short", "Confidence SHORT", "Mức độ tự tin trung bình của AI khi quyết định SHORT.", "AI tự tin hơn với SHORT.", "AI ít tự tin hơn với SHORT."],
   ["profit_factor_long", "Profit Factor LONG", "Hiệu quả sinh lời của các lệnh LONG. Giá trị lớn hơn 1 cho thấy LONG đang có lợi nhuận.", "Hiệu quả LONG tăng.", "Hiệu quả LONG giảm."],
   ["profit_factor_short", "Profit Factor SHORT", "Hiệu quả sinh lời của các lệnh SHORT. Giá trị lớn hơn 1 cho thấy SHORT đang có lợi nhuận.", "Hiệu quả SHORT tăng.", "Hiệu quả SHORT giảm."],
+  ["avg_confidence_long", "Confidence LONG", "Mức độ tự tin trung bình của AI khi quyết định LONG.", "AI tự tin hơn với LONG.", "AI ít tự tin hơn với LONG."],
+  ["avg_confidence_short", "Confidence SHORT", "Mức độ tự tin trung bình của AI khi quyết định SHORT.", "AI tự tin hơn với SHORT.", "AI ít tự tin hơn với SHORT."],
   ["bias_warning", "Bias Warning", "Cảnh báo khi AI có xu hướng thiên quá nhiều về LONG hoặc SHORT.", "AI đang lệch bias mạnh hơn.", "AI giảm mức lệch bias.", true],
 ].map(([key, label, meaning, up, down, isBiasWarning], index) => ({
   key,
