@@ -724,8 +724,11 @@ def _internal_scan_allows_pending(config: dict[str, Any], scan: dict[str, Any] |
         return False, "Mini scan pending queue is disabled"
     selected_symbols = [str(symbol) for symbol in scan.get("selected_symbols") or [] if str(symbol)]
     if not selected_symbols:
+        skip_reason = str(scan.get("skip_reason") or "").strip()
+        if skip_reason:
+            return False, skip_reason
         if scan.get("selection_stale"):
-            return False, "Mini selection is stale because the current LC noi bo pool has changed"
+            return False, "Mini selection is stale because a newer LC noi bo 4h slot is available"
         return False, "Mini scan has no selected symbols"
     if bool(internal_config.get("market_scan_require_ai_for_pending", True)):
         if scan.get("fallback") or scan.get("ai_review_error"):

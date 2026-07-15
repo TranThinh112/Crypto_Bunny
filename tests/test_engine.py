@@ -334,6 +334,23 @@ class EngineMiniQueueTest(TestCase):
         self.assertEqual(result["created"], 0)
         self.assertEqual(list_pending_orders(config, status="OPEN"), [])
 
+    def test_mini_scan_no_selected_uses_scan_skip_reason(self) -> None:
+        config = self._config()
+        scan = {
+            "provider": "openai",
+            "model": "gpt-5.4-mini",
+            "selected_symbols": [],
+            "approved_symbols": [],
+            "ai_review": {"decision": "NO_TRADE", "approved_symbols": []},
+            "skip_reason": "Mini AI returned NO_TRADE; no setup may continue to LC_OKX",
+        }
+
+        result = _create_pending_from_internal_scan(config, [], scan, (5, set(), []), set())
+
+        self.assertFalse(result["allowed"])
+        self.assertEqual(result["reason"], "Mini AI returned NO_TRADE; no setup may continue to LC_OKX")
+        self.assertEqual(result["created"], 0)
+
     def test_run_once_updates_lc_pipeline_before_running_mini_scan(self) -> None:
         config = self._config()
         call_order: list[str] = []
