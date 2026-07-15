@@ -198,7 +198,7 @@ class EngineMiniQueueTest(TestCase):
         self.assertIn("Setup khong du chat luong", result["skipped"][0]["reason"])
         self.assertEqual(list_pending_orders(config, status="LC_OKX"), [])
 
-    def test_mini_scan_keeps_gpt_55_watchlist_as_watchlist_and_blocks_duplicate_review(self) -> None:
+    def test_mini_scan_submits_gpt_55_keep_monitor_to_okx_and_blocks_duplicate_review(self) -> None:
         config = self._config()
         config["mode"] = "demo"
         candidate = _candidate("INJ/USDT:USDT")
@@ -213,8 +213,9 @@ class EngineMiniQueueTest(TestCase):
             "approved": False,
             "decision": "REJECT",
             "reason": "Missing 4h/15m confirmation; keep watching",
-            "rejection_policy": "watchlist",
-            "recheck_after_minutes": 30,
+            "rejection_policy": "keep_monitor",
+            "review_state": "GPT55_KEEP_MONITOR",
+            "accepted_for_okx": True,
         }
 
         def soft_review(_config, reviewed_candidate, *_args, **_kwargs):
@@ -230,7 +231,17 @@ class EngineMiniQueueTest(TestCase):
 
         with (
             patch("crypto_trader.engine.review_candidate_for_lc_okx", side_effect=soft_review) as review,
-            patch("crypto_trader.engine.execute_candidate") as execute,
+            patch(
+                "crypto_trader.engine.execute_candidate",
+                return_value=ExecutionResult(
+                    mode="demo",
+                    submitted=True,
+                    order_id="limit-keep-1",
+                    message="demo: limit order submitted",
+                    journal_type="LC",
+                    journal_id=1,
+                ),
+            ) as execute,
         ):
             first = _create_pending_from_internal_scan(config, [candidate], scan, (5, set(), []), set())
             second = _create_pending_from_internal_scan(
@@ -241,23 +252,23 @@ class EngineMiniQueueTest(TestCase):
                 open_pending_symbols(config),
             )
 
-        execute.assert_not_called()
+        execute.assert_called_once()
         review.assert_called_once()
-        self.assertEqual(first["created"], 0)
+        self.assertEqual(first["created"], 1)
         self.assertEqual(first["wait_slot"], 0)
-        self.assertEqual(first["watchlist"], 1)
         self.assertEqual(first["skipped"], [])
         self.assertEqual(second["created"], 0)
         self.assertEqual(second["wait_slot"], 0)
-        self.assertEqual(second["watchlist"], 0)
         self.assertEqual(second["skipped"][0]["reason"], "already pending or active in LC memory")
-        orders = list_pending_orders(config, status="WATCHLIST")
+        orders = list_pending_orders(config, status="LC_OKX")
         self.assertEqual(len(orders), 1)
         self.assertEqual(orders[0]["symbol"], "INJ/USDT:USDT")
-        self.assertEqual(orders[0]["status"], "WATCHLIST")
+        self.assertEqual(orders[0]["status"], "LC_OKX")
+        self.assertEqual(orders[0]["exchange_order_id"], "limit-keep-1")
         payload = json.loads(str(orders[0]["payload_json"]))
-        self.assertEqual(payload["decision_metadata"]["okx_review"]["rejection_policy"], "watchlist")
-        self.assertEqual(payload["decision_metadata"]["setup_watchlist"]["reason"], review_decision["reason"])
+        self.assertEqual(payload["decision_metadata"]["okx_review"]["rejection_policy"], "keep_monitor")
+        self.assertEqual(payload["decision_metadata"]["okx_review"]["review_state"], "GPT55_KEEP_MONITOR")
+        self.assertTrue(payload["decision_metadata"]["okx_review"]["accepted_for_okx"])
 
     @patch("crypto_trader.notifier.send_telegram_message")
     @patch("crypto_trader.engine.lc_pipeline_pool_rows")

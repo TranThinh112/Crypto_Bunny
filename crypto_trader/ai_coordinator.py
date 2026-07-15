@@ -39,12 +39,12 @@ from .strategy import build_candidates, enrich_quantities
 _PENDING_STATUS_PRIORITY = {
     "LC_OKX": 0,
     "WAIT_SLOT": 1,
-    "WATCHLIST": 2,
-    "OPEN": 3,
+    "OPEN": 2,
 }
 OKX_REVIEW_CACHE_STATE_KEY = "okx_review_cache"
 OKX_REJECTION_HARD_DELETE = "hard_delete"
-OKX_REJECTION_WATCHLIST = "watchlist"
+OKX_REJECTION_KEEP_MONITOR = "keep_monitor"
+LEGACY_OKX_REJECTION_WATCHLIST = "watchlist"
 DEFAULT_OKX_SOFT_RECHECK_MINUTES = 30
 
 
@@ -134,11 +134,63 @@ def _okx_setup_rejection_policy(decision: dict[str, Any]) -> dict[str, Any]:
             "cache_mode": "permanent",
             "reason": "hard rejection: direction/conflict/unsafe entry or unusable volume",
         }
+    keep_monitor_patterns = (
+        r"\bgiu theo doi\b",
+        r"\btheo doi\b",
+        r"\bgiu setup\b",
+        r"\bgiu lai setup\b",
+        r"\bkeep watching\b",
+        r"\bkeep monitoring\b",
+        r"\bmonitor\b",
+        r"\bwatch\b",
+        r"\bwait confirmation\b",
+        r"\bcho them xac nhan\b",
+        r"\bcan cho them\b",
+    )
+    if any(re.search(pattern, text) for pattern in keep_monitor_patterns):
+        return {
+            "policy": OKX_REJECTION_KEEP_MONITOR,
+            "cache_mode": "keep_monitor",
+            "reason": "soft 5.5 decision: keep the setup monitored while it is submitted to OKX",
+        }
     return {
-        "policy": OKX_REJECTION_WATCHLIST,
-        "cache_mode": "soft_recheck",
-        "reason": "soft rejection: keep watching for later confirmation",
+        "policy": OKX_REJECTION_HARD_DELETE,
+        "cache_mode": "permanent",
+        "reason": "5.5 rejected the setup without a keep-monitor instruction",
     }
+
+
+def _normalize_okx_rejection_policy(value: Any) -> str:
+    policy = str(value or "").strip().lower()
+    if policy == LEGACY_OKX_REJECTION_WATCHLIST:
+        return OKX_REJECTION_KEEP_MONITOR
+    return policy
+
+
+def okx_review_rejection_policy(decision: dict[str, Any]) -> str:
+    policy = _normalize_okx_rejection_policy(decision.get("rejection_policy"))
+    if policy:
+        return policy
+    return _okx_setup_rejection_policy(decision)["policy"]
+
+
+def okx_review_is_keep_monitor(decision: dict[str, Any]) -> bool:
+    return okx_review_rejection_policy(decision) == OKX_REJECTION_KEEP_MONITOR
+
+
+def okx_review_allows_okx_submission(decision: dict[str, Any]) -> bool:
+    return bool(decision.get("approved")) or okx_review_is_keep_monitor(decision)
+
+
+def okx_review_state(decision: dict[str, Any]) -> str:
+    if bool(decision.get("approved")):
+        return "GPT55_APPROVED"
+    policy = okx_review_rejection_policy(decision)
+    if policy == OKX_REJECTION_HARD_DELETE:
+        return "GPT55_HARD_DELETE"
+    if policy == OKX_REJECTION_KEEP_MONITOR:
+        return "GPT55_KEEP_MONITOR"
+    return "GPT55_REJECTED"
 
 
 def _okx_review_cache_key(candidate: TradeCandidate, route: str) -> str:
@@ -196,8 +248,8 @@ def _recent_rejected_okx_review(
     if bool(entry.get("approved")):
         return None
     policy = _okx_setup_rejection_policy(entry)
-    rejection_policy = str(entry.get("rejection_policy") or policy["policy"])
-    if rejection_policy != OKX_REJECTION_HARD_DELETE:
+    rejection_policy = _normalize_okx_rejection_policy(entry.get("rejection_policy") or policy["policy"])
+    if rejection_policy not in {OKX_REJECTION_HARD_DELETE, OKX_REJECTION_KEEP_MONITOR}:
         recheck_minutes = _okx_soft_recheck_minutes(config)
         reviewed_at = _parse_time(entry.get("reviewed_at") or entry.get("created_at"))
         if reviewed_at is None or (datetime.now(timezone.utc) - reviewed_at) > timedelta(minutes=recheck_minutes):
@@ -207,11 +259,13 @@ def _recent_rejected_okx_review(
     return {
         **entry,
         "rejection_policy": rejection_policy,
+        "review_state": okx_review_state({**entry, "rejection_policy": rejection_policy}),
+        "accepted_for_okx": okx_review_allows_okx_submission({**entry, "rejection_policy": rejection_policy}),
         "cached": True,
         "cache_reason": (
             "Reused permanent rejected 5.5 setup review"
             if rejection_policy == OKX_REJECTION_HARD_DELETE
-            else f"Waiting for fresh confirmation before retrying 5.5 for {_okx_soft_recheck_minutes(config)} minute(s)"
+            else f"Reused recent 5.5 keep-monitor review for {_okx_soft_recheck_minutes(config)} minute(s)"
         ),
     }
 
@@ -232,13 +286,16 @@ def _remember_okx_review_cache(
             _save_okx_review_cache(config, cache)
         return
     policy = _okx_setup_rejection_policy(decision)
+    rejection_policy = _normalize_okx_rejection_policy(policy["policy"])
     cache[cache_key] = {
         "approved": bool(decision.get("approved")),
         "decision": str(decision.get("decision") or ("approve" if decision.get("approved") else "reject")),
         "reason": str(decision.get("reason") or ""),
-        "rejection_policy": policy["policy"],
+        "rejection_policy": rejection_policy,
         "cache_mode": policy["cache_mode"],
         "policy_reason": policy["reason"],
+        "review_state": okx_review_state({**decision, "rejection_policy": rejection_policy}),
+        "accepted_for_okx": okx_review_allows_okx_submission({**decision, "rejection_policy": rejection_policy}),
         "provider": decision.get("provider"),
         "model": decision.get("model"),
         "model_version": decision.get("model_version"),
@@ -808,7 +865,6 @@ def internal_lc_memory(config: dict[str, Any], *, limit: int = 50) -> dict[str, 
     records = prioritize_pending_records(list_pending_orders(config, status="ACTIVE", limit=limit))
     lc_okx = [record for record in records if str(record.get("status") or "") == "LC_OKX"]
     wait_slot = [record for record in records if str(record.get("status") or "") == "WAIT_SLOT"]
-    watchlist = [record for record in records if str(record.get("status") or "") == "WATCHLIST"]
     local = [record for record in records if str(record.get("status") or "") == "OPEN"]
     preferred = records[0] if records else None
     memory = {
@@ -819,9 +875,8 @@ def internal_lc_memory(config: dict[str, Any], *, limit: int = 50) -> dict[str, 
         "pending_total": len(records),
         "lc_okx_count": len(lc_okx),
         "wait_slot_count": len(wait_slot),
-        "watchlist_count": len(watchlist),
         "local_lc_count": len(local),
-        "priority": ["LC_OKX", "WAIT_SLOT", "WATCHLIST", "OPEN"],
+        "priority": ["LC_OKX", "WAIT_SLOT", "OPEN"],
         "preferred": _pending_summary_row(preferred) if preferred else None,
         "orders": [_pending_summary_row(record) for record in records],
     }
@@ -1414,11 +1469,11 @@ def _openai_json_decision(
     }
     if route == "lc_okx_setup_review" and not result["approved"]:
         policy = _okx_setup_rejection_policy(result)
-        result["rejection_policy"] = policy["policy"]
+        result["rejection_policy"] = _normalize_okx_rejection_policy(policy["policy"])
         result["cache_mode"] = policy["cache_mode"]
         result["policy_reason"] = policy["reason"]
-        if policy["policy"] == OKX_REJECTION_WATCHLIST:
-            result["recheck_after_minutes"] = _okx_soft_recheck_minutes(config)
+    result["review_state"] = okx_review_state(result)
+    result["accepted_for_okx"] = okx_review_allows_okx_submission(result)
     if route in {"lc_okx_setup_review", "lc_okx_release"}:
         review_status = "GIỮ SETUP"
         market_reason = "-"
@@ -1439,7 +1494,7 @@ def _openai_json_decision(
         if (
             route == "lc_okx_setup_review"
             and not result["approved"]
-            and result.get("rejection_policy") == OKX_REJECTION_WATCHLIST
+            and okx_review_is_keep_monitor(result)
         ):
             review_status = "GIỮ THEO DÕI"
             keep_reason = result["reason"] or "5.5 chưa cho mở Market, cần chờ thêm xác nhận."
@@ -1461,7 +1516,8 @@ def _openai_json_decision(
                 "lc_okx_id": context.get("lc_id"),
                 "rejection_policy": result.get("rejection_policy"),
                 "cache_mode": result.get("cache_mode"),
-                "recheck_after_minutes": result.get("recheck_after_minutes"),
+                "review_state": result.get("review_state"),
+                "accepted_for_okx": result.get("accepted_for_okx"),
                 "market_reason": market_reason,
                 "keep_reason": keep_reason,
                 "delete_reason": delete_reason,
@@ -1568,12 +1624,14 @@ def okx_setup_review_recheck_state(
         }
 
     policy = _okx_setup_rejection_policy(review)
-    rejection_policy = str(review.get("rejection_policy") or policy["policy"])
+    rejection_policy = _normalize_okx_rejection_policy(review.get("rejection_policy") or policy["policy"])
     normalized_review = {
         **review,
         "rejection_policy": rejection_policy,
         "cache_mode": review.get("cache_mode") or policy["cache_mode"],
         "policy_reason": review.get("policy_reason") or policy["reason"],
+        "review_state": okx_review_state({**review, "rejection_policy": rejection_policy}),
+        "accepted_for_okx": okx_review_allows_okx_submission({**review, "rejection_policy": rejection_policy}),
     }
     if rejection_policy == OKX_REJECTION_HARD_DELETE:
         return {
@@ -1582,6 +1640,14 @@ def okx_setup_review_recheck_state(
             "review": normalized_review,
             "rejection_policy": rejection_policy,
             "hard_delete": True,
+        }
+    if rejection_policy == OKX_REJECTION_KEEP_MONITOR:
+        return {
+            "has_review": True,
+            "due": False,
+            "review": normalized_review,
+            "rejection_policy": rejection_policy,
+            "keep_monitor": True,
         }
 
     recheck_minutes = _okx_soft_recheck_minutes(config)
@@ -1632,6 +1698,8 @@ def attach_okx_review_metadata(
 ) -> TradeCandidate:
     reviewed = deepcopy(candidate)
     metadata = reviewed.decision_metadata if isinstance(reviewed.decision_metadata, dict) else {}
+    rejection_policy = okx_review_rejection_policy(decision)
+    normalized_decision = {**decision, "rejection_policy": rejection_policy}
     review_payload = {
         "route": route,
         "approved": bool(decision.get("approved")),
@@ -1643,11 +1711,12 @@ def attach_okx_review_metadata(
         "prompt_version": decision.get("prompt_version"),
         "prompt_hash": decision.get("prompt_hash"),
         "experiment_name": decision.get("experiment_name"),
-        "rejection_policy": decision.get("rejection_policy"),
+        "rejection_policy": rejection_policy,
         "cache_mode": decision.get("cache_mode"),
         "policy_reason": decision.get("policy_reason"),
-        "recheck_after_minutes": decision.get("recheck_after_minutes"),
-        "next_recheck_at": decision.get("next_recheck_at"),
+        "review_state": okx_review_state(normalized_decision),
+        "accepted_for_okx": okx_review_allows_okx_submission(normalized_decision),
+        "gpt55_checked": True,
         "reviewed_at": str(decision.get("reviewed_at") or datetime.now(timezone.utc).isoformat()),
         "context": dict(context or {}),
     }
@@ -1712,17 +1781,22 @@ def review_candidate_for_lc_okx(
         policy = _okx_setup_rejection_policy(decision)
         decision = {
             **decision,
-            "rejection_policy": policy["policy"],
+            "rejection_policy": _normalize_okx_rejection_policy(policy["policy"]),
             "cache_mode": policy["cache_mode"],
             "policy_reason": policy["reason"],
         }
-        if policy["policy"] == OKX_REJECTION_WATCHLIST:
-            decision["recheck_after_minutes"] = _okx_soft_recheck_minutes(config)
+    if route == "lc_okx_setup_review":
+        decision = {
+            **decision,
+            "rejection_policy": okx_review_rejection_policy(decision),
+            "review_state": okx_review_state(decision),
+            "accepted_for_okx": okx_review_allows_okx_submission(decision),
+        }
     _remember_okx_review_cache(config, candidate, route=route, decision=decision)
     if (
         route == "lc_okx_setup_review"
         and not bool(decision.get("approved"))
-        and decision.get("rejection_policy") == OKX_REJECTION_HARD_DELETE
+        and okx_review_rejection_policy(decision) == OKX_REJECTION_HARD_DELETE
     ):
         reject_lc_pipeline_setup(
             config,

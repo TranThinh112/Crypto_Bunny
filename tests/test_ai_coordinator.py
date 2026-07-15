@@ -233,14 +233,14 @@ class AiCoordinatorTest(TestCase):
         self.assertEqual(second_decision["decision"], "APPROVE")
         self.assertIs(reused, reviewed)
 
-    def test_reuses_recent_rejected_okx_setup_review_without_recalling_ai(self) -> None:
+    def test_reuses_recent_keep_monitor_okx_setup_review_without_recalling_ai(self) -> None:
         config = self._config()
         candidate = _candidate("SUI/USDT:USDT")
         check = RiskCheck(True, [], [])
         rejected = {
             "approved": False,
             "decision": "REJECT",
-            "reason": "Missing 4h bias and 15m confirmation; volume ratio 0.774 is weak",
+            "reason": "Missing 4h bias and 15m confirmation; keep watching",
             "provider": "openai",
             "model": "gpt-5.5",
             "model_version": "gpt-5.5",
@@ -271,7 +271,9 @@ class AiCoordinatorTest(TestCase):
         self.assertFalse(first_decision["approved"])
         self.assertFalse(second_decision["approved"])
         self.assertTrue(second_decision.get("cached"))
-        self.assertEqual(second_decision.get("rejection_policy"), "watchlist")
+        self.assertEqual(second_decision.get("rejection_policy"), "keep_monitor")
+        self.assertTrue(second_decision.get("accepted_for_okx"))
+        self.assertEqual(second_decision.get("review_state"), "GPT55_KEEP_MONITOR")
         self.assertEqual(second_decision["reason"], rejected["reason"])
         self.assertIsNotNone(first_candidate.decision_metadata.get("okx_review"))
         self.assertIsNotNone(second_candidate.decision_metadata.get("okx_review"))
@@ -313,24 +315,18 @@ class AiCoordinatorTest(TestCase):
         self.assertEqual(decision["reason"], rejected["reason"])
         self.assertIsNotNone(reviewed.decision_metadata.get("okx_review"))
 
-    def test_old_soft_rejected_okx_setup_review_rechecks_ai_after_cooldown(self) -> None:
+    def test_old_keep_monitor_okx_setup_review_does_not_recheck_after_cooldown(self) -> None:
         config = self._config()
         candidate = _candidate("AAVE/USDT:USDT")
         check = RiskCheck(True, [], [])
         rejected = {
             "approved": False,
             "decision": "REJECT",
-            "reason": "Missing 4h bias and 15m confirmation; volume ratio 0.774 is weak",
+            "reason": "Missing 4h bias and 15m confirmation; keep watching",
+            "rejection_policy": "keep_monitor",
             "provider": "openai",
             "model": "gpt-5.5",
             "reviewed_at": "2026-07-14T01:02:50+00:00",
-        }
-        approved = {
-            "approved": True,
-            "decision": "APPROVE",
-            "reason": "Fresh 4h/15m confirmation is now aligned",
-            "provider": "openai",
-            "model": "gpt-5.5",
         }
         set_journal_state(
             config,
@@ -338,7 +334,7 @@ class AiCoordinatorTest(TestCase):
             json.dumps({"lc_okx_setup_review|AAVE/USDT:USDT|LONG": rejected}, ensure_ascii=False),
         )
 
-        with patch("crypto_trader.ai_coordinator.okx_ai_approval", return_value=approved) as approval:
+        with patch("crypto_trader.ai_coordinator.okx_ai_approval") as approval:
             _, decision = review_candidate_for_lc_okx(
                 config,
                 candidate,
@@ -346,11 +342,12 @@ class AiCoordinatorTest(TestCase):
                 context={"route": "lc_okx_setup_review", "lc_id": 27},
             )
 
-        approval.assert_called_once()
-        self.assertTrue(decision["approved"])
-        self.assertEqual(decision["decision"], "APPROVE")
+        approval.assert_not_called()
+        self.assertFalse(decision["approved"])
+        self.assertEqual(decision.get("rejection_policy"), "keep_monitor")
+        self.assertTrue(decision.get("accepted_for_okx"))
 
-    def test_recent_watchlist_metadata_does_not_reask_or_refresh_reviewed_at(self) -> None:
+    def test_recent_keep_monitor_metadata_does_not_reask_or_refresh_reviewed_at(self) -> None:
         config = self._config()
         candidate = _candidate("INJ/USDT:USDT")
         reviewed_at = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
@@ -362,8 +359,9 @@ class AiCoordinatorTest(TestCase):
                 "reason": "5.5 giu setup de theo doi them",
                 "provider": "openai",
                 "model": "gpt-5.5",
-                "rejection_policy": "watchlist",
-                "recheck_after_minutes": 30,
+                "rejection_policy": "keep_monitor",
+                "review_state": "GPT55_KEEP_MONITOR",
+                "accepted_for_okx": True,
                 "reviewed_at": reviewed_at,
             }
         }
@@ -378,11 +376,12 @@ class AiCoordinatorTest(TestCase):
 
         approval.assert_not_called()
         self.assertFalse(decision["approved"])
-        self.assertTrue(decision.get("cached"))
+        self.assertTrue(decision.get("accepted_for_okx"))
+        self.assertEqual(decision.get("review_state"), "GPT55_KEEP_MONITOR")
         self.assertEqual(decision["reviewed_at"], reviewed_at)
         self.assertEqual(reviewed.decision_metadata["okx_review"]["reviewed_at"], reviewed_at)
 
-    def test_old_watchlist_metadata_reasks_ai_after_recheck_cooldown(self) -> None:
+    def test_old_keep_monitor_metadata_does_not_reask_after_recheck_cooldown(self) -> None:
         config = self._config()
         candidate = _candidate("INJ/USDT:USDT")
         candidate.decision_metadata = {
@@ -393,20 +392,14 @@ class AiCoordinatorTest(TestCase):
                 "reason": "5.5 giu setup de theo doi them",
                 "provider": "openai",
                 "model": "gpt-5.5",
-                "rejection_policy": "watchlist",
-                "recheck_after_minutes": 30,
+                "rejection_policy": "keep_monitor",
+                "review_state": "GPT55_KEEP_MONITOR",
+                "accepted_for_okx": True,
                 "reviewed_at": (datetime.now(timezone.utc) - timedelta(minutes=45)).isoformat(),
             }
         }
-        approved = {
-            "approved": True,
-            "decision": "APPROVE",
-            "reason": "Setup da co xac nhan moi",
-            "provider": "openai",
-            "model": "gpt-5.5",
-        }
 
-        with patch("crypto_trader.ai_coordinator.okx_ai_approval", return_value=approved) as approval:
+        with patch("crypto_trader.ai_coordinator.okx_ai_approval") as approval:
             _, decision = review_candidate_for_lc_okx(
                 config,
                 candidate,
@@ -414,9 +407,10 @@ class AiCoordinatorTest(TestCase):
                 context={"route": "lc_okx_setup_review", "lc_id": 29},
             )
 
-        approval.assert_called_once()
-        self.assertTrue(decision["approved"])
-        self.assertEqual(decision["decision"], "APPROVE")
+        approval.assert_not_called()
+        self.assertFalse(decision["approved"])
+        self.assertEqual(decision.get("rejection_policy"), "keep_monitor")
+        self.assertTrue(decision.get("accepted_for_okx"))
 
     def test_internal_market_scan_runs_once_per_fixed_slot(self) -> None:
         config = self._config()

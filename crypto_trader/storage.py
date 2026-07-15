@@ -23,9 +23,10 @@ from .models import Decision, TradeCandidate, to_jsonable
 
 PENDING_OKX_COLLECTION = "pending_orders"
 PENDING_INTERNAL_COLLECTION = "internal_pending_orders"
-ACTIVE_PENDING_STATUSES = ("LC_OKX", "WAIT_SLOT", "WATCHLIST", "OPEN")
+ACTIVE_PENDING_STATUSES = ("LC_OKX", "WAIT_SLOT", "OPEN")
 OKX_PENDING_STATUSES = ("LC_OKX",)
-INTERNAL_PENDING_STATUSES = ("WAIT_SLOT", "WATCHLIST", "OPEN")
+INTERNAL_PENDING_STATUSES = ("WAIT_SLOT", "OPEN")
+LEGACY_INTERNAL_PENDING_STATUSES = ("WATCHLIST",)
 DEFAULT_MARKET_SCAN_MAX_JSON_BYTES = 8000
 DEPRECATED_JOURNAL_STATE_KEYS = {
     "ai_internal_market_scan_latest",
@@ -529,7 +530,7 @@ def migrate_legacy_pending_orders(config: dict[str, Any]) -> dict[str, int]:
     legacy_rows = _mongo_find_many(
         config,
         PENDING_OKX_COLLECTION,
-        query={"status": {"$in": list(INTERNAL_PENDING_STATUSES)}},
+        query={"status": {"$in": list(INTERNAL_PENDING_STATUSES + LEGACY_INTERNAL_PENDING_STATUSES)}},
         sort=[("id", 1)],
     )
     if not legacy_rows:
@@ -2005,7 +2006,7 @@ def list_pending_orders(config: dict[str, Any], status: str = "OPEN", limit: int
         internal_rows = _mongo_find_many(
             config,
             PENDING_INTERNAL_COLLECTION,
-            query={"status": {"$in": list(INTERNAL_PENDING_STATUSES)}},
+            query={"status": {"$in": list(INTERNAL_PENDING_STATUSES + LEGACY_INTERNAL_PENDING_STATUSES)}},
             sort=[("updated_at", -1), ("created_at", -1), ("id", -1)],
             limit=safe_limit,
         )
@@ -2227,7 +2228,7 @@ def count_pending_orders(config: dict[str, Any], status: str = "OPEN") -> int:
     if normalized_status in {"OPEN", "ACTIVE"}:
         internal_count = int(
             _mongo_collection(config, PENDING_INTERNAL_COLLECTION).count_documents(
-                {"status": {"$in": list(INTERNAL_PENDING_STATUSES)}}
+                {"status": {"$in": list(INTERNAL_PENDING_STATUSES + LEGACY_INTERNAL_PENDING_STATUSES)}}
             )
         )
         okx_count = int(

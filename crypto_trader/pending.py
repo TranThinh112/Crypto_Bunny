@@ -6,9 +6,11 @@ from typing import Any
 
 from .ai_coordinator import (
     OKX_REJECTION_HARD_DELETE,
-    OKX_REJECTION_WATCHLIST,
     candidate_okx_review,
     okx_ai_approval,
+    okx_review_allows_okx_submission,
+    okx_review_is_keep_monitor,
+    okx_review_rejection_policy,
     okx_setup_review_recheck_state,
     prioritize_pending_records,
     review_candidate_for_lc_okx,
@@ -387,7 +389,7 @@ def _wait_slot_queue_meta(record: dict[str, Any]) -> dict[str, Any]:
     return meta if isinstance(meta, dict) else {}
 
 
-def _setup_watchlist_meta(record: dict[str, Any]) -> dict[str, Any]:
+def _legacy_keep_monitor_meta(record: dict[str, Any]) -> dict[str, Any]:
     candidate = _candidate_from_record(record)
     if candidate is None:
         return {}
@@ -395,20 +397,16 @@ def _setup_watchlist_meta(record: dict[str, Any]) -> dict[str, Any]:
     return meta if isinstance(meta, dict) else {}
 
 
-def _record_watchlist_review(record: dict[str, Any]) -> dict[str, Any] | None:
+def _record_keep_monitor_review(record: dict[str, Any]) -> dict[str, Any] | None:
     candidate = _candidate_from_record(record)
     if candidate is None:
         return None
     return candidate_okx_review(candidate, route="lc_okx_setup_review")
 
 
-def _is_watchlist_review(record: dict[str, Any]) -> bool:
-    review = _record_watchlist_review(record)
-    return bool(
-        review
-        and not review.get("approved")
-        and str(review.get("rejection_policy") or "") == OKX_REJECTION_WATCHLIST
-    )
+def _is_keep_monitor_review(record: dict[str, Any]) -> bool:
+    review = _record_keep_monitor_review(record)
+    return bool(review and not review.get("approved") and okx_review_is_keep_monitor(review))
 
 
 def _is_wait_slot_reason(reason: str) -> bool:
@@ -460,7 +458,7 @@ def _recheck_wait_slot_candidate(
         if clean and clean not in pool_symbols:
             pool_symbols.append(clean)
     selected_symbols = [str(item) for item in list(latest_scan.get("selected_symbols") or []) if str(item)]
-    queue_meta = _wait_slot_queue_meta(record) or _setup_watchlist_meta(record)
+    queue_meta = _wait_slot_queue_meta(record) or _legacy_keep_monitor_meta(record)
     queued_slot_id = str(queue_meta.get("scan_slot_id") or "")
     latest_slot_id = str(latest_scan.get("slot_id") or "")
 
@@ -673,14 +671,14 @@ def maintain_pending_orders(
         candidate = candidates_by_key.get(_record_key(record))
 
         if record_status == "WATCHLIST":
-            watchlist_candidate = _candidate_from_record(record)
-            if watchlist_candidate is None:
-                reason = "WATCHLIST khong con payload hop le"
+            legacy_candidate = _candidate_from_record(record)
+            if legacy_candidate is None:
+                reason = "Legacy keep-monitor payload is invalid"
                 close_pending_order(config, local_id, "CANCELED", reason)
                 events.append(
                     {
                         "type": "pending_canceled",
-                        "source": "mini_watchlist",
+                        "source": "legacy_keep_monitor",
                         "lc_id": lc_id,
                         "symbol": symbol,
                         "side": str(record.get("side") or ""),
@@ -691,14 +689,14 @@ def maintain_pending_orders(
                 continue
 
             if config.get("mode") != "dry_run" and (exchange is None or position_count is None):
-                warnings.append(f"{symbol}: WATCHLIST kept because OKX sync is unavailable")
                 refresh_pending_order(
                     config,
                     local_id,
-                    watchlist_candidate,
-                    status="WATCHLIST",
+                    legacy_candidate,
+                    status="OPEN",
                     max_age_hours=float(lifecycle["local_max_age_hours"]),
                 )
+                warnings.append(f"{symbol}: legacy keep-monitor moved to OPEN because OKX sync is unavailable")
                 kept += 1
                 continue
 
@@ -706,19 +704,19 @@ def maintain_pending_orders(
                 refresh_pending_order(
                     config,
                     local_id,
-                    watchlist_candidate,
-                    status="WATCHLIST",
+                    legacy_candidate,
+                    status="WAIT_SLOT",
                     max_age_hours=float(lifecycle["local_max_age_hours"]),
                 )
                 events.append(
                     {
                         "type": "pending_kept",
-                        "source": "mini_watchlist_slot_full",
-                        "status": "WATCHLIST",
+                        "source": "legacy_keep_monitor_slot_full",
+                        "status": "WAIT_SLOT",
                         "lc_id": lc_id,
                         "symbol": symbol,
                         "side": str(record.get("side") or ""),
-                        "reason": f"Slot dang day {position_count}/{max_active}; chua hoi lai GPT-5.5",
+                        "reason": f"Slot dang day {position_count}/{max_active}; legacy keep-monitor moved to WAIT_SLOT",
                     }
                 )
                 kept += 1
@@ -728,12 +726,12 @@ def maintain_pending_orders(
             refreshed_candidate = recheck.get("candidate")
             comparison = recheck.get("comparison") or {}
             if refreshed_candidate is None:
-                reason = str(recheck.get("reason") or "WATCHLIST khong con du dieu kien sau tai kiem")
+                reason = str(recheck.get("reason") or "Legacy keep-monitor setup is no longer valid")
                 close_pending_order(config, local_id, "CANCELED", reason)
                 events.append(
                     {
                         "type": "pending_canceled",
-                        "source": "mini_watchlist_recheck",
+                        "source": "legacy_keep_monitor_recheck",
                         "lc_id": lc_id,
                         "symbol": symbol,
                         "side": str(record.get("side") or ""),
@@ -758,7 +756,7 @@ def maintain_pending_orders(
                 events.append(
                     {
                         "type": "pending_canceled",
-                        "source": "mini_watchlist_recheck",
+                        "source": "legacy_keep_monitor_recheck",
                         "lc_id": lc_id,
                         "symbol": symbol,
                         "side": str(record.get("side") or ""),
@@ -774,18 +772,18 @@ def maintain_pending_orders(
                     config,
                     local_id,
                     refreshed_candidate,
-                    status="WATCHLIST",
+                    status="OPEN",
                     max_age_hours=float(lifecycle["local_max_age_hours"]),
                 )
                 events.append(
                     {
                         "type": "pending_kept",
-                        "source": "mini_watchlist_recheck",
-                        "status": "WATCHLIST",
+                        "source": "legacy_keep_monitor_recheck",
+                        "status": "OPEN",
                         "lc_id": lc_id,
                         "symbol": symbol,
                         "side": str(record.get("side") or ""),
-                        "reason": str(recheck.get("reason") or "WATCHLIST tiep tuc cho tai kiem"),
+                        "reason": str(recheck.get("reason") or "Legacy keep-monitor moved to OPEN"),
                         "comparison": comparison,
                     }
                 )
@@ -797,7 +795,7 @@ def maintain_pending_orders(
                     config,
                     local_id,
                     refreshed_candidate,
-                    status="WATCHLIST",
+                    status="OPEN",
                     max_age_hours=float(lifecycle["local_max_age_hours"]),
                 )
                 kept += 1
@@ -810,79 +808,17 @@ def maintain_pending_orders(
                 check_order_limits=True,
             )
             if not submit_check.passed:
+                target_status = "WAIT_SLOT" if any(_is_wait_slot_reason(reason) for reason in submit_check.reasons) else "OPEN"
                 refresh_pending_order(
                     config,
                     local_id,
                     refreshed_candidate,
-                    status="WATCHLIST",
+                    status=target_status,
                     max_age_hours=float(lifecycle["local_max_age_hours"]),
                 )
                 warnings.append(
-                    f"{symbol}: WATCHLIST kept because submit risk check failed: "
+                    f"{symbol}: legacy keep-monitor kept as {target_status} because submit risk check failed: "
                     + "; ".join(submit_check.reasons[:3])
-                )
-                kept += 1
-                continue
-
-            setup_review_state = okx_setup_review_recheck_state(
-                config,
-                refreshed_candidate,
-                route="lc_okx_setup_review",
-            )
-            if setup_review_state.get("rejection_policy") == OKX_REJECTION_HARD_DELETE:
-                stored_review = setup_review_state.get("review") or {}
-                reason = str(
-                    stored_review.get("reason")
-                    or stored_review.get("decision")
-                    or "GPT-5.5 rejected LC_OKX setup"
-                )
-                close_pending_order(config, local_id, "CANCELED", reason)
-                events.append(
-                    {
-                        "type": "pending_canceled",
-                        "source": "mini_watchlist_stored_review",
-                        "lc_id": lc_id,
-                        "symbol": symbol,
-                        "side": str(record.get("side") or ""),
-                        "reason": reason,
-                        "rejection_policy": setup_review_state.get("rejection_policy"),
-                        "comparison": comparison,
-                    }
-                )
-                canceled += 1
-                continue
-            if (
-                setup_review_state.get("has_review")
-                and setup_review_state.get("rejection_policy") == OKX_REJECTION_WATCHLIST
-                and not bool(setup_review_state.get("due", True))
-            ):
-                stored_review = setup_review_state.get("review") or {}
-                reason = str(
-                    stored_review.get("reason")
-                    or stored_review.get("decision")
-                    or "GPT-5.5 dang giu setup de theo doi"
-                )
-                refresh_pending_order(
-                    config,
-                    local_id,
-                    refreshed_candidate,
-                    status="WATCHLIST",
-                    max_age_hours=float(lifecycle["local_max_age_hours"]),
-                )
-                events.append(
-                    {
-                        "type": "pending_kept",
-                        "source": "mini_watchlist_review_cooldown",
-                        "status": "WATCHLIST",
-                        "lc_id": lc_id,
-                        "symbol": symbol,
-                        "side": str(record.get("side") or ""),
-                        "reason": reason,
-                        "rejection_policy": setup_review_state.get("rejection_policy"),
-                        "recheck_after_minutes": stored_review.get("recheck_after_minutes"),
-                        "next_recheck_at": setup_review_state.get("next_recheck_at"),
-                        "comparison": comparison,
-                    }
                 )
                 kept += 1
                 continue
@@ -894,41 +830,17 @@ def maintain_pending_orders(
                 context={
                     "route": "lc_okx_setup_review",
                     "lc_id": lc_id,
-                    "from_status": "WATCHLIST",
-                    "source": "mini_watchlist_release",
+                    "from_status": "LEGACY_KEEP_MONITOR",
+                    "source": "legacy_keep_monitor_release",
                 },
             )
-            if not setup_review.get("approved"):
+            if not okx_review_allows_okx_submission(setup_review):
                 reason = str(setup_review.get("reason") or setup_review.get("decision") or "GPT-5.5 rejected LC_OKX setup")
-                if setup_review.get("rejection_policy") == OKX_REJECTION_WATCHLIST:
-                    refresh_pending_order(
-                        config,
-                        local_id,
-                        reviewed_candidate,
-                        status="WATCHLIST",
-                        max_age_hours=float(lifecycle["local_max_age_hours"]),
-                    )
-                    events.append(
-                        {
-                            "type": "pending_kept",
-                            "source": "mini_watchlist_review",
-                            "status": "WATCHLIST",
-                            "lc_id": lc_id,
-                            "symbol": symbol,
-                            "side": str(record.get("side") or ""),
-                            "reason": reason,
-                            "rejection_policy": setup_review.get("rejection_policy"),
-                            "recheck_after_minutes": setup_review.get("recheck_after_minutes"),
-                            "comparison": comparison,
-                        }
-                    )
-                    kept += 1
-                    continue
                 close_pending_order(config, local_id, "CANCELED", reason)
                 events.append(
                     {
                         "type": "pending_canceled",
-                        "source": "mini_watchlist_review",
+                        "source": "legacy_keep_monitor_review",
                         "lc_id": lc_id,
                         "symbol": symbol,
                         "side": str(record.get("side") or ""),
@@ -943,7 +855,7 @@ def maintain_pending_orders(
                 config,
                 reviewed_candidate,
                 order_type_override=str(lifecycle["order_type"]),
-                entry_type="mini_watchlist_okx",
+                entry_type="legacy_keep_monitor_okx",
                 journal_type="LC",
                 journal_id=lc_id,
             )
@@ -952,10 +864,10 @@ def maintain_pending_orders(
                     config,
                     local_id,
                     reviewed_candidate,
-                    status="WATCHLIST",
+                    status="OPEN",
                     max_age_hours=float(lifecycle["local_max_age_hours"]),
                 )
-                warnings.append(f"{symbol}: WATCHLIST submit to OKX failed: {execution.message}")
+                warnings.append(f"{symbol}: legacy keep-monitor submit to OKX failed: {execution.message}")
                 kept += 1
                 continue
 
@@ -969,13 +881,13 @@ def maintain_pending_orders(
             events.append(
                 {
                     "type": "pending_submitted",
-                    "source": "mini_watchlist_release",
+                    "source": "legacy_keep_monitor_release",
                     "status": "LC_OKX",
                     "lc_id": lc_id,
                     "symbol": symbol,
                     "side": str(record.get("side") or ""),
                     "exchange_order_id": execution.order_id,
-                    "reason": str(recheck.get("reason") or "WATCHLIST released to LC_OKX"),
+                    "reason": str(recheck.get("reason") or "Legacy keep-monitor released to LC_OKX"),
                     "comparison": comparison,
                 }
             )
@@ -1000,28 +912,6 @@ def maintain_pending_orders(
                     }
                 )
                 canceled += 1
-                continue
-
-            if _is_watchlist_review(record) and not _is_real_wait_slot_record(record):
-                refresh_pending_order(
-                    config,
-                    local_id,
-                    wait_slot_candidate,
-                    status="WATCHLIST",
-                    max_age_hours=float(lifecycle["local_max_age_hours"]),
-                )
-                events.append(
-                    {
-                        "type": "pending_kept",
-                        "source": "wait_slot_watchlist_migrated",
-                        "status": "WATCHLIST",
-                        "lc_id": lc_id,
-                        "symbol": symbol,
-                        "side": str(record.get("side") or ""),
-                        "reason": "WAIT_SLOT cu thuc chat la GPT-5.5 watchlist, da chuyen sang WATCHLIST",
-                    }
-                )
-                kept += 1
                 continue
 
             if config.get("mode") != "dry_run" and (exchange is None or position_count is None):
@@ -1185,42 +1075,6 @@ def maintain_pending_orders(
                 )
                 canceled += 1
                 continue
-            if (
-                setup_review_state.get("has_review")
-                and setup_review_state.get("rejection_policy") == OKX_REJECTION_WATCHLIST
-                and not bool(setup_review_state.get("due", True))
-            ):
-                stored_review = setup_review_state.get("review") or {}
-                reason = str(
-                    stored_review.get("reason")
-                    or stored_review.get("decision")
-                    or "GPT-5.5 dang giu setup de theo doi"
-                )
-                refresh_pending_order(
-                    config,
-                    local_id,
-                    refreshed_candidate,
-                    status="WAIT_SLOT",
-                    max_age_hours=float(lifecycle["local_max_age_hours"]),
-                )
-                events.append(
-                    {
-                        "type": "pending_kept",
-                        "source": "mini_wait_slot_review_cooldown",
-                        "status": "WAIT_SLOT",
-                        "lc_id": lc_id,
-                        "symbol": symbol,
-                        "side": str(record.get("side") or ""),
-                        "reason": reason,
-                        "rejection_policy": setup_review_state.get("rejection_policy"),
-                        "recheck_after_minutes": stored_review.get("recheck_after_minutes"),
-                        "next_recheck_at": setup_review_state.get("next_recheck_at"),
-                        "comparison": comparison,
-                    }
-                )
-                kept += 1
-                continue
-
             reviewed_candidate, setup_review = review_candidate_for_lc_okx(
                 config,
                 refreshed_candidate,
@@ -1232,32 +1086,8 @@ def maintain_pending_orders(
                     "source": "mini_wait_slot_release",
                 },
             )
-            if not setup_review.get("approved"):
+            if not okx_review_allows_okx_submission(setup_review):
                 reason = str(setup_review.get("reason") or setup_review.get("decision") or "GPT-5.5 rejected LC_OKX setup")
-                if setup_review.get("rejection_policy") == OKX_REJECTION_WATCHLIST:
-                    refresh_pending_order(
-                        config,
-                        local_id,
-                        reviewed_candidate,
-                        status="WAIT_SLOT",
-                        max_age_hours=float(lifecycle["local_max_age_hours"]),
-                    )
-                    events.append(
-                        {
-                            "type": "pending_kept",
-                            "source": "mini_wait_slot_review",
-                            "status": "WAIT_SLOT",
-                            "lc_id": lc_id,
-                            "symbol": symbol,
-                            "side": str(record.get("side") or ""),
-                            "reason": reason,
-                            "rejection_policy": setup_review.get("rejection_policy"),
-                            "recheck_after_minutes": setup_review.get("recheck_after_minutes"),
-                            "comparison": comparison,
-                        }
-                    )
-                    kept += 1
-                    continue
                 close_pending_order(config, local_id, "CANCELED", reason)
                 events.append(
                     {
@@ -1638,39 +1468,6 @@ def maintain_pending_orders(
                         )
                         canceled += 1
                         continue
-                    if (
-                        setup_review_state.get("has_review")
-                        and setup_review_state.get("rejection_policy") == OKX_REJECTION_WATCHLIST
-                        and not bool(setup_review_state.get("due", True))
-                    ):
-                        stored_review = setup_review_state.get("review") or {}
-                        reason = str(
-                            stored_review.get("reason")
-                            or stored_review.get("decision")
-                            or "GPT-5.5 dang giu setup de theo doi"
-                        )
-                        refresh_pending_order(
-                            config,
-                            local_id,
-                            candidate,
-                            status=str(record.get("status") or "OPEN"),
-                            max_age_hours=float(lifecycle["local_max_age_hours"]),
-                        )
-                        events.append(
-                            {
-                                "type": "pending_kept",
-                                "source": "local_pending_review_cooldown",
-                                "lc_id": lc_id,
-                                "symbol": symbol,
-                                "side": str(record.get("side") or ""),
-                                "reason": reason,
-                                "rejection_policy": setup_review_state.get("rejection_policy"),
-                                "recheck_after_minutes": stored_review.get("recheck_after_minutes"),
-                                "next_recheck_at": setup_review_state.get("next_recheck_at"),
-                            }
-                        )
-                        kept += 1
-                        continue
                     reviewed_candidate, setup_review = review_candidate_for_lc_okx(
                         config,
                         candidate,
@@ -1682,30 +1479,8 @@ def maintain_pending_orders(
                             "source": "local_pending_submit",
                         },
                     )
-                    if not setup_review.get("approved"):
+                    if not okx_review_allows_okx_submission(setup_review):
                         reason = str(setup_review.get("reason") or setup_review.get("decision") or "GPT-5.5 rejected LC_OKX setup")
-                        if setup_review.get("rejection_policy") == OKX_REJECTION_WATCHLIST:
-                            refresh_pending_order(
-                                config,
-                                local_id,
-                                reviewed_candidate,
-                                status=str(record.get("status") or "OPEN"),
-                                max_age_hours=float(lifecycle["local_max_age_hours"]),
-                            )
-                            events.append(
-                                {
-                                    "type": "pending_kept",
-                                    "source": "local_pending_review",
-                                    "lc_id": lc_id,
-                                    "symbol": symbol,
-                                    "side": str(record.get("side") or ""),
-                                    "reason": reason,
-                                    "rejection_policy": setup_review.get("rejection_policy"),
-                                    "recheck_after_minutes": setup_review.get("recheck_after_minutes"),
-                                }
-                            )
-                            kept += 1
-                            continue
                         close_pending_order(config, local_id, "CANCELED", reason)
                         events.append(
                             {
