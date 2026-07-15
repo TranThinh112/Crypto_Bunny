@@ -14,6 +14,7 @@ from .ai_coordinator import (
     internal_market_shortlist,
     okx_ai_approval,
     okx_review_allows_okx_submission,
+    okx_review_requests_market_entry,
     review_candidate_for_lc_okx,
     run_internal_market_scan,
     run_internal_market_scan_if_due,
@@ -892,6 +893,8 @@ def _create_pending_from_internal_scan(
         "configured_limit": configured_pending_limit,
         "created": 0,
         "created_orders": [],
+        "market": 0,
+        "market_orders": [],
         "wait_slot": 0,
         "wait_slot_orders": [],
         "skipped": [],
@@ -1000,6 +1003,40 @@ def _create_pending_from_internal_scan(
                     "from_status": "MINI_APPROVED",
                 },
             )
+            if okx_review_requests_market_entry(okx_review):
+                vt_id = next_global_counter(config, "VT") if config.get("mode") != "dry_run" else None
+                execution = execute_candidate(
+                    config,
+                    reviewed_candidate,
+                    order_type_override="market",
+                    entry_type="mini_lc_market",
+                    journal_type="VT",
+                    journal_id=vt_id,
+                )
+                if not execution.submitted:
+                    result["skipped"].append(
+                        {
+                            "symbol": candidate.symbol,
+                            "side": candidate.side,
+                            "reason": f"OKX market entry failed: {execution.message}",
+                        }
+                    )
+                    continue
+                result["market"] += 1
+                created_symbols.add(candidate.symbol)
+                result["market_orders"].append(
+                    {
+                        "vt_id": vt_id,
+                        "symbol": reviewed_candidate.symbol,
+                        "side": reviewed_candidate.side,
+                        "exchange_order_id": execution.order_id,
+                        "win_probability_pct": reviewed_candidate.win_probability_pct,
+                        "confidence": reviewed_candidate.confidence,
+                        "okx_review": candidate_okx_review(reviewed_candidate, route="lc_okx_setup_review"),
+                        "execution": to_jsonable(execution),
+                    }
+                )
+                continue
             if not okx_review_allows_okx_submission(okx_review):
                 reason = str(okx_review.get("reason") or okx_review.get("decision") or "GPT-5.5 rejected LC_OKX setup")
                 result["skipped"].append(
@@ -1321,9 +1358,21 @@ def run_once(
             if selected is None and candidate is candidates[0]:
                 risk_check = current_check
 
+    market_from_mini = bool((mini_pending_queue or {}).get("market"))
     queued_from_mini = bool((mini_pending_queue or {}).get("created"))
     waiting_slot_from_mini = bool((mini_pending_queue or {}).get("wait_slot"))
-    if queued_from_mini:
+    if market_from_mini:
+        first_market = (mini_pending_queue or {}).get("market_orders", [{}])[0]
+        selected = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate.symbol == first_market.get("symbol") and candidate.side == first_market.get("side")
+            ),
+            selected,
+        )
+        risk_check = RiskCheck(True, [], market_warnings + quantity_warnings)
+    elif queued_from_mini:
         first_created = (mini_pending_queue or {}).get("created_orders", [{}])[0]
         selected = next(
             (
@@ -1351,7 +1400,20 @@ def run_once(
         )
     execution_result: ExecutionResult | None = None
     action = "hold"
-    if queued_from_mini and selected:
+    if market_from_mini and selected:
+        first_market = (mini_pending_queue or {}).get("market_orders", [{}])[0]
+        execution_payload = first_market.get("execution") if isinstance(first_market.get("execution"), dict) else {}
+        action = f"{selected.side}_{selected.symbol}"
+        execution_result = ExecutionResult(
+            mode=str(execution_payload.get("mode") or config.get("mode", "dry_run")),
+            submitted=bool(execution_payload.get("submitted", True)),
+            order_id=execution_payload.get("order_id"),
+            message=str(execution_payload.get("message") or "GPT 5.5 selected immediate market entry from Mini review"),
+            raw={"mini_pending_queue": mini_pending_queue, "mini_market_entry": True},
+            journal_type=str(execution_payload.get("journal_type") or "VT"),
+            journal_id=execution_payload.get("journal_id") or first_market.get("vt_id"),
+        )
+    elif queued_from_mini and selected:
         action = f"pending_{selected.side}_{selected.symbol}"
         execution_result = ExecutionResult(
             mode=config.get("mode", "dry_run"),

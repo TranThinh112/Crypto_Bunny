@@ -45,6 +45,11 @@ OKX_REVIEW_CACHE_STATE_KEY = "okx_review_cache"
 OKX_REJECTION_HARD_DELETE = "hard_delete"
 OKX_REJECTION_KEEP_MONITOR = "keep_monitor"
 LEGACY_OKX_REJECTION_WATCHLIST = "watchlist"
+OKX_REVIEW_ACTION_KEEP_SETUP = "keep_setup"
+OKX_REVIEW_ACTION_DELETE_SETUP = "delete_setup"
+OKX_REVIEW_ACTION_ENTER_MARKET = "enter_market"
+OKX_INITIAL_REVIEW_SOURCE = "mini_lc_okx"
+OKX_INITIAL_REVIEW_FROM_STATUS = "MINI_APPROVED"
 DEFAULT_OKX_SOFT_RECHECK_MINUTES = 30
 
 
@@ -160,6 +165,67 @@ def _okx_setup_rejection_policy(decision: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _okx_review_text(decision: dict[str, Any]) -> str:
+    raw = decision.get("raw") if isinstance(decision.get("raw"), dict) else {}
+    values = (
+        decision.get("setup_action"),
+        decision.get("action"),
+        decision.get("decision"),
+        decision.get("reason"),
+        raw.get("setup_action"),
+        raw.get("action"),
+        raw.get("decision"),
+        raw.get("reason"),
+    )
+    return _ascii_fold(" ".join(str(value or "") for value in values))
+
+
+def _normalize_okx_review_action(value: Any) -> str | None:
+    clean = re.sub(r"[^a-z0-9]+", "_", _ascii_fold(value)).strip("_")
+    if not clean:
+        return None
+    if clean in {
+        "enter_market",
+        "market_entry",
+        "vao_market",
+        "vao_lenh_market",
+        "mo_market",
+        "duyet_mo_market",
+        "open_market",
+        "market_order",
+    }:
+        return OKX_REVIEW_ACTION_ENTER_MARKET
+    if clean in {
+        "keep_setup",
+        "giu_setup",
+        "giu_lai_setup",
+        "giu_theo_doi",
+        "keep_monitor",
+        "keep_monitoring",
+        "keep_watching",
+        "approve",
+        "approved",
+        "giu",
+    }:
+        return OKX_REVIEW_ACTION_KEEP_SETUP
+    if clean in {
+        "delete_setup",
+        "xoa_setup",
+        "remove_setup",
+        "cancel_setup",
+    }:
+        return OKX_REVIEW_ACTION_DELETE_SETUP
+    return None
+
+
+def _okx_initial_mini_review_context(context: dict[str, Any]) -> bool:
+    return (
+        str(context.get("route") or "") == "lc_okx_setup_review"
+        and str(context.get("source") or "") == OKX_INITIAL_REVIEW_SOURCE
+        and str(context.get("from_status") or "") == OKX_INITIAL_REVIEW_FROM_STATUS
+    )
+
+
 def _normalize_okx_rejection_policy(value: Any) -> str:
     policy = str(value or "").strip().lower()
     if policy == LEGACY_OKX_REJECTION_WATCHLIST:
@@ -178,19 +244,57 @@ def okx_review_is_keep_monitor(decision: dict[str, Any]) -> bool:
     return okx_review_rejection_policy(decision) == OKX_REJECTION_KEEP_MONITOR
 
 
+def okx_review_action(decision: dict[str, Any]) -> str:
+    raw = decision.get("raw") if isinstance(decision.get("raw"), dict) else {}
+    for value in (
+        decision.get("setup_action"),
+        decision.get("action"),
+        decision.get("decision"),
+        raw.get("setup_action"),
+        raw.get("action"),
+        raw.get("decision"),
+    ):
+        action = _normalize_okx_review_action(value)
+        if action is not None:
+            return action
+    text = _okx_review_text(decision)
+    market_patterns = (
+        r"\benter market\b",
+        r"\benter_market\b",
+        r"\bmarket entry\b",
+        r"\bmarket_order\b",
+        r"\bmarket order\b",
+        r"\bvao lenh market\b",
+        r"\bmo lenh market\b",
+        r"\bduyet mo market\b",
+    )
+    if any(re.search(pattern, text) for pattern in market_patterns):
+        return OKX_REVIEW_ACTION_ENTER_MARKET
+    if bool(decision.get("approved")) or okx_review_is_keep_monitor(decision):
+        return OKX_REVIEW_ACTION_KEEP_SETUP
+    return OKX_REVIEW_ACTION_DELETE_SETUP
+
+
+def okx_review_requests_market_entry(decision: dict[str, Any]) -> bool:
+    return okx_review_action(decision) == OKX_REVIEW_ACTION_ENTER_MARKET
+
+
 def okx_review_allows_okx_submission(decision: dict[str, Any]) -> bool:
-    return bool(decision.get("approved")) or okx_review_is_keep_monitor(decision)
+    return okx_review_action(decision) == OKX_REVIEW_ACTION_KEEP_SETUP
 
 
 def okx_review_state(decision: dict[str, Any]) -> str:
-    if bool(decision.get("approved")):
-        return "GPT55_APPROVED"
+    action = okx_review_action(decision)
+    if action == OKX_REVIEW_ACTION_ENTER_MARKET:
+        return "GPT55_ENTER_MARKET"
+    if action == OKX_REVIEW_ACTION_KEEP_SETUP:
+        return "GPT55_KEEP_SETUP"
     policy = okx_review_rejection_policy(decision)
     if policy == OKX_REJECTION_HARD_DELETE:
-        return "GPT55_HARD_DELETE"
+        return "GPT55_DELETE_SETUP"
     if policy == OKX_REJECTION_KEEP_MONITOR:
-        return "GPT55_KEEP_MONITOR"
-    return "GPT55_REJECTED"
+        return "GPT55_KEEP_SETUP"
+    return "GPT55_DELETE_SETUP"
 
 
 def _okx_review_cache_key(candidate: TradeCandidate, route: str) -> str:
@@ -258,6 +362,7 @@ def _recent_rejected_okx_review(
             return None
     return {
         **entry,
+        "setup_action": okx_review_action({**entry, "rejection_policy": rejection_policy}),
         "rejection_policy": rejection_policy,
         "review_state": okx_review_state({**entry, "rejection_policy": rejection_policy}),
         "accepted_for_okx": okx_review_allows_okx_submission({**entry, "rejection_policy": rejection_policy}),
@@ -289,6 +394,7 @@ def _remember_okx_review_cache(
     rejection_policy = _normalize_okx_rejection_policy(policy["policy"])
     cache[cache_key] = {
         "approved": bool(decision.get("approved")),
+        "setup_action": okx_review_action(decision),
         "decision": str(decision.get("decision") or ("approve" if decision.get("approved") else "reject")),
         "reason": str(decision.get("reason") or ""),
         "rejection_policy": rejection_policy,
@@ -1467,38 +1573,30 @@ def _openai_json_decision(
         "pending_memory": pending_memory,
         "raw": decision,
     }
+    result["setup_action"] = okx_review_action(result)
     if route == "lc_okx_setup_review" and not result["approved"]:
         policy = _okx_setup_rejection_policy(result)
         result["rejection_policy"] = _normalize_okx_rejection_policy(policy["policy"])
         result["cache_mode"] = policy["cache_mode"]
         result["policy_reason"] = policy["reason"]
+        result["setup_action"] = okx_review_action(result)
     result["review_state"] = okx_review_state(result)
     result["accepted_for_okx"] = okx_review_allows_okx_submission(result)
     if route in {"lc_okx_setup_review", "lc_okx_release"}:
-        review_status = "GIỮ SETUP"
+        setup_action = okx_review_action(result)
+        review_status = "GIU SETUP"
         market_reason = "-"
         keep_reason = "-"
         delete_reason = "-"
-        if route == "lc_okx_release" and result["approved"]:
-            review_status = "DUYỆT MỞ MARKET"
-            market_reason = result["reason"] or "5.5 xác nhận setup đủ điều kiện để đi tiếp vào Market."
-        elif result["approved"]:
-            review_status = "GIỮ SETUP"
-            keep_reason = result["reason"] or "5.5 giữ lại setup vì cấu trúc lệnh vẫn hợp lệ."
-        elif route == "lc_okx_setup_review":
-            review_status = "XÓA SETUP"
-            delete_reason = result["reason"] or "5.5 loại setup vì chưa đủ chất lượng."
+        if setup_action == OKX_REVIEW_ACTION_ENTER_MARKET:
+            review_status = "VAO MARKET"
+            market_reason = result["reason"] or "5.5 chon vao lenh Market ngay."
+        elif setup_action == OKX_REVIEW_ACTION_KEEP_SETUP:
+            review_status = "GIU SETUP"
+            keep_reason = result["reason"] or "5.5 giu setup va cho phep luu lenh cho tren OKX."
         else:
-            review_status = "GIỮ SETUP"
-            keep_reason = result["reason"] or "5.5 chưa cho phép mở Market, setup tiếp tục được giữ lại."
-        if (
-            route == "lc_okx_setup_review"
-            and not result["approved"]
-            and okx_review_is_keep_monitor(result)
-        ):
-            review_status = "GIỮ THEO DÕI"
-            keep_reason = result["reason"] or "5.5 chưa cho mở Market, cần chờ thêm xác nhận."
-            delete_reason = "-"
+            review_status = "XOA SETUP"
+            delete_reason = result["reason"] or "5.5 loai setup vi chua du chat luong."
         record_ai_call_event(
             config,
             {
@@ -1552,8 +1650,21 @@ def okx_ai_approval(
     lc_okx_review_once = (
         route == "lc_okx_setup_review"
         and not manual_openai_once
+        and _okx_initial_mini_review_context(context)
         and bool(okx_config.get("auto_lc_okx_review_once_enabled", False))
     )
+    if manual_openai_once:
+        return {
+            **local_decision,
+            "decision": "manual_openai_blocked",
+            "reason": "5.5 is restricted to the initial Mini LC_OKX setup review and cannot be called manually.",
+        }
+    if route == "lc_okx_setup_review" and not lc_okx_review_once and not candidate_okx_review(candidate, route=route):
+        return {
+            **local_decision,
+            "decision": "initial_mini_review_required",
+            "reason": "5.5 can only be called once when Mini first promotes this setup.",
+        }
     if manual_openai_once or lc_okx_review_once:
         if manual_openai_once and not bool(okx_config.get("manual_openai_enabled", False)):
             return {
@@ -1615,11 +1726,20 @@ def okx_setup_review_recheck_state(
     review = candidate_okx_review(candidate, route=route)
     if review is None:
         return {"has_review": False, "due": True, "review": None}
-    if route != "lc_okx_setup_review" or bool(review.get("approved")):
+    stored_action = okx_review_action(review)
+    if route != "lc_okx_setup_review" or stored_action in {
+        OKX_REVIEW_ACTION_KEEP_SETUP,
+        OKX_REVIEW_ACTION_ENTER_MARKET,
+    }:
         return {
             "has_review": True,
             "due": False,
-            "review": review,
+            "review": {
+                **review,
+                "setup_action": stored_action,
+                "review_state": okx_review_state(review),
+                "accepted_for_okx": okx_review_allows_okx_submission(review),
+            },
             "rejection_policy": review.get("rejection_policy"),
         }
 
@@ -1700,9 +1820,11 @@ def attach_okx_review_metadata(
     metadata = reviewed.decision_metadata if isinstance(reviewed.decision_metadata, dict) else {}
     rejection_policy = okx_review_rejection_policy(decision)
     normalized_decision = {**decision, "rejection_policy": rejection_policy}
+    setup_action = okx_review_action(normalized_decision)
     review_payload = {
         "route": route,
         "approved": bool(decision.get("approved")),
+        "setup_action": setup_action,
         "decision": str(decision.get("decision") or ("approve" if decision.get("approved") else "reject")),
         "reason": str(decision.get("reason") or ""),
         "provider": decision.get("provider"),
@@ -1716,7 +1838,7 @@ def attach_okx_review_metadata(
         "policy_reason": decision.get("policy_reason"),
         "review_state": okx_review_state(normalized_decision),
         "accepted_for_okx": okx_review_allows_okx_submission(normalized_decision),
-        "gpt55_checked": True,
+        "gpt55_checked": bool(decision.get("gpt55_checked", True)),
         "reviewed_at": str(decision.get("reviewed_at") or datetime.now(timezone.utc).isoformat()),
         "context": dict(context or {}),
     }
@@ -1770,6 +1892,18 @@ def review_candidate_for_lc_okx(
                 route=route,
             )
         return attach_okx_review_metadata(candidate, cached, route=route, context=review_context), cached
+    if route == "lc_okx_setup_review" and not _okx_initial_mini_review_context(review_context):
+        return candidate, {
+            "approved": False,
+            "decision": "initial_mini_review_required",
+            "reason": "5.5 can only be called once when Mini first promotes this setup.",
+            "provider": "blocked",
+            "model": ai_config(config).get("okx", {}).get("model", "gpt-5.5"),
+            "setup_action": OKX_REVIEW_ACTION_DELETE_SETUP,
+            "review_state": "GPT55_NOT_REVIEWED",
+            "accepted_for_okx": False,
+            "gpt55_checked": False,
+        }
     decision = okx_ai_approval(
         config,
         candidate,
@@ -1788,6 +1922,7 @@ def review_candidate_for_lc_okx(
     if route == "lc_okx_setup_review":
         decision = {
             **decision,
+            "setup_action": okx_review_action(decision),
             "rejection_policy": okx_review_rejection_policy(decision),
             "review_state": okx_review_state(decision),
             "accepted_for_okx": okx_review_allows_okx_submission(decision),

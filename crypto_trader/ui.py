@@ -47,7 +47,7 @@ from .config import (
     runtime_config_override_payload,
     runtime_config_overrides_should_attempt,
 )
-from .ai_coordinator import next_internal_market_scan_at, okx_ai_approval, review_candidate_for_lc_okx, run_internal_market_scan_if_due
+from .ai_coordinator import candidate_okx_review, next_internal_market_scan_at, run_internal_market_scan_if_due
 from .codex_features import (
     activate_strategy_version,
     ai_trade_decision_stats,
@@ -3012,14 +3012,12 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
     def okx_manual_review_once(payload: dict[str, Any]) -> dict[str, Any]:
         config = load_config(app.state.config_path)
         route = str(payload.get("route") or "lc_okx_setup_review")
-        allowed_routes = {"new_vt", "lc_okx_setup_review", "lc_okx_release", "local_lc_release"}
-        if route not in allowed_routes:
-            raise HTTPException(status_code=400, detail=f"route must be one of: {', '.join(sorted(allowed_routes))}")
+        if route != "lc_okx_setup_review":
+            raise HTTPException(status_code=400, detail="5.5 can only be inspected for route=lc_okx_setup_review")
 
         context: dict[str, Any] = {
             "route": route,
             "source": "manual_api",
-            "manual_openai_once": True,
         }
         record = None
         lc_id = payload.get("lc_id", payload.get("journal_id"))
@@ -3045,61 +3043,25 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
             except Exception as exc:
                 raise HTTPException(status_code=400, detail=f"Invalid candidate payload: {exc}") from exc
 
-        if route == "new_vt":
-            risk_check = evaluate_candidate(
-                config,
-                candidate,
-                active_summary=active_trades_summary(config),
-                extra_active_symbols=open_pending_symbols(config),
+        risk_check = evaluate_candidate(
+            config,
+            candidate,
+            check_active_trades=False,
+            check_order_limits=True,
+        )
+        decision = candidate_okx_review(candidate, route="lc_okx_setup_review")
+        if decision is None:
+            raise HTTPException(
+                status_code=409,
+                detail="No stored initial Mini 5.5 review exists for this setup; 5.5 is not called manually.",
             )
-        else:
-            risk_check = evaluate_candidate(
-                config,
-                candidate,
-                check_active_trades=False,
-                check_order_limits=True,
-            )
-
-        if route == "lc_okx_setup_review":
-            reviewed_candidate, decision = review_candidate_for_lc_okx(
-                config,
-                candidate,
-                risk_check,
-                context=context,
-                force=bool(payload.get("force", False)),
-            )
-            reviewed_payload = to_jsonable(reviewed_candidate)
-        else:
-            decision = okx_ai_approval(
-                config,
-                candidate,
-                risk_check,
-                context=context,
-            )
-            reviewed_payload = to_jsonable(candidate)
-
+        reviewed_payload = to_jsonable(candidate)
         persisted = False
-        if record is not None and route == "lc_okx_setup_review":
-            record_status = str(record.get("status") or "OPEN").upper()
-            pending_config = config.get("pending_orders", {})
-            refresh_kwargs: dict[str, Any]
-            if record_status == "LC_OKX":
-                refresh_kwargs = {"max_age_days": float(pending_config.get("exchange_max_age_days", 1.5) or 1.5)}
-            else:
-                refresh_kwargs = {"max_age_hours": float(pending_config.get("local_max_age_hours", 6) or 6)}
-            refresh_pending_order(
-                config,
-                int(record["id"]),
-                reviewed_candidate,
-                status=record_status,
-                **refresh_kwargs,
-            )
-            persisted = True
 
         return {
             "ok": True,
-            "manual_only": True,
-            "one_shot": True,
+            "manual_only": False,
+            "one_shot": False,
             "persisted": persisted,
             "route": route,
             "lc_id": context.get("lc_id"),

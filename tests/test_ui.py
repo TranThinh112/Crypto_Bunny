@@ -293,26 +293,17 @@ class UiTest(TestCase):
         self.assertEqual(payload["ai"]["internal"]["model"], "gpt-5.4-mini")
         self.assertEqual(payload["ai"]["okx"]["model"], "gpt-5.5")
 
-    @patch(
-        "crypto_trader.ui.okx_ai_approval",
-        return_value={"approved": True, "decision": "APPROVE", "reason": "manual one-shot", "provider": "openai"},
-    )
-    @patch("crypto_trader.ui.open_pending_symbols", return_value=set())
-    @patch("crypto_trader.ui.active_trades_summary", return_value=(0, set(), []))
     @patch("crypto_trader.ui.evaluate_candidate", return_value=RiskCheck(True, [], []))
-    def test_manual_okx_review_endpoint_requires_manual_one_shot_context(
+    def test_manual_okx_review_endpoint_returns_stored_setup_review_without_calling_openai(
         self,
         _evaluate_candidate,
-        _active_trades_summary,
-        _open_pending_symbols,
-        okx_ai_approval,
     ) -> None:
         client = TestClient(create_app("config.example.yaml"))
 
         response = client.post(
             "/api/okx/manual-review-once",
             json={
-                "route": "new_vt",
+                "route": "lc_okx_setup_review",
                 "candidate": {
                     "symbol": "BTC/USDT:USDT",
                     "base": "BTC",
@@ -328,17 +319,25 @@ class UiTest(TestCase):
                     "spread_pct": 0.01,
                     "news_score": 0.0,
                     "news_count": 0,
+                    "decision_metadata": {
+                        "okx_review": {
+                            "route": "lc_okx_setup_review",
+                            "approved": True,
+                            "setup_action": "keep_setup",
+                            "decision": "KEEP_SETUP",
+                            "reason": "5.5 giu setup",
+                        }
+                    },
                 },
             },
         )
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertTrue(payload["manual_only"])
-        self.assertTrue(payload["one_shot"])
+        self.assertFalse(payload["manual_only"])
+        self.assertFalse(payload["one_shot"])
         self.assertFalse(payload["persisted"])
-        okx_ai_approval.assert_called_once()
-        self.assertTrue(okx_ai_approval.call_args.kwargs["context"]["manual_openai_once"])
+        self.assertEqual(payload["decision"]["decision"], "KEEP_SETUP")
 
     def test_version_endpoint_returns_code_signature_and_feature_flags(self) -> None:
         client = TestClient(create_app("config.example.yaml"))

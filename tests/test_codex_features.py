@@ -155,13 +155,13 @@ class CodexFeaturesTest(TestCase):
                 route="new_vt",
             )
 
-        self.assertIn("auto_openai_enabled=false", str(error.exception))
+        self.assertIn("route=new_vt", str(error.exception))
         urlopen.assert_not_called()
 
     @patch.dict(os.environ, {"OPENAI_API_KEY_TEST": "test-key"})
     @patch("crypto_trader.notifier.send_telegram_message")
     @patch("crypto_trader.codex_features.urllib.request.urlopen")
-    def test_openai_okx_final_approval_allows_manual_one_shot_when_manual_enabled(self, urlopen, _send_telegram_message) -> None:
+    def test_openai_okx_final_approval_blocks_manual_one_shot_even_when_manual_enabled(self, urlopen, _send_telegram_message) -> None:
         config = self._config()
         config["ai"]["okx"] = {
             "auto_openai_enabled": False,
@@ -175,18 +175,19 @@ class CodexFeaturesTest(TestCase):
             }
         )
 
-        result = call_openai_json(
-            config,
-            self._role_config(),
-            self._prompt_package(),
-            model_name="gpt-5.5",
-            purpose="okx_final_approval",
-            route="lc_okx_setup_review",
-            manual_trigger=True,
-        )
+        with self.assertRaises(RuntimeError) as error:
+            call_openai_json(
+                config,
+                self._role_config(),
+                self._prompt_package(),
+                model_name="gpt-5.5",
+                purpose="okx_final_approval",
+                route="lc_okx_setup_review",
+                manual_trigger=True,
+            )
 
-        self.assertTrue(result["parsed"]["approved"])
-        urlopen.assert_called_once()
+        self.assertIn("manual 5.5 calls are disabled", str(error.exception))
+        urlopen.assert_not_called()
 
     @patch.dict(os.environ, {"OPENAI_API_KEY_TEST": "test-key"})
     @patch("crypto_trader.notifier.send_telegram_message")

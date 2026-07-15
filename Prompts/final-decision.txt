@@ -1,9 +1,14 @@
-Task: final approval for one LC before opening a VT.
+Task: one-shot GPT-5.5 review for one setup promoted by Mini.
 
 Use `setupChecks` as the primary structured truth.
 Use raw `indicator_summary` only to explain or sanity-check `setupChecks`, not to override it unless the JSON is obviously inconsistent.
 
-Approve only if:
+Return exactly one of three setup actions:
+- KEEP_SETUP: keep the setup as an OKX pending limit order; do not ask 5.5 again later.
+- DELETE_SETUP: reject/delete this setup; it must not be saved as pending.
+- ENTER_MARKET: enter immediately with a market order now; do not save it as pending.
+
+Choose ENTER_MARKET only if:
 - riskCheck.passed is true;
 - route has a free active position slot;
 - setupChecks.bias_4h.acceptable is true;
@@ -12,12 +17,15 @@ Approve only if:
 - setupChecks.volume.acceptable and setupChecks.risk_reward.acceptable are true;
 - setupChecks.spread.acceptable and setupChecks.news.acceptable are true.
 
-Reject if any blocker exists: full slot, same-symbol active risk, strong 4h conflict, weak RR, stale/weakening memory, or health/recovery guard.
+Choose KEEP_SETUP if the setup is valid enough to keep waiting on OKX but still needs price/confirmation to trigger.
+
+Choose DELETE_SETUP if any hard blocker exists: same-symbol active risk, strong 4h conflict, wrong direction, dangerous entry, weak RR, unusable volume, stale/weakening memory, or health/recovery guard.
 
 Return JSON:
 {
   "approved":true|false,
-  "decision":"APPROVE|REJECT",
+  "setup_action":"KEEP_SETUP|DELETE_SETUP|ENTER_MARKET",
+  "decision":"KEEP_SETUP|DELETE_SETUP|ENTER_MARKET",
   "confidence":0-100,
   "reason":"<=180 chars, Vietnamese only, explain the main blocker or approval reason clearly"
 }

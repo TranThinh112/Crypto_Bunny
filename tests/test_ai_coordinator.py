@@ -147,7 +147,7 @@ class AiCoordinatorTest(TestCase):
 
         approval.assert_not_called()
         self.assertTrue(decision["approved"])
-        self.assertEqual(decision["decision"], "approval_disabled")
+        self.assertEqual(decision["decision"], "manual_openai_blocked")
         self.assertEqual(decision["provider"], "local_policy")
 
     def test_okx_auto_flow_never_calls_openai_even_if_auto_config_is_enabled(self) -> None:
@@ -167,7 +167,7 @@ class AiCoordinatorTest(TestCase):
         self.assertEqual(decision["decision"], "approve")
         self.assertEqual(decision["provider"], "local_policy")
 
-    def test_okx_manual_openai_once_calls_openai_even_when_auto_is_disabled(self) -> None:
+    def test_okx_manual_openai_once_is_blocked_even_when_manual_is_enabled(self) -> None:
         config = self._config()
         config["ai"]["okx"]["provider"] = "local_policy"
         config["ai"]["okx"]["auto_openai_enabled"] = False
@@ -191,10 +191,10 @@ class AiCoordinatorTest(TestCase):
                 context={"route": "lc_okx_setup_review", "manual_openai_once": True},
             )
 
-        approval.assert_called_once()
+        approval.assert_not_called()
         self.assertTrue(decision["approved"])
-        self.assertEqual(decision["decision"], "APPROVE")
-        self.assertEqual(decision["provider"], "openai")
+        self.assertEqual(decision["decision"], "manual_openai_blocked")
+        self.assertEqual(decision["provider"], "local_policy")
 
     def test_lc_okx_setup_review_auto_one_shot_calls_openai_once_gate(self) -> None:
         config = self._config()
@@ -217,13 +217,23 @@ class AiCoordinatorTest(TestCase):
                 config,
                 candidate,
                 check,
-                context={"route": "lc_okx_setup_review", "lc_id": 88, "source": "mini_lc_okx"},
+                context={
+                    "route": "lc_okx_setup_review",
+                    "lc_id": 88,
+                    "source": "mini_lc_okx",
+                    "from_status": "MINI_APPROVED",
+                },
             )
             reused, second_decision = review_candidate_for_lc_okx(
                 config,
                 reviewed,
                 check,
-                context={"route": "lc_okx_setup_review", "lc_id": 88, "source": "mini_lc_okx"},
+                context={
+                    "route": "lc_okx_setup_review",
+                    "lc_id": 88,
+                    "source": "mini_lc_okx",
+                    "from_status": "MINI_APPROVED",
+                },
             )
 
         approval.assert_called_once()
@@ -257,13 +267,23 @@ class AiCoordinatorTest(TestCase):
                 config,
                 candidate,
                 check,
-                context={"route": "lc_okx_setup_review", "lc_id": 63},
+                context={
+                    "route": "lc_okx_setup_review",
+                    "lc_id": 63,
+                    "source": "mini_lc_okx",
+                    "from_status": "MINI_APPROVED",
+                },
             )
             second_candidate, second_decision = review_candidate_for_lc_okx(
                 config,
                 _candidate("SUI/USDT:USDT"),
                 check,
-                context={"route": "lc_okx_setup_review", "lc_id": 64},
+                context={
+                    "route": "lc_okx_setup_review",
+                    "lc_id": 64,
+                    "source": "mini_lc_okx",
+                    "from_status": "MINI_APPROVED",
+                },
             )
 
         approval.assert_called_once()
@@ -273,7 +293,7 @@ class AiCoordinatorTest(TestCase):
         self.assertTrue(second_decision.get("cached"))
         self.assertEqual(second_decision.get("rejection_policy"), "keep_monitor")
         self.assertTrue(second_decision.get("accepted_for_okx"))
-        self.assertEqual(second_decision.get("review_state"), "GPT55_KEEP_MONITOR")
+        self.assertEqual(second_decision.get("review_state"), "GPT55_KEEP_SETUP")
         self.assertEqual(second_decision["reason"], rejected["reason"])
         self.assertIsNotNone(first_candidate.decision_metadata.get("okx_review"))
         self.assertIsNotNone(second_candidate.decision_metadata.get("okx_review"))
@@ -360,7 +380,7 @@ class AiCoordinatorTest(TestCase):
                 "provider": "openai",
                 "model": "gpt-5.5",
                 "rejection_policy": "keep_monitor",
-                "review_state": "GPT55_KEEP_MONITOR",
+                "review_state": "GPT55_KEEP_SETUP",
                 "accepted_for_okx": True,
                 "reviewed_at": reviewed_at,
             }
@@ -377,7 +397,7 @@ class AiCoordinatorTest(TestCase):
         approval.assert_not_called()
         self.assertFalse(decision["approved"])
         self.assertTrue(decision.get("accepted_for_okx"))
-        self.assertEqual(decision.get("review_state"), "GPT55_KEEP_MONITOR")
+        self.assertEqual(decision.get("review_state"), "GPT55_KEEP_SETUP")
         self.assertEqual(decision["reviewed_at"], reviewed_at)
         self.assertEqual(reviewed.decision_metadata["okx_review"]["reviewed_at"], reviewed_at)
 
@@ -393,7 +413,7 @@ class AiCoordinatorTest(TestCase):
                 "provider": "openai",
                 "model": "gpt-5.5",
                 "rejection_policy": "keep_monitor",
-                "review_state": "GPT55_KEEP_MONITOR",
+                "review_state": "GPT55_KEEP_SETUP",
                 "accepted_for_okx": True,
                 "reviewed_at": (datetime.now(timezone.utc) - timedelta(minutes=45)).isoformat(),
             }

@@ -863,13 +863,12 @@ def call_openai_json(
         if not bool(internal_config.get("market_scan_use_ai", True)):
             raise RuntimeError("OpenAI mini scan blocked: ai.internal.market_scan_use_ai=false")
     if purpose == "okx_final_approval":
-        allowed_routes = {"new_vt", "local_lc_release", "lc_okx_release", "lc_okx_setup_review"}
+        allowed_routes = {"lc_okx_setup_review"}
         if route not in allowed_routes:
             raise RuntimeError(f"OpenAI OKX approval blocked by policy: route={route or '-'}")
         okx_config = ai_settings.get("okx", {})
         if manual_trigger:
-            if not bool(okx_config.get("manual_openai_enabled", False)):
-                raise RuntimeError("OpenAI OKX approval blocked: ai.okx.manual_openai_enabled=false")
+            raise RuntimeError("OpenAI OKX approval blocked: manual 5.5 calls are disabled")
         elif lc_okx_review_once:
             if route != "lc_okx_setup_review":
                 raise RuntimeError(f"OpenAI OKX LC_OKX one-shot blocked by policy: route={route or '-'}")

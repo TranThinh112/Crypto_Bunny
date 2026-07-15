@@ -214,7 +214,7 @@ class EngineMiniQueueTest(TestCase):
             "decision": "REJECT",
             "reason": "Missing 4h/15m confirmation; keep watching",
             "rejection_policy": "keep_monitor",
-            "review_state": "GPT55_KEEP_MONITOR",
+            "review_state": "GPT55_KEEP_SETUP",
             "accepted_for_okx": True,
         }
 
@@ -267,7 +267,7 @@ class EngineMiniQueueTest(TestCase):
         self.assertEqual(orders[0]["exchange_order_id"], "limit-keep-1")
         payload = json.loads(str(orders[0]["payload_json"]))
         self.assertEqual(payload["decision_metadata"]["okx_review"]["rejection_policy"], "keep_monitor")
-        self.assertEqual(payload["decision_metadata"]["okx_review"]["review_state"], "GPT55_KEEP_MONITOR")
+        self.assertEqual(payload["decision_metadata"]["okx_review"]["review_state"], "GPT55_KEEP_SETUP")
         self.assertTrue(payload["decision_metadata"]["okx_review"]["accepted_for_okx"])
 
     @patch("crypto_trader.notifier.send_telegram_message")

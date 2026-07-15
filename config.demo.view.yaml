@@ -98,7 +98,7 @@ ai:
     api_key_env: OPENAI_API_KEY_OKX
     approval_enabled: true
     auto_openai_enabled: false
-    manual_openai_enabled: true
+    manual_openai_enabled: false
     ask_internal_before_entry: true
     require_external_approval: false
     timeout_seconds: 20

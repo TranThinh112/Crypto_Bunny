@@ -250,7 +250,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "approval_enabled": True,
             "auto_openai_enabled": False,
             "auto_lc_okx_review_once_enabled": True,
-            "manual_openai_enabled": True,
+            "manual_openai_enabled": False,
             "ask_internal_before_entry": True,
             "require_external_approval": False,
             "timeout_seconds": 20,

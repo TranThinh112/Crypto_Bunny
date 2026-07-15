@@ -65,8 +65,24 @@ def _keep_monitor_review(minutes_ago: int = 5) -> dict:
         "provider": "openai",
         "model": "gpt-5.5",
         "rejection_policy": "keep_monitor",
-        "review_state": "GPT55_KEEP_MONITOR",
+        "review_state": "GPT55_KEEP_SETUP",
         "accepted_for_okx": True,
+        "reviewed_at": reviewed_at.isoformat(),
+    }
+
+
+def _market_entry_review(minutes_ago: int = 5) -> dict:
+    reviewed_at = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+    return {
+        "route": "lc_okx_setup_review",
+        "approved": True,
+        "setup_action": "enter_market",
+        "decision": "ENTER_MARKET",
+        "reason": "5.5 chon vao lenh market ngay",
+        "provider": "openai",
+        "model": "gpt-5.5",
+        "review_state": "GPT55_ENTER_MARKET",
+        "accepted_for_okx": False,
         "reviewed_at": reviewed_at.isoformat(),
     }
 
@@ -218,13 +234,13 @@ class PendingTest(TestCase):
         config["risk"]["max_active_trades"] = 5
         config["pending_orders"]["local_max_age_hours"] = 6
         config["pending_orders"]["exchange_max_age_days"] = 1.5
-        record = save_pending_order(config, _candidate(), None, journal_id=12, max_age_hours=6)
+        candidate = _candidate()
+        candidate.decision_metadata = {"okx_review": _keep_monitor_review(minutes_ago=5)}
+        record = save_pending_order(config, candidate, None, journal_id=12, max_age_hours=6)
         _age_pending_order(config, int(record["id"]), 7)
 
         with (
             patch("crypto_trader.pending.create_exchange", return_value=FakeExchange()),
-            patch("crypto_trader.pending.okx_ai_approval") as ai_approval,
-            patch("crypto_trader.pending.review_candidate_for_lc_okx", side_effect=lambda *args, **kwargs: (args[1], {"approved": True, "decision": "approve"})) as review,
             patch(
                 "crypto_trader.pending.execute_candidate",
                 return_value=ExecutionResult(
@@ -239,8 +255,6 @@ class PendingTest(TestCase):
         ):
             result = maintain_pending_orders(config, [_candidate()])
 
-        ai_approval.assert_not_called()
-        review.assert_called_once()
         execute.assert_called_once()
         self.assertEqual(execute.call_args.kwargs["order_type_override"], "limit")
         self.assertEqual(result["events"][0]["type"], "pending_submitted")
@@ -318,34 +332,33 @@ class PendingTest(TestCase):
 
         config = self._config(mode="demo")
         config["risk"]["max_active_trades"] = 5
-        save_pending_order(config, _candidate(), None, journal_id=12)
+        candidate = _candidate()
+        candidate.decision_metadata = {"okx_review": _keep_monitor_review(minutes_ago=5)}
+        save_pending_order(config, candidate, None, journal_id=12)
 
         with (
             patch("crypto_trader.pending.create_exchange", return_value=FakeExchange()),
-            patch("crypto_trader.pending.review_candidate_for_lc_okx", side_effect=lambda *args, **kwargs: (args[1], {"approved": True, "decision": "approve"})) as review,
             patch(
                 "crypto_trader.pending.execute_candidate",
                 return_value=ExecutionResult(
                     mode="demo",
                     submitted=True,
-                    order_id="order-2",
-                    message="demo: market order submitted",
-                    journal_type="VT",
-                    journal_id=1,
-                    linked_journal_id=12,
+                    order_id="limit-2",
+                    message="demo: limit order submitted",
+                    journal_type="LC",
+                    journal_id=12,
                 ),
             ) as execute,
         ):
             result = maintain_pending_orders(config, [_candidate()])
 
         execute.assert_called_once()
-        self.assertEqual(result["converted"], 1)
+        self.assertEqual(execute.call_args.kwargs["order_type_override"], "limit")
+        self.assertEqual(result["submitted"], 1)
         self.assertEqual(result["events"][0]["lc_id"], 12)
-        self.assertEqual(result["events"][0]["vt_id"], 1)
-        self.assertEqual(result["events"][0]["source"], "local_released")
-        self.assertEqual(result["events"][0]["exchange_order_id"], "order-2")
-        self.assertEqual(len(list_pending_orders(config, status="FILLED")), 0)
-        self.assertEqual(self._pending_record_total(config), 0)
+        self.assertEqual(result["events"][0]["source"], "local_pending_okx")
+        self.assertEqual(result["events"][0]["exchange_order_id"], "limit-2")
+        self.assertEqual(len(list_pending_orders(config, status="LC_OKX")), 1)
 
     def test_rechecks_wait_slot_and_submits_to_okx_when_slot_opens(self) -> None:
         class FakeExchange:
@@ -364,7 +377,10 @@ class PendingTest(TestCase):
         config = self._config(mode="demo")
         config["risk"]["max_active_trades"] = 5
         queued = _candidate("LIT/USDT:USDT")
-        queued.decision_metadata = {"wait_slot_queue": {"scan_slot_id": "slot-1"}}
+        queued.decision_metadata = {
+            "wait_slot_queue": {"scan_slot_id": "slot-1"},
+            "okx_review": _keep_monitor_review(minutes_ago=5),
+        }
         save_pending_order(
             config,
             queued,
@@ -392,7 +408,6 @@ class PendingTest(TestCase):
 
         with (
             patch("crypto_trader.pending.create_exchange", return_value=FakeExchange()),
-            patch("crypto_trader.pending.review_candidate_for_lc_okx", side_effect=lambda *args, **kwargs: (args[1], {"approved": True, "decision": "approve"})) as review,
             patch(
                 "crypto_trader.pending.execute_candidate",
                 return_value=ExecutionResult(
@@ -407,7 +422,6 @@ class PendingTest(TestCase):
         ):
             result = maintain_pending_orders(config, [refreshed])
 
-        review.assert_called_once()
         execute.assert_called_once()
         self.assertEqual(result["submitted"], 1)
         self.assertEqual(result["events"][0]["source"], "mini_wait_slot_release")
@@ -591,7 +605,7 @@ class PendingTest(TestCase):
         self.assertEqual(result["events"][0]["source"], "legacy_keep_monitor_release")
         self.assertEqual(list_pending_orders(config, status="LC_OKX")[0]["exchange_order_id"], "limit-legacy-watch-old-1")
 
-    def test_releases_lc_okx_without_reasking_gpt_when_setup_review_already_saved(self) -> None:
+    def test_keeps_lc_okx_without_reasking_gpt_when_setup_review_already_saved(self) -> None:
         class FakeExchange:
             def __init__(self) -> None:
                 self.canceled: list[tuple[str, str]] = []
@@ -616,15 +630,15 @@ class PendingTest(TestCase):
             "okx_review": {
                 "route": "lc_okx_setup_review",
                 "approved": True,
-                "decision": "approve",
-                "reason": "Setup dat chat luong de vao Market",
+                "setup_action": "keep_setup",
+                "decision": "KEEP_SETUP",
+                "reason": "Setup duoc giu lam lenh cho OKX",
             }
         }
         save_pending_order(config, candidate, "limit-1", journal_id=12)
 
         with (
             patch("crypto_trader.pending.create_exchange", return_value=exchange),
-            patch("crypto_trader.pending.okx_ai_approval") as ai_approval,
             patch(
                 "crypto_trader.pending.execute_candidate",
                 return_value=ExecutionResult(
@@ -640,11 +654,11 @@ class PendingTest(TestCase):
         ):
             result = maintain_pending_orders(config, [_candidate()])
 
-        ai_approval.assert_not_called()
-        self.assertEqual(exchange.canceled, [("limit-1", "BTC/USDT:USDT")])
-        execute.assert_called_once()
-        self.assertEqual(result["converted"], 1)
-        self.assertEqual(result["events"][0]["source"], "lc_okx_released")
+        self.assertEqual(exchange.canceled, [])
+        execute.assert_not_called()
+        self.assertEqual(result["converted"], 0)
+        self.assertEqual(result["kept"], 1)
+        self.assertEqual(result["events"][0]["source"], "lc_okx_stored_setup")
 
     def test_cancels_okx_pending_and_enters_market_when_slot_is_available(self) -> None:
         class FakeExchange:
@@ -669,7 +683,9 @@ class PendingTest(TestCase):
         exchange = FakeExchange()
         config = self._config(mode="demo")
         config["risk"]["max_active_trades"] = 5
-        save_pending_order(config, _candidate(), "limit-1", journal_id=12)
+        candidate = _candidate()
+        candidate.decision_metadata = {"okx_review": _market_entry_review(minutes_ago=5)}
+        save_pending_order(config, candidate, "limit-1", journal_id=12)
 
         with (
             patch("crypto_trader.pending.create_exchange", return_value=exchange),
@@ -718,7 +734,9 @@ class PendingTest(TestCase):
         config = self._config(mode="demo")
         config["risk"]["max_active_trades"] = 1
         save_pending_order(config, _candidate("ETH/USDT:USDT"), None, journal_id=21)
-        save_pending_order(config, _candidate("BTC/USDT:USDT"), "limit-1", journal_id=12)
+        lc_okx_candidate = _candidate("BTC/USDT:USDT")
+        lc_okx_candidate.decision_metadata = {"okx_review": _keep_monitor_review(minutes_ago=5)}
+        save_pending_order(config, lc_okx_candidate, "limit-1", journal_id=12)
 
         with (
             patch("crypto_trader.pending.create_exchange", return_value=exchange),
@@ -740,10 +758,9 @@ class PendingTest(TestCase):
                 [_candidate("ETH/USDT:USDT"), _candidate("BTC/USDT:USDT")],
             )
 
-        self.assertEqual(exchange.canceled, [("limit-1", "BTC/USDT:USDT")])
-        self.assertEqual(execute.call_args.args[1].symbol, "BTC/USDT:USDT")
-        self.assertEqual(result["converted"], 1)
-        self.assertEqual(result["events"][0]["source"], "lc_okx_released")
+        self.assertEqual(exchange.canceled, [])
+        execute.assert_not_called()
+        self.assertEqual(result["converted"], 0)
+        self.assertEqual(result["events"][0]["source"], "lc_okx_stored_setup")
         open_orders = list_pending_orders(config, status="OPEN")
-        self.assertEqual(len(open_orders), 1)
-        self.assertEqual(open_orders[0]["symbol"], "ETH/USDT:USDT")
+        self.assertEqual({order["symbol"] for order in open_orders}, {"ETH/USDT:USDT", "BTC/USDT:USDT"})

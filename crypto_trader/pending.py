@@ -5,15 +5,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .ai_coordinator import (
-    OKX_REJECTION_HARD_DELETE,
     candidate_okx_review,
-    okx_ai_approval,
     okx_review_allows_okx_submission,
     okx_review_is_keep_monitor,
     okx_review_rejection_policy,
-    okx_setup_review_recheck_state,
     prioritize_pending_records,
-    review_candidate_for_lc_okx,
+    okx_review_requests_market_entry,
 )
 from .codex_features import record_trade_execution
 from .executor import execute_candidate
@@ -402,6 +399,17 @@ def _record_keep_monitor_review(record: dict[str, Any]) -> dict[str, Any] | None
     if candidate is None:
         return None
     return candidate_okx_review(candidate, route="lc_okx_setup_review")
+
+
+def _stored_review_blocks_okx_submission(candidate: TradeCandidate) -> dict[str, Any] | None:
+    review = candidate_okx_review(candidate, route="lc_okx_setup_review")
+    if review is None or okx_review_allows_okx_submission(review):
+        return None
+    return review
+
+
+def _review_block_reason(review: dict[str, Any]) -> str:
+    return str(review.get("reason") or review.get("decision") or "Stored 5.5 setup review does not allow OKX submission")
 
 
 def _is_keep_monitor_review(record: dict[str, Any]) -> bool:
@@ -823,24 +831,15 @@ def maintain_pending_orders(
                 kept += 1
                 continue
 
-            reviewed_candidate, setup_review = review_candidate_for_lc_okx(
-                config,
-                refreshed_candidate,
-                submit_check,
-                context={
-                    "route": "lc_okx_setup_review",
-                    "lc_id": lc_id,
-                    "from_status": "LEGACY_KEEP_MONITOR",
-                    "source": "legacy_keep_monitor_release",
-                },
-            )
-            if not okx_review_allows_okx_submission(setup_review):
-                reason = str(setup_review.get("reason") or setup_review.get("decision") or "GPT-5.5 rejected LC_OKX setup")
+            reviewed_candidate = refreshed_candidate
+            blocked_review = _stored_review_blocks_okx_submission(reviewed_candidate)
+            if blocked_review is not None:
+                reason = _review_block_reason(blocked_review)
                 close_pending_order(config, local_id, "CANCELED", reason)
                 events.append(
                     {
                         "type": "pending_canceled",
-                        "source": "legacy_keep_monitor_review",
+                        "source": "legacy_keep_monitor_stored_review",
                         "lc_id": lc_id,
                         "symbol": symbol,
                         "side": str(record.get("side") or ""),
@@ -1048,18 +1047,10 @@ def maintain_pending_orders(
                 kept += 1
                 continue
 
-            setup_review_state = okx_setup_review_recheck_state(
-                config,
-                refreshed_candidate,
-                route="lc_okx_setup_review",
-            )
-            if setup_review_state.get("rejection_policy") == OKX_REJECTION_HARD_DELETE:
-                stored_review = setup_review_state.get("review") or {}
-                reason = str(
-                    stored_review.get("reason")
-                    or stored_review.get("decision")
-                    or "GPT-5.5 rejected LC_OKX setup"
-                )
+            reviewed_candidate = refreshed_candidate
+            blocked_review = _stored_review_blocks_okx_submission(reviewed_candidate)
+            if blocked_review is not None:
+                reason = _review_block_reason(blocked_review)
                 close_pending_order(config, local_id, "CANCELED", reason)
                 events.append(
                     {
@@ -1069,34 +1060,7 @@ def maintain_pending_orders(
                         "symbol": symbol,
                         "side": str(record.get("side") or ""),
                         "reason": reason,
-                        "rejection_policy": setup_review_state.get("rejection_policy"),
-                        "comparison": comparison,
-                    }
-                )
-                canceled += 1
-                continue
-            reviewed_candidate, setup_review = review_candidate_for_lc_okx(
-                config,
-                refreshed_candidate,
-                submit_check,
-                context={
-                    "route": "lc_okx_setup_review",
-                    "lc_id": lc_id,
-                    "from_status": "WAIT_SLOT",
-                    "source": "mini_wait_slot_release",
-                },
-            )
-            if not okx_review_allows_okx_submission(setup_review):
-                reason = str(setup_review.get("reason") or setup_review.get("decision") or "GPT-5.5 rejected LC_OKX setup")
-                close_pending_order(config, local_id, "CANCELED", reason)
-                events.append(
-                    {
-                        "type": "pending_canceled",
-                        "source": "mini_wait_slot_review",
-                        "lc_id": lc_id,
-                        "symbol": symbol,
-                        "side": str(record.get("side") or ""),
-                        "reason": reason,
+                        "rejection_policy": okx_review_rejection_policy(blocked_review),
                         "comparison": comparison,
                     }
                 )
@@ -1282,24 +1246,19 @@ def maintain_pending_orders(
                         record_candidate = _candidate_from_record(record)
                         if record_candidate is not None:
                             stored_review = candidate_okx_review(record_candidate, route="lc_okx_setup_review")
-                    ai_decision = stored_review or okx_ai_approval(
-                        config,
-                        candidate,
-                        release_check,
-                        context={"route": "lc_okx_release", "lc_id": lc_id, "from_status": "LC_OKX"},
-                    )
-                    if not ai_decision.get("approved"):
-                        warnings.append(
-                            f"{symbol}: OKX AI kept LC_OKX before VT: {ai_decision.get('reason') or ai_decision.get('decision')}"
-                        )
+                    if stored_review is None:
+                        warnings.append(f"{symbol}: LC_OKX kept because no initial 5.5 setup review is stored")
+                        kept += 1
+                        continue
+                    if not okx_review_requests_market_entry(stored_review):
                         events.append(
                             {
-                                "type": "pending_ai_deferred",
-                                "source": "lc_okx_release",
+                                "type": "pending_kept",
+                                "source": "lc_okx_stored_setup",
                                 "lc_id": lc_id,
                                 "symbol": symbol,
                                 "side": str(record.get("side") or ""),
-                                "reason": ai_decision.get("reason") or ai_decision.get("decision"),
+                                "reason": stored_review.get("reason") or stored_review.get("decision"),
                             }
                         )
                         kept += 1
@@ -1442,18 +1401,9 @@ def maintain_pending_orders(
                         )
                         kept += 1
                         continue
-                    setup_review_state = okx_setup_review_recheck_state(
-                        config,
-                        candidate,
-                        route="lc_okx_setup_review",
-                    )
-                    if setup_review_state.get("rejection_policy") == OKX_REJECTION_HARD_DELETE:
-                        stored_review = setup_review_state.get("review") or {}
-                        reason = str(
-                            stored_review.get("reason")
-                            or stored_review.get("decision")
-                            or "GPT-5.5 rejected LC_OKX setup"
-                        )
+                    blocked_review = _stored_review_blocks_okx_submission(candidate)
+                    if blocked_review is not None:
+                        reason = _review_block_reason(blocked_review)
                         close_pending_order(config, local_id, "CANCELED", reason)
                         events.append(
                             {
@@ -1463,37 +1413,17 @@ def maintain_pending_orders(
                                 "symbol": symbol,
                                 "side": str(record.get("side") or ""),
                                 "reason": reason,
-                                "rejection_policy": setup_review_state.get("rejection_policy"),
+                                "rejection_policy": okx_review_rejection_policy(blocked_review),
                             }
                         )
                         canceled += 1
                         continue
-                    reviewed_candidate, setup_review = review_candidate_for_lc_okx(
-                        config,
-                        candidate,
-                        submit_check,
-                        context={
-                            "route": "lc_okx_setup_review",
-                            "lc_id": lc_id,
-                            "from_status": "OPEN",
-                            "source": "local_pending_submit",
-                        },
-                    )
-                    if not okx_review_allows_okx_submission(setup_review):
-                        reason = str(setup_review.get("reason") or setup_review.get("decision") or "GPT-5.5 rejected LC_OKX setup")
-                        close_pending_order(config, local_id, "CANCELED", reason)
-                        events.append(
-                            {
-                                "type": "pending_canceled",
-                                "source": "local_pending_review",
-                                "lc_id": lc_id,
-                                "symbol": symbol,
-                                "side": str(record.get("side") or ""),
-                                "reason": reason,
-                            }
-                        )
-                        canceled += 1
+                    stored_review = candidate_okx_review(candidate, route="lc_okx_setup_review")
+                    if stored_review is None:
+                        warnings.append(f"{symbol}: local pending kept because no initial 5.5 setup review is stored")
+                        kept += 1
                         continue
+                    reviewed_candidate = candidate
                     final_check = evaluate_candidate(
                         config,
                         reviewed_candidate,
@@ -1565,27 +1495,73 @@ def maintain_pending_orders(
                     )
                     kept += 1
                     continue
-                ai_decision = okx_ai_approval(
-                    config,
-                    candidate,
-                    release_check,
-                    context={"route": "local_lc_release", "lc_id": lc_id, "from_status": "OPEN"},
-                )
-                if not ai_decision.get("approved"):
-                    warnings.append(
-                        f"{symbol}: OKX AI kept local LC before VT: {ai_decision.get('reason') or ai_decision.get('decision')}"
+                stored_review = candidate_okx_review(candidate, route="lc_okx_setup_review")
+                if stored_review is None:
+                    warnings.append(f"{symbol}: local pending kept because no initial 5.5 setup review is stored")
+                    kept += 1
+                    continue
+                if okx_review_allows_okx_submission(stored_review):
+                    final_check = evaluate_candidate(
+                        config,
+                        candidate,
+                        check_active_trades=False,
+                        check_order_limits=True,
+                    )
+                    if not final_check.passed:
+                        warnings.append(
+                            f"{symbol}: final validator kept local LC before OKX submit: "
+                            + "; ".join(final_check.reasons[:3])
+                        )
+                        kept += 1
+                        continue
+                    execution = execute_candidate(
+                        config,
+                        candidate,
+                        order_type_override=str(lifecycle["order_type"]),
+                        entry_type="pending_okx",
+                        journal_type="LC",
+                        journal_id=lc_id,
+                    )
+                    if not execution.submitted or not execution.order_id:
+                        warnings.append(f"{symbol}: local pending submit to OKX failed: {execution.message}")
+                        kept += 1
+                        continue
+                    set_pending_order_exchange_order(
+                        config,
+                        local_id,
+                        candidate,
+                        execution.order_id,
+                        max_age_days=float(lifecycle["exchange_max_age_days"]),
                     )
                     events.append(
                         {
-                            "type": "pending_ai_deferred",
-                            "source": "local_lc_release",
+                            "type": "pending_submitted",
+                            "source": "local_pending_okx",
+                            "status": "LC_OKX",
                             "lc_id": lc_id,
                             "symbol": symbol,
                             "side": str(record.get("side") or ""),
-                            "reason": ai_decision.get("reason") or ai_decision.get("decision"),
+                            "exchange_order_id": execution.order_id,
                         }
                     )
+                    submitted += 1
                     kept += 1
+                    active_symbols.add(symbol)
+                    continue
+                if not okx_review_requests_market_entry(stored_review):
+                    reason = _review_block_reason(stored_review)
+                    close_pending_order(config, local_id, "CANCELED", reason)
+                    events.append(
+                        {
+                            "type": "pending_canceled",
+                            "source": "local_pending_stored_review",
+                            "lc_id": lc_id,
+                            "symbol": symbol,
+                            "side": str(record.get("side") or ""),
+                            "reason": reason,
+                        }
+                    )
+                    canceled += 1
                     continue
                 final_check = evaluate_candidate(
                     config,
