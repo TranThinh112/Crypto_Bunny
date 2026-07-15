@@ -1962,6 +1962,15 @@ tr:last-child td {
   transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
 }
 
+.module-chart-meta .module-total-anchor {
+  position: relative;
+}
+
+.module-ai-kpi-row .module-total-anchor,
+.module-chart-meta:not(.module-ai-kpi-row) .module-total-anchor {
+  padding-right: 58px;
+}
+
 .module-chart-meta:not(.module-ai-kpi-row) .module-total-anchor {
   grid-column: 1 / -1;
 }

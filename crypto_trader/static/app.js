@@ -1579,12 +1579,14 @@ function aiDecisionLegendRows(rows) {
   }).filter((row) => !hiddenKeys.has(String(row?.aiDecisionKey || "")));
 }
 
-function renderAiDecisionKpi(row) {
+function renderAiDecisionKpi(module, row) {
   if (!row) return "";
   const totalTarget = row.chartTotalTarget ? String(row.chartTotalTarget) : "";
+  const delta = moduleDeltaInfo(module, row);
   return `
     <div class="module-chart-meta" ${totalTarget ? `data-chart-total-target="${escapeHtml(totalTarget)}"` : ""}>
       <div class="module-total-anchor">
+        <span class="module-chart-delta ${delta.state}">${escapeHtml(delta.text)}</span>
         <span>${escapeHtml(moduleDisplayLabel(row))}</span>
         <strong>${escapeHtml(moduleLegendCurrentValue(row))}</strong>
       </div>
@@ -1592,17 +1594,21 @@ function renderAiDecisionKpi(row) {
   `;
 }
 
-function renderAiDecisionKpiGroup(rows) {
+function renderAiDecisionKpiGroup(module, rows) {
   const items = (Array.isArray(rows) ? rows : []).filter(Boolean);
   if (!items.length) return "";
   return `
     <div class="module-chart-meta module-ai-kpi-row">
-      ${items.map((row) => `
-        <div class="module-total-anchor">
-          <span>${escapeHtml(moduleDisplayLabel(row))}</span>
-          <strong>${escapeHtml(moduleLegendCurrentValue(row))}</strong>
-        </div>
-      `).join("")}
+      ${items.map((row) => {
+        const delta = moduleDeltaInfo(module, row);
+        return `
+          <div class="module-total-anchor">
+            <span class="module-chart-delta ${delta.state}">${escapeHtml(delta.text)}</span>
+            <span>${escapeHtml(moduleDisplayLabel(row))}</span>
+            <strong>${escapeHtml(moduleLegendCurrentValue(row))}</strong>
+          </div>
+        `;
+      }).join("")}
     </div>
   `;
 }
@@ -1785,7 +1791,7 @@ function renderAiDecisionModuleChart(module, rows) {
   return `
     <section class="module-chart-panel module-chart-panel-compact module-ai-decision-panel">
       <div class="module-chart-legend module-ai-chart-stack">
-        ${renderAiDecisionKpiGroup([totalKpiRow, noTradeRow])}
+        ${renderAiDecisionKpiGroup(module, [totalKpiRow, noTradeRow])}
         ${renderAiDecisionDonut(entryDirectionRows, "Entry Direction", "Phân bổ lệnh LONG và SHORT", entryTotal ? String(entryTotal) : "0", "lệnh")}
         ${renderAiDecisionBarSvg(directionPercentRows, "Entry Direction · Tỷ lệ", "Tỷ lệ LONG/SHORT trên tổng decision", "ai-entry-percent")}
         ${renderAiDecisionBarSvg(winrateRows, "Decision Performance · Winrate", "Hiệu suất quyết định · Tỷ lệ thắng", "ai-winrate")}
