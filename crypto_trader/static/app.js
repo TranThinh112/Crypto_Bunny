@@ -1443,6 +1443,7 @@ function renderModuleVariableRows(module, chartRows, showShare = false) {
     };
     const share = moduleLegendShare(chartRows, row);
     const currentValue = moduleLegendCurrentValue(row);
+    const displayLabel = moduleDisplayLabel(row);
     const delta = moduleDeltaInfo(module, row);
     const valueLine = row.isBiasWarning
       ? `<small class="module-chart-value-line"><span>Hiển thị:</span><span class="module-chart-delta flat">${escapeHtml(formatBiasWarningValue(row.value))}</span></small>`
