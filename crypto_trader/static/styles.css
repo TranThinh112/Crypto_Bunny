@@ -2038,6 +2038,15 @@ tr:last-child td {
   line-height: 1.35;
 }
 
+.module-chart-meta .module-chart-delta {
+  width: 42px;
+  min-width: 42px;
+  padding-left: 0;
+  padding-right: 0;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
 .module-chart-delta.up {
   color: #ffffff;
   background: var(--green);
