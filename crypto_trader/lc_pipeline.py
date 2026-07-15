@@ -1704,10 +1704,19 @@ def latest_lc_pipeline_mini_scan(config: dict[str, Any]) -> dict[str, Any] | Non
     if not scan:
         return None
     current_symbols = lc_pipeline_four_hour_symbols(config, limit=10)
+    scan_pool_symbols = _symbol_list(scan.get("pool_symbols"), limit=10)
+    if not scan_pool_symbols:
+        scan_pool_symbols = _symbol_list((scan.get("local_policy") or {}).get("approved_symbols"), limit=10)
+    if not scan_pool_symbols:
+        scan_pool_symbols = list(current_symbols)
     original_selected_symbols = _symbol_list(
         scan.get("selected_symbols") if isinstance(scan.get("selected_symbols"), list) else scan.get("approved_symbols"),
         limit=10,
     )
+    latest_four_hour = latest_lc_pipeline_four_hour_event(config) or {}
+    current_slot = _parse_time(latest_four_hour.get("slot") or latest_four_hour.get("created_at"))
+    scan_slot = _parse_time(scan.get("slot_id") or scan.get("slot_start"))
+    selection_slot_stale = bool(scan_slot and current_slot and current_slot > scan_slot)
     ai_review = scan.get("ai_review") if isinstance(scan.get("ai_review"), dict) else {}
     ai_decision = str(ai_review.get("decision") or "").strip().upper()
     ai_explicitly_rejected = (
@@ -1716,26 +1725,39 @@ def latest_lc_pipeline_mini_scan(config: dict[str, Any]) -> dict[str, Any] | Non
     )
     selected_symbols = (
         []
-        if ai_explicitly_rejected
-        else [symbol for symbol in original_selected_symbols if symbol in current_symbols]
+        if ai_explicitly_rejected or selection_slot_stale
+        else original_selected_symbols
     )
-    selection_stale = bool(original_selected_symbols and selected_symbols != original_selected_symbols)
+    selection_stale = bool(original_selected_symbols and selection_slot_stale)
+    current_pool_changed = bool(scan_pool_symbols and current_symbols and scan_pool_symbols != current_symbols)
+    selected_missing_from_current_pool = [
+        symbol for symbol in original_selected_symbols if current_symbols and symbol not in current_symbols
+    ]
     status = "ai_rejected" if ai_explicitly_rejected else "stale_selection" if selection_stale else scan.get("status")
     skip_reason = scan.get("skip_reason")
     if ai_explicitly_rejected:
         skip_reason = "Mini AI returned NO_TRADE; no setup may continue to LC_OKX"
     elif selection_stale and not selected_symbols:
-        skip_reason = "Mini selection is stale because the current LC noi bo pool has changed"
+        skip_reason = "Mini selection is stale because a newer LC noi bo 4h slot is available"
+    approved_symbols = (
+        []
+        if ai_explicitly_rejected or selection_stale
+        else _symbol_list(scan.get("approved_symbols"), limit=10) or selected_symbols
+    )
     return {
         **scan,
         "status": status,
-        "pool_symbols": current_symbols,
-        "pool_count": len(current_symbols),
-        "approved_symbols": [] if ai_explicitly_rejected else current_symbols,
-        "approved_count": 0 if ai_explicitly_rejected else len(current_symbols),
+        "pool_symbols": scan_pool_symbols,
+        "pool_count": len(scan_pool_symbols),
+        "current_pool_symbols": current_symbols,
+        "current_pool_count": len(current_symbols),
+        "current_pool_changed": current_pool_changed,
+        "approved_symbols": approved_symbols,
+        "approved_count": len(approved_symbols),
         "selected_symbols": selected_symbols,
         "selected_count": len(selected_symbols),
         "selected_original_symbols": original_selected_symbols,
+        "selected_missing_from_current_pool": selected_missing_from_current_pool,
         "selection_stale": selection_stale,
         "skip_reason": skip_reason,
     }

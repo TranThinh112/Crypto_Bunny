@@ -101,6 +101,41 @@ class EngineMiniQueueTest(TestCase):
         self.assertEqual(len(orders), 1)
         self.assertEqual(orders[0]["symbol"], "LIT/USDT:USDT")
 
+    @patch("crypto_trader.engine.lc_pipeline_pool_rows", return_value=[])
+    def test_mini_scan_uses_saved_snapshot_when_latest_lc_row_is_gone(self, _lc_pipeline_pool_rows) -> None:
+        config = self._config()
+        scan = {
+            "provider": "openai",
+            "model": "gpt-5.4-mini",
+            "selected_symbols": ["BTC/USDT:USDT"],
+            "approved_symbols": ["BTC/USDT:USDT"],
+            "pool_symbols": ["BTC/USDT:USDT"],
+            "ai_review": {"approved_symbols": ["BTC/USDT:USDT"]},
+            "candidates": [
+                {
+                    "symbol": "BTC/USDT:USDT",
+                    "side": "long",
+                    "confidence": 86.0,
+                    "win_probability_pct": 82.0,
+                    "entry": 100.0,
+                    "stop_loss": 98.0,
+                    "take_profit": 103.0,
+                    "risk_reward": 1.5,
+                    "spread_pct": 0.01,
+                    "news_score": 0.0,
+                    "news_count": 1,
+                }
+            ],
+        }
+
+        result = _create_pending_from_internal_scan(config, [], scan, (5, set(), []), set())
+
+        self.assertTrue(result["allowed"])
+        self.assertEqual(result["created"], 1)
+        orders = list_pending_orders(config, status="OPEN")
+        self.assertEqual(len(orders), 1)
+        self.assertEqual(orders[0]["symbol"], "BTC/USDT:USDT")
+
     def test_mini_scan_submits_demo_lc_to_okx_as_lc_okx(self) -> None:
         config = self._config()
         config["mode"] = "demo"

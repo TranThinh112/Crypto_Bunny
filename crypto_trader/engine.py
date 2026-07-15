@@ -802,6 +802,32 @@ def _internal_lc_candidate_cache(
     return {candidate.symbol: candidate for candidate in cached_rows}
 
 
+def _internal_scan_candidate_cache(
+    config: dict[str, Any],
+    internal_scan: dict[str, Any] | None,
+    symbols: list[str],
+) -> dict[str, TradeCandidate]:
+    wanted = {str(symbol) for symbol in symbols if str(symbol)}
+    if not wanted:
+        return {}
+    cached_rows: list[TradeCandidate] = []
+    for item in (internal_scan or {}).get("candidates") or []:
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("symbol") or "")
+        if symbol not in wanted:
+            continue
+        candidate = _candidate_from_payload(item)
+        if candidate is None:
+            continue
+        candidate.scan_source = "mini_scan_snapshot"
+        cached_rows.append(candidate)
+    if cached_rows:
+        apply_position_sizing(config, cached_rows)
+        enrich_quantities(config, cached_rows)
+    return {candidate.symbol: candidate for candidate in cached_rows}
+
+
 def _is_wait_slot_only_rejection(reasons: list[str]) -> bool:
     normalized = [str(reason or "").strip() for reason in reasons if str(reason or "").strip()]
     if not normalized:
@@ -903,12 +929,15 @@ def _create_pending_from_internal_scan(
     approved = approved[:pending_limit]
     current_candidates_by_symbol = {candidate.symbol: candidate for candidate in candidates}
     cached_candidates_by_symbol = _internal_lc_candidate_cache(config, approved)
+    missing_cached_symbols = [symbol for symbol in approved if symbol not in cached_candidates_by_symbol]
+    scan_candidates_by_symbol = _internal_scan_candidate_cache(config, internal_scan, missing_cached_symbols)
     created_symbols = set(pending_symbols)
     for symbol in approved:
         if result["created"] >= pending_limit:
             break
         candidate = (
             cached_candidates_by_symbol.get(symbol)
+            or scan_candidates_by_symbol.get(symbol)
             or current_candidates_by_symbol.get(symbol)
         )
         if candidate is None:

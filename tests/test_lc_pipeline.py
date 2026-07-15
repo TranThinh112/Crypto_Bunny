@@ -15,6 +15,7 @@ from crypto_trader.lc_pipeline import (
     _one_hour_notification_text,
     format_internal_lc_view,
     format_internal_notifications_view,
+    latest_lc_pipeline_mini_scan,
     lc_pipeline_dashboard_payload,
     lc_pipeline_mini_pool,
     notify_mini_pool_summary,
@@ -721,6 +722,91 @@ class LcPipelineTest(TestCase):
         self.assertEqual([candidate.symbol for candidate in pool], ["SOL/USDT:USDT"])
         self.assertEqual(saved_state["rejected_setups"][0]["lc_id"], 7)
         self.assertEqual(saved_state["rejected_setups"][0]["four_hour_slot"], "2026-07-13T00:00:00+07:00")
+
+    def test_latest_mini_scan_preserves_selection_when_same_slot_pool_changes(self) -> None:
+        config = self._config()
+        state = {
+            "state_version": 3,
+            "day_key": "2026-07-15",
+            "four_hour_history": [
+                {
+                    "frame": "4h",
+                    "slot": "2026-07-15T16:00:00+07:00",
+                    "created_at": "2026-07-15T09:30:09+00:00",
+                    "index": 7,
+                    "approved": [
+                        {**_saved_row("ETC/USDT:USDT", 64, state="LC_NOI_BO"), "source_slot": "4h", "source_index": 7},
+                        {**_saved_row("SUI/USDT:USDT", 63, state="LC_NOI_BO"), "source_slot": "4h", "source_index": 7},
+                    ],
+                }
+            ],
+            "latest_mini_scan": {
+                "created_at": "2026-07-15T09:01:21+00:00",
+                "slot_id": "2026-07-15T09:00:00+00:00",
+                "pool_symbols": ["BTC/USDT:USDT"],
+                "selected_symbols": ["BTC/USDT:USDT"],
+                "approved_symbols": ["BTC/USDT:USDT"],
+                "candidates": [
+                    {
+                        "symbol": "BTC/USDT:USDT",
+                        "side": "long",
+                        "confidence": 85,
+                        "win_probability_pct": 66,
+                        "entry": 100,
+                        "stop_loss": 98,
+                        "take_profit": 103,
+                        "risk_reward": 1.5,
+                        "spread_pct": 0.01,
+                        "news_score": 0,
+                        "news_count": 1,
+                    }
+                ],
+                "ai_review": {"approved_symbols": ["BTC/USDT:USDT"]},
+                "status": "done",
+            },
+        }
+        set_journal_state(config, "lc_internal_pipeline_state", json.dumps(state, ensure_ascii=False))
+
+        scan = latest_lc_pipeline_mini_scan(config)
+
+        self.assertEqual(scan["selected_symbols"], ["BTC/USDT:USDT"])
+        self.assertFalse(scan["selection_stale"])
+        self.assertTrue(scan["current_pool_changed"])
+        self.assertEqual(scan["selected_missing_from_current_pool"], ["BTC/USDT:USDT"])
+
+    def test_latest_mini_scan_marks_selection_stale_after_newer_four_hour_slot(self) -> None:
+        config = self._config()
+        state = {
+            "state_version": 3,
+            "day_key": "2026-07-15",
+            "four_hour_history": [
+                {
+                    "frame": "4h",
+                    "slot": "2026-07-15T20:00:00+07:00",
+                    "created_at": "2026-07-15T13:00:09+00:00",
+                    "index": 8,
+                    "approved": [
+                        {**_saved_row("SUI/USDT:USDT", 64, state="LC_NOI_BO"), "source_slot": "4h", "source_index": 8},
+                    ],
+                }
+            ],
+            "latest_mini_scan": {
+                "created_at": "2026-07-15T09:01:21+00:00",
+                "slot_id": "2026-07-15T09:00:00+00:00",
+                "pool_symbols": ["BTC/USDT:USDT"],
+                "selected_symbols": ["BTC/USDT:USDT"],
+                "approved_symbols": ["BTC/USDT:USDT"],
+                "ai_review": {"approved_symbols": ["BTC/USDT:USDT"]},
+                "status": "done",
+            },
+        }
+        set_journal_state(config, "lc_internal_pipeline_state", json.dumps(state, ensure_ascii=False))
+
+        scan = latest_lc_pipeline_mini_scan(config)
+
+        self.assertEqual(scan["selected_symbols"], [])
+        self.assertTrue(scan["selection_stale"])
+        self.assertIn("newer LC noi bo 4h slot", scan["skip_reason"])
 
     @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
     def test_two_hour_uses_rechecked_win_rate_before_selecting_top_three(self, recheck_rows) -> None:
