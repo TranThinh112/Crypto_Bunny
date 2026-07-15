@@ -51,6 +51,9 @@ paper_trading:
   scan_interval_seconds: 60
   max_active_trades: 5
 
+trading_risk:
+  max_concurrent_positions: 5
+
 pending_orders:
   enabled: true
   max_age_days: 3
