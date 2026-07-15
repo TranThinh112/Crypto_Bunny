@@ -1546,6 +1546,80 @@ def candidate_okx_review(candidate: TradeCandidate, *, route: str | None = None)
     return review
 
 
+def okx_setup_review_recheck_state(
+    config: dict[str, Any],
+    candidate: TradeCandidate,
+    *,
+    route: str = "lc_okx_setup_review",
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    review = candidate_okx_review(candidate, route=route)
+    if review is None:
+        return {"has_review": False, "due": True, "review": None}
+    if route != "lc_okx_setup_review" or bool(review.get("approved")):
+        return {
+            "has_review": True,
+            "due": False,
+            "review": review,
+            "rejection_policy": review.get("rejection_policy"),
+        }
+
+    policy = _okx_setup_rejection_policy(review)
+    rejection_policy = str(review.get("rejection_policy") or policy["policy"])
+    normalized_review = {
+        **review,
+        "rejection_policy": rejection_policy,
+        "cache_mode": review.get("cache_mode") or policy["cache_mode"],
+        "policy_reason": review.get("policy_reason") or policy["reason"],
+    }
+    if rejection_policy == OKX_REJECTION_HARD_DELETE:
+        return {
+            "has_review": True,
+            "due": False,
+            "review": normalized_review,
+            "rejection_policy": rejection_policy,
+            "hard_delete": True,
+        }
+
+    recheck_minutes = _okx_soft_recheck_minutes(config)
+    try:
+        recheck_minutes = max(1, int(review.get("recheck_after_minutes") or recheck_minutes))
+    except (TypeError, ValueError):
+        recheck_minutes = _okx_soft_recheck_minutes(config)
+    reviewed_at = _parse_time(review.get("reviewed_at") or review.get("created_at"))
+    if reviewed_at is None:
+        return {
+            "has_review": True,
+            "due": True,
+            "review": {**normalized_review, "recheck_after_minutes": recheck_minutes},
+            "rejection_policy": rejection_policy,
+        }
+
+    check_now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    next_recheck_at = reviewed_at + timedelta(minutes=recheck_minutes)
+    due = check_now >= next_recheck_at
+    return {
+        "has_review": True,
+        "due": due,
+        "review": {
+            **normalized_review,
+            "recheck_after_minutes": recheck_minutes,
+            "next_recheck_at": next_recheck_at.isoformat(),
+            **(
+                {}
+                if due
+                else {
+                    "cached": True,
+                    "cache_reason": f"Waiting for fresh confirmation before retrying 5.5 until {next_recheck_at.isoformat()}",
+                }
+            ),
+        },
+        "rejection_policy": rejection_policy,
+        "reviewed_at": reviewed_at.isoformat(),
+        "next_recheck_at": next_recheck_at.isoformat(),
+    }
+
+
 def attach_okx_review_metadata(
     candidate: TradeCandidate,
     decision: dict[str, Any],
@@ -1570,7 +1644,8 @@ def attach_okx_review_metadata(
         "cache_mode": decision.get("cache_mode"),
         "policy_reason": decision.get("policy_reason"),
         "recheck_after_minutes": decision.get("recheck_after_minutes"),
-        "reviewed_at": datetime.now(timezone.utc).isoformat(),
+        "next_recheck_at": decision.get("next_recheck_at"),
+        "reviewed_at": str(decision.get("reviewed_at") or datetime.now(timezone.utc).isoformat()),
         "context": dict(context or {}),
     }
     reviewed.decision_metadata = {
@@ -1592,9 +1667,25 @@ def review_candidate_for_lc_okx(
     review_context = dict(context or {})
     route = str(review_context.get("route") or "lc_okx_setup_review")
     review_context["route"] = route
-    existing = candidate_okx_review(candidate, route=route)
+    existing_state = okx_setup_review_recheck_state(config, candidate, route=route)
+    existing = existing_state.get("review")
     if existing is not None and not force:
-        return candidate, existing
+        if route != "lc_okx_setup_review" or bool(existing.get("approved")):
+            return candidate, existing
+        if (
+            existing_state.get("rejection_policy") == OKX_REJECTION_HARD_DELETE
+            or not bool(existing_state.get("due", True))
+        ):
+            if existing_state.get("rejection_policy") == OKX_REJECTION_HARD_DELETE:
+                reject_lc_pipeline_setup(
+                    config,
+                    candidate.symbol,
+                    side=candidate.side,
+                    reason=str(existing.get("reason") or existing.get("decision") or "cached 5.5 rejection"),
+                    lc_id=review_context.get("lc_id"),
+                    route=route,
+                )
+            return attach_okx_review_metadata(candidate, existing, route=route, context=review_context), existing
     cached = _recent_rejected_okx_review(config, candidate, route=route)
     if cached is not None and not force:
         if cached.get("rejection_policy") == OKX_REJECTION_HARD_DELETE:

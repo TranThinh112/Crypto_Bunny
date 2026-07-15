@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -344,6 +344,74 @@ class AiCoordinatorTest(TestCase):
                 candidate,
                 check,
                 context={"route": "lc_okx_setup_review", "lc_id": 27},
+            )
+
+        approval.assert_called_once()
+        self.assertTrue(decision["approved"])
+        self.assertEqual(decision["decision"], "APPROVE")
+
+    def test_recent_watchlist_metadata_does_not_reask_or_refresh_reviewed_at(self) -> None:
+        config = self._config()
+        candidate = _candidate("INJ/USDT:USDT")
+        reviewed_at = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        candidate.decision_metadata = {
+            "okx_review": {
+                "route": "lc_okx_setup_review",
+                "approved": False,
+                "decision": "GIU_THEO_DOI",
+                "reason": "5.5 giu setup de theo doi them",
+                "provider": "openai",
+                "model": "gpt-5.5",
+                "rejection_policy": "watchlist",
+                "recheck_after_minutes": 30,
+                "reviewed_at": reviewed_at,
+            }
+        }
+
+        with patch("crypto_trader.ai_coordinator.okx_ai_approval") as approval:
+            reviewed, decision = review_candidate_for_lc_okx(
+                config,
+                candidate,
+                RiskCheck(True, [], []),
+                context={"route": "lc_okx_setup_review", "lc_id": 28},
+            )
+
+        approval.assert_not_called()
+        self.assertFalse(decision["approved"])
+        self.assertTrue(decision.get("cached"))
+        self.assertEqual(decision["reviewed_at"], reviewed_at)
+        self.assertEqual(reviewed.decision_metadata["okx_review"]["reviewed_at"], reviewed_at)
+
+    def test_old_watchlist_metadata_reasks_ai_after_recheck_cooldown(self) -> None:
+        config = self._config()
+        candidate = _candidate("INJ/USDT:USDT")
+        candidate.decision_metadata = {
+            "okx_review": {
+                "route": "lc_okx_setup_review",
+                "approved": False,
+                "decision": "GIU_THEO_DOI",
+                "reason": "5.5 giu setup de theo doi them",
+                "provider": "openai",
+                "model": "gpt-5.5",
+                "rejection_policy": "watchlist",
+                "recheck_after_minutes": 30,
+                "reviewed_at": (datetime.now(timezone.utc) - timedelta(minutes=45)).isoformat(),
+            }
+        }
+        approved = {
+            "approved": True,
+            "decision": "APPROVE",
+            "reason": "Setup da co xac nhan moi",
+            "provider": "openai",
+            "model": "gpt-5.5",
+        }
+
+        with patch("crypto_trader.ai_coordinator.okx_ai_approval", return_value=approved) as approval:
+            _, decision = review_candidate_for_lc_okx(
+                config,
+                candidate,
+                RiskCheck(True, [], []),
+                context={"route": "lc_okx_setup_review", "lc_id": 29},
             )
 
         approval.assert_called_once()

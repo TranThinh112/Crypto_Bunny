@@ -162,6 +162,7 @@ from .storage import (
     prune_market_scan_observations,
     purge_deprecated_journal_state,
     recent_market_scan_memory,
+    refresh_pending_order,
     run_storage_maintenance,
     set_journal_state,
     storage_stats,
@@ -3077,11 +3078,29 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
             )
             reviewed_payload = to_jsonable(candidate)
 
+        persisted = False
+        if record is not None and route == "lc_okx_setup_review":
+            record_status = str(record.get("status") or "OPEN").upper()
+            pending_config = config.get("pending_orders", {})
+            refresh_kwargs: dict[str, Any]
+            if record_status == "LC_OKX":
+                refresh_kwargs = {"max_age_days": float(pending_config.get("exchange_max_age_days", 1.5) or 1.5)}
+            else:
+                refresh_kwargs = {"max_age_hours": float(pending_config.get("local_max_age_hours", 6) or 6)}
+            refresh_pending_order(
+                config,
+                int(record["id"]),
+                reviewed_candidate,
+                status=record_status,
+                **refresh_kwargs,
+            )
+            persisted = True
+
         return {
             "ok": True,
             "manual_only": True,
             "one_shot": True,
-            "persisted": False,
+            "persisted": persisted,
             "route": route,
             "lc_id": context.get("lc_id"),
             "candidate": reviewed_payload,

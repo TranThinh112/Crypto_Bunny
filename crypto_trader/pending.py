@@ -1,12 +1,15 @@
 from __future__ import annotations
+from copy import deepcopy
 import json
 from datetime import datetime, timezone
 from typing import Any
 
 from .ai_coordinator import (
+    OKX_REJECTION_HARD_DELETE,
     OKX_REJECTION_WATCHLIST,
     candidate_okx_review,
     okx_ai_approval,
+    okx_setup_review_recheck_state,
     prioritize_pending_records,
     review_candidate_for_lc_okx,
 )
@@ -142,6 +145,22 @@ def _candidate_from_record(record: dict[str, Any]) -> TradeCandidate | None:
     clean_payload.setdefault("reasons", payload.get("reasons") or [])
     clean_payload.setdefault("warnings", payload.get("warnings") or [])
     return TradeCandidate(**clean_payload)
+
+
+def _candidate_with_record_metadata(candidate: TradeCandidate, record: dict[str, Any]) -> TradeCandidate:
+    record_candidate = _candidate_from_record(record)
+    if record_candidate is None or not isinstance(record_candidate.decision_metadata, dict):
+        return candidate
+    record_metadata = record_candidate.decision_metadata
+    if not record_metadata:
+        return candidate
+    merged = deepcopy(candidate)
+    current_metadata = merged.decision_metadata if isinstance(merged.decision_metadata, dict) else {}
+    merged.decision_metadata = {
+        **record_metadata,
+        **current_metadata,
+    }
+    return merged
 
 
 def _close_latest_lc_trade_execution(
@@ -677,6 +696,7 @@ def maintain_pending_orders(
                 canceled += 1
                 continue
 
+            refreshed_candidate = _candidate_with_record_metadata(refreshed_candidate, record)
             refresh_check = evaluate_candidate(
                 config,
                 refreshed_candidate,
@@ -763,6 +783,69 @@ def maintain_pending_orders(
                 warnings.append(
                     f"{symbol}: WAIT_SLOT kept because recheck release gate failed: "
                     + "; ".join(submit_check.reasons[:3])
+                )
+                kept += 1
+                continue
+
+            setup_review_state = okx_setup_review_recheck_state(
+                config,
+                refreshed_candidate,
+                route="lc_okx_setup_review",
+            )
+            if setup_review_state.get("rejection_policy") == OKX_REJECTION_HARD_DELETE:
+                stored_review = setup_review_state.get("review") or {}
+                reason = str(
+                    stored_review.get("reason")
+                    or stored_review.get("decision")
+                    or "GPT-5.5 rejected LC_OKX setup"
+                )
+                close_pending_order(config, local_id, "CANCELED", reason)
+                events.append(
+                    {
+                        "type": "pending_canceled",
+                        "source": "mini_wait_slot_stored_review",
+                        "lc_id": lc_id,
+                        "symbol": symbol,
+                        "side": str(record.get("side") or ""),
+                        "reason": reason,
+                        "rejection_policy": setup_review_state.get("rejection_policy"),
+                        "comparison": comparison,
+                    }
+                )
+                canceled += 1
+                continue
+            if (
+                setup_review_state.get("has_review")
+                and setup_review_state.get("rejection_policy") == OKX_REJECTION_WATCHLIST
+                and not bool(setup_review_state.get("due", True))
+            ):
+                stored_review = setup_review_state.get("review") or {}
+                reason = str(
+                    stored_review.get("reason")
+                    or stored_review.get("decision")
+                    or "GPT-5.5 dang giu setup de theo doi"
+                )
+                refresh_pending_order(
+                    config,
+                    local_id,
+                    refreshed_candidate,
+                    status="WAIT_SLOT",
+                    max_age_hours=float(lifecycle["local_max_age_hours"]),
+                )
+                events.append(
+                    {
+                        "type": "pending_kept",
+                        "source": "mini_wait_slot_review_cooldown",
+                        "status": "WAIT_SLOT",
+                        "lc_id": lc_id,
+                        "symbol": symbol,
+                        "side": str(record.get("side") or ""),
+                        "reason": reason,
+                        "rejection_policy": setup_review_state.get("rejection_policy"),
+                        "recheck_after_minutes": stored_review.get("recheck_after_minutes"),
+                        "next_recheck_at": setup_review_state.get("next_recheck_at"),
+                        "comparison": comparison,
+                    }
                 )
                 kept += 1
                 continue
@@ -876,6 +959,7 @@ def maintain_pending_orders(
         )
         review_reasons = _pending_review_reasons(config, record, candidate, check, market_layers)
         if candidate and not review_reasons:
+            candidate = _candidate_with_record_metadata(candidate, record)
             _fill_missing_quantity(candidate, record)
             local_age_hours = _record_age_hours(record, now)
 
@@ -1154,6 +1238,65 @@ def maintain_pending_orders(
                         warnings.append(
                             f"{symbol}: local pending order kept because OKX submit risk check failed: "
                             + "; ".join(submit_check.reasons[:3])
+                        )
+                        kept += 1
+                        continue
+                    setup_review_state = okx_setup_review_recheck_state(
+                        config,
+                        candidate,
+                        route="lc_okx_setup_review",
+                    )
+                    if setup_review_state.get("rejection_policy") == OKX_REJECTION_HARD_DELETE:
+                        stored_review = setup_review_state.get("review") or {}
+                        reason = str(
+                            stored_review.get("reason")
+                            or stored_review.get("decision")
+                            or "GPT-5.5 rejected LC_OKX setup"
+                        )
+                        close_pending_order(config, local_id, "CANCELED", reason)
+                        events.append(
+                            {
+                                "type": "pending_canceled",
+                                "source": "local_pending_stored_review",
+                                "lc_id": lc_id,
+                                "symbol": symbol,
+                                "side": str(record.get("side") or ""),
+                                "reason": reason,
+                                "rejection_policy": setup_review_state.get("rejection_policy"),
+                            }
+                        )
+                        canceled += 1
+                        continue
+                    if (
+                        setup_review_state.get("has_review")
+                        and setup_review_state.get("rejection_policy") == OKX_REJECTION_WATCHLIST
+                        and not bool(setup_review_state.get("due", True))
+                    ):
+                        stored_review = setup_review_state.get("review") or {}
+                        reason = str(
+                            stored_review.get("reason")
+                            or stored_review.get("decision")
+                            or "GPT-5.5 dang giu setup de theo doi"
+                        )
+                        refresh_pending_order(
+                            config,
+                            local_id,
+                            candidate,
+                            status=str(record.get("status") or "OPEN"),
+                            max_age_hours=float(lifecycle["local_max_age_hours"]),
+                        )
+                        events.append(
+                            {
+                                "type": "pending_kept",
+                                "source": "local_pending_review_cooldown",
+                                "lc_id": lc_id,
+                                "symbol": symbol,
+                                "side": str(record.get("side") or ""),
+                                "reason": reason,
+                                "rejection_policy": setup_review_state.get("rejection_policy"),
+                                "recheck_after_minutes": stored_review.get("recheck_after_minutes"),
+                                "next_recheck_at": setup_review_state.get("next_recheck_at"),
+                            }
                         )
                         kept += 1
                         continue
