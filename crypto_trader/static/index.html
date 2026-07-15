@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Crypto Signal Bot</title>
-    <link rel="stylesheet" href="/static/styles.css?v=ai-percent-chart-20260715-3" />
+    <link rel="stylesheet" href="/static/styles.css?v=darkmode-toggle-20260716" />
   </head>
   <body>
     <main class="shell">
@@ -17,6 +17,10 @@
           <label class="toggle">
             <input id="autoRun" type="checkbox" />
             <span>Tự động</span>
+          </label>
+          <label class="toggle theme-toggle">
+            <input id="darkModeToggle" type="checkbox" />
+            <span>Dark mode</span>
           </label>
           <input id="intervalInput" class="interval" type="number" value="60" min="30" step="30" aria-label="Chu kỳ tự động theo giây" />
           <label class="config-control margin-control">
@@ -256,6 +260,6 @@
       </div>
     </main>
 
-    <script src="/static/app.js?v=ai-percent-chart-20260715-3"></script>
+    <script src="/static/app.js?v=darkmode-toggle-20260716"></script>
   </body>
 </html>

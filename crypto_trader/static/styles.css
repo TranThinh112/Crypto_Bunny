@@ -13,6 +13,21 @@
   --shadow: 0 16px 36px rgba(31, 45, 52, 0.08);
 }
 
+body.dark-mode {
+  color-scheme: dark;
+  --bg: #0f171d;
+  --panel: #162229;
+  --ink: #e8f0f2;
+  --muted: #9aabb5;
+  --line: #2b3a43;
+  --green: #39b878;
+  --red: #e05b50;
+  --amber: #d69b2f;
+  --teal: #20a6a9;
+  --blue: #6b94d8;
+  --shadow: 0 18px 42px rgba(0, 0, 0, 0.34);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -147,6 +162,10 @@ h2 {
   accent-color: var(--teal);
 }
 
+.theme-toggle {
+  gap: 7px;
+}
+
 .interval {
   width: 82px;
   padding: 0 9px;
@@ -196,6 +215,88 @@ h2 {
 .config-control .button {
   height: 30px;
   padding: 0 10px;
+}
+
+body.dark-mode .secondary,
+body.dark-mode .toggle,
+body.dark-mode .interval,
+body.dark-mode .config-control,
+body.dark-mode .margin-input,
+body.dark-mode .leverage-input,
+body.dark-mode input[type="date"],
+body.dark-mode .auto-strip,
+body.dark-mode .pulse-focus,
+body.dark-mode .pulse-feed-item,
+body.dark-mode .module-chart-legend-item,
+body.dark-mode .module-chart-meta div,
+body.dark-mode .module-stat-table > div,
+body.dark-mode .health-card,
+body.dark-mode .health-evidence-row,
+body.dark-mode .system-summary-head,
+body.dark-mode .module-detail,
+body.dark-mode .module-chart-panel {
+  background: #162229;
+  color: var(--ink);
+  border-color: var(--line);
+}
+
+body.dark-mode .margin-input,
+body.dark-mode .leverage-input,
+body.dark-mode .interval,
+body.dark-mode input[type="date"] {
+  background: #101a20;
+}
+
+body.dark-mode .metric,
+body.dark-mode .panel {
+  background: var(--panel);
+}
+
+body.dark-mode table,
+body.dark-mode th,
+body.dark-mode td {
+  border-color: var(--line);
+}
+
+body.dark-mode th,
+body.dark-mode .module-stat-head {
+  background: #101a20 !important;
+  color: var(--muted);
+}
+
+body.dark-mode tr.selected-row td,
+body.dark-mode .candidate-row:hover td {
+  background: #132d31;
+}
+
+body.dark-mode .meter {
+  background: #263741;
+}
+
+body.dark-mode .status-pill.ok {
+  background: rgba(57, 184, 120, 0.16);
+}
+
+body.dark-mode .status-pill.warn,
+body.dark-mode .warning,
+body.dark-mode .source-pill.old {
+  background: rgba(214, 155, 47, 0.16);
+}
+
+body.dark-mode .source-pill.new {
+  background: rgba(32, 166, 169, 0.16);
+}
+
+body.dark-mode .source-pill.both {
+  background: rgba(107, 148, 216, 0.18);
+}
+
+body.dark-mode .module-chart-callout-box {
+  fill: rgba(5, 10, 13, 0.94);
+}
+
+body.dark-mode .module-donut circle {
+  fill: var(--panel);
 }
 
 .summary-grid {
@@ -1799,11 +1900,12 @@ tr:last-child td {
 
 .module-chart-legend-item {
   appearance: none;
+  position: relative;
   display: grid;
   grid-template-columns: 12px minmax(0, 1fr);
   gap: 8px;
   align-items: start;
-  padding: 7px 8px;
+  padding: 7px 58px 7px 8px;
   border: 1px solid var(--line);
   border-radius: 7px;
   background: #fbfcfc;
@@ -1914,9 +2016,12 @@ tr:last-child td {
 
 .module-chart-delta {
   display: inline-flex;
+  position: absolute;
+  top: 7px;
+  right: 8px;
   align-items: center;
   justify-content: center;
-  min-width: 42px;
+  min-width: 34px;
   padding: 1px 8px;
   border-radius: 999px;
   font-size: 11px;

@@ -28,6 +28,7 @@ const MIN_BASE_MARGIN_USDT = 1;
 const refs = {
   statusLine: el("statusLine"),
   autoRun: el("autoRun"),
+  darkModeToggle: el("darkModeToggle"),
   intervalInput: el("intervalInput"),
   orderMarginInput: el("orderMarginInput"),
   saveOrderMarginBtn: el("saveOrderMarginBtn"),
@@ -101,6 +102,24 @@ const refs = {
   newsList: el("newsList"),
   newsCount: el("newsCount"),
 };
+
+const THEME_STORAGE_KEY = "cryptoSignalTheme";
+
+function applyTheme(isDark) {
+  document.body.classList.toggle("dark-mode", Boolean(isDark));
+  if (refs.darkModeToggle) refs.darkModeToggle.checked = Boolean(isDark);
+}
+
+function initTheme() {
+  const savedTheme = localStorage.getItem(THEME_STORAGE_KEY);
+  applyTheme(savedTheme === "dark");
+}
+
+function setThemeFromToggle() {
+  const isDark = Boolean(refs.darkModeToggle?.checked);
+  localStorage.setItem(THEME_STORAGE_KEY, isDark ? "dark" : "light");
+  applyTheme(isDark);
+}
 
 function fmt(value, digits = 2) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
@@ -1254,11 +1273,11 @@ function moduleDeltaInfo(module, row) {
   const previousValue = moduleComparableValue(modulePreviousStatRow(module, row)?.value);
   const suffix = moduleDeltaSuffix(row);
   if (currentValue === null || previousValue === null) {
-    return { state: "na", text: "Chua co moc" };
+    return { state: "flat", text: "0" };
   }
   const delta = currentValue - previousValue;
   if (Math.abs(delta) < 1e-9) {
-    return { state: "flat", text: `0${suffix}` };
+    return { state: "flat", text: "0" };
   }
   return {
     state: delta > 0 ? "up" : "down",
@@ -1547,6 +1566,7 @@ function aiDecisionChartRow(rows, key, chartIndex, colorIndex, tooltipValue = nu
 }
 
 function aiDecisionLegendRows(rows) {
+  const hiddenKeys = new Set(["total_decisions", "no_trade_count"]);
   return (Array.isArray(rows) ? rows : []).map((row, index) => {
     const numeric = moduleNumericValue(row.value);
     return {
@@ -1556,7 +1576,7 @@ function aiDecisionLegendRows(rows) {
       chartIndex: index,
       color: MODULE_CHART_COLORS[index % MODULE_CHART_COLORS.length],
     };
-  });
+  }).filter((row) => !hiddenKeys.has(String(row?.aiDecisionKey || "")));
 }
 
 function renderAiDecisionKpi(row) {
@@ -1745,11 +1765,6 @@ function renderAiDecisionModuleChart(module, rows) {
     longOrderRow ? { ...longOrderRow, tooltipValue: `Số LONG: ${moduleLegendCurrentValue(longOrderRow)} | Tỷ lệ LONG: ${longPercent?.value ?? "-"}` } : null,
     shortOrderRow ? { ...shortOrderRow, tooltipValue: `Số SHORT: ${moduleLegendCurrentValue(shortOrderRow)} | Tỷ lệ SHORT: ${shortPercent?.value ?? "-"}` } : null,
   ];
-  const entryTotalRow = {
-    label: "Tổng lệnh",
-    value: entryTotal,
-    unit: "lệnh",
-  };
   const totalKpiRow = totalDecisionRow ? { ...totalDecisionRow } : null;
   const directionPercentRows = [
     aiDecisionChartRow(rows, "long_percent", 4, 4),
@@ -1771,7 +1786,6 @@ function renderAiDecisionModuleChart(module, rows) {
     <section class="module-chart-panel module-chart-panel-compact module-ai-decision-panel">
       <div class="module-chart-legend module-ai-chart-stack">
         ${renderAiDecisionKpiGroup([totalKpiRow, noTradeRow])}
-        ${renderAiDecisionKpi(entryTotalRow)}
         ${renderAiDecisionDonut(entryDirectionRows, "Entry Direction", "Phân bổ lệnh LONG và SHORT", entryTotal ? String(entryTotal) : "0", "lệnh")}
         ${renderAiDecisionBarSvg(directionPercentRows, "Entry Direction · Tỷ lệ", "Tỷ lệ LONG/SHORT trên tổng decision", "ai-entry-percent")}
         ${renderAiDecisionBarSvg(winrateRows, "Decision Performance · Winrate", "Hiệu suất quyết định · Tỷ lệ thắng", "ai-winrate")}
@@ -3382,6 +3396,7 @@ refs.refreshBtn.addEventListener("click", () => {
 });
 refs.analyzeBtn.addEventListener("click", runAnalysis);
 refs.autoRun.addEventListener("change", resetAutoTimer);
+if (refs.darkModeToggle) refs.darkModeToggle.addEventListener("change", setThemeFromToggle);
 refs.intervalInput.addEventListener("change", resetAutoTimer);
 if (refs.saveOrderMarginBtn) refs.saveOrderMarginBtn.addEventListener("click", saveOrderMargin);
 if (refs.orderMarginInput) {
@@ -3440,6 +3455,8 @@ if (refs.leverageInput) {
 window.addEventListener("resize", () => {
   if (state.currentDecision) renderSelected(state.currentDecision);
 });
+
+initTheme();
 
 loadConfigSummary().catch((err) => {
   setLeverageStatus(`Lỗi: ${err.message}`, "warn");
