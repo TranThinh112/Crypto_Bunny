@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from contextlib import ExitStack
 import tempfile
 from copy import deepcopy
@@ -11,7 +12,7 @@ from unittest.mock import patch
 from crypto_trader.config import DEFAULT_CONFIG
 from crypto_trader.engine import _create_pending_from_internal_scan, run_once
 from crypto_trader.models import ExecutionResult, RiskCheck, TradeCandidate
-from crypto_trader.storage import list_pending_orders
+from crypto_trader.storage import list_pending_orders, open_pending_symbols
 
 
 def _candidate(symbol: str = "BTC/USDT:USDT") -> TradeCandidate:
@@ -161,6 +162,65 @@ class EngineMiniQueueTest(TestCase):
         self.assertEqual(len(result["skipped"]), 1)
         self.assertIn("Setup khong du chat luong", result["skipped"][0]["reason"])
         self.assertEqual(list_pending_orders(config, status="LC_OKX"), [])
+
+    def test_mini_scan_keeps_gpt_55_watchlist_as_wait_slot_and_blocks_duplicate_review(self) -> None:
+        config = self._config()
+        config["mode"] = "demo"
+        candidate = _candidate("INJ/USDT:USDT")
+        scan = {
+            "provider": "openai",
+            "model": "gpt-5.4-mini",
+            "selected_symbols": ["INJ/USDT:USDT"],
+            "approved_symbols": ["INJ/USDT:USDT"],
+            "ai_review": {"approved_symbols": ["INJ/USDT:USDT"]},
+        }
+        review_decision = {
+            "approved": False,
+            "decision": "REJECT",
+            "reason": "Missing 4h/15m confirmation; keep watching",
+            "rejection_policy": "watchlist",
+            "recheck_after_minutes": 30,
+        }
+
+        def soft_review(_config, reviewed_candidate, *_args, **_kwargs):
+            stored = deepcopy(reviewed_candidate)
+            stored.decision_metadata = {
+                **(stored.decision_metadata or {}),
+                "okx_review": {
+                    "route": "lc_okx_setup_review",
+                    **review_decision,
+                },
+            }
+            return stored, dict(review_decision)
+
+        with (
+            patch("crypto_trader.engine.review_candidate_for_lc_okx", side_effect=soft_review) as review,
+            patch("crypto_trader.engine.execute_candidate") as execute,
+        ):
+            first = _create_pending_from_internal_scan(config, [candidate], scan, (5, set(), []), set())
+            second = _create_pending_from_internal_scan(
+                config,
+                [candidate],
+                scan,
+                (5, set(), []),
+                open_pending_symbols(config),
+            )
+
+        execute.assert_not_called()
+        review.assert_called_once()
+        self.assertEqual(first["created"], 0)
+        self.assertEqual(first["wait_slot"], 1)
+        self.assertEqual(first["skipped"], [])
+        self.assertEqual(second["created"], 0)
+        self.assertEqual(second["wait_slot"], 0)
+        self.assertEqual(second["skipped"][0]["reason"], "already pending or active in LC memory")
+        orders = list_pending_orders(config, status="WAIT_SLOT")
+        self.assertEqual(len(orders), 1)
+        self.assertEqual(orders[0]["symbol"], "INJ/USDT:USDT")
+        self.assertEqual(orders[0]["status"], "WAIT_SLOT")
+        payload = json.loads(str(orders[0]["payload_json"]))
+        self.assertEqual(payload["decision_metadata"]["okx_review"]["rejection_policy"], "watchlist")
+        self.assertEqual(payload["decision_metadata"]["wait_slot_queue"]["reason"], review_decision["reason"])
 
     @patch("crypto_trader.notifier.send_telegram_message")
     @patch("crypto_trader.engine.lc_pipeline_pool_rows")

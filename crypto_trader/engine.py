@@ -968,11 +968,49 @@ def _create_pending_from_internal_scan(
                 },
             )
             if not okx_review.get("approved"):
+                reason = str(okx_review.get("reason") or okx_review.get("decision") or "GPT-5.5 rejected LC_OKX setup")
+                if okx_review.get("rejection_policy") == "watchlist":
+                    source_meta = _wait_slot_source_meta(config, candidate.symbol)
+                    queued_candidate = _with_wait_slot_metadata(
+                        reviewed_candidate,
+                        reason=reason,
+                        internal_scan=internal_scan,
+                        source_meta=source_meta,
+                    )
+                    record = save_pending_order(
+                        config,
+                        queued_candidate,
+                        None,
+                        status="WAIT_SLOT",
+                        max_age_hours=float(config.get("pending_orders", {}).get("local_max_age_hours", 6) or 6),
+                        journal_id=journal_id,
+                    )
+                    result["wait_slot"] += 1
+                    created_symbols.add(candidate.symbol)
+                    result["wait_slot_orders"].append(
+                        {
+                            "id": record.get("id"),
+                            "lc_id": journal_id or record.get("id"),
+                            "status": "WAIT_SLOT",
+                            "symbol": reviewed_candidate.symbol,
+                            "side": reviewed_candidate.side,
+                            "reason": reason,
+                            "rejection_policy": okx_review.get("rejection_policy"),
+                            "recheck_after_minutes": okx_review.get("recheck_after_minutes"),
+                            "win_probability_pct": reviewed_candidate.win_probability_pct,
+                            "confidence": reviewed_candidate.confidence,
+                            "source": source_meta.get("source_text") or "5.5 giữ theo dõi",
+                            "queued_at": (
+                                (queued_candidate.decision_metadata or {}).get("wait_slot_queue", {}).get("queued_at")
+                            ),
+                        }
+                    )
+                    continue
                 result["skipped"].append(
                     {
                         "symbol": candidate.symbol,
                         "side": candidate.side,
-                        "reason": str(okx_review.get("reason") or okx_review.get("decision") or "GPT-5.5 rejected LC_OKX setup"),
+                        "reason": reason,
                     }
                 )
                 continue
