@@ -1667,6 +1667,10 @@ function renderAiDecisionModuleChart(module, rows) {
     unit: "lần",
   };
   const totalKpiRow = totalDecisionRow ? { ...totalDecisionRow, chartTotalTarget: "ai-entry-total" } : null;
+  const directionPercentRows = [
+    aiDecisionChartRow(rows, "long_percent", 4, 4),
+    aiDecisionChartRow(rows, "short_percent", 5, 5),
+  ];
   const winrateRows = [
     aiDecisionChartRow(rows, "winrate_long", 6, 6),
     aiDecisionChartRow(rows, "winrate_short", 7, 7),
@@ -1685,6 +1689,7 @@ function renderAiDecisionModuleChart(module, rows) {
         ${renderAiDecisionKpi(totalKpiRow)}
         ${renderAiDecisionKpi(entryTotalRow)}
         ${renderAiDecisionDonut(entryDirectionRows, "Entry Direction", "Phân bổ LONG, SHORT và 5.5 từ chối/xóa setup", entryTotal ? String(entryTotal) : "0", "biến vẽ")}
+        ${renderAiDecisionBarSvg(directionPercentRows, "Entry Direction · Tỷ lệ", "Tỷ lệ LONG/SHORT trên tổng decision", "Tên biến", "ai-entry-percent")}
         ${renderAiDecisionBarSvg(winrateRows, "Decision Performance · Winrate", "Hiệu suất quyết định · Tỷ lệ thắng", "Tên biến", "ai-winrate")}
         ${renderAiDecisionBarSvg(profitRows, "Decision Performance · Profit Factor", "Hiệu suất quyết định · Hệ số lợi nhuận", "Tên biến", "ai-profit")}
         ${renderAiDecisionBarSvg(confidenceRows, "AI Confidence", "Độ tin cậy của AI", "Tên biến", "ai-confidence")}
