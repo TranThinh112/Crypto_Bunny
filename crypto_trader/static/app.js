@@ -1188,6 +1188,25 @@ function moduleLegendCurrentValue(row) {
   if (numeric !== null) return formatFixed2(numeric);
   return formatCardValue(row?.label || "", viText(row?.value ?? "-"));
 }
+
+function aiDecisionUnit(row) {
+  const key = String(row?.aiDecisionKey || "");
+  if (key === "total_decisions") return "quyết định";
+  if (key === "long_count" || key === "short_count") return "lệnh";
+  if (key === "no_trade_count") return "lần";
+  if (key.includes("percent") || key.includes("winrate")) return "%";
+  if (key.includes("confidence")) return "điểm";
+  if (key.includes("profit_factor")) return "hệ số";
+  if (key === "bias_warning") return "trạng thái";
+  return String(row?.unit || "");
+}
+
+function moduleDisplayLabel(row) {
+  const label = String(row?.label || "-");
+  const unit = aiDecisionUnit(row);
+  return unit ? `${label} (${unit})` : label;
+}
+
 function moduleLegendShare(chartRows, row) {
   const totalRaw = chartRows.reduce((sum, item) => sum + Math.max(0, Number(item.rawNumericValue || 0)), 0);
   if (!totalRaw) return "0.00%";
@@ -1429,10 +1448,10 @@ function renderModuleVariableRows(module, chartRows, showShare = false) {
       ? `<small class="module-chart-value-line"><span>Hiển thị:</span><span class="module-chart-delta flat">${escapeHtml(formatBiasWarningValue(row.value))}</span></small>`
       : `<small class="module-chart-value-line"><span>Giá trị hiện tại: ${escapeHtml(currentValue)}</span><span class="module-chart-delta ${delta.state}">${escapeHtml(delta.text)}</span></small>`;
     return `
-      <button class="module-chart-legend-item ${row.attention ? "attention" : ""}" type="button" data-chart-index="${chartIndex}" ${aiKey ? `data-ai-key="${escapeHtml(aiKey)}"` : ""} ${totalTarget ? `data-chart-total-target="${totalTarget}"` : ""} title="${escapeHtml(row.label || "-")}: ${escapeHtml(currentValue)}">
+      <button class="module-chart-legend-item ${row.attention ? "attention" : ""}" type="button" data-chart-index="${chartIndex}" ${aiKey ? `data-ai-key="${escapeHtml(aiKey)}"` : ""} ${totalTarget ? `data-chart-total-target="${totalTarget}"` : ""} title="${escapeHtml(displayLabel)}: ${escapeHtml(currentValue)}">
         <span class="module-chart-swatch" style="background:${row.color}"></span>
         <div>
-          <strong>${escapeHtml(row.label || "-")}</strong>
+          <strong>${escapeHtml(displayLabel)}</strong>
           ${valueLine}
           ${showShare ? `<small class="module-chart-share-line">Tỷ trọng trên biểu đồ: ${escapeHtml(share)}${row.attention ? " · cần chú ý" : ""}</small>` : ""}
           <p>${escapeHtml(row.meaning || "Biến dùng để theo dõi trạng thái module.")}</p>
@@ -1488,17 +1507,46 @@ function aiDecisionLegendRows(rows) {
 
 function renderAiDecisionKpi(row) {
   if (!row) return "";
+  const totalTarget = row.chartTotalTarget ? String(row.chartTotalTarget) : "";
   return `
-    <div class="module-chart-meta" data-chart-total-target="ai-entry-total">
+    <div class="module-chart-meta" ${totalTarget ? `data-chart-total-target="${escapeHtml(totalTarget)}"` : ""}>
       <div class="module-total-anchor">
-        <span>${escapeHtml(row.label || "Tổng số decision")}</span>
+        <span>${escapeHtml(moduleDisplayLabel(row))}</span>
         <strong>${escapeHtml(moduleLegendCurrentValue(row))}</strong>
       </div>
     </div>
   `;
 }
 
-function renderAiDecisionDonut(rows, title, centerLabel, caption) {
+function renderChartTitle(title, subtitle) {
+  return `
+    <div class="module-chart-title">
+      <strong>${escapeHtml(title)}</strong>
+      ${subtitle ? `<small>${escapeHtml(subtitle)}</small>` : ""}
+    </div>
+  `;
+}
+
+function chartAxisLabelLines(row) {
+  const label = moduleDisplayLabel(row);
+  const unitMatch = label.match(/^(.*)\s+(\([^)]*\))$/);
+  if (unitMatch) return [unitMatch[1], unitMatch[2]];
+  const words = label.split(/\s+/).filter(Boolean);
+  if (words.length <= 2) return [label];
+  const midpoint = Math.ceil(words.length / 2);
+  return [words.slice(0, midpoint).join(" "), words.slice(midpoint).join(" ")];
+}
+
+function renderChartAxisLabel(row, x, y) {
+  const lines = chartAxisLabelLines(row).slice(0, 2);
+  return `
+    <text x="${x}" y="${y}" text-anchor="middle" class="module-bar-index">
+      ${lines.map((line, index) => `<tspan x="${x}" dy="${index ? 14 : 0}">${escapeHtml(line)}</tspan>`).join("")}
+    </text>
+  `;
+}
+
+function renderAiDecisionDonut(rows, title, subtitle, centerLabel, caption) {
   const chartRows = rows.filter(Boolean);
   if (!chartRows.length) {
     return '<div class="module-chart-empty">Chưa có dữ liệu Decision Distribution.</div>';
@@ -1512,12 +1560,12 @@ function renderAiDecisionDonut(rows, title, centerLabel, caption) {
     const midAngle = startAngle + angle / 2;
     const path = donutSegmentPath(100, 100, 82, 45, startAngle, endAngle);
     cursor += angle;
-    const tooltip = row.tooltipValue || `${row.label}: ${row.value ?? "-"}`;
+    const tooltip = row.tooltipValue || `${moduleDisplayLabel(row)}: ${row.value ?? "-"}`;
     return `<path class="module-chart-segment module-donut-segment" data-chart-index="${row.chartIndex}" data-mid-angle="${midAngle}" d="${path}" fill="${row.color}"><title>${escapeHtml(tooltip)}</title></path>`;
   }).join("");
   return `
     <div>
-      <strong>${escapeHtml(title)}</strong>
+      ${renderChartTitle(title, subtitle)}
       <div class="module-chart-wrap">
         <svg class="module-donut" data-chart-total-target="ai-entry-total" viewBox="0 0 200 200" role="img" aria-label="${escapeHtml(title)}">
           ${segments}
@@ -1531,11 +1579,14 @@ function renderAiDecisionDonut(rows, title, centerLabel, caption) {
           </g>
         </svg>
       </div>
+      <div class="module-donut-keys">
+        ${chartRows.map((row) => `<span><i style="background:${row.color}"></i>${escapeHtml(moduleDisplayLabel(row))}: ${escapeHtml(moduleLegendCurrentValue(row))}</span>`).join("")}
+      </div>
     </div>
   `;
 }
 
-function renderAiDecisionBarSvg(rows, title, axisCaption, chartId) {
+function renderAiDecisionBarSvg(rows, title, subtitle, axisCaption, chartId) {
   const chartRows = rows.filter(Boolean);
   if (!chartRows.length) {
     return `<div class="module-chart-empty">Chưa có dữ liệu ${escapeHtml(title)}.</div>`;
@@ -1566,18 +1617,18 @@ function renderAiDecisionBarSvg(rows, title, axisCaption, chartId) {
     return `
       <g>
         <rect class="module-chart-segment module-bar-segment" data-chart-index="${row.chartIndex}" x="${x}" y="${y}" width="${width}" height="${height}" rx="4" fill="${row.color}">
-          <title>${escapeHtml(row.label || "-")}: ${escapeHtml(xLabel)}</title>
+          <title>${escapeHtml(moduleDisplayLabel(row))}: ${escapeHtml(xLabel)}</title>
         </rect>
-        <text x="${x + width / 2}" y="216" text-anchor="middle" class="module-bar-index">${escapeHtml(row.label.replace(/^(Winrate|Profit Factor|Confidence)\s+/i, ""))}</text>
+        ${renderChartAxisLabel(row, x + width / 2, 214)}
       </g>
     `;
   }).join("");
   const markerId = `module-y-arrow-${chartId}`;
   return `
     <div>
-      <strong>${escapeHtml(title)}</strong>
+      ${renderChartTitle(title, subtitle)}
       <div class="module-chart-wrap">
-        <svg class="module-bar-chart" viewBox="0 0 430 244" role="img" aria-label="${escapeHtml(title)}">
+        <svg class="module-bar-chart" viewBox="0 0 430 264" role="img" aria-label="${escapeHtml(title)}">
           <defs>
             <marker id="${markerId}" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto" markerUnits="strokeWidth">
               <path d="M 0 8 L 4 0 L 8 8 Z" class="module-axis-arrow-head"></path>
@@ -1588,7 +1639,7 @@ function renderAiDecisionBarSvg(rows, title, axisCaption, chartId) {
           <line x1="${chartLeft}" y1="${chartBaseline}" x2="${chartLeft}" y2="${chartTop - 12}" class="module-bar-axis module-y-axis" marker-end="url(#${markerId})"></line>
           <text x="${chartLeft - 12}" y="${chartTop - 16}" text-anchor="middle" class="module-axis-percent">%</text>
           ${bars}
-          <text x="${(chartLeft + chartRight) / 2}" y="236" text-anchor="middle" class="module-axis-caption">${escapeHtml(axisCaption)}</text>
+          <text x="${(chartLeft + chartRight) / 2}" y="258" text-anchor="middle" class="module-axis-caption">${escapeHtml(axisCaption)}</text>
           <g class="module-chart-callout" hidden>
             <line class="module-chart-callout-line" x1="0" y1="0" x2="0" y2="0"></line>
             <rect class="module-chart-callout-box" x="0" y="0" width="0" height="0" rx="6"></rect>
@@ -1603,15 +1654,19 @@ function renderAiDecisionBarSvg(rows, title, axisCaption, chartId) {
 function renderAiDecisionModuleChart(module, rows) {
   const longPercent = aiDecisionRow(rows, "long_percent");
   const shortPercent = aiDecisionRow(rows, "short_percent");
+  const totalDecisionRow = aiDecisionRow(rows, "total_decisions");
   const entryDirectionRows = [
     aiDecisionChartRow(rows, "long_count", 1, 1, `Số LONG: ${aiDecisionRow(rows, "long_count")?.value ?? "-"} | Tỷ lệ LONG: ${longPercent?.value ?? "-"}`),
     aiDecisionChartRow(rows, "short_count", 2, 2, `Số SHORT: ${aiDecisionRow(rows, "short_count")?.value ?? "-"} | Tỷ lệ SHORT: ${shortPercent?.value ?? "-"}`),
+    aiDecisionChartRow(rows, "no_trade_count", 3, 3),
   ];
   const entryTotal = entryDirectionRows.filter(Boolean).reduce((sum, row) => sum + Number(row.rawNumericValue || 0), 0);
   const entryTotalRow = {
-    label: "Tổng LONG/SHORT",
+    label: "Tổng biến đang vẽ",
     value: entryTotal,
+    unit: "lần",
   };
+  const totalKpiRow = totalDecisionRow ? { ...totalDecisionRow, chartTotalTarget: "ai-entry-total" } : null;
   const winrateRows = [
     aiDecisionChartRow(rows, "winrate_long", 6, 6),
     aiDecisionChartRow(rows, "winrate_short", 7, 7),
@@ -1627,11 +1682,12 @@ function renderAiDecisionModuleChart(module, rows) {
   return `
     <section class="module-chart-panel module-chart-panel-compact module-ai-decision-panel">
       <div class="module-chart-legend module-ai-chart-stack">
+        ${renderAiDecisionKpi(totalKpiRow)}
         ${renderAiDecisionKpi(entryTotalRow)}
-        ${renderAiDecisionDonut(entryDirectionRows, "Entry Direction", entryTotal ? String(entryTotal) : "0", "LONG/SHORT")}
-        ${renderAiDecisionBarSvg(winrateRows, "Decision Performance · Winrate", "LONG vs SHORT", "ai-winrate")}
-        ${renderAiDecisionBarSvg(profitRows, "Decision Performance · Profit Factor", "LONG vs SHORT", "ai-profit")}
-        ${renderAiDecisionBarSvg(confidenceRows, "AI Confidence", "LONG vs SHORT", "ai-confidence")}
+        ${renderAiDecisionDonut(entryDirectionRows, "Entry Direction", "Phân bổ LONG, SHORT và 5.5 từ chối/xóa setup", entryTotal ? String(entryTotal) : "0", "biến vẽ")}
+        ${renderAiDecisionBarSvg(winrateRows, "Decision Performance · Winrate", "Hiệu suất quyết định · Tỷ lệ thắng", "Tên biến", "ai-winrate")}
+        ${renderAiDecisionBarSvg(profitRows, "Decision Performance · Profit Factor", "Hiệu suất quyết định · Hệ số lợi nhuận", "Tên biến", "ai-profit")}
+        ${renderAiDecisionBarSvg(confidenceRows, "AI Confidence", "Độ tin cậy của AI", "Tên biến", "ai-confidence")}
       </div>
       <div class="module-chart-legend compact module-ai-variable-list">${renderModuleVariableRows(module, aiDecisionLegendRows(rows), false)}</div>
     </section>
