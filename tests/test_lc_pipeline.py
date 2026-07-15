@@ -10,6 +10,8 @@ from unittest.mock import patch
 import crypto_trader.lc_pipeline as lc_pipeline_module
 from crypto_trader.config import DEFAULT_CONFIG
 from crypto_trader.lc_pipeline import (
+    _notify_four_hour_summary,
+    _notify_one_hour_summary,
     _notify_two_hour_summary,
     _four_hour_notification_text,
     _one_hour_notification_text,
@@ -309,6 +311,41 @@ class LcPipelineTest(TestCase):
 
         self.assertEqual(send_message.call_count, 1)
         self.assertIn("Khong co cap nao du dieu kien giu lai o 2h.", send_message.call_args.args[1])
+
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_pool_summary_notifications_bypass_startup_quiet(self, send_message) -> None:
+        config = self._config()
+        config["ai"]["internal"]["lc_pipeline_notify_mini_pool_summary"] = True
+        row = {"symbol": "AAA/USDT:USDT", "side": "long", "source_slot": "4h", "source_index": 1}
+        base_event = {
+            "slot": "2026-07-06T08:00:00+07:00",
+            "created_at": "2026-07-06T01:00:00+00:00",
+            "index": 1,
+            "daily_index": 1,
+            "date": "06/07/26",
+            "time": "08:00:00",
+            "approved": [row],
+            "rejected": [],
+        }
+
+        _notify_one_hour_summary(config, {**base_event, "frame": "1h"})
+        _notify_two_hour_summary(config, {**base_event, "frame": "2h"})
+        _notify_four_hour_summary(config, {**base_event, "frame": "4h"})
+        notify_mini_pool_summary(
+            config,
+            [row],
+            scan={
+                "mini_index": 1,
+                "pool_symbols": ["AAA/USDT:USDT"],
+                "selected_symbols": ["AAA/USDT:USDT"],
+                "decision_reason_vi": "Mini chon setup hop le.",
+            },
+            slot_id="slot-1",
+        )
+
+        self.assertEqual(send_message.call_count, 4)
+        for call in send_message.call_args_list:
+            self.assertTrue(call.kwargs.get("allow_during_startup_quiet"))
 
     def test_dashboard_payload_sanitizes_sample_symbols_when_filter_enabled(self) -> None:
         config = self._config()

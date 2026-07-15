@@ -1032,7 +1032,7 @@ def _automation_worker(app: FastAPI) -> None:
 def _run_lc_pipeline_worker_cycle(app: FastAPI) -> None:
     now = datetime.now(timezone.utc)
     config = load_config(app.state.config_path)
-    notification_config = _telegram_background_config(app, config, now)
+    notification_config = config
     interval = _lc_pipeline_worker_interval(config)
     next_scan_at = _next_automation_cycle_at(now, interval)
     status: dict[str, Any] = {
@@ -1110,7 +1110,7 @@ def _lc_pipeline_worker(app: FastAPI) -> None:
 def _run_lc_pipeline_slot_cycle(app: FastAPI) -> None:
     now = datetime.now(timezone.utc)
     config = load_config(app.state.config_path)
-    notification_config = _telegram_background_config(app, config, now)
+    notification_config = config
     if not _lc_pipeline_worker_enabled(config):
         return
     if not app.state.lc_pipeline_slot_lock.acquire(blocking=False):

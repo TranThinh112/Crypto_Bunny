@@ -2776,7 +2776,13 @@ def _notify_two_hour_summary(config: dict[str, Any], event: dict[str, Any]) -> N
         from .notifier import send_telegram_message
     except Exception:
         return
-    send_telegram_message(config, _two_hour_notification_text(config, sanitized_event), with_buttons=False, replace_previous=False)
+    send_telegram_message(
+        config,
+        _two_hour_notification_text(config, sanitized_event),
+        with_buttons=False,
+        replace_previous=False,
+        allow_during_startup_quiet=True,
+    )
 
 
 def _notify_one_hour_summary(config: dict[str, Any], event: dict[str, Any]) -> None:
@@ -2785,7 +2791,13 @@ def _notify_one_hour_summary(config: dict[str, Any], event: dict[str, Any]) -> N
         from .notifier import send_telegram_message
     except Exception:
         return
-    send_telegram_message(config, _one_hour_notification_text(config, sanitized_event), with_buttons=False, replace_previous=False)
+    send_telegram_message(
+        config,
+        _one_hour_notification_text(config, sanitized_event),
+        with_buttons=False,
+        replace_previous=False,
+        allow_during_startup_quiet=True,
+    )
 
 
 def _notify_four_hour_summary(config: dict[str, Any], event: dict[str, Any]) -> None:
@@ -2794,7 +2806,13 @@ def _notify_four_hour_summary(config: dict[str, Any], event: dict[str, Any]) -> 
         from .notifier import send_telegram_message
     except Exception:
         return
-    send_telegram_message(config, _four_hour_notification_text(config, sanitized_event), with_buttons=False, replace_previous=False)
+    send_telegram_message(
+        config,
+        _four_hour_notification_text(config, sanitized_event),
+        with_buttons=False,
+        replace_previous=False,
+        allow_during_startup_quiet=True,
+    )
 
 
 def _should_push_one_hour_summary(config: dict[str, Any], now: datetime) -> bool:
@@ -3061,6 +3079,7 @@ def notify_mini_pool_summary(
         _mini_notification_text(config, scan, latest_four_hour, rows=rows),
         with_buttons=False,
         replace_previous=False,
+        allow_during_startup_quiet=True,
     )
 
 

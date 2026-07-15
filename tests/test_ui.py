@@ -26,6 +26,7 @@ from crypto_trader.ui import (
     _periodic_scan_notification_due,
     _remember_periodic_scan_notification,
     _run_automation_cycle,
+    _run_lc_pipeline_worker_cycle,
     _telegram_action_response,
     create_app,
 )
@@ -697,6 +698,48 @@ class UiTest(TestCase):
             api_request.assert_called_once()
         finally:
             set_telegram_startup_quiet_until(None)
+
+    @patch("crypto_trader.ui.update_lc_internal_pipeline")
+    @patch("crypto_trader.ui.collect_lc_pipeline_candidates")
+    def test_lc_pipeline_worker_keeps_telegram_config_during_startup_quiet(self, collect_candidates, update_pipeline) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text(
+                "mode: dry_run\n"
+                "runtime_config_overrides:\n"
+                "  enabled: false\n"
+                "automation:\n"
+                "  enabled: true\n"
+                "notifications:\n"
+                "  telegram:\n"
+                "    enabled: true\n"
+                "ai:\n"
+                "  internal:\n"
+                "    lc_pipeline_enabled: true\n",
+                encoding="utf-8",
+            )
+            collect_candidates.return_value = {"candidates": [], "candidate_count": 0, "source_symbol_count": 0}
+            update_pipeline.return_value = {
+                "created_hourly": False,
+                "created_two_hour": False,
+                "created_four_hour": False,
+                "hourly_slot": "2026-07-16T02:00:00+07:00",
+                "two_hour_slot": "2026-07-16T02:00:00+07:00",
+                "four_hour_slot": "2026-07-16T00:00:00+07:00",
+            }
+            app = SimpleNamespace(
+                state=SimpleNamespace(
+                    config_path=config_path,
+                    lc_pipeline_lock=threading.Lock(),
+                    lc_pipeline_status={},
+                    telegram_startup_quiet_until=datetime.now(timezone.utc) + timedelta(minutes=5),
+                )
+            )
+
+            _run_lc_pipeline_worker_cycle(app)
+
+        passed_config = update_pipeline.call_args.args[0]
+        self.assertTrue(passed_config["notifications"]["telegram"]["enabled"])
 
     def test_healthz_includes_runtime_build_metadata(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
