@@ -319,6 +319,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "interval_seconds": 900,
         "emergency": False,
     },
+    "journal_state_retention": {
+        "enabled": True,
+        "system_checklist_keep_days": 30,
+        "daily_start_balance_keep_days": 10,
+        "wait_slot_notification_history_keep_days": 7,
+        "lc_pipeline_candidate_cache_keep_hours": 6,
+        "telegram_message_id_keep_days": 10,
+        "dashboard_snapshot_keep_days": 1,
+    },
     "storage_retention": {
         "pending_orders_keep_days": 5,
         "internal_pending_orders_keep_days": 5,

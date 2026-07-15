@@ -501,6 +501,110 @@ def _prune_by_created_at(
     return {"deleted_old": deleted}
 
 
+def _journal_state_retention(config: dict[str, Any]) -> dict[str, Any]:
+    settings = config.get("journal_state_retention", {})
+    return settings if isinstance(settings, dict) else {}
+
+
+def _journal_retention_float(settings: dict[str, Any], key: str, default: float) -> float:
+    raw = settings.get(key, default)
+    try:
+        return max(0.1, float(raw or default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _iso_cutoff_hours(hours: float) -> str:
+    return (datetime.now(timezone.utc) - timedelta(hours=max(1.0, float(hours)))).isoformat()
+
+
+def _delete_stale_journal_state_prefix(
+    config: dict[str, Any],
+    *,
+    prefix: str,
+    cutoff: str,
+    preserve_keys: set[str] | None = None,
+) -> int:
+    query: dict[str, Any] = {
+        "key": {"$regex": f"^{re.escape(prefix)}"},
+        "updated_at": {"$lt": cutoff},
+    }
+    if preserve_keys:
+        query = {
+            "$and": [
+                {"key": {"$regex": f"^{re.escape(prefix)}"}},
+                {"key": {"$nin": sorted(preserve_keys)}},
+                {"updated_at": {"$lt": cutoff}},
+            ]
+        }
+    deleted = int(_mongo_collection(config, "journal_state").delete_many(query).deleted_count or 0)
+    if deleted:
+        _journal_state_cache_invalidate_prefix(config, prefix)
+    return deleted
+
+
+def _delete_stale_journal_state_key(config: dict[str, Any], *, key: str, cutoff: str) -> int:
+    deleted = int(
+        _mongo_collection(config, "journal_state").delete_many(
+            {
+                "key": key,
+                "updated_at": {"$lt": cutoff},
+            }
+        ).deleted_count
+        or 0
+    )
+    if deleted:
+        _journal_state_cache_invalidate(config, key)
+    return deleted
+
+
+def prune_journal_state(config: dict[str, Any]) -> dict[str, Any]:
+    settings = _journal_state_retention(config)
+    if not bool(settings.get("enabled", True)):
+        return {"enabled": False, "deleted_total": 0, "rules": {}}
+    _ensure_mongo_write_allowed(config)
+    rules = {
+        "system_checklist": _delete_stale_journal_state_prefix(
+            config,
+            prefix="system_checklist:",
+            cutoff=_iso_cutoff_days(_journal_retention_float(settings, "system_checklist_keep_days", 90)),
+        ),
+        "daily_start_balance": _delete_stale_journal_state_prefix(
+            config,
+            prefix="daily_start_balance:",
+            cutoff=_iso_cutoff_days(_journal_retention_float(settings, "daily_start_balance_keep_days", 90)),
+        ),
+        "wait_slot_notification_history": _delete_stale_journal_state_key(
+            config,
+            key="wait_slot_notification_history_v1",
+            cutoff=_iso_cutoff_days(_journal_retention_float(settings, "wait_slot_notification_history_keep_days", 30)),
+        ),
+        "lc_pipeline_candidate_cache": _delete_stale_journal_state_key(
+            config,
+            key="lc_pipeline_candidate_cache_v1",
+            cutoff=_iso_cutoff_hours(
+                _journal_retention_float(settings, "lc_pipeline_candidate_cache_keep_hours", 24)
+            ),
+        ),
+        "telegram_message_ids": _delete_stale_journal_state_prefix(
+            config,
+            prefix="telegram_last_message_id:",
+            cutoff=_iso_cutoff_days(_journal_retention_float(settings, "telegram_message_id_keep_days", 30)),
+        ),
+        "dashboard_snapshots": _delete_stale_journal_state_prefix(
+            config,
+            prefix=DASHBOARD_SNAPSHOT_PREFIX,
+            cutoff=_iso_cutoff_days(_journal_retention_float(settings, "dashboard_snapshot_keep_days", 7)),
+            preserve_keys={DASHBOARD_SNAPSHOT_VERSION_KEY},
+        ),
+    }
+    return {
+        "enabled": True,
+        "deleted_total": sum(int(value or 0) for value in rules.values()),
+        "rules": rules,
+    }
+
+
 def _pending_collection_for_status(status: str, exchange_order_id: str | None = None) -> str:
     normalized_status = str(status or "").upper()
     if normalized_status in OKX_PENDING_STATUSES or str(exchange_order_id or "").strip():
@@ -1835,6 +1939,7 @@ def storage_stats(config: dict[str, Any]) -> dict[str, Any]:
             "decision_history": config.get("decision_history", {}),
             "market_guard": {"memory_keep_hours": config.get("market_guard", {}).get("memory_keep_hours", 6)},
             "pending_orders": config.get("pending_orders", {}),
+            "journal_state_retention": _journal_state_retention(config),
             "storage_retention": _storage_retention(config),
         },
     }
@@ -1881,6 +1986,7 @@ def run_storage_maintenance(
             "ai_experiments": prune_ai_experiments(config),
             "replay_history": prune_replay_history(config),
             "paper_trades": prune_paper_trades(config),
+            "journal_state": prune_journal_state(config),
         }
     except Exception as exc:
         errors.append(f"extra_prune: {exc}")

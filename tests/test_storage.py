@@ -11,6 +11,7 @@ from crypto_trader.storage import (
     compact_market_scan_observations,
     ensure_ai_model_version,
     prune_decision_history,
+    prune_journal_state,
     prune_pending_orders,
     prune_prompt_versions,
     prune_strategy_versions,
@@ -346,6 +347,65 @@ class StorageTest(TestCase):
 
         self.assertEqual(result["deleted_old"], 1)
         self.assertEqual(ids, [2])
+
+    def test_prune_journal_state_removes_only_stale_cache_keys(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config = self._config(tmpdir)
+            config["journal_state_retention"] = {
+                "enabled": True,
+                "system_checklist_keep_days": 90,
+                "daily_start_balance_keep_days": 90,
+                "wait_slot_notification_history_keep_days": 30,
+                "lc_pipeline_candidate_cache_keep_hours": 24,
+                "telegram_message_id_keep_days": 30,
+                "dashboard_snapshot_keep_days": 7,
+            }
+            now = datetime.now(timezone.utc)
+            old = (now - timedelta(days=120)).isoformat()
+            recent = (now - timedelta(days=1)).isoformat()
+            collection = atlas_database(config)["journal_state"]
+
+            def put(key: str, updated_at: str = old) -> None:
+                collection.replace_one(
+                    {"_id": key},
+                    {"_id": key, "key": key, "value": "x", "updated_at": updated_at},
+                    upsert=True,
+                )
+
+            stale_cache_keys = [
+                "system_checklist:2026-01-01",
+                "daily_start_balance:2026-01-01",
+                "wait_slot_notification_history_v1",
+                "lc_pipeline_candidate_cache_v1",
+                "telegram_last_message_id:123",
+                "dashboard_snapshot:analytics:v=old",
+            ]
+            for key in stale_cache_keys:
+                put(key)
+
+            protected_keys = [
+                "counter:VT",
+                "telegram_update_offset",
+                "runtime_config_overrides",
+                "lc_internal_pipeline_state",
+                "position_sizing_state",
+                "market_guard_block_until",
+                "system_checklist_current",
+                "dashboard_snapshot:version",
+            ]
+            for key in protected_keys:
+                put(key)
+            put("system_checklist:recent", recent)
+            put("telegram_last_message_id:recent", recent)
+
+            result = prune_journal_state(config)
+            remaining = {row["key"] for row in collection.find({}, {"_id": 0, "key": 1})}
+
+        self.assertEqual(result["deleted_total"], len(stale_cache_keys))
+        self.assertTrue(set(stale_cache_keys).isdisjoint(remaining))
+        self.assertTrue(set(protected_keys).issubset(remaining))
+        self.assertIn("system_checklist:recent", remaining)
+        self.assertIn("telegram_last_message_id:recent", remaining)
 
     def test_save_pending_order_keeps_insert_when_prune_times_out(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
