@@ -1468,7 +1468,14 @@ function moduleBarPercentValue(row, maxRawValue) {
   const raw = Math.max(0, Number(row?.rawNumericValue || 0));
   const label = viLabel(row?.label || "");
   const valueText = String(row?.value ?? "");
-  const looksPercent = valueText.includes("%") || label.includes("percent") || label.includes("rate") || label.includes("ratio") || label.includes("confidence") || label.includes("score");
+  const looksPercent = aiDecisionUnit(row) === "%"
+    || valueText.includes("%")
+    || label.includes("percent")
+    || label.includes("ty le")
+    || label.includes("rate")
+    || label.includes("ratio")
+    || label.includes("confidence")
+    || label.includes("score");
   if (looksPercent) return Math.max(0, Math.min(100, raw));
   if (!maxRawValue) return 0;
   return Math.max(0, Math.min(100, raw / maxRawValue * 100));
