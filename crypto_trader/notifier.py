@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -14,6 +15,29 @@ from dotenv import load_dotenv
 from .storage import get_journal_state, set_journal_state
 
 TELEGRAM_COMMANDS_SYNC_KEY = "telegram_commands_last_sync_at"
+_TELEGRAM_STARTUP_QUIET_LOCK = threading.Lock()
+_TELEGRAM_STARTUP_QUIET_UNTIL: datetime | None = None
+
+
+def _utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def set_telegram_startup_quiet_until(quiet_until: datetime | None) -> None:
+    global _TELEGRAM_STARTUP_QUIET_UNTIL
+    with _TELEGRAM_STARTUP_QUIET_LOCK:
+        _TELEGRAM_STARTUP_QUIET_UNTIL = _utc_datetime(quiet_until) if quiet_until is not None else None
+
+
+def telegram_startup_quiet_active(now: datetime | None = None) -> bool:
+    with _TELEGRAM_STARTUP_QUIET_LOCK:
+        quiet_until = _TELEGRAM_STARTUP_QUIET_UNTIL
+    if quiet_until is None:
+        return False
+    now = _utc_datetime(now or datetime.now(timezone.utc))
+    return now < quiet_until
 
 
 def _env_bool(name: str, default: bool = True) -> bool:
@@ -335,7 +359,10 @@ def send_telegram_message(
     with_buttons: bool | None = None,
     replace_previous: bool | None = None,
     reply_markup: dict[str, Any] | None = None,
+    allow_during_startup_quiet: bool = False,
 ) -> bool:
+    if telegram_startup_quiet_active() and not allow_during_startup_quiet:
+        return False
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
     thread_id = os.getenv("TELEGRAM_MESSAGE_THREAD_ID", "").strip()
     payload: dict[str, Any] = {

@@ -667,6 +667,36 @@ class UiTest(TestCase):
         self.assertEqual(send_message.call_args.args[1], STARTUP_TELEGRAM_MESSAGE)
         self.assertFalse(send_message.call_args.kwargs["with_buttons"])
         self.assertFalse(send_message.call_args.kwargs["replace_previous"])
+        self.assertTrue(send_message.call_args.kwargs["allow_during_startup_quiet"])
+
+    @patch("crypto_trader.notifier._telegram_api_request")
+    def test_telegram_startup_quiet_blocks_background_messages(self, api_request) -> None:
+        from crypto_trader.notifier import send_telegram_message, set_telegram_startup_quiet_until
+
+        config = {"notifications": {"telegram": {"enabled": True}}}
+        set_telegram_startup_quiet_until(datetime.now(timezone.utc) + timedelta(minutes=5))
+        try:
+            sent = send_telegram_message(
+                config,
+                "LC internal recheck replay",
+                with_buttons=False,
+                replace_previous=False,
+            )
+            self.assertFalse(sent)
+            api_request.assert_not_called()
+
+            api_request.return_value = {"ok": True}
+            sent = send_telegram_message(
+                config,
+                STARTUP_TELEGRAM_MESSAGE,
+                with_buttons=False,
+                replace_previous=False,
+                allow_during_startup_quiet=True,
+            )
+            self.assertTrue(sent)
+            api_request.assert_called_once()
+        finally:
+            set_telegram_startup_quiet_until(None)
 
     def test_healthz_includes_runtime_build_metadata(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:

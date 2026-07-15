@@ -127,6 +127,7 @@ from .notifier import (
     fetch_telegram_updates,
     send_telegram_chat_message,
     send_telegram_message,
+    set_telegram_startup_quiet_until,
     telegram_buttons_enabled,
     sync_telegram_commands,
     telegram_control_keyboard,
@@ -2644,6 +2645,12 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
     @app.on_event("startup")
     def start_automation() -> None:
         config = load_config(app.state.config_path)
+        now = datetime.now(timezone.utc)
+        quiet_seconds = _telegram_startup_quiet_seconds(config)
+        quiet_until = now + timedelta(seconds=quiet_seconds) if quiet_seconds else now
+        app.state.started_at = now
+        app.state.telegram_startup_quiet_until = quiet_until
+        set_telegram_startup_quiet_until(quiet_until)
         try:
             purge_deprecated_journal_state(config)
         except Exception as exc:
@@ -2657,10 +2664,6 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
         initial_delay = max(0, int(config.get("automation", {}).get("initial_delay_seconds", 5) or 0))
         interval = _automation_interval(config)
         enabled = _automation_enabled(config)
-        now = datetime.now(timezone.utc)
-        app.state.started_at = now
-        quiet_seconds = _telegram_startup_quiet_seconds(config)
-        app.state.telegram_startup_quiet_until = now + timedelta(seconds=quiet_seconds) if quiet_seconds else now
         app.state.automation_status = {
             "enabled": enabled,
             "interval_seconds": interval,
@@ -2675,6 +2678,7 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
                 STARTUP_TELEGRAM_MESSAGE,
                 with_buttons=False,
                 replace_previous=False,
+                allow_during_startup_quiet=True,
             )
 
         def delayed_worker() -> None:
@@ -2731,6 +2735,7 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
         lc_pipeline_slot_thread = getattr(app.state, "lc_pipeline_slot_thread", None)
         if lc_pipeline_slot_thread and lc_pipeline_slot_thread.is_alive():
             lc_pipeline_slot_thread.join(timeout=5)
+        set_telegram_startup_quiet_until(None)
 
     @app.get("/")
     def index() -> FileResponse:
