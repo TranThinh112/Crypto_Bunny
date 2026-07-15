@@ -842,6 +842,34 @@ def _with_wait_slot_metadata(
     return queued
 
 
+def _with_watchlist_metadata(
+    candidate: TradeCandidate,
+    *,
+    reason: str,
+    internal_scan: dict[str, Any] | None,
+    source_meta: dict[str, Any] | None = None,
+) -> TradeCandidate:
+    queued = deepcopy(candidate)
+    queued_at = datetime.now(timezone.utc).isoformat()
+    queued.decision_metadata = {
+        **(queued.decision_metadata or {}),
+        "setup_watchlist": {
+            "queued_at": queued_at,
+            "reason": reason,
+            "scan_created_at": (internal_scan or {}).get("created_at"),
+            "scan_slot_id": (internal_scan or {}).get("slot_id"),
+            "pool_symbols": list((internal_scan or {}).get("pool_symbols") or []),
+            "selected_symbols": list((internal_scan or {}).get("selected_symbols") or []),
+            "source_slot": (source_meta or {}).get("source_slot"),
+            "source_index": (source_meta or {}).get("source_index"),
+            "source_time": (source_meta or {}).get("source_time"),
+            "source_label": (source_meta or {}).get("source_label"),
+            "source_text": (source_meta or {}).get("source_text"),
+        },
+    }
+    return queued
+
+
 def _create_pending_from_internal_scan(
     config: dict[str, Any],
     candidates: list[Any],
@@ -864,6 +892,8 @@ def _create_pending_from_internal_scan(
         "created_orders": [],
         "wait_slot": 0,
         "wait_slot_orders": [],
+        "watchlist": 0,
+        "watchlist_orders": [],
         "skipped": [],
     }
     if not result["enabled"] or not allowed:
@@ -971,7 +1001,7 @@ def _create_pending_from_internal_scan(
                 reason = str(okx_review.get("reason") or okx_review.get("decision") or "GPT-5.5 rejected LC_OKX setup")
                 if okx_review.get("rejection_policy") == "watchlist":
                     source_meta = _wait_slot_source_meta(config, candidate.symbol)
-                    queued_candidate = _with_wait_slot_metadata(
+                    queued_candidate = _with_watchlist_metadata(
                         reviewed_candidate,
                         reason=reason,
                         internal_scan=internal_scan,
@@ -981,17 +1011,17 @@ def _create_pending_from_internal_scan(
                         config,
                         queued_candidate,
                         None,
-                        status="WAIT_SLOT",
+                        status="WATCHLIST",
                         max_age_hours=float(config.get("pending_orders", {}).get("local_max_age_hours", 6) or 6),
                         journal_id=journal_id,
                     )
-                    result["wait_slot"] += 1
+                    result["watchlist"] += 1
                     created_symbols.add(candidate.symbol)
-                    result["wait_slot_orders"].append(
+                    result["watchlist_orders"].append(
                         {
                             "id": record.get("id"),
                             "lc_id": journal_id or record.get("id"),
-                            "status": "WAIT_SLOT",
+                            "status": "WATCHLIST",
                             "symbol": reviewed_candidate.symbol,
                             "side": reviewed_candidate.side,
                             "reason": reason,
@@ -1001,7 +1031,7 @@ def _create_pending_from_internal_scan(
                             "confidence": reviewed_candidate.confidence,
                             "source": source_meta.get("source_text") or "5.5 giữ theo dõi",
                             "queued_at": (
-                                (queued_candidate.decision_metadata or {}).get("wait_slot_queue", {}).get("queued_at")
+                                (queued_candidate.decision_metadata or {}).get("setup_watchlist", {}).get("queued_at")
                             ),
                         }
                     )
@@ -1327,6 +1357,7 @@ def run_once(
 
     queued_from_mini = bool((mini_pending_queue or {}).get("created"))
     waiting_slot_from_mini = bool((mini_pending_queue or {}).get("wait_slot"))
+    watchlist_from_mini = bool((mini_pending_queue or {}).get("watchlist"))
     if queued_from_mini:
         first_created = (mini_pending_queue or {}).get("created_orders", [{}])[0]
         selected = next(
@@ -1351,6 +1382,21 @@ def run_once(
         risk_check = RiskCheck(
             False,
             [str(first_waiting.get("reason") or "Mini setup duoc dua vao hang tai kiem vi da het slot")],
+            market_warnings + quantity_warnings,
+        )
+    elif watchlist_from_mini:
+        first_watchlist = (mini_pending_queue or {}).get("watchlist_orders", [{}])[0]
+        selected = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate.symbol == first_watchlist.get("symbol") and candidate.side == first_watchlist.get("side")
+            ),
+            selected,
+        )
+        risk_check = RiskCheck(
+            False,
+            [str(first_watchlist.get("reason") or "GPT-5.5 giu setup de theo doi them")],
             market_warnings + quantity_warnings,
         )
 
@@ -1384,6 +1430,18 @@ def run_once(
             raw={"mini_pending_queue": mini_pending_queue, "wait_slot_recheck": True},
             journal_type="LC",
             journal_id=first_waiting.get("lc_id"),
+        )
+    elif watchlist_from_mini and selected:
+        first_watchlist = (mini_pending_queue or {}).get("watchlist_orders", [{}])[0]
+        action = "hold"
+        execution_result = ExecutionResult(
+            mode=config.get("mode", "dry_run"),
+            submitted=True,
+            order_id=None,
+            message="GPT-5.5 kept mini setup on watchlist: " + str(first_watchlist.get("reason") or "-"),
+            raw={"watchlist": True, "mini_pending_queue": mini_pending_queue},
+            journal_type="LC",
+            journal_id=first_watchlist.get("lc_id"),
         )
     elif selected and risk_check.passed:
         action = f"{selected.side}_{selected.symbol}"

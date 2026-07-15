@@ -404,7 +404,7 @@ class PendingTest(TestCase):
         self.assertEqual(order["status"], "LC_OKX")
         self.assertEqual(order["exchange_order_id"], "limit-wait-1")
 
-    def test_wait_slot_watchlist_review_waits_for_recheck_before_asking_gpt_again(self) -> None:
+    def test_legacy_wait_slot_watchlist_is_migrated_to_watchlist_without_reasking_gpt(self) -> None:
         class FakeExchange:
             def load_markets(self) -> None:
                 return None
@@ -448,13 +448,62 @@ class PendingTest(TestCase):
         execute.assert_not_called()
         self.assertEqual(result["submitted"], 0)
         self.assertEqual(result["kept"], 1)
-        self.assertEqual(result["events"][0]["source"], "mini_wait_slot_review_cooldown")
-        order = list_pending_orders(config, status="WAIT_SLOT")[0]
+        self.assertEqual(result["events"][0]["source"], "wait_slot_watchlist_migrated")
+        order = list_pending_orders(config, status="WATCHLIST")[0]
+        self.assertEqual(order["status"], "WATCHLIST")
         payload = json.loads(str(order["payload_json"]))
         self.assertEqual(payload["decision_metadata"]["okx_review"]["reviewed_at"], review["reviewed_at"])
         self.assertEqual(payload["decision_metadata"]["wait_slot_queue"]["scan_slot_id"], "slot-1")
 
-    def test_wait_slot_watchlist_review_reasks_gpt_after_recheck_cooldown(self) -> None:
+    def test_watchlist_review_waits_for_recheck_before_asking_gpt_again(self) -> None:
+        class FakeExchange:
+            def load_markets(self) -> None:
+                return None
+
+            def fetch_open_orders(self) -> list[dict]:
+                return []
+
+            def fetch_positions(self) -> list[dict]:
+                return [{"symbol": f"COIN{index}/USDT:USDT", "contracts": 1} for index in range(4)]
+
+        config = self._config(mode="demo")
+        config["risk"]["max_active_trades"] = 5
+        queued = _candidate("INJ/USDT:USDT")
+        review = _watchlist_review(minutes_ago=5)
+        queued.decision_metadata = {
+            "setup_watchlist": {"scan_slot_id": "slot-1"},
+            "okx_review": review,
+        }
+        save_pending_order(config, queued, None, status="WATCHLIST", max_age_hours=6, journal_id=12)
+        save_lc_pipeline_mini_scan(
+            config,
+            {
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "slot_id": "slot-1",
+                "status": "done",
+                "pool_symbols": ["INJ/USDT:USDT"],
+                "selected_symbols": ["INJ/USDT:USDT"],
+                "approved_symbols": ["INJ/USDT:USDT"],
+            },
+        )
+
+        with (
+            patch("crypto_trader.pending.create_exchange", return_value=FakeExchange()),
+            patch("crypto_trader.pending.review_candidate_for_lc_okx") as review_again,
+            patch("crypto_trader.pending.execute_candidate") as execute,
+        ):
+            result = maintain_pending_orders(config, [_candidate("INJ/USDT:USDT")])
+
+        review_again.assert_not_called()
+        execute.assert_not_called()
+        self.assertEqual(result["submitted"], 0)
+        self.assertEqual(result["kept"], 1)
+        self.assertEqual(result["events"][0]["source"], "mini_watchlist_review_cooldown")
+        order = list_pending_orders(config, status="WATCHLIST")[0]
+        payload = json.loads(str(order["payload_json"]))
+        self.assertEqual(payload["decision_metadata"]["okx_review"]["reviewed_at"], review["reviewed_at"])
+
+    def test_watchlist_review_reasks_gpt_after_recheck_cooldown(self) -> None:
         class FakeExchange:
             def load_markets(self) -> None:
                 return None
@@ -469,10 +518,10 @@ class PendingTest(TestCase):
         config["risk"]["max_active_trades"] = 5
         queued = _candidate("INJ/USDT:USDT")
         queued.decision_metadata = {
-            "wait_slot_queue": {"scan_slot_id": "slot-1"},
+            "setup_watchlist": {"scan_slot_id": "slot-1"},
             "okx_review": _watchlist_review(minutes_ago=45),
         }
-        save_pending_order(config, queued, None, status="WAIT_SLOT", max_age_hours=6, journal_id=12)
+        save_pending_order(config, queued, None, status="WATCHLIST", max_age_hours=6, journal_id=12)
         save_lc_pipeline_mini_scan(
             config,
             {
@@ -496,7 +545,7 @@ class PendingTest(TestCase):
                 return_value=ExecutionResult(
                     mode="demo",
                     submitted=True,
-                    order_id="limit-wait-2",
+                    order_id="limit-watch-1",
                     message="demo: limit order submitted",
                     journal_type="LC",
                     journal_id=12,
@@ -508,7 +557,8 @@ class PendingTest(TestCase):
         review_again.assert_called_once()
         execute.assert_called_once()
         self.assertEqual(result["submitted"], 1)
-        self.assertEqual(list_pending_orders(config, status="LC_OKX")[0]["exchange_order_id"], "limit-wait-2")
+        self.assertEqual(result["events"][0]["source"], "mini_watchlist_release")
+        self.assertEqual(list_pending_orders(config, status="LC_OKX")[0]["exchange_order_id"], "limit-watch-1")
 
     def test_releases_lc_okx_without_reasking_gpt_when_setup_review_already_saved(self) -> None:
         class FakeExchange:

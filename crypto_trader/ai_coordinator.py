@@ -39,7 +39,8 @@ from .strategy import build_candidates, enrich_quantities
 _PENDING_STATUS_PRIORITY = {
     "LC_OKX": 0,
     "WAIT_SLOT": 1,
-    "OPEN": 2,
+    "WATCHLIST": 2,
+    "OPEN": 3,
 }
 OKX_REVIEW_CACHE_STATE_KEY = "okx_review_cache"
 OKX_REJECTION_HARD_DELETE = "hard_delete"
@@ -807,6 +808,7 @@ def internal_lc_memory(config: dict[str, Any], *, limit: int = 50) -> dict[str, 
     records = prioritize_pending_records(list_pending_orders(config, status="ACTIVE", limit=limit))
     lc_okx = [record for record in records if str(record.get("status") or "") == "LC_OKX"]
     wait_slot = [record for record in records if str(record.get("status") or "") == "WAIT_SLOT"]
+    watchlist = [record for record in records if str(record.get("status") or "") == "WATCHLIST"]
     local = [record for record in records if str(record.get("status") or "") == "OPEN"]
     preferred = records[0] if records else None
     memory = {
@@ -817,8 +819,9 @@ def internal_lc_memory(config: dict[str, Any], *, limit: int = 50) -> dict[str, 
         "pending_total": len(records),
         "lc_okx_count": len(lc_okx),
         "wait_slot_count": len(wait_slot),
+        "watchlist_count": len(watchlist),
         "local_lc_count": len(local),
-        "priority": ["LC_OKX", "WAIT_SLOT", "OPEN"],
+        "priority": ["LC_OKX", "WAIT_SLOT", "WATCHLIST", "OPEN"],
         "preferred": _pending_summary_row(preferred) if preferred else None,
         "orders": [_pending_summary_row(record) for record in records],
     }

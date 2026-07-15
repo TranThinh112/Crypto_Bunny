@@ -998,9 +998,21 @@ def format_pending_orders_view(config: dict[str, Any]) -> str:
             f"   📦 KL: {_fmt_number(row.get('quantity'), 6)} | ⏳ Hết hạn: {date_time_label(expires_at) if expires_at else '-'}"
         )
         lines.append(f"   📈 Win rate: {_fmt_number(row.get('win_probability_pct'), 2, '%')}")
-        status_label = "LC_OKX" if str(row.get("status") or "") == "LC_OKX" or row.get("exchange_order_id") else "LC noi bo"
+        raw_status = str(row.get("status") or "")
+        if raw_status == "LC_OKX" or row.get("exchange_order_id"):
+            status_label = "LC_OKX"
+        elif raw_status == "WATCHLIST":
+            status_label = "WATCHLIST"
+        elif raw_status == "WAIT_SLOT":
+            status_label = "WAIT_SLOT"
+        else:
+            status_label = "LC noi bo"
         if status_label == "LC_OKX":
             lines.append(f"   Status: LC_OKX | OKX ID: {row.get('exchange_order_id') or '-'}")
+        elif status_label == "WATCHLIST":
+            lines.append("   Status: WATCHLIST, GPT-5.5 dang giu theo doi")
+        elif status_label == "WAIT_SLOT":
+            lines.append("   Status: WAIT_SLOT, dang cho slot trong")
         else:
             lines.append("   Status: LC noi bo, chua gui OKX")
         continue

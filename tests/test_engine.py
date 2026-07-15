@@ -163,7 +163,7 @@ class EngineMiniQueueTest(TestCase):
         self.assertIn("Setup khong du chat luong", result["skipped"][0]["reason"])
         self.assertEqual(list_pending_orders(config, status="LC_OKX"), [])
 
-    def test_mini_scan_keeps_gpt_55_watchlist_as_wait_slot_and_blocks_duplicate_review(self) -> None:
+    def test_mini_scan_keeps_gpt_55_watchlist_as_watchlist_and_blocks_duplicate_review(self) -> None:
         config = self._config()
         config["mode"] = "demo"
         candidate = _candidate("INJ/USDT:USDT")
@@ -209,18 +209,20 @@ class EngineMiniQueueTest(TestCase):
         execute.assert_not_called()
         review.assert_called_once()
         self.assertEqual(first["created"], 0)
-        self.assertEqual(first["wait_slot"], 1)
+        self.assertEqual(first["wait_slot"], 0)
+        self.assertEqual(first["watchlist"], 1)
         self.assertEqual(first["skipped"], [])
         self.assertEqual(second["created"], 0)
         self.assertEqual(second["wait_slot"], 0)
+        self.assertEqual(second["watchlist"], 0)
         self.assertEqual(second["skipped"][0]["reason"], "already pending or active in LC memory")
-        orders = list_pending_orders(config, status="WAIT_SLOT")
+        orders = list_pending_orders(config, status="WATCHLIST")
         self.assertEqual(len(orders), 1)
         self.assertEqual(orders[0]["symbol"], "INJ/USDT:USDT")
-        self.assertEqual(orders[0]["status"], "WAIT_SLOT")
+        self.assertEqual(orders[0]["status"], "WATCHLIST")
         payload = json.loads(str(orders[0]["payload_json"]))
         self.assertEqual(payload["decision_metadata"]["okx_review"]["rejection_policy"], "watchlist")
-        self.assertEqual(payload["decision_metadata"]["wait_slot_queue"]["reason"], review_decision["reason"])
+        self.assertEqual(payload["decision_metadata"]["setup_watchlist"]["reason"], review_decision["reason"])
 
     @patch("crypto_trader.notifier.send_telegram_message")
     @patch("crypto_trader.engine.lc_pipeline_pool_rows")

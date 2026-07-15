@@ -387,6 +387,43 @@ def _wait_slot_queue_meta(record: dict[str, Any]) -> dict[str, Any]:
     return meta if isinstance(meta, dict) else {}
 
 
+def _setup_watchlist_meta(record: dict[str, Any]) -> dict[str, Any]:
+    candidate = _candidate_from_record(record)
+    if candidate is None:
+        return {}
+    meta = candidate.decision_metadata.get("setup_watchlist") if isinstance(candidate.decision_metadata, dict) else {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _record_watchlist_review(record: dict[str, Any]) -> dict[str, Any] | None:
+    candidate = _candidate_from_record(record)
+    if candidate is None:
+        return None
+    return candidate_okx_review(candidate, route="lc_okx_setup_review")
+
+
+def _is_watchlist_review(record: dict[str, Any]) -> bool:
+    review = _record_watchlist_review(record)
+    return bool(
+        review
+        and not review.get("approved")
+        and str(review.get("rejection_policy") or "") == OKX_REJECTION_WATCHLIST
+    )
+
+
+def _is_wait_slot_reason(reason: str) -> bool:
+    clean = str(reason or "").strip()
+    if not clean:
+        return False
+    return clean.startswith(("Da het slot:", "Slot ", "Active trade limit reached:"))
+
+
+def _is_real_wait_slot_record(record: dict[str, Any]) -> bool:
+    meta = _wait_slot_queue_meta(record)
+    reason = str(meta.get("reason") or "")
+    return _is_wait_slot_reason(reason)
+
+
 def _recheck_wait_slot_candidate(
     config: dict[str, Any],
     record: dict[str, Any],
@@ -423,7 +460,7 @@ def _recheck_wait_slot_candidate(
         if clean and clean not in pool_symbols:
             pool_symbols.append(clean)
     selected_symbols = [str(item) for item in list(latest_scan.get("selected_symbols") or []) if str(item)]
-    queue_meta = _wait_slot_queue_meta(record)
+    queue_meta = _wait_slot_queue_meta(record) or _setup_watchlist_meta(record)
     queued_slot_id = str(queue_meta.get("scan_slot_id") or "")
     latest_slot_id = str(latest_scan.get("slot_id") or "")
 
@@ -635,6 +672,318 @@ def maintain_pending_orders(
         record_status = str(record.get("status") or "").upper()
         candidate = candidates_by_key.get(_record_key(record))
 
+        if record_status == "WATCHLIST":
+            watchlist_candidate = _candidate_from_record(record)
+            if watchlist_candidate is None:
+                reason = "WATCHLIST khong con payload hop le"
+                close_pending_order(config, local_id, "CANCELED", reason)
+                events.append(
+                    {
+                        "type": "pending_canceled",
+                        "source": "mini_watchlist",
+                        "lc_id": lc_id,
+                        "symbol": symbol,
+                        "side": str(record.get("side") or ""),
+                        "reason": reason,
+                    }
+                )
+                canceled += 1
+                continue
+
+            if config.get("mode") != "dry_run" and (exchange is None or position_count is None):
+                warnings.append(f"{symbol}: WATCHLIST kept because OKX sync is unavailable")
+                refresh_pending_order(
+                    config,
+                    local_id,
+                    watchlist_candidate,
+                    status="WATCHLIST",
+                    max_age_hours=float(lifecycle["local_max_age_hours"]),
+                )
+                kept += 1
+                continue
+
+            if config.get("mode") != "dry_run" and position_count is not None and position_count >= max_active:
+                refresh_pending_order(
+                    config,
+                    local_id,
+                    watchlist_candidate,
+                    status="WATCHLIST",
+                    max_age_hours=float(lifecycle["local_max_age_hours"]),
+                )
+                events.append(
+                    {
+                        "type": "pending_kept",
+                        "source": "mini_watchlist_slot_full",
+                        "status": "WATCHLIST",
+                        "lc_id": lc_id,
+                        "symbol": symbol,
+                        "side": str(record.get("side") or ""),
+                        "reason": f"Slot dang day {position_count}/{max_active}; chua hoi lai GPT-5.5",
+                    }
+                )
+                kept += 1
+                continue
+
+            recheck = _recheck_wait_slot_candidate(config, record, candidates_by_key, candidates_by_symbol)
+            refreshed_candidate = recheck.get("candidate")
+            comparison = recheck.get("comparison") or {}
+            if refreshed_candidate is None:
+                reason = str(recheck.get("reason") or "WATCHLIST khong con du dieu kien sau tai kiem")
+                close_pending_order(config, local_id, "CANCELED", reason)
+                events.append(
+                    {
+                        "type": "pending_canceled",
+                        "source": "mini_watchlist_recheck",
+                        "lc_id": lc_id,
+                        "symbol": symbol,
+                        "side": str(record.get("side") or ""),
+                        "reason": reason,
+                        "comparison": comparison,
+                    }
+                )
+                canceled += 1
+                continue
+
+            refreshed_candidate = _candidate_with_record_metadata(refreshed_candidate, record)
+            refresh_check = evaluate_candidate(
+                config,
+                refreshed_candidate,
+                check_active_trades=False,
+                check_order_limits=False,
+            )
+            refresh_reasons = _pending_review_reasons(config, record, refreshed_candidate, refresh_check, market_layers)
+            if refresh_reasons:
+                reason = "; ".join(refresh_reasons[:3])
+                close_pending_order(config, local_id, "CANCELED", reason)
+                events.append(
+                    {
+                        "type": "pending_canceled",
+                        "source": "mini_watchlist_recheck",
+                        "lc_id": lc_id,
+                        "symbol": symbol,
+                        "side": str(record.get("side") or ""),
+                        "reason": reason,
+                        "comparison": comparison,
+                    }
+                )
+                canceled += 1
+                continue
+
+            if str(recheck.get("action") or "") == "keep":
+                refresh_pending_order(
+                    config,
+                    local_id,
+                    refreshed_candidate,
+                    status="WATCHLIST",
+                    max_age_hours=float(lifecycle["local_max_age_hours"]),
+                )
+                events.append(
+                    {
+                        "type": "pending_kept",
+                        "source": "mini_watchlist_recheck",
+                        "status": "WATCHLIST",
+                        "lc_id": lc_id,
+                        "symbol": symbol,
+                        "side": str(record.get("side") or ""),
+                        "reason": str(recheck.get("reason") or "WATCHLIST tiep tuc cho tai kiem"),
+                        "comparison": comparison,
+                    }
+                )
+                kept += 1
+                continue
+
+            if config.get("mode") == "dry_run":
+                refresh_pending_order(
+                    config,
+                    local_id,
+                    refreshed_candidate,
+                    status="WATCHLIST",
+                    max_age_hours=float(lifecycle["local_max_age_hours"]),
+                )
+                kept += 1
+                continue
+
+            submit_check = evaluate_candidate(
+                config,
+                refreshed_candidate,
+                check_active_trades=False,
+                check_order_limits=True,
+            )
+            if not submit_check.passed:
+                refresh_pending_order(
+                    config,
+                    local_id,
+                    refreshed_candidate,
+                    status="WATCHLIST",
+                    max_age_hours=float(lifecycle["local_max_age_hours"]),
+                )
+                warnings.append(
+                    f"{symbol}: WATCHLIST kept because submit risk check failed: "
+                    + "; ".join(submit_check.reasons[:3])
+                )
+                kept += 1
+                continue
+
+            setup_review_state = okx_setup_review_recheck_state(
+                config,
+                refreshed_candidate,
+                route="lc_okx_setup_review",
+            )
+            if setup_review_state.get("rejection_policy") == OKX_REJECTION_HARD_DELETE:
+                stored_review = setup_review_state.get("review") or {}
+                reason = str(
+                    stored_review.get("reason")
+                    or stored_review.get("decision")
+                    or "GPT-5.5 rejected LC_OKX setup"
+                )
+                close_pending_order(config, local_id, "CANCELED", reason)
+                events.append(
+                    {
+                        "type": "pending_canceled",
+                        "source": "mini_watchlist_stored_review",
+                        "lc_id": lc_id,
+                        "symbol": symbol,
+                        "side": str(record.get("side") or ""),
+                        "reason": reason,
+                        "rejection_policy": setup_review_state.get("rejection_policy"),
+                        "comparison": comparison,
+                    }
+                )
+                canceled += 1
+                continue
+            if (
+                setup_review_state.get("has_review")
+                and setup_review_state.get("rejection_policy") == OKX_REJECTION_WATCHLIST
+                and not bool(setup_review_state.get("due", True))
+            ):
+                stored_review = setup_review_state.get("review") or {}
+                reason = str(
+                    stored_review.get("reason")
+                    or stored_review.get("decision")
+                    or "GPT-5.5 dang giu setup de theo doi"
+                )
+                refresh_pending_order(
+                    config,
+                    local_id,
+                    refreshed_candidate,
+                    status="WATCHLIST",
+                    max_age_hours=float(lifecycle["local_max_age_hours"]),
+                )
+                events.append(
+                    {
+                        "type": "pending_kept",
+                        "source": "mini_watchlist_review_cooldown",
+                        "status": "WATCHLIST",
+                        "lc_id": lc_id,
+                        "symbol": symbol,
+                        "side": str(record.get("side") or ""),
+                        "reason": reason,
+                        "rejection_policy": setup_review_state.get("rejection_policy"),
+                        "recheck_after_minutes": stored_review.get("recheck_after_minutes"),
+                        "next_recheck_at": setup_review_state.get("next_recheck_at"),
+                        "comparison": comparison,
+                    }
+                )
+                kept += 1
+                continue
+
+            reviewed_candidate, setup_review = review_candidate_for_lc_okx(
+                config,
+                refreshed_candidate,
+                submit_check,
+                context={
+                    "route": "lc_okx_setup_review",
+                    "lc_id": lc_id,
+                    "from_status": "WATCHLIST",
+                    "source": "mini_watchlist_release",
+                },
+            )
+            if not setup_review.get("approved"):
+                reason = str(setup_review.get("reason") or setup_review.get("decision") or "GPT-5.5 rejected LC_OKX setup")
+                if setup_review.get("rejection_policy") == OKX_REJECTION_WATCHLIST:
+                    refresh_pending_order(
+                        config,
+                        local_id,
+                        reviewed_candidate,
+                        status="WATCHLIST",
+                        max_age_hours=float(lifecycle["local_max_age_hours"]),
+                    )
+                    events.append(
+                        {
+                            "type": "pending_kept",
+                            "source": "mini_watchlist_review",
+                            "status": "WATCHLIST",
+                            "lc_id": lc_id,
+                            "symbol": symbol,
+                            "side": str(record.get("side") or ""),
+                            "reason": reason,
+                            "rejection_policy": setup_review.get("rejection_policy"),
+                            "recheck_after_minutes": setup_review.get("recheck_after_minutes"),
+                            "comparison": comparison,
+                        }
+                    )
+                    kept += 1
+                    continue
+                close_pending_order(config, local_id, "CANCELED", reason)
+                events.append(
+                    {
+                        "type": "pending_canceled",
+                        "source": "mini_watchlist_review",
+                        "lc_id": lc_id,
+                        "symbol": symbol,
+                        "side": str(record.get("side") or ""),
+                        "reason": reason,
+                        "comparison": comparison,
+                    }
+                )
+                canceled += 1
+                continue
+
+            execution = execute_candidate(
+                config,
+                reviewed_candidate,
+                order_type_override=str(lifecycle["order_type"]),
+                entry_type="mini_watchlist_okx",
+                journal_type="LC",
+                journal_id=lc_id,
+            )
+            if not execution.submitted or not execution.order_id:
+                refresh_pending_order(
+                    config,
+                    local_id,
+                    reviewed_candidate,
+                    status="WATCHLIST",
+                    max_age_hours=float(lifecycle["local_max_age_hours"]),
+                )
+                warnings.append(f"{symbol}: WATCHLIST submit to OKX failed: {execution.message}")
+                kept += 1
+                continue
+
+            set_pending_order_exchange_order(
+                config,
+                local_id,
+                reviewed_candidate,
+                execution.order_id,
+                max_age_days=float(lifecycle["exchange_max_age_days"]),
+            )
+            events.append(
+                {
+                    "type": "pending_submitted",
+                    "source": "mini_watchlist_release",
+                    "status": "LC_OKX",
+                    "lc_id": lc_id,
+                    "symbol": symbol,
+                    "side": str(record.get("side") or ""),
+                    "exchange_order_id": execution.order_id,
+                    "reason": str(recheck.get("reason") or "WATCHLIST released to LC_OKX"),
+                    "comparison": comparison,
+                }
+            )
+            submitted += 1
+            kept += 1
+            active_symbols.add(symbol)
+            continue
+
         if record_status == "WAIT_SLOT":
             wait_slot_candidate = _candidate_from_record(record)
             if wait_slot_candidate is None:
@@ -651,6 +1000,28 @@ def maintain_pending_orders(
                     }
                 )
                 canceled += 1
+                continue
+
+            if _is_watchlist_review(record) and not _is_real_wait_slot_record(record):
+                refresh_pending_order(
+                    config,
+                    local_id,
+                    wait_slot_candidate,
+                    status="WATCHLIST",
+                    max_age_hours=float(lifecycle["local_max_age_hours"]),
+                )
+                events.append(
+                    {
+                        "type": "pending_kept",
+                        "source": "wait_slot_watchlist_migrated",
+                        "status": "WATCHLIST",
+                        "lc_id": lc_id,
+                        "symbol": symbol,
+                        "side": str(record.get("side") or ""),
+                        "reason": "WAIT_SLOT cu thuc chat la GPT-5.5 watchlist, da chuyen sang WATCHLIST",
+                    }
+                )
+                kept += 1
                 continue
 
             if config.get("mode") != "dry_run" and (exchange is None or position_count is None):
