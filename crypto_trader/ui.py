@@ -175,6 +175,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 PRICE_CACHE_TTL_SECONDS = 55
 TELEGRAM_VIEW_CACHE_TTL_SECONDS = 4
 SYSTEM_ERROR_NOTIFY_COOLDOWN_SECONDS = 900
+STARTUP_TELEGRAM_MESSAGE = "\U0001f7e2 Bot Crypto \u0111\u00e3 kh\u1edfi \u0111\u1ed9ng"
 _SYSTEM_ERROR_NOTIFY_LOCK = threading.Lock()
 _SYSTEM_ERROR_NOTIFICATIONS: dict[str, tuple[str, datetime]] = {}
 
@@ -650,6 +651,34 @@ def _automation_interval(config: dict[str, Any]) -> int:
     return max(60, int(automation.get("scan_interval_seconds", fallback) or 60))
 
 
+def _telegram_startup_quiet_seconds(config: dict[str, Any]) -> int:
+    raw = config.get("notifications", {}).get("telegram", {}).get("startup_quiet_seconds", 300)
+    try:
+        return max(0, int(raw or 0))
+    except (TypeError, ValueError):
+        return 300
+
+
+def _telegram_startup_quiet_active(app: FastAPI, now: datetime | None = None) -> bool:
+    quiet_until = getattr(app.state, "telegram_startup_quiet_until", None)
+    if not isinstance(quiet_until, datetime):
+        return False
+    now = now or datetime.now(timezone.utc)
+    if quiet_until.tzinfo is None:
+        quiet_until = quiet_until.replace(tzinfo=timezone.utc)
+    return now.astimezone(timezone.utc) < quiet_until.astimezone(timezone.utc)
+
+
+def _telegram_disabled_config(config: dict[str, Any]) -> dict[str, Any]:
+    return deep_merge(config, {"notifications": {"telegram": {"enabled": False}}})
+
+
+def _telegram_background_config(app: FastAPI, config: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
+    if _telegram_startup_quiet_active(app, now):
+        return _telegram_disabled_config(config)
+    return config
+
+
 def _lc_pipeline_worker_interval(config: dict[str, Any]) -> int:
     internal = config.get("ai", {}).get("internal", {})
     fallback = _automation_interval(config)
@@ -952,18 +981,26 @@ def _run_automation_cycle(app: FastAPI) -> None:
         _notify_system_error(config, "Dashboard", exc)
 
     messages: list[str] = []
+    startup_quiet = _telegram_startup_quiet_active(app, now)
     should_notify_scan = telegram_notify_scans(config) and (
         status.get("last_result") == "error" or _periodic_scan_notification_due(config, now)
     )
     if should_notify_scan:
-        sent = send_telegram_message(
-            config,
-            format_scan_message(config, payload, status),
-            with_buttons=False,
-            replace_previous=False,
-        )
-        if sent and status.get("last_result") != "error":
-            _remember_periodic_scan_notification(config, now)
+        if startup_quiet:
+            if status.get("last_result") != "error":
+                _remember_periodic_scan_notification(config, now)
+        else:
+            sent = send_telegram_message(
+                config,
+                format_scan_message(config, payload, status),
+                with_buttons=False,
+                replace_previous=False,
+            )
+            if sent and status.get("last_result") != "error":
+                _remember_periodic_scan_notification(config, now)
+    if startup_quiet:
+        build_periodic_report_messages(config)
+        return
     if payload:
         messages.extend(format_pending_event_messages(payload))
         messages.extend(format_execution_messages(payload))
@@ -994,6 +1031,7 @@ def _automation_worker(app: FastAPI) -> None:
 def _run_lc_pipeline_worker_cycle(app: FastAPI) -> None:
     now = datetime.now(timezone.utc)
     config = load_config(app.state.config_path)
+    notification_config = _telegram_background_config(app, config, now)
     interval = _lc_pipeline_worker_interval(config)
     next_scan_at = _next_automation_cycle_at(now, interval)
     status: dict[str, Any] = {
@@ -1014,10 +1052,10 @@ def _run_lc_pipeline_worker_cycle(app: FastAPI) -> None:
         return
 
     try:
-        cycle_result = collect_lc_pipeline_candidates(config)
+        cycle_result = collect_lc_pipeline_candidates(notification_config)
         app.state.lc_pipeline_candidate_cache = cycle_result
         pipeline = update_lc_internal_pipeline(
-            config,
+            notification_config,
             list(cycle_result.get("candidates") or []),
             now=datetime.now(timezone.utc),
         )
@@ -1071,6 +1109,7 @@ def _lc_pipeline_worker(app: FastAPI) -> None:
 def _run_lc_pipeline_slot_cycle(app: FastAPI) -> None:
     now = datetime.now(timezone.utc)
     config = load_config(app.state.config_path)
+    notification_config = _telegram_background_config(app, config, now)
     if not _lc_pipeline_worker_enabled(config):
         return
     if not app.state.lc_pipeline_slot_lock.acquire(blocking=False):
@@ -1127,8 +1166,8 @@ def _run_lc_pipeline_slot_cycle(app: FastAPI) -> None:
                 return
         if not candidates or created_at is None:
             return
-        pipeline = update_lc_internal_pipeline(config, candidates, now=now)
-        mini_scan = run_internal_market_scan_if_due(config)
+        pipeline = update_lc_internal_pipeline(notification_config, candidates, now=now)
+        mini_scan = run_internal_market_scan_if_due(notification_config)
         current_status = getattr(app.state, "lc_pipeline_status", {}).copy()
         current_status.update(
             {
@@ -2372,7 +2411,8 @@ def _market_guard_worker(app: FastAPI) -> None:
             now = datetime.now(timezone.utc)
             notify_status = _market_guard_notification_status(config, status)
             if notify_status and _market_guard_notify_due(config, now):
-                send_telegram_message(config, format_market_guard_message(notify_status), replace_previous=False)
+                if not _telegram_startup_quiet_active(app, now):
+                    send_telegram_message(config, format_market_guard_message(notify_status), replace_previous=False)
                 _mark_market_guard_notified(config, now)
         except Exception as exc:
             app.state.market_guard_status = {
@@ -2586,6 +2626,8 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
     app.state.price_cache = None
     app.state.telegram_view_cache = {}
     app.state.telegram_commands_next_sync_at = None
+    app.state.started_at = None
+    app.state.telegram_startup_quiet_until = None
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -2616,6 +2658,9 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
         interval = _automation_interval(config)
         enabled = _automation_enabled(config)
         now = datetime.now(timezone.utc)
+        app.state.started_at = now
+        quiet_seconds = _telegram_startup_quiet_seconds(config)
+        app.state.telegram_startup_quiet_until = now + timedelta(seconds=quiet_seconds) if quiet_seconds else now
         app.state.automation_status = {
             "enabled": enabled,
             "interval_seconds": interval,
@@ -2627,12 +2672,9 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
         if config.get("notifications", {}).get("telegram", {}).get("startup_message_enabled", True):
             send_telegram_message(
                 config,
-                "🟢 Bot crypto đã khởi động\n"
-                f"⚙️ Chế độ: {config.get('mode', 'dry_run')}\n"
-                f"🤖 Tự động: {'bật' if enabled else 'tắt'}\n"
-                f"⏱️ Chu kỳ: {interval}s\n"
-                f"🛡️ Guard: {'bật' if market_guard_enabled(config) else 'tắt'} / {market_guard_interval(config)}s, báo Telegram mỗi {market_guard_notify_interval(config) // 60} phút\n"
-                "📲 Có thể bấm nút bên dưới để xem VT/PNL/SD, SD, LC bất cứ lúc nào.",
+                STARTUP_TELEGRAM_MESSAGE,
+                with_buttons=False,
+                replace_previous=False,
             )
 
         def delayed_worker() -> None:

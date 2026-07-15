@@ -18,6 +18,7 @@ from crypto_trader.notifier import telegram_command_list
 from crypto_trader.storage import get_journal_state, list_trade_execution_rows, save_market_scan_observations, set_journal_state
 from crypto_trader.ui import (
     SCAN_TELEGRAM_SLOT_KEY,
+    STARTUP_TELEGRAM_MESSAGE,
     _format_ai_call_history_view,
     _handle_telegram_update,
     _market_guard_notification_status,
@@ -662,6 +663,10 @@ class UiTest(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertGreaterEqual(sync_commands.call_count, 1)
+        send_message.assert_called_once()
+        self.assertEqual(send_message.call_args.args[1], STARTUP_TELEGRAM_MESSAGE)
+        self.assertFalse(send_message.call_args.kwargs["with_buttons"])
+        self.assertFalse(send_message.call_args.kwargs["replace_previous"])
 
     def test_healthz_includes_runtime_build_metadata(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:

@@ -405,6 +405,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "account_report_interval_seconds": 18000,
             "daily_summary_enabled": True,
             "startup_message_enabled": True,
+            "startup_quiet_seconds": 300,
             "trade_memory_limit": 100,
         },
     },

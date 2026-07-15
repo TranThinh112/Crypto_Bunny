@@ -264,6 +264,7 @@ notifications:
     account_report_interval_seconds: 0
     daily_summary_enabled: false
     startup_message_enabled: true
+    startup_quiet_seconds: 300
     trade_memory_limit: 100
 
 execution:
