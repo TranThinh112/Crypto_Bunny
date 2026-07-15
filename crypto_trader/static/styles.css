@@ -1931,6 +1931,10 @@ tr:last-child td {
   transform: translateX(2px);
 }
 
+.module-chart-status-item {
+  cursor: default;
+}
+
 .module-chart-callout-line {
   stroke: var(--ink);
   stroke-width: 1.2;

@@ -1579,7 +1579,7 @@ const AI_DECISION_CHART_META = new Map([
 ]);
 
 function aiDecisionLegendRows(rows) {
-  const hiddenKeys = new Set(["total_decisions", "no_trade_count"]);
+  const hiddenKeys = new Set(["total_decisions", "no_trade_count", "bias_warning"]);
   return (Array.isArray(rows) ? rows : []).map((row, index) => {
     const numeric = moduleNumericValue(row.value);
     const chartMeta = AI_DECISION_CHART_META.get(String(row?.aiDecisionKey || ""));
@@ -1593,6 +1593,29 @@ function aiDecisionLegendRows(rows) {
       color: MODULE_CHART_COLORS[colorIndex % MODULE_CHART_COLORS.length],
     };
   }).filter((row) => !hiddenKeys.has(String(row?.aiDecisionKey || "")));
+}
+
+function renderAiDecisionBiasCard(module, row) {
+  if (!row) return "";
+  const trend = {
+    ...moduleTrendMeaning(row),
+    ...(row.trendUp ? { up: row.trendUp } : {}),
+    ...(row.trendDown ? { down: row.trendDown } : {}),
+  };
+  const currentValue = moduleLegendCurrentValue(row);
+  const displayLabel = moduleDisplayLabel(row);
+  return `
+    <div class="module-chart-legend-item module-chart-status-item module-ai-bias-card" role="status" title="${escapeHtml(displayLabel)}: ${escapeHtml(currentValue)}">
+      <span class="module-chart-swatch" style="background:${MODULE_CHART_COLORS[2]}"></span>
+      <div>
+        <strong>${escapeHtml(displayLabel)}</strong>
+        <small class="module-chart-value-line"><span>Hiển thị:</span><span class="module-chart-delta flat">${escapeHtml(formatBiasWarningValue(row.value))}</span></small>
+        <p>${escapeHtml(row.meaning || "Biến dùng để theo dõi trạng thái module.")}</p>
+        <p><b>Tăng:</b> ${escapeHtml(trend.up)}</p>
+        <p><b>Giảm:</b> ${escapeHtml(trend.down)}</p>
+      </div>
+    </div>
+  `;
 }
 
 function renderAiDecisionKpi(module, row) {
@@ -1778,6 +1801,7 @@ function renderAiDecisionBarSvg(rows, title, subtitle, chartId) {
 function renderAiDecisionModuleChart(module, rows) {
   const totalDecisionRow = aiDecisionRow(rows, "total_decisions");
   const noTradeRow = aiDecisionRow(rows, "no_trade_count");
+  const biasWarningRow = aiDecisionRow(rows, "bias_warning");
   const longPercent = aiDecisionRow(rows, "long_percent");
   const shortPercent = aiDecisionRow(rows, "short_percent");
   const longOrderRow = aiDecisionChartRow(rows, "long_count", 1, 1);
@@ -1808,6 +1832,7 @@ function renderAiDecisionModuleChart(module, rows) {
     <section class="module-chart-panel module-chart-panel-compact module-ai-decision-panel">
       <div class="module-chart-legend module-ai-chart-stack">
         ${renderAiDecisionKpiGroup(module, [totalKpiRow, noTradeRow])}
+        ${renderAiDecisionBiasCard(module, biasWarningRow)}
         ${renderAiDecisionDonut(entryDirectionRows, "Entry Direction", "Phân bổ lệnh LONG và SHORT", entryTotal ? String(entryTotal) : "0", "lệnh")}
         ${renderAiDecisionBarSvg(directionPercentRows, "Entry Direction · Tỷ lệ", "Tỷ lệ LONG/SHORT trên tổng decision", "ai-entry-percent")}
         ${renderAiDecisionBarSvg(winrateRows, "Decision Performance · Winrate", "Hiệu suất quyết định · Tỷ lệ thắng", "ai-winrate")}
@@ -2042,6 +2067,7 @@ function bindModuleChartInteractions() {
   detail.querySelectorAll(".module-chart-legend-item").forEach((item) => {
     item.addEventListener("click", () => {
       const index = item.getAttribute("data-chart-index");
+      if (index === null) return;
       const alreadyActive = item.classList.contains("active");
       clearActive();
       if (alreadyActive) return;
