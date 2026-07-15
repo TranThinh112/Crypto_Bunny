@@ -1860,6 +1860,10 @@ tr:last-child td {
   transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
 }
 
+.module-chart-meta:not(.module-ai-kpi-row) .module-total-anchor {
+  grid-column: 1 / -1;
+}
+
 .module-chart-meta.active .module-total-anchor {
   border-color: var(--teal);
   box-shadow: 0 6px 16px rgba(10, 31, 68, 0.1);

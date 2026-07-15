@@ -1185,13 +1185,19 @@ function moduleChartRows(rows) {
 
 function moduleLegendCurrentValue(row) {
   const numeric = moduleNumericValue(row?.value);
-  if (numeric !== null) return formatFixed2(numeric);
+  if (numeric !== null) {
+    const unitKey = viLabel(aiDecisionUnit(row));
+    if (unitKey === "lan" || unitKey === "lenh" || unitKey === "quyet dinh") {
+      return Math.round(numeric).toLocaleString("en-US", { maximumFractionDigits: 0 });
+    }
+    return formatFixed2(numeric);
+  }
   return formatCardValue(row?.label || "", viText(row?.value ?? "-"));
 }
 
 function aiDecisionUnit(row) {
   const key = String(row?.aiDecisionKey || "");
-  if (key === "total_decisions") return "quyết định";
+  if (key === "total_decisions") return "lần";
   if (key === "long_count" || key === "short_count") return "lệnh";
   if (key === "no_trade_count") return "lần";
   if (key.includes("percent") || key.includes("winrate")) return "%";
@@ -1215,6 +1221,15 @@ function moduleLegendShare(chartRows, row) {
 function moduleAxisTickLabel(value) {
   return formatFixed2(value);
 }
+
+function moduleDeltaValueLabel(row, value) {
+  const unitKey = viLabel(aiDecisionUnit(row));
+  if (unitKey === "lan" || unitKey === "lenh" || unitKey === "quyet dinh") {
+    return Math.round(Number(value || 0)).toLocaleString("en-US", { maximumFractionDigits: 0 });
+  }
+  return moduleAxisTickLabel(value);
+}
+
 function moduleDeltaSuffix(row) {
   return String(row?.value ?? "").includes("%") ? "%" : "";
 }
@@ -1247,7 +1262,7 @@ function moduleDeltaInfo(module, row) {
   }
   return {
     state: delta > 0 ? "up" : "down",
-    text: `${delta > 0 ? "+" : "-"}${moduleAxisTickLabel(Math.abs(delta))}${suffix}`,
+    text: `${delta > 0 ? "+" : "-"}${moduleDeltaValueLabel(row, Math.abs(delta))}${suffix}`,
   };
 }
 
@@ -1262,7 +1277,7 @@ function moduleChangedVariableCount(module, rows = null) {
 }
 
 const AI_DECISION_ROW_CONFIG = [
-  ["total_decisions", "Tổng số decision", "Tổng số quyết định AI giao dịch đã được ghi nhận vào hệ thống.", "AI đã đưa ra nhiều quyết định hơn.", "AI đưa ra ít quyết định hơn."],
+  ["total_decisions", "Tổng số quyết định của AI", "Tổng số lần AI giao dịch đã đưa ra quyết định và được ghi nhận vào hệ thống.", "AI đã đưa ra nhiều quyết định hơn.", "AI đưa ra ít quyết định hơn."],
   ["long_count", "Số LONG", "Số lần AI quyết định ENTER_LONG.", "AI ưu tiên LONG nhiều hơn.", "AI giảm số quyết định LONG."],
   ["short_count", "Số SHORT", "Số lần AI quyết định ENTER_SHORT.", "AI ưu tiên SHORT nhiều hơn.", "AI giảm số quyết định SHORT."],
   ["no_trade_count", "5.5 từ chối/xóa setup", "Số lần GPT-5.5 từ chối vào lệnh hoặc xóa setup; không tính các lần giữ setup.", "5.5 từ chối/xóa setup nhiều hơn.", "5.5 từ chối/xóa setup ít hơn."],
@@ -1435,7 +1450,6 @@ function renderModuleVariableRows(module, chartRows, showShare = false) {
   return chartRows.map((row, index) => {
     const chartIndex = row.chartIndex ?? index;
     const aiKey = row.aiDecisionKey ? String(row.aiDecisionKey) : "";
-    const totalTarget = aiKey === "total_decisions" ? "ai-entry-total" : "";
     const trend = {
       ...moduleTrendMeaning(row),
       ...(row.trendUp ? { up: row.trendUp } : {}),
@@ -1449,7 +1463,7 @@ function renderModuleVariableRows(module, chartRows, showShare = false) {
       ? `<small class="module-chart-value-line"><span>Hiển thị:</span><span class="module-chart-delta flat">${escapeHtml(formatBiasWarningValue(row.value))}</span></small>`
       : `<small class="module-chart-value-line"><span>Giá trị hiện tại: ${escapeHtml(currentValue)}</span><span class="module-chart-delta ${delta.state}">${escapeHtml(delta.text)}</span></small>`;
     return `
-      <button class="module-chart-legend-item ${row.attention ? "attention" : ""}" type="button" data-chart-index="${chartIndex}" ${aiKey ? `data-ai-key="${escapeHtml(aiKey)}"` : ""} ${totalTarget ? `data-chart-total-target="${totalTarget}"` : ""} title="${escapeHtml(displayLabel)}: ${escapeHtml(currentValue)}">
+      <button class="module-chart-legend-item ${row.attention ? "attention" : ""}" type="button" data-chart-index="${chartIndex}" ${aiKey ? `data-ai-key="${escapeHtml(aiKey)}"` : ""} title="${escapeHtml(displayLabel)}: ${escapeHtml(currentValue)}">
         <span class="module-chart-swatch" style="background:${row.color}"></span>
         <div>
           <strong>${escapeHtml(displayLabel)}</strong>
@@ -1479,6 +1493,38 @@ function moduleBarPercentValue(row, maxRawValue) {
   if (looksPercent) return Math.max(0, Math.min(100, raw));
   if (!maxRawValue) return 0;
   return Math.max(0, Math.min(100, raw / maxRawValue * 100));
+}
+
+function niceAutoPercentAxisMax(maxValue) {
+  const raw = Math.max(0, Number(maxValue || 0));
+  if (!Number.isFinite(raw) || raw <= 0) return 1;
+  if (raw > 80) return 100;
+  const target = raw * 1.2;
+  const exponent = Math.floor(Math.log10(target));
+  const base = 10 ** exponent;
+  const mantissas = [1, 2, 4, 5, 8, 10];
+  let best = 100;
+  let bestDistance = Infinity;
+  mantissas.forEach((mantissa) => {
+    const candidate = mantissa * base;
+    if (candidate < raw) return;
+    const distance = Math.abs(candidate - target);
+    if (distance < bestDistance || (Math.abs(distance - bestDistance) < 1e-9 && candidate > best)) {
+      best = candidate;
+      bestDistance = distance;
+    }
+  });
+  if (best === 100 && raw <= 80 && target < 100) return 80;
+  return Math.min(100, best);
+}
+
+function formatAxisPercentLabel(value) {
+  const numeric = Number(value || 0);
+  if (Math.abs(numeric) < 1e-9) return "0%";
+  return `${numeric.toLocaleString("en-US", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  })}%`;
 }
 
 function aiDecisionRow(rows, key) {
@@ -1522,6 +1568,21 @@ function renderAiDecisionKpi(row) {
         <span>${escapeHtml(moduleDisplayLabel(row))}</span>
         <strong>${escapeHtml(moduleLegendCurrentValue(row))}</strong>
       </div>
+    </div>
+  `;
+}
+
+function renderAiDecisionKpiGroup(rows) {
+  const items = (Array.isArray(rows) ? rows : []).filter(Boolean);
+  if (!items.length) return "";
+  return `
+    <div class="module-chart-meta module-ai-kpi-row">
+      ${items.map((row) => `
+        <div class="module-total-anchor">
+          <span>${escapeHtml(moduleDisplayLabel(row))}</span>
+          <strong>${escapeHtml(moduleLegendCurrentValue(row))}</strong>
+        </div>
+      `).join("")}
     </div>
   `;
 }
@@ -1594,30 +1655,44 @@ function renderAiDecisionDonut(rows, title, subtitle, centerLabel, caption) {
   `;
 }
 
-function renderAiDecisionBarSvg(rows, title, subtitle, axisCaption, chartId) {
+function renderAiDecisionBarSvg(rows, title, subtitle, chartId) {
   const chartRows = rows.filter(Boolean);
   if (!chartRows.length) {
     return `<div class="module-chart-empty">Chưa có dữ liệu ${escapeHtml(title)}.</div>`;
   }
-  const maxRawValue = Math.max(...chartRows.map((row) => Math.max(0, Number(row.rawNumericValue || 0))), 1);
+  const rawValues = chartRows.map((row) => Math.max(0, Number(row.rawNumericValue || 0)));
+  const maxChartValue = Math.max(...rawValues, 0);
+  const maxRawValue = Math.max(maxChartValue, 1);
   const chartLeft = 62;
   const chartRight = 398;
   const chartTop = 34;
   const chartBaseline = 196;
   const chartHeight = chartBaseline - chartTop;
   const barWidth = (chartRight - chartLeft - 10) / chartRows.length;
-  const yTicks = [25, 50, 75, 100].map((tickValue) => {
-    const y = chartBaseline - (tickValue / 100) * chartHeight;
+  const autoScaleYAxis = ["ai-entry-percent", "ai-winrate", "ai-profit"].includes(chartId);
+  const barPercentValues = chartRows.map((row) => moduleBarPercentValue(row, maxRawValue));
+  const maxPercentValue = Math.max(...barPercentValues, 0);
+  const yAxisMax = autoScaleYAxis ? niceAutoPercentAxisMax(maxPercentValue) : 100;
+  const tickValues = autoScaleYAxis
+    ? [0, 1, 2, 3, 4].map((step) => yAxisMax * step / 4)
+    : [25, 50, 75, 100];
+  const yTicks = tickValues.map((tickValue) => {
+    const y = chartBaseline - (tickValue / yAxisMax) * chartHeight;
+    const tickLabel = autoScaleYAxis ? formatAxisPercentLabel(tickValue) : `${formatFixed2(tickValue)}%`;
+    const gridLine = Math.abs(tickValue) < 1e-9
+      ? ""
+      : `<line x1="${chartLeft}" y1="${y}" x2="${chartRight}" y2="${y}" class="module-bar-grid"></line>`;
     return `
       <g>
-        <line x1="${chartLeft}" y1="${y}" x2="${chartRight}" y2="${y}" class="module-bar-grid"></line>
-        <text x="${chartLeft - 8}" y="${y + 4}" text-anchor="end" class="module-axis-label">${formatFixed2(tickValue)}%</text>
+        ${gridLine}
+        <text x="${chartLeft - 8}" y="${y + 4}" text-anchor="end" class="module-axis-label">${tickLabel}</text>
       </g>
     `;
   }).join("");
   const bars = chartRows.map((row, index) => {
-    const percentValue = moduleBarPercentValue(row, maxRawValue);
-    const height = Math.max(8, percentValue / 100 * chartHeight);
+    const percentValue = barPercentValues[index] ?? 0;
+    const scaledPercent = Math.max(0, Math.min(100, percentValue / yAxisMax * 100));
+    const height = Math.max(8, scaledPercent / 100 * chartHeight);
     const x = chartLeft + index * barWidth + barWidth * 0.18;
     const y = chartBaseline - height;
     const width = Math.max(28, barWidth * 0.64);
@@ -1647,7 +1722,6 @@ function renderAiDecisionBarSvg(rows, title, subtitle, axisCaption, chartId) {
           <line x1="${chartLeft}" y1="${chartBaseline}" x2="${chartLeft}" y2="${chartTop - 12}" class="module-bar-axis module-y-axis" marker-end="url(#${markerId})"></line>
           <text x="${chartLeft - 12}" y="${chartTop - 16}" text-anchor="middle" class="module-axis-percent">%</text>
           ${bars}
-          <text x="${(chartLeft + chartRight) / 2}" y="258" text-anchor="middle" class="module-axis-caption">${escapeHtml(axisCaption)}</text>
           <g class="module-chart-callout" hidden>
             <line class="module-chart-callout-line" x1="0" y1="0" x2="0" y2="0"></line>
             <rect class="module-chart-callout-box" x="0" y="0" width="0" height="0" rx="6"></rect>
@@ -1660,21 +1734,23 @@ function renderAiDecisionBarSvg(rows, title, subtitle, axisCaption, chartId) {
 }
 
 function renderAiDecisionModuleChart(module, rows) {
+  const totalDecisionRow = aiDecisionRow(rows, "total_decisions");
+  const noTradeRow = aiDecisionRow(rows, "no_trade_count");
   const longPercent = aiDecisionRow(rows, "long_percent");
   const shortPercent = aiDecisionRow(rows, "short_percent");
-  const totalDecisionRow = aiDecisionRow(rows, "total_decisions");
+  const longOrderRow = aiDecisionChartRow(rows, "long_count", 1, 1);
+  const shortOrderRow = aiDecisionChartRow(rows, "short_count", 2, 2);
+  const entryTotal = [longOrderRow, shortOrderRow].filter(Boolean).reduce((sum, row) => sum + Number(row.rawNumericValue || 0), 0);
   const entryDirectionRows = [
-    aiDecisionChartRow(rows, "long_count", 1, 1, `Số LONG: ${aiDecisionRow(rows, "long_count")?.value ?? "-"} | Tỷ lệ LONG: ${longPercent?.value ?? "-"}`),
-    aiDecisionChartRow(rows, "short_count", 2, 2, `Số SHORT: ${aiDecisionRow(rows, "short_count")?.value ?? "-"} | Tỷ lệ SHORT: ${shortPercent?.value ?? "-"}`),
-    aiDecisionChartRow(rows, "no_trade_count", 3, 3),
+    longOrderRow ? { ...longOrderRow, tooltipValue: `Số LONG: ${moduleLegendCurrentValue(longOrderRow)} | Tỷ lệ LONG: ${longPercent?.value ?? "-"}` } : null,
+    shortOrderRow ? { ...shortOrderRow, tooltipValue: `Số SHORT: ${moduleLegendCurrentValue(shortOrderRow)} | Tỷ lệ SHORT: ${shortPercent?.value ?? "-"}` } : null,
   ];
-  const entryTotal = entryDirectionRows.filter(Boolean).reduce((sum, row) => sum + Number(row.rawNumericValue || 0), 0);
   const entryTotalRow = {
-    label: "Tổng biến đang vẽ",
+    label: "Tổng lệnh",
     value: entryTotal,
-    unit: "lần",
+    unit: "lệnh",
   };
-  const totalKpiRow = totalDecisionRow ? { ...totalDecisionRow, chartTotalTarget: "ai-entry-total" } : null;
+  const totalKpiRow = totalDecisionRow ? { ...totalDecisionRow } : null;
   const directionPercentRows = [
     aiDecisionChartRow(rows, "long_percent", 4, 4),
     aiDecisionChartRow(rows, "short_percent", 5, 5),
@@ -1694,13 +1770,13 @@ function renderAiDecisionModuleChart(module, rows) {
   return `
     <section class="module-chart-panel module-chart-panel-compact module-ai-decision-panel">
       <div class="module-chart-legend module-ai-chart-stack">
-        ${renderAiDecisionKpi(totalKpiRow)}
+        ${renderAiDecisionKpiGroup([totalKpiRow, noTradeRow])}
         ${renderAiDecisionKpi(entryTotalRow)}
-        ${renderAiDecisionDonut(entryDirectionRows, "Entry Direction", "Phân bổ LONG, SHORT và 5.5 từ chối/xóa setup", entryTotal ? String(entryTotal) : "0", "biến vẽ")}
-        ${renderAiDecisionBarSvg(directionPercentRows, "Entry Direction · Tỷ lệ", "Tỷ lệ LONG/SHORT trên tổng decision", "Tên biến", "ai-entry-percent")}
-        ${renderAiDecisionBarSvg(winrateRows, "Decision Performance · Winrate", "Hiệu suất quyết định · Tỷ lệ thắng", "Tên biến", "ai-winrate")}
-        ${renderAiDecisionBarSvg(profitRows, "Decision Performance · Profit Factor", "Hiệu suất quyết định · Hệ số lợi nhuận", "Tên biến", "ai-profit")}
-        ${renderAiDecisionBarSvg(confidenceRows, "AI Confidence", "Độ tin cậy của AI", "Tên biến", "ai-confidence")}
+        ${renderAiDecisionDonut(entryDirectionRows, "Entry Direction", "Phân bổ lệnh LONG và SHORT", entryTotal ? String(entryTotal) : "0", "lệnh")}
+        ${renderAiDecisionBarSvg(directionPercentRows, "Entry Direction · Tỷ lệ", "Tỷ lệ LONG/SHORT trên tổng decision", "ai-entry-percent")}
+        ${renderAiDecisionBarSvg(winrateRows, "Decision Performance · Winrate", "Hiệu suất quyết định · Tỷ lệ thắng", "ai-winrate")}
+        ${renderAiDecisionBarSvg(profitRows, "Decision Performance · Profit Factor", "Hiệu suất quyết định · Hệ số lợi nhuận", "ai-profit")}
+        ${renderAiDecisionBarSvg(confidenceRows, "AI Confidence", "Độ tin cậy của AI", "ai-confidence")}
       </div>
       <div class="module-chart-legend compact module-ai-variable-list">${renderModuleVariableRows(module, aiDecisionLegendRows(rows), false)}</div>
     </section>
@@ -1758,7 +1834,6 @@ function renderModuleBarChart(module, rows) {
           <line x1="${chartLeft}" y1="${chartBaseline}" x2="${chartLeft}" y2="${chartTop - 12}" class="module-bar-axis module-y-axis" marker-end="url(#module-y-arrow)"></line>
           <text x="${chartLeft - 12}" y="${chartTop - 16}" text-anchor="middle" class="module-axis-percent">%</text>
           ${bars}
-          <text x="${(chartLeft + chartRight) / 2}" y="236" text-anchor="middle" class="module-axis-caption">Trục X: giá trị hiện tại từng biến</text>
           <g class="module-chart-callout" hidden>
             <line class="module-chart-callout-line" x1="0" y1="0" x2="0" y2="0"></line>
             <rect class="module-chart-callout-box" x="0" y="0" width="0" height="0" rx="6"></rect>
