@@ -1565,16 +1565,32 @@ function aiDecisionChartRow(rows, key, chartIndex, colorIndex, tooltipValue = nu
   };
 }
 
+const AI_DECISION_CHART_META = new Map([
+  ["long_count", { chartIndex: 1, colorIndex: 1 }],
+  ["short_count", { chartIndex: 2, colorIndex: 2 }],
+  ["long_percent", { chartIndex: 4, colorIndex: 4 }],
+  ["short_percent", { chartIndex: 5, colorIndex: 5 }],
+  ["winrate_long", { chartIndex: 6, colorIndex: 6 }],
+  ["winrate_short", { chartIndex: 7, colorIndex: 7 }],
+  ["avg_confidence_long", { chartIndex: 8, colorIndex: 8 }],
+  ["avg_confidence_short", { chartIndex: 9, colorIndex: 9 }],
+  ["profit_factor_long", { chartIndex: 10, colorIndex: 10 }],
+  ["profit_factor_short", { chartIndex: 11, colorIndex: 11 }],
+]);
+
 function aiDecisionLegendRows(rows) {
   const hiddenKeys = new Set(["total_decisions", "no_trade_count"]);
   return (Array.isArray(rows) ? rows : []).map((row, index) => {
     const numeric = moduleNumericValue(row.value);
+    const chartMeta = AI_DECISION_CHART_META.get(String(row?.aiDecisionKey || ""));
+    const chartIndex = chartMeta?.chartIndex ?? index;
+    const colorIndex = chartMeta?.colorIndex ?? index;
     return {
       ...row,
       rawNumericValue: numeric === null ? 0 : numeric,
       chartValue: numeric && numeric > 0 ? numeric : 0.2,
-      chartIndex: index,
-      color: MODULE_CHART_COLORS[index % MODULE_CHART_COLORS.length],
+      chartIndex,
+      color: MODULE_CHART_COLORS[colorIndex % MODULE_CHART_COLORS.length],
     };
   }).filter((row) => !hiddenKeys.has(String(row?.aiDecisionKey || "")));
 }
