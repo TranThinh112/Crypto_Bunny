@@ -295,6 +295,17 @@ body.dark-mode .module-chart-callout-box {
   fill: rgba(5, 10, 13, 0.94);
 }
 
+body.dark-mode .module-help {
+  border-color: #536773;
+  background: #101a20;
+  color: var(--teal);
+}
+
+body.dark-mode .module-help-tooltip {
+  background: rgba(5, 10, 13, 0.96);
+  color: #eef5f6;
+}
+
 body.dark-mode .module-donut circle {
   fill: var(--panel);
 }
@@ -2010,6 +2021,60 @@ tr:last-child td {
 .module-chart-legend-item small,
 .module-chart-legend-item p {
   display: block;
+}
+
+.module-label-with-help {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.module-help {
+  position: relative;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  flex: 0 0 17px;
+  border: 1px solid #b8c7cf;
+  border-radius: 999px;
+  background: #fff;
+  color: var(--teal);
+  font-size: 11px;
+  font-weight: 900;
+  line-height: 1;
+  cursor: help;
+}
+
+.module-help-tooltip {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  width: min(280px, 78vw);
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: rgba(23, 32, 38, 0.94);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.35;
+  text-transform: none;
+  text-align: left;
+  white-space: normal;
+  box-shadow: 0 10px 24px rgba(10, 31, 68, 0.18);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 4px);
+  transition: opacity 0.14s ease, transform 0.14s ease;
+}
+
+.module-help:hover .module-help-tooltip,
+.module-help:focus-within .module-help-tooltip {
+  opacity: 1;
+  transform: translate(-50%, 0);
 }
 
 .module-chart-legend-item small {

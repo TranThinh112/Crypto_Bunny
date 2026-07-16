@@ -1477,6 +1477,10 @@ function renderModuleVariableRows(module, chartRows, showShare = false) {
     const share = moduleLegendShare(chartRows, row);
     const currentValue = moduleLegendCurrentValue(row);
     const displayLabel = moduleDisplayLabel(row);
+    const helpText = moduleHelpText(row);
+    const labelHtml = helpText
+      ? `<span class="module-label-with-help">${escapeHtml(displayLabel)}${renderHelpBadge(helpText)}</span>`
+      : escapeHtml(displayLabel);
     const delta = moduleDeltaInfo(module, row);
     const valueLine = row.isBiasWarning
       ? `<small class="module-chart-value-line"><span>Hiển thị:</span><span class="module-chart-delta flat">${escapeHtml(formatBiasWarningValue(row.value))}</span></small>`
@@ -1485,7 +1489,7 @@ function renderModuleVariableRows(module, chartRows, showShare = false) {
       <button class="module-chart-legend-item ${row.attention ? "attention" : ""}" type="button" data-chart-index="${chartIndex}" ${aiKey ? `data-ai-key="${escapeHtml(aiKey)}"` : ""} title="${escapeHtml(displayLabel)}: ${escapeHtml(currentValue)}">
         <span class="module-chart-swatch" style="background:${row.color}"></span>
         <div>
-          <strong>${escapeHtml(displayLabel)}</strong>
+          <strong>${labelHtml}</strong>
           ${valueLine}
           ${showShare ? `<small class="module-chart-share-line">Tỷ trọng trên biểu đồ: ${escapeHtml(share)}${row.attention ? " · cần chú ý" : ""}</small>` : ""}
           <p>${escapeHtml(row.meaning || "Biến dùng để theo dõi trạng thái module.")}</p>
@@ -1495,6 +1499,24 @@ function renderModuleVariableRows(module, chartRows, showShare = false) {
       </button>
     `;
   }).join("");
+}
+
+function moduleHelpText(row) {
+  const key = String(row?.aiDecisionKey || "");
+  if (key === "profit_factor_long" || key === "profit_factor_short") {
+    return "Profit Factor = tổng PnL lời / tổng giá trị tuyệt đối của PnL lỗ. Mốc 1.0 là hòa vốn; lớn hơn 1 là có lợi nhuận, nhỏ hơn 1 là lỗ nhiều hơn lời.";
+  }
+  return "";
+}
+
+function renderHelpBadge(helpText) {
+  if (!helpText) return "";
+  return `
+    <span class="module-help" aria-label="${escapeHtml(helpText)}">
+      ?
+      <span class="module-help-tooltip" role="tooltip">${escapeHtml(helpText)}</span>
+    </span>
+  `;
 }
 
 function moduleBarPercentValue(row, maxRawValue) {
@@ -1674,10 +1696,10 @@ function renderAiDecisionKpiGroup(module, rows) {
   `;
 }
 
-function renderChartTitle(title, subtitle) {
+function renderChartTitle(title, subtitle, helpText = "") {
   return `
     <div class="module-chart-title">
-      <strong>${escapeHtml(title)}</strong>
+      <strong>${escapeHtml(title)}${renderHelpBadge(helpText)}</strong>
       ${subtitle ? `<small>${escapeHtml(subtitle)}</small>` : ""}
     </div>
   `;
@@ -1815,9 +1837,12 @@ function renderAiDecisionBarSvg(rows, title, subtitle, chartId) {
     `;
   }).join("");
   const markerId = `module-y-arrow-${chartId}`;
+  const chartHelpText = isProfitFactorChart
+    ? "Profit Factor = tổng PnL lời / tổng giá trị tuyệt đối của PnL lỗ. Mốc 1.0 là hòa vốn; lớn hơn 1 là có lợi nhuận, nhỏ hơn 1 là lỗ nhiều hơn lời."
+    : "";
   return `
     <div>
-      ${renderChartTitle(title, subtitle)}
+      ${renderChartTitle(title, subtitle, chartHelpText)}
       <div class="module-chart-wrap">
         <svg class="module-bar-chart" viewBox="0 0 430 264" role="img" aria-label="${escapeHtml(title)}">
           <defs>
