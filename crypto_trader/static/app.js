@@ -17,6 +17,7 @@ const state = {
   previousSystemChecklistPayload: null,
   systemChecklistRefreshInFlight: false,
   lastSystemChecklistRefreshMs: 0,
+  selectedSystemModuleKey: null,
   running: false,
 };
 
@@ -1030,8 +1031,35 @@ function moduleStatusLabel(status) {
   return "LỖI";
 }
 
+function systemModuleKey(module) {
+  if (!module) return "";
+  return `${String(module.number ?? "").trim()}::${String(module.name || "").trim()}`;
+}
+
+function moduleDetailScrollTop() {
+  return refs.systemModuleDetail?.querySelector(".module-chart-scroll")?.scrollTop || 0;
+}
+
+function moduleDetailActiveChartIndex() {
+  return refs.systemModuleDetail?.querySelector(".module-chart-legend-item.active")?.getAttribute("data-chart-index") || null;
+}
+
+function moduleGroupCollapsedKeys() {
+  const keys = new Set();
+  if (!refs.systemModuleGrid) return keys;
+  refs.systemModuleGrid.querySelectorAll(".module-group").forEach((group) => {
+    const key = group.getAttribute("data-group-key");
+    const toggle = group.querySelector(".module-group-toggle");
+    const body = group.querySelector(".module-group-body");
+    const collapsed = toggle?.getAttribute("aria-expanded") === "false" || Boolean(body?.hidden);
+    if (key && collapsed) keys.add(key);
+  });
+  return keys;
+}
+
 function closeSystemModuleDetail() {
   if (refs.systemModuleOverlay) refs.systemModuleOverlay.hidden = true;
+  state.selectedSystemModuleKey = null;
   if (refs.systemModuleDetail) {
     refs.systemModuleDetail.classList.remove("module-detail-chart-scroll");
     refs.systemModuleDetail.innerHTML = "";
@@ -1047,6 +1075,7 @@ function closeSystemModuleDetail() {
 function renderHealthCriterionDetail(item) {
   if (!refs.systemModuleDetail || !refs.systemModuleOverlay || !item) return;
   const evidence = Array.isArray(item.evidence) ? item.evidence : [];
+  state.selectedSystemModuleKey = null;
   refs.systemModuleOverlay.hidden = false;
   refs.systemModuleDetail.classList.remove("module-detail-chart-scroll");
   refs.systemModuleDetail.innerHTML = `
@@ -2163,8 +2192,9 @@ function bindModuleChartInteractions() {
   });
 }
 
-function renderModuleDetail(module) {
+function renderModuleDetail(module, options = {}) {
   if (!refs.systemModuleDetail || !refs.systemModuleOverlay || !module) return;
+  state.selectedSystemModuleKey = systemModuleKey(module);
   const allRows = Array.isArray(module.stats) ? module.stats : [];
   const rows = moduleDisplayRows(module, allRows);
   const auxRows = moduleAuxRows(module, allRows);
@@ -2211,6 +2241,16 @@ function renderModuleDetail(module) {
   const closeBtn = refs.systemModuleDetail.querySelector(".module-close");
   if (closeBtn) closeBtn.addEventListener("click", closeSystemModuleDetail);
   bindModuleChartInteractions();
+  if (options.activeChartIndex !== null && options.activeChartIndex !== undefined) {
+    const activeItem = refs.systemModuleDetail.querySelector(`.module-chart-legend-item[data-chart-index="${options.activeChartIndex}"]`);
+    if (activeItem) activeItem.click();
+  }
+  if (Number.isFinite(Number(options.scrollTop))) {
+    const scrollNode = refs.systemModuleDetail.querySelector(".module-chart-scroll");
+    if (scrollNode) requestAnimationFrame(() => {
+      scrollNode.scrollTop = Number(options.scrollTop);
+    });
+  }
 }
 
 function groupedSystemModules(modules) {
@@ -2310,16 +2350,23 @@ function renderSystemModules(modules) {
   const totalModules = groups.reduce((sum, group) => sum + group.items.length, 0);
   if (refs.systemModuleStatus) refs.systemModuleStatus.textContent = `${totalModules} module theo nhóm`;
   if (!refs.systemModuleGrid) return;
-  refs.systemModuleGrid.innerHTML = "";
+  const collapsedGroupKeys = moduleGroupCollapsedKeys();
+  const selectedModuleKey = state.selectedSystemModuleKey;
+  const detailWasOpen = Boolean(selectedModuleKey && refs.systemModuleOverlay && !refs.systemModuleOverlay.hidden);
+  const detailScrollTop = detailWasOpen ? moduleDetailScrollTop() : null;
+  const activeChartIndex = detailWasOpen ? moduleDetailActiveChartIndex() : null;
+  let refreshedSelectedModule = null;
+  const fragment = document.createDocumentFragment();
   groups.forEach((group) => {
     const section = document.createElement("section");
     section.className = "module-group module-group-card";
     section.dataset.groupKey = group.key;
+    const isCollapsed = collapsedGroupKeys.has(group.key);
 
     const toggle = document.createElement("button");
     toggle.type = "button";
     toggle.className = "module-group-toggle";
-    toggle.setAttribute("aria-expanded", "true");
+    toggle.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
     toggle.innerHTML = `
       <div class="module-group-head">
         <div class="module-group-title-block">
@@ -2336,6 +2383,7 @@ function renderSystemModules(modules) {
 
     const body = document.createElement("div");
     body.className = "module-group-body module-card-body";
+    body.hidden = isCollapsed;
 
     toggle.addEventListener("click", () => {
       const expanded = toggle.getAttribute("aria-expanded") === "true";
@@ -2356,6 +2404,11 @@ function renderSystemModules(modules) {
       const card = document.createElement("button");
       card.type = "button";
       card.className = `module-item module-card ${module.status || "warn"}`;
+      const cardModuleKey = systemModuleKey(module);
+      if (cardModuleKey === selectedModuleKey) {
+        card.classList.add("selected");
+        refreshedSelectedModule = module;
+      }
       card.innerHTML = `
         <div class="module-item-head">
           <span class="module-number">#${escapeHtml(module.group_order || "-")}</span>
@@ -2375,6 +2428,7 @@ function renderSystemModules(modules) {
       card.addEventListener("click", () => {
         refs.systemModuleGrid.querySelectorAll(".module-item").forEach((item) => item.classList.remove("selected"));
         card.classList.add("selected");
+        state.selectedSystemModuleKey = cardModuleKey;
         renderModuleDetail(module);
       });
       body.appendChild(card);
@@ -2382,9 +2436,18 @@ function renderSystemModules(modules) {
 
     section.appendChild(toggle);
     section.appendChild(body);
-    refs.systemModuleGrid.appendChild(section);
+    fragment.appendChild(section);
   });
-  closeSystemModuleDetail();
+  refs.systemModuleGrid.replaceChildren(fragment);
+  if (detailWasOpen) {
+    if (refreshedSelectedModule) {
+      renderModuleDetail(refreshedSelectedModule, { scrollTop: detailScrollTop, activeChartIndex });
+    } else {
+      closeSystemModuleDetail();
+    }
+  } else {
+    closeSystemModuleDetail();
+  }
 }
 
 function renderSystemChecklist(payload) {
@@ -2394,7 +2457,7 @@ function renderSystemChecklist(payload) {
     refs.systemChecklistStatus.textContent = `${data.ok_count || 0}/${data.total || items.length} OK - ${data.date || "-"}`;
   }
   if (refs.systemChecklistGrid) {
-    refs.systemChecklistGrid.innerHTML = "";
+    const fragment = document.createDocumentFragment();
     items.forEach((item) => {
       const card = document.createElement("button");
       card.type = "button";
@@ -2416,8 +2479,9 @@ function renderSystemChecklist(payload) {
         card.classList.add("selected");
         renderHealthCriterionDetail(item);
       });
-      refs.systemChecklistGrid.appendChild(card);
+      fragment.appendChild(card);
     });
+    refs.systemChecklistGrid.replaceChildren(fragment);
   }
   renderSystemModules(data.modules || []);
   const storage = data.storage || {};
@@ -2980,8 +3044,8 @@ renderHealthCriterionDetail = function renderHealthCriterionDetailPatched(item) 
 };
 
 const renderModuleDetailOriginal = renderModuleDetail;
-renderModuleDetail = function renderModuleDetailPatched(module) {
-  renderModuleDetailOriginal(module);
+renderModuleDetail = function renderModuleDetailPatched(module, options = {}) {
+  renderModuleDetailOriginal(module, options);
   normalizeVietnameseUi(refs.systemModuleDetail || document.body);
 };
 
