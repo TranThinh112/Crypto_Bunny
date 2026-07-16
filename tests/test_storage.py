@@ -8,6 +8,7 @@ from unittest.mock import patch
 from crypto_trader.atlas_mirror import atlas_database, atlas_database_for_collection
 from crypto_trader.models import Decision, RiskCheck, TradeCandidate
 from crypto_trader.storage import (
+    clear_dashboard_snapshot_cache,
     compact_market_scan_observations,
     ensure_ai_model_version,
     prune_decision_history,
@@ -406,6 +407,31 @@ class StorageTest(TestCase):
         self.assertTrue(set(protected_keys).issubset(remaining))
         self.assertIn("system_checklist:recent", remaining)
         self.assertIn("telegram_last_message_id:recent", remaining)
+
+    def test_clear_dashboard_snapshot_cache_deletes_old_snapshot_keys(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config = self._config(tmpdir)
+            collection = atlas_database(config)["journal_state"]
+            for key in (
+                "dashboard_snapshot:analytics:v=old",
+                "dashboard_snapshot:scan-memory:v=old",
+                "dashboard_snapshot:version",
+                "system_checklist_current",
+            ):
+                collection.replace_one(
+                    {"_id": key},
+                    {"_id": key, "key": key, "value": "old", "updated_at": "2026-01-01T00:00:00+00:00"},
+                    upsert=True,
+                )
+
+            clear_dashboard_snapshot_cache(config)
+            remaining = {row["key"]: row["value"] for row in collection.find({}, {"_id": 0, "key": 1, "value": 1})}
+
+        self.assertNotIn("dashboard_snapshot:analytics:v=old", remaining)
+        self.assertNotIn("dashboard_snapshot:scan-memory:v=old", remaining)
+        self.assertIn("dashboard_snapshot:version", remaining)
+        self.assertNotEqual(remaining["dashboard_snapshot:version"], "old")
+        self.assertIn("system_checklist_current", remaining)
 
     def test_save_pending_order_keeps_insert_when_prune_times_out(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:

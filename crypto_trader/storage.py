@@ -1278,13 +1278,22 @@ def delete_journal_state(config: dict[str, Any], key: str) -> None:
     _mongo_collection(config, "journal_state").delete_one({"_id": key})
     _journal_state_cache_invalidate(config, key)
     return
-def delete_journal_state_prefix(config: dict[str, Any], prefix: str) -> None:
+def delete_journal_state_prefix(config: dict[str, Any], prefix: str, *, preserve_keys: set[str] | None = None) -> int:
     _ensure_mongo_write_allowed(config)
-    _mongo_collection(config, "journal_state").delete_many({"key": {"$regex": f"^{prefix}"}})
+    query: dict[str, Any] = {"key": {"$regex": f"^{re.escape(prefix)}"}}
+    if preserve_keys:
+        query = {
+            "$and": [
+                {"key": {"$regex": f"^{re.escape(prefix)}"}},
+                {"key": {"$nin": sorted(preserve_keys)}},
+            ]
+        }
+    deleted = int(_mongo_collection(config, "journal_state").delete_many(query).deleted_count or 0)
     _journal_state_cache_invalidate_prefix(config, prefix)
-    return
+    return deleted
 def clear_dashboard_snapshot_cache(config: dict[str, Any]) -> None:
     _ensure_mongo_write_allowed(config)
+    delete_journal_state_prefix(config, DASHBOARD_SNAPSHOT_PREFIX, preserve_keys={DASHBOARD_SNAPSHOT_VERSION_KEY})
     set_journal_state(config, DASHBOARD_SNAPSHOT_VERSION_KEY, datetime.now(timezone.utc).isoformat())
 
 
