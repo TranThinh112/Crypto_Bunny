@@ -1854,7 +1854,7 @@ function renderAiDecisionBarSvg(rows, title, subtitle, chartId) {
           ${profitFactorMarker}
           <line x1="${chartLeft}" y1="${chartBaseline}" x2="${chartRight}" y2="${chartBaseline}" class="module-bar-axis"></line>
           <line x1="${chartLeft}" y1="${chartBaseline}" x2="${chartLeft}" y2="${chartTop - 12}" class="module-bar-axis module-y-axis" marker-end="url(#${markerId})"></line>
-          <text x="${chartLeft - 12}" y="${chartTop - 16}" text-anchor="middle" class="module-axis-percent">${isProfitFactorChart ? "x" : "%"}</text>
+          <text x="${chartLeft - 12}" y="${chartTop - 16}" text-anchor="middle" class="module-axis-percent">${isProfitFactorChart ? "hệ số" : "%"}</text>
           ${bars}
           <g class="module-chart-callout" hidden>
             <line class="module-chart-callout-line" x1="0" y1="0" x2="0" y2="0"></line>
