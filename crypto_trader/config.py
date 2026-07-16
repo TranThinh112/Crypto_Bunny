@@ -339,7 +339,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "ai_experiments_keep_days": 365,
         "replay_history_keep_days": 30,
         "paper_trades_keep_days": 30,
-        "market_regime_history_keep_days": 14,
+        "market_regime_history_keep_days": 7,
     },
     "runtime_sync": {
         "position_close_grace_seconds": 120,
