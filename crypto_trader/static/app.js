@@ -1501,10 +1501,17 @@ function renderModuleVariableRows(module, chartRows, showShare = false) {
   }).join("");
 }
 
+const PROFIT_FACTOR_HELP_TEXT = [
+  "Profit Factor = tổng PnL lời / tổng giá trị tuyệt đối của PnL lỗ.",
+  "Ý nghĩa: cho biết hướng LONG/SHORT lời gấp bao nhiêu lần phần lỗ của chính hướng đó.",
+  "Mốc 1.0 là hòa vốn; >1 là lời nhiều hơn lỗ, <1 là lỗ nhiều hơn lời.",
+  "Dùng để so sánh LONG và SHORT: hướng nào hệ số cao hơn thì đang kiếm tiền hiệu quả hơn.",
+].join(" ");
+
 function moduleHelpText(row) {
   const key = String(row?.aiDecisionKey || "");
   if (key === "profit_factor_long" || key === "profit_factor_short") {
-    return "Profit Factor = tổng PnL lời / tổng giá trị tuyệt đối của PnL lỗ. Mốc 1.0 là hòa vốn; lớn hơn 1 là có lợi nhuận, nhỏ hơn 1 là lỗ nhiều hơn lời.";
+    return PROFIT_FACTOR_HELP_TEXT;
   }
   return "";
 }
@@ -1837,9 +1844,7 @@ function renderAiDecisionBarSvg(rows, title, subtitle, chartId) {
     `;
   }).join("");
   const markerId = `module-y-arrow-${chartId}`;
-  const chartHelpText = isProfitFactorChart
-    ? "Profit Factor = tổng PnL lời / tổng giá trị tuyệt đối của PnL lỗ. Mốc 1.0 là hòa vốn; lớn hơn 1 là có lợi nhuận, nhỏ hơn 1 là lỗ nhiều hơn lời."
-    : "";
+  const chartHelpText = isProfitFactorChart ? PROFIT_FACTOR_HELP_TEXT : "";
   return `
     <div>
       ${renderChartTitle(title, subtitle, chartHelpText)}
