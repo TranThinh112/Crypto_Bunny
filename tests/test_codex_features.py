@@ -282,12 +282,13 @@ class CodexFeaturesTest(TestCase):
 
         stats = ai_trade_decision_stats(self._config())
 
-        self.assertEqual(stats["totalDecisions"], 3)
+        self.assertEqual(stats["totalDecisions"], 2)
+        self.assertEqual(stats["totalRecords"], 3)
         self.assertEqual(stats["longCount"], 1)
         self.assertEqual(stats["shortCount"], 1)
         self.assertEqual(stats["noTradeCount"], 0)
-        self.assertEqual(stats["longPercent"], 33.33)
-        self.assertEqual(stats["shortPercent"], 33.33)
+        self.assertEqual(stats["longPercent"], 50.0)
+        self.assertEqual(stats["shortPercent"], 50.0)
         self.assertEqual(stats["winrateLong"], 100.0)
         self.assertEqual(stats["winrateShort"], 0.0)
         self.assertEqual(stats["avgConfidenceLong"], 91.0)
@@ -337,7 +338,10 @@ class CodexFeaturesTest(TestCase):
 
         stats = ai_trade_decision_stats(config)
 
-        self.assertEqual(stats["totalDecisions"], 3)
+        self.assertEqual(stats["totalDecisions"], 5)
+        self.assertEqual(stats["totalRecords"], 3)
         self.assertEqual(stats["longCount"], 1)
         self.assertEqual(stats["shortCount"], 1)
         self.assertEqual(stats["noTradeCount"], 3)
+        self.assertEqual(stats["longPercent"], 20.0)
+        self.assertEqual(stats["shortPercent"], 20.0)

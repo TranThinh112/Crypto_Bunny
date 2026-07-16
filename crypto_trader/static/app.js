@@ -1296,12 +1296,12 @@ function moduleChangedVariableCount(module, rows = null) {
 }
 
 const AI_DECISION_ROW_CONFIG = [
-  ["total_decisions", "Tổng số quyết định của AI", "Tổng số lần AI giao dịch đã đưa ra quyết định và được ghi nhận vào hệ thống.", "AI đã đưa ra nhiều quyết định hơn.", "AI đưa ra ít quyết định hơn."],
+  ["total_decisions", "Tổng quyết định AI thực", "LONG + SHORT + số lần GPT-5.5 từ chối hoặc xóa setup; không tính log scan NO_TRADE thường.", "AI đã đưa ra nhiều quyết định thực hơn.", "AI đưa ra ít quyết định thực hơn."],
   ["long_count", "Số LONG", "Số lần AI quyết định ENTER_LONG.", "AI ưu tiên LONG nhiều hơn.", "AI giảm số quyết định LONG."],
   ["short_count", "Số SHORT", "Số lần AI quyết định ENTER_SHORT.", "AI ưu tiên SHORT nhiều hơn.", "AI giảm số quyết định SHORT."],
   ["no_trade_count", "5.5 từ chối/xóa setup", "Số lần GPT-5.5 từ chối vào lệnh hoặc xóa setup; không tính các lần giữ setup.", "5.5 từ chối/xóa setup nhiều hơn.", "5.5 từ chối/xóa setup ít hơn."],
-  ["long_percent", "Tỷ lệ LONG", "Tỷ lệ quyết định LONG trên tổng số decision.", "AI đang thiên về LONG.", "AI giảm xu hướng LONG."],
-  ["short_percent", "Tỷ lệ SHORT", "Tỷ lệ quyết định SHORT trên tổng số decision.", "AI đang thiên về SHORT.", "AI giảm xu hướng SHORT."],
+  ["long_percent", "Tỷ lệ LONG", "Tỷ lệ quyết định LONG trên tổng quyết định AI thực.", "AI đang thiên về LONG.", "AI giảm xu hướng LONG."],
+  ["short_percent", "Tỷ lệ SHORT", "Tỷ lệ quyết định SHORT trên tổng quyết định AI thực.", "AI đang thiên về SHORT.", "AI giảm xu hướng SHORT."],
   ["winrate_long", "Winrate LONG", "Tỷ lệ thắng của các lệnh LONG.", "LONG đang hoạt động hiệu quả hơn.", "Hiệu quả LONG giảm."],
   ["winrate_short", "Winrate SHORT", "Tỷ lệ thắng của các lệnh SHORT.", "SHORT đang hoạt động hiệu quả hơn.", "Hiệu quả SHORT giảm."],
   ["profit_factor_long", "Profit Factor LONG", "Hiệu quả sinh lời của các lệnh LONG. Giá trị lớn hơn 1 cho thấy LONG đang có lợi nhuận.", "Hiệu quả LONG tăng.", "Hiệu quả LONG giảm."],

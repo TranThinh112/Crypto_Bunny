@@ -1418,11 +1418,12 @@ def recent_ai_trade_decisions(
 
 def ai_trade_decision_stats(config: dict[str, Any]) -> dict[str, Any]:
     rows = list_ai_trade_decision_stat_rows(config, limit=5000)
-    total = len(rows)
+    raw_total = len(rows)
     long_rows = [row for row in rows if row.get("decision") == "ENTER_LONG"]
     short_rows = [row for row in rows if row.get("decision") == "ENTER_SHORT"]
     ai_call_stats = _load_ai_call_status_stats(config)
     no_trade_count = max(0, int(ai_call_stats.get("no_trade_count") or 0))
+    total = len(long_rows) + len(short_rows) + no_trade_count
 
     def winrate(items: list[dict[str, Any]]) -> float:
         closed = [row for row in items if row.get("trade_status") in {"WIN", "LOSS", "BREAKEVEN"}]
@@ -1449,6 +1450,7 @@ def ai_trade_decision_stats(config: dict[str, Any]) -> dict[str, Any]:
         warning = f"Bias SHORT dang chiem {short_ratio:.2f}%"
     return {
         "totalDecisions": total,
+        "totalRecords": raw_total,
         "longCount": len(long_rows),
         "shortCount": len(short_rows),
         "noTradeCount": no_trade_count,
