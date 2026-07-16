@@ -1546,6 +1546,28 @@ function formatAxisPercentLabel(value) {
   })}%`;
 }
 
+function niceAutoFactorAxisMax(maxValue) {
+  const raw = Math.max(0, Number(maxValue || 0));
+  const target = Math.max(raw, 1) * 1.2;
+  const exponent = Math.floor(Math.log10(target));
+  const base = 10 ** exponent;
+  const mantissas = [1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 8, 10];
+  for (const mantissa of mantissas) {
+    const candidate = mantissa * base;
+    if (candidate >= target) return candidate;
+  }
+  return 10 * base;
+}
+
+function formatAxisFactorLabel(value) {
+  const numeric = Number(value || 0);
+  if (Math.abs(numeric) < 1e-9) return "0";
+  return numeric.toLocaleString("en-US", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: numeric < 10 ? 2 : 1,
+  });
+}
+
 function aiDecisionRow(rows, key) {
   return (Array.isArray(rows) ? rows : []).find((row) => row.aiDecisionKey === key) || null;
 }
@@ -1734,16 +1756,26 @@ function renderAiDecisionBarSvg(rows, title, subtitle, chartId) {
   const chartBaseline = 196;
   const chartHeight = chartBaseline - chartTop;
   const barWidth = (chartRight - chartLeft - 10) / chartRows.length;
-  const autoScaleYAxis = ["ai-entry-percent", "ai-winrate", "ai-profit"].includes(chartId);
+  const isProfitFactorChart = chartId === "ai-profit";
+  const autoScaleYAxis = ["ai-entry-percent", "ai-winrate"].includes(chartId);
   const barPercentValues = chartRows.map((row) => moduleBarPercentValue(row, maxRawValue));
-  const maxPercentValue = Math.max(...barPercentValues, 0);
-  const yAxisMax = autoScaleYAxis ? niceAutoPercentAxisMax(maxPercentValue) : 100;
-  const tickValues = autoScaleYAxis
+  const barAxisValues = isProfitFactorChart ? rawValues : barPercentValues;
+  const maxAxisValue = Math.max(...barAxisValues, 0);
+  const yAxisMax = isProfitFactorChart
+    ? niceAutoFactorAxisMax(maxAxisValue)
+    : autoScaleYAxis
+      ? niceAutoPercentAxisMax(maxAxisValue)
+      : 100;
+  const tickValues = (autoScaleYAxis || isProfitFactorChart)
     ? [0, 1, 2, 3, 4].map((step) => yAxisMax * step / 4)
     : [25, 50, 75, 100];
   const yTicks = tickValues.map((tickValue) => {
     const y = chartBaseline - (tickValue / yAxisMax) * chartHeight;
-    const tickLabel = autoScaleYAxis ? formatAxisPercentLabel(tickValue) : `${formatFixed2(tickValue)}%`;
+    const tickLabel = isProfitFactorChart
+      ? formatAxisFactorLabel(tickValue)
+      : autoScaleYAxis
+        ? formatAxisPercentLabel(tickValue)
+        : `${formatFixed2(tickValue)}%`;
     const gridLine = Math.abs(tickValue) < 1e-9
       ? ""
       : `<line x1="${chartLeft}" y1="${y}" x2="${chartRight}" y2="${y}" class="module-bar-grid"></line>`;
@@ -1754,9 +1786,20 @@ function renderAiDecisionBarSvg(rows, title, subtitle, chartId) {
       </g>
     `;
   }).join("");
+  const profitFactorMarker = isProfitFactorChart && yAxisMax >= 1
+    ? (() => {
+      const markerY = chartBaseline - (1 / yAxisMax) * chartHeight;
+      return `
+        <g>
+          <line x1="${chartLeft}" y1="${markerY}" x2="${chartRight}" y2="${markerY}" class="module-bar-grid"></line>
+          <text x="${chartRight}" y="${markerY - 7}" text-anchor="end" class="module-axis-label">mốc 1.0</text>
+        </g>
+      `;
+    })()
+    : "";
   const bars = chartRows.map((row, index) => {
-    const percentValue = barPercentValues[index] ?? 0;
-    const scaledPercent = Math.max(0, Math.min(100, percentValue / yAxisMax * 100));
+    const axisValue = barAxisValues[index] ?? 0;
+    const scaledPercent = Math.max(0, Math.min(100, axisValue / yAxisMax * 100));
     const height = Math.max(8, scaledPercent / 100 * chartHeight);
     const x = chartLeft + index * barWidth + barWidth * 0.18;
     const y = chartBaseline - height;
@@ -1783,9 +1826,10 @@ function renderAiDecisionBarSvg(rows, title, subtitle, chartId) {
             </marker>
           </defs>
           ${yTicks}
+          ${profitFactorMarker}
           <line x1="${chartLeft}" y1="${chartBaseline}" x2="${chartRight}" y2="${chartBaseline}" class="module-bar-axis"></line>
           <line x1="${chartLeft}" y1="${chartBaseline}" x2="${chartLeft}" y2="${chartTop - 12}" class="module-bar-axis module-y-axis" marker-end="url(#${markerId})"></line>
-          <text x="${chartLeft - 12}" y="${chartTop - 16}" text-anchor="middle" class="module-axis-percent">%</text>
+          <text x="${chartLeft - 12}" y="${chartTop - 16}" text-anchor="middle" class="module-axis-percent">${isProfitFactorChart ? "x" : "%"}</text>
           ${bars}
           <g class="module-chart-callout" hidden>
             <line class="module-chart-callout-line" x1="0" y1="0" x2="0" y2="0"></line>
