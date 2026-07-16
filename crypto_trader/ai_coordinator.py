@@ -1215,42 +1215,93 @@ def _validated_ai_symbols(review: dict[str, Any], allowed_symbols: set[str], fal
     return symbols[:max_symbols]
 
 
-def _mini_ai_reason_vi(review: dict[str, Any], pool_symbols: list[str], selected_symbols: list[str]) -> str:
+def _mini_symbol_name(symbol: str) -> str:
+    return str(symbol or "").split("/")[0] or str(symbol or "-")
+
+
+def _mini_reason_signals(raw_reason: str) -> tuple[list[str], list[str]]:
+    lowered = raw_reason.lower()
+    keep_reasons: list[str] = []
+    reject_reasons: list[str] = []
+    if "4h/1h/5m" in lowered and ("align" in lowered or "aligned" in lowered):
+        keep_reasons.append("4h, 1h và 5m cùng chiều với setup")
+    elif "1h/5m" in lowered and ("align" in lowered or "aligned" in lowered):
+        keep_reasons.append("1h và 5m cùng chiều với setup")
+    elif "1h" in lowered and "5m" in lowered and ("confirm" in lowered or "confirmation" in lowered):
+        keep_reasons.append("có xác nhận từ 1h và 5m")
+    if "rr acceptable" in lowered or "rr đạt" in lowered or "risk reward" in lowered:
+        keep_reasons.append("RR đạt yêu cầu")
+    if "spread low" in lowered or "clean spread" in lowered or "spread thấp" in lowered:
+        keep_reasons.append("spread thấp")
+    if "strong volume" in lowered or "volume strong" in lowered or "volume hỗ trợ" in lowered:
+        keep_reasons.append("volume hỗ trợ")
+    if "no news risk" in lowered or "không có rủi ro tin" in lowered:
+        keep_reasons.append("không có rủi ro tin tức lớn")
+    if "best" in lowered or "better" in lowered:
+        keep_reasons.append("điểm setup nổi bật hơn nhóm còn lại")
+
+    if "critical health" in lowered:
+        reject_reasons.append("sức khỏe hệ thống đang ở mức nghiêm trọng")
+    if "4h bias missing" in lowered or "4h absent" in lowered or "missing 4h" in lowered or "4h not provided" in lowered:
+        reject_reasons.append("thiếu dữ liệu hoặc xác nhận xu hướng 4h")
+    if "missing 15m" in lowered or "15m confirmation" in lowered or "confirm 15m" in lowered:
+        reject_reasons.append("xác nhận 15m chưa đủ")
+    if "5m/1h conflict" in lowered or ("5m" in lowered and "1h" in lowered and "conflict" in lowered):
+        reject_reasons.append("xu hướng 5m và 1h xung đột")
+    elif "5m" in lowered and ("conflict" in lowered or "mixed" in lowered):
+        reject_reasons.append("5m còn xung đột")
+    if "1h" in lowered and "conflict" in lowered:
+        reject_reasons.append("1h còn xung đột")
+    if "volume is weak" in lowered or "weak volume" in lowered or "missing volume" in lowered or "volume yếu" in lowered:
+        reject_reasons.append("volume yếu hoặc thiếu volume xác nhận")
+    if "rr only" in lowered or "rr just" in lowered:
+        reject_reasons.append("RR chỉ ở mức tối thiểu")
+    if "confidence capped" in lowered or "modest confidence" in lowered or "confidence modest" in lowered:
+        reject_reasons.append("độ tin cậy bị giới hạn")
+    return keep_reasons, reject_reasons
+
+
+def _mini_ai_reason_parts_vi(review: dict[str, Any], pool_symbols: list[str], selected_symbols: list[str]) -> dict[str, str]:
     rejected = [symbol for symbol in pool_symbols if symbol not in selected_symbols]
     scores = review.get("setup_scores") if isinstance(review.get("setup_scores"), dict) else {}
     score_labels = [
-        f"{symbol.split('/')[0]} {scores[symbol]}/100"
+        f"{_mini_symbol_name(symbol)} {scores[symbol]}/100"
         for symbol in rejected
         if symbol in scores
     ]
-    if not selected_symbols:
-        names = ", ".join(symbol.split("/")[0] for symbol in rejected) or "toàn bộ setup"
-        result = f"Mini loại {names}"
-        if score_labels:
-            result += f" (điểm setup: {', '.join(score_labels)})"
-    else:
-        kept = ", ".join(symbol.split("/")[0] for symbol in selected_symbols)
-        result = f"Mini giữ {kept}"
-        if rejected:
-            result += "; loại " + ", ".join(symbol.split("/")[0] for symbol in rejected)
-
     raw_reason = str(review.get("reason") or "").strip()
-    lowered = raw_reason.lower()
-    reasons: list[str] = []
-    if "critical health" in lowered:
-        reasons.append("sức khỏe hệ thống đang ở mức nghiêm trọng")
-    if "4h absent" in lowered or "missing 4h" in lowered:
-        reasons.append("thiếu dữ liệu hoặc xác nhận xu hướng 4h")
-    if "5m/1h conflict" in lowered or ("5m" in lowered and "1h" in lowered and "conflict" in lowered):
-        reasons.append("xu hướng 5m và 1h xung đột")
-    rr_match = re.search(r"\brr\s*([0-9.]+)", raw_reason, flags=re.IGNORECASE)
-    if rr_match:
-        reasons.append(f"RR {rr_match.group(1)} chưa đủ tốt")
-    if "missing volume" in lowered or "volume support" in lowered:
-        reasons.append("thiếu volume xác nhận")
-    if not reasons:
-        reasons.append("AI nội bộ đánh giá setup chưa đủ chất lượng để đi tiếp")
-    return result + ". Lý do: " + "; ".join(reasons) + "."
+    keep_reasons, reject_reasons = _mini_reason_signals(raw_reason)
+    if not selected_symbols:
+        names = ", ".join(_mini_symbol_name(symbol) for symbol in rejected) or "toàn bộ setup"
+        selection_reason = "Mini chưa chọn cặp nào vì chưa có setup đủ điều kiện đi tiếp."
+        rejection_reason = f"Mini loại {names}"
+        if score_labels:
+            rejection_reason += f" (điểm setup: {', '.join(score_labels)})"
+        rejection_reason += ". Lý do: " + "; ".join(reject_reasons or ["setup chưa đủ chất lượng để đi tiếp"]) + "."
+    else:
+        kept = ", ".join(_mini_symbol_name(symbol) for symbol in selected_symbols)
+        selection_reason = f"Mini giữ {kept} vì " + "; ".join(
+            keep_reasons or ["có điểm setup tốt nhất trong nhóm Mini"]
+        ) + "."
+        if rejected:
+            names = ", ".join(_mini_symbol_name(symbol) for symbol in rejected)
+            rejection_reason = f"Mini loại {names}"
+            if score_labels:
+                rejection_reason += f" (điểm setup: {', '.join(score_labels)})"
+            rejection_reason += ". Lý do: " + "; ".join(reject_reasons or ["điểm setup yếu hơn cặp được chọn"]) + "."
+        elif reject_reasons:
+            rejection_reason = "Điểm cần theo dõi: " + "; ".join(reject_reasons) + "."
+        else:
+            rejection_reason = "Không có cặp khác bị loại trong nhóm Mini."
+    return {
+        "selection_reason_vi": selection_reason,
+        "rejection_reason_vi": rejection_reason,
+        "decision_reason_vi": f"{selection_reason} {rejection_reason}".strip(),
+    }
+
+
+def _mini_ai_reason_vi(review: dict[str, Any], pool_symbols: list[str], selected_symbols: list[str]) -> str:
+    return _mini_ai_reason_parts_vi(review, pool_symbols, selected_symbols)["decision_reason_vi"]
 
 
 def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
@@ -1398,19 +1449,29 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
 
     result["approved_symbols"] = list(result.get("selected_symbols") or [])
     result["status"] = "done" if has_mini_pool else "waiting_lc"
-    result["decision_reason_vi"] = (
-        _mini_ai_reason_vi(
+    mini_reason_parts = (
+        _mini_ai_reason_parts_vi(
             result["ai_review"],
             list(result.get("pool_symbols") or []),
             list(result.get("selected_symbols") or []),
         )
         if result.get("ai_review")
-        else (
-            "Mini chưa chọn cặp nào vì hiện chưa có LC 4h đủ điều kiện."
-            if not result["approved_symbols"]
-            else "Mini đã chọn từ nhóm LC 4h hiện tại dựa trên Win Rate, chất lượng setup, xu hướng và chỉ báo."
-        )
+        else {}
     )
+    if mini_reason_parts:
+        result.update(mini_reason_parts)
+    elif not result["approved_symbols"]:
+        result["selection_reason_vi"] = "Mini chưa chọn cặp nào vì hiện chưa có LC 4h đủ điều kiện."
+        result["rejection_reason_vi"] = str(
+            (local_result or {}).get("skip_reason") or "Không có setup đủ điều kiện đi tiếp."
+        )
+        result["decision_reason_vi"] = f"{result['selection_reason_vi']} Lý do loại: {result['rejection_reason_vi']}"
+    else:
+        result["selection_reason_vi"] = (
+            "Mini đã chọn từ nhóm LC 4h hiện tại dựa trên Win Rate, chất lượng setup, xu hướng và chỉ báo."
+        )
+        result["rejection_reason_vi"] = "Các cặp không được chọn có điểm tổng hợp yếu hơn cặp được giữ."
+        result["decision_reason_vi"] = f"{result['selection_reason_vi']} {result['rejection_reason_vi']}"
     saved_result = save_lc_pipeline_mini_scan(config, result)
     notify_mini_pool_summary(
         config,

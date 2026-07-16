@@ -1544,6 +1544,8 @@ def _compact_mini_scan(scan: dict[str, Any]) -> dict[str, Any]:
         "ai_review_error": scan.get("ai_review_error"),
         "fallback": scan.get("fallback"),
         "skip_reason": scan.get("skip_reason"),
+        "selection_reason_vi": scan.get("selection_reason_vi"),
+        "rejection_reason_vi": scan.get("rejection_reason_vi"),
         "decision_reason_vi": scan.get("decision_reason_vi"),
     }
     compact["candidates"] = [
@@ -1719,9 +1721,14 @@ def latest_lc_pipeline_mini_scan(config: dict[str, Any]) -> dict[str, Any] | Non
     selection_slot_stale = bool(scan_slot and current_slot and current_slot > scan_slot)
     ai_review = scan.get("ai_review") if isinstance(scan.get("ai_review"), dict) else {}
     ai_decision = str(ai_review.get("decision") or "").strip().upper()
+    scan_status = str(scan.get("status") or "")
+    setup_deleted_by_5_5 = scan_status == "setup_deleted_by_5_5"
     ai_explicitly_rejected = (
-        ai_decision in {"NO_TRADE", "NONE", "REJECTED", "REJECT"}
-        or isinstance(ai_review.get("approved_symbols"), list) and not ai_review.get("approved_symbols")
+        not setup_deleted_by_5_5
+        and (
+            ai_decision in {"NO_TRADE", "NONE", "REJECTED", "REJECT"}
+            or isinstance(ai_review.get("approved_symbols"), list) and not ai_review.get("approved_symbols")
+        )
     )
     selected_symbols = (
         []
@@ -1733,7 +1740,7 @@ def latest_lc_pipeline_mini_scan(config: dict[str, Any]) -> dict[str, Any] | Non
     selected_missing_from_current_pool = [
         symbol for symbol in original_selected_symbols if current_symbols and symbol not in current_symbols
     ]
-    status = "ai_rejected" if ai_explicitly_rejected else "stale_selection" if selection_stale else scan.get("status")
+    status = "ai_rejected" if ai_explicitly_rejected else "stale_selection" if selection_stale else scan_status
     skip_reason = scan.get("skip_reason")
     if ai_explicitly_rejected:
         skip_reason = "Mini AI returned NO_TRADE; no setup may continue to LC_OKX"
@@ -2356,6 +2363,19 @@ def _mini_reason_vi(scan: dict[str, Any]) -> str:
     return "Mini chưa chọn cặp nào sau khi rà lại nhóm LC 4h."
 
 
+def _mini_reason_notification_lines(scan: dict[str, Any]) -> list[str]:
+    selection_reason = str(scan.get("selection_reason_vi") or "").strip()
+    rejection_reason = str(scan.get("rejection_reason_vi") or "").strip()
+    if selection_reason or rejection_reason:
+        lines: list[str] = []
+        if selection_reason:
+            lines.append("Lý do chọn: " + selection_reason)
+        if rejection_reason:
+            lines.append("Lý do loại: " + rejection_reason)
+        return lines
+    return ["Lý do: " + str(scan.get("decision_reason_vi") or _mini_reason_vi(scan))]
+
+
 def _build_internal_lc_rows(
     rows: list[dict[str, Any]],
     *,
@@ -2501,7 +2521,7 @@ def _mini_notification_text(
             lines.append(f"{index}. {row.get('symbol', '-')} | {side} | {_source_label(row)}")
     else:
         lines.append("Mini chưa chọn được cặp nào.")
-    lines.append("Lý do: " + str(scan.get("decision_reason_vi") or _mini_reason_vi(scan)))
+    lines.extend(_mini_reason_notification_lines(scan))
     if scan.get("slot_id"):
         lines.append(f"Slot: {scan.get('slot_id')}")
     return "\n".join(lines)
@@ -3050,7 +3070,7 @@ def notify_mini_pool_summary(
             lines.append(f"{index}. {row.get('symbol', '-')} | {side} | {_source_label(row)}")
     else:
         lines.append("Mini chưa chọn được cặp nào.")
-    lines.append("Lý do: " + str(scan.get("decision_reason_vi") or _mini_reason_vi(scan)))
+    lines.extend(_mini_reason_notification_lines(scan))
     if scan.get("slot_id"):
         lines.append(f"Slot: {scan.get('slot_id')}")
     _append_internal_notification(

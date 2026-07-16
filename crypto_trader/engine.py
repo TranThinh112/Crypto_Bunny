@@ -55,6 +55,7 @@ from .strategy import build_candidates, enrich_quantities
 LC_PIPELINE_CANDIDATE_CACHE_KEY = "lc_pipeline_candidate_cache_v1"
 WAIT_SLOT_NOTIFICATION_HISTORY_KEY = "wait_slot_notification_history_v1"
 WAIT_SLOT_NOTIFICATION_COUNTER_KEY = "wait_slot_notification_counter_v1"
+MINI_SYSTEM_NOTIFICATION_HISTORY_KEY = "mini_system_notification_history_v1"
 
 
 def _report_progress(
@@ -272,6 +273,95 @@ def _notify_wait_slot_queued(
             _telegram_api_request(config, "sendMessage", payload)
         except Exception:
             return entry
+    return entry
+
+
+def _mini_system_notification_key(
+    *,
+    stage: str,
+    reason: str,
+    scan: dict[str, Any] | None,
+    candidate: TradeCandidate | None,
+) -> str:
+    symbol = str(getattr(candidate, "symbol", "") or "")
+    side = str(getattr(candidate, "side", "") or "")
+    slot_id = str((scan or {}).get("slot_id") or (scan or {}).get("created_at") or "unknown")
+    return "|".join([slot_id, stage, symbol, side, str(reason or "")[:180]])
+
+
+def _mini_system_notification_text(
+    config: dict[str, Any],
+    *,
+    stage: str,
+    reason: str,
+    scan: dict[str, Any] | None,
+    candidate: TradeCandidate | None,
+) -> str:
+    now = datetime.now(timezone.utc)
+    local_now = now.astimezone(_engine_timezone(config))
+    selected = [str(symbol) for symbol in (scan or {}).get("selected_symbols") or [] if str(symbol)]
+    pool = [str(symbol) for symbol in (scan or {}).get("pool_symbols") or [] if str(symbol)]
+    lines = [
+        "⚠️ Thông báo hệ thống",
+        f"Thời gian: {local_now.strftime('%d/%m/%y %H:%M:%S')}",
+        f"Bị chặn ở bước: {stage}",
+        f"Slot Mini: {(scan or {}).get('slot_id') or '-'}",
+        f"Trạng thái Mini: {(scan or {}).get('status') or '-'}",
+    ]
+    if candidate is not None:
+        lines.append(f"Cặp: {candidate.symbol} | {str(candidate.side or '-').upper()}")
+    if selected:
+        lines.append("Mini đã chọn: " + ", ".join(selected[:3]))
+    elif pool:
+        lines.append("Pool Mini: " + ", ".join(pool[:3]))
+    lines.append("Lý do chặn: " + (str(reason or "").strip() or "-"))
+    lines.append("Hành động: không tạo LC_OKX/không gọi bước sau cho setup này.")
+    return "\n".join(lines)
+
+
+def _notify_mini_system_block(
+    config: dict[str, Any],
+    *,
+    stage: str,
+    reason: str,
+    scan: dict[str, Any] | None,
+    candidate: TradeCandidate | None = None,
+) -> dict[str, Any] | None:
+    reason = str(reason or "").strip()
+    if not reason:
+        return None
+    fingerprint = _mini_system_notification_key(stage=stage, reason=reason, scan=scan, candidate=candidate)
+    try:
+        raw = get_journal_state(config, MINI_SYSTEM_NOTIFICATION_HISTORY_KEY)
+        history = json.loads(str(raw or "[]")) if raw else []
+    except Exception:
+        history = []
+    if not isinstance(history, list):
+        history = []
+    if any(isinstance(item, dict) and item.get("fingerprint") == fingerprint for item in history[-80:]):
+        return None
+    text = _mini_system_notification_text(config, stage=stage, reason=reason, scan=scan, candidate=candidate)
+    entry = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "fingerprint": fingerprint,
+        "stage": stage,
+        "reason": reason,
+        "symbol": getattr(candidate, "symbol", None),
+        "side": getattr(candidate, "side", None),
+        "slot_id": (scan or {}).get("slot_id"),
+        "text": text,
+    }
+    history.append(entry)
+    try:
+        set_journal_state(config, MINI_SYSTEM_NOTIFICATION_HISTORY_KEY, json.dumps(history[-80:], ensure_ascii=False))
+    except Exception:
+        pass
+    try:
+        from .notifier import send_telegram_message
+
+        send_telegram_message(config, text, with_buttons=False, replace_previous=False)
+    except Exception:
+        pass
     return entry
 
 
@@ -898,8 +988,17 @@ def _create_pending_from_internal_scan(
         "wait_slot": 0,
         "wait_slot_orders": [],
         "skipped": [],
+        "system_notifications": [],
     }
     if not result["enabled"] or not allowed:
+        notification = _notify_mini_system_block(
+            config,
+            stage="Mini -> LC_OKX",
+            reason=reason,
+            scan=internal_scan,
+        )
+        if notification:
+            result["system_notifications"].append(notification)
         return result
 
     approved = [str(symbol) for symbol in (internal_scan or {}).get("selected_symbols") or [] if str(symbol)]
@@ -918,15 +1017,34 @@ def _create_pending_from_internal_scan(
             or current_candidates_by_symbol.get(symbol)
         )
         if candidate is None:
+            skip_reason = "approved symbol not available in saved internal LC setup"
             result["skipped"].append(
                 {
                     "symbol": symbol,
-                    "reason": "approved symbol not available in saved internal LC setup",
+                    "reason": skip_reason,
                 }
             )
+            notification = _notify_mini_system_block(
+                config,
+                stage="Mini -> lấy setup đã lưu",
+                reason=skip_reason,
+                scan=internal_scan,
+            )
+            if notification:
+                result["system_notifications"].append(notification)
             continue
         if candidate.symbol in created_symbols:
-            result["skipped"].append({"symbol": candidate.symbol, "reason": "already pending or active in LC memory"})
+            skip_reason = "already pending or active in LC memory"
+            result["skipped"].append({"symbol": candidate.symbol, "reason": skip_reason})
+            notification = _notify_mini_system_block(
+                config,
+                stage="Mini -> kiểm tra trùng lệnh",
+                reason=skip_reason,
+                scan=internal_scan,
+                candidate=candidate,
+            )
+            if notification:
+                result["system_notifications"].append(notification)
             continue
         pending_risk_config = _mini_pending_risk_config(config)
         check = evaluate_candidate(
@@ -988,6 +1106,15 @@ def _create_pending_from_internal_scan(
                     "reason": check_reason,
                 }
             )
+            notification = _notify_mini_system_block(
+                config,
+                stage="Mini -> risk gate",
+                reason=check_reason,
+                scan=internal_scan,
+                candidate=candidate,
+            )
+            if notification:
+                result["system_notifications"].append(notification)
             continue
         journal_id = next_global_counter(config, "LC") if config.get("mode") != "dry_run" else None
         reviewed_candidate = candidate
@@ -1014,13 +1141,23 @@ def _create_pending_from_internal_scan(
                     journal_id=vt_id,
                 )
                 if not execution.submitted:
+                    skip_reason = f"OKX market entry failed: {execution.message}"
                     result["skipped"].append(
                         {
                             "symbol": candidate.symbol,
                             "side": candidate.side,
-                            "reason": f"OKX market entry failed: {execution.message}",
+                            "reason": skip_reason,
                         }
                     )
+                    notification = _notify_mini_system_block(
+                        config,
+                        stage="Mini -> Market",
+                        reason=skip_reason,
+                        scan=internal_scan,
+                        candidate=reviewed_candidate,
+                    )
+                    if notification:
+                        result["system_notifications"].append(notification)
                     continue
                 result["market"] += 1
                 created_symbols.add(candidate.symbol)
@@ -1039,6 +1176,8 @@ def _create_pending_from_internal_scan(
                 continue
             if not okx_review_allows_okx_submission(okx_review):
                 reason = str(okx_review.get("reason") or okx_review.get("decision") or "GPT-5.5 rejected LC_OKX setup")
+                cache_reason = str(okx_review.get("cache_reason") or "").strip()
+                notify_reason = f"{cache_reason}: {reason}" if cache_reason else reason
                 result["skipped"].append(
                     {
                         "symbol": candidate.symbol,
@@ -1046,6 +1185,15 @@ def _create_pending_from_internal_scan(
                         "reason": reason,
                     }
                 )
+                notification = _notify_mini_system_block(
+                    config,
+                    stage="Mini -> 5.5/LC_OKX",
+                    reason=notify_reason,
+                    scan=internal_scan,
+                    candidate=candidate,
+                )
+                if notification:
+                    result["system_notifications"].append(notification)
                 continue
         exchange_order_id: str | None = None
         order_status = "OPEN"
@@ -1060,13 +1208,23 @@ def _create_pending_from_internal_scan(
                 journal_id=journal_id,
             )
             if not execution.submitted or not execution.order_id:
+                skip_reason = f"OKX LC submit failed: {execution.message}"
                 result["skipped"].append(
                     {
                         "symbol": candidate.symbol,
                         "side": candidate.side,
-                        "reason": f"OKX LC submit failed: {execution.message}",
+                        "reason": skip_reason,
                     }
                 )
+                notification = _notify_mini_system_block(
+                    config,
+                    stage="Mini -> gửi lệnh chờ OKX",
+                    reason=skip_reason,
+                    scan=internal_scan,
+                    candidate=reviewed_candidate,
+                )
+                if notification:
+                    result["system_notifications"].append(notification)
                 continue
             exchange_order_id = execution.order_id
             order_status = "LC_OKX"

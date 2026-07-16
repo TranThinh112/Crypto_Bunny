@@ -189,6 +189,7 @@ class EngineMiniQueueTest(TestCase):
         with (
             patch("crypto_trader.engine.review_candidate_for_lc_okx", side_effect=lambda *args, **kwargs: (args[1], {"approved": False, "decision": "reject", "reason": "Setup khong du chat luong de vao Market"})),
             patch("crypto_trader.engine.execute_candidate") as execute,
+            patch("crypto_trader.notifier.send_telegram_message") as send_message,
         ):
             result = _create_pending_from_internal_scan(config, [_candidate()], scan, (5, set(), []), set())
 
@@ -196,6 +197,11 @@ class EngineMiniQueueTest(TestCase):
         self.assertEqual(result["created"], 0)
         self.assertEqual(len(result["skipped"]), 1)
         self.assertIn("Setup khong du chat luong", result["skipped"][0]["reason"])
+        self.assertEqual(len(result["system_notifications"]), 1)
+        message = send_message.call_args.args[1]
+        self.assertIn("Thông báo hệ thống", message)
+        self.assertIn("Mini -> 5.5/LC_OKX", message)
+        self.assertIn("Setup khong du chat luong", message)
         self.assertEqual(list_pending_orders(config, status="LC_OKX"), [])
 
     def test_mini_scan_submits_gpt_55_keep_monitor_to_okx_and_blocks_duplicate_review(self) -> None:
@@ -345,7 +351,8 @@ class EngineMiniQueueTest(TestCase):
         self.assertEqual(result["created"], 0)
         self.assertEqual(list_pending_orders(config, status="OPEN"), [])
 
-    def test_mini_scan_no_selected_uses_scan_skip_reason(self) -> None:
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_mini_scan_no_selected_uses_scan_skip_reason(self, send_telegram_message) -> None:
         config = self._config()
         scan = {
             "provider": "openai",
@@ -361,6 +368,8 @@ class EngineMiniQueueTest(TestCase):
         self.assertFalse(result["allowed"])
         self.assertEqual(result["reason"], "Mini AI returned NO_TRADE; no setup may continue to LC_OKX")
         self.assertEqual(result["created"], 0)
+        self.assertEqual(len(result["system_notifications"]), 1)
+        self.assertIn("Mini -> LC_OKX", send_telegram_message.call_args.args[1])
 
     def test_run_once_updates_lc_pipeline_before_running_mini_scan(self) -> None:
         config = self._config()

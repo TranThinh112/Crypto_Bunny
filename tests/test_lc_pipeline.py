@@ -2046,6 +2046,28 @@ class LcPipelineTest(TestCase):
         self.assertIn("Lý do: Mini đã chọn 2 cặp tốt nhất trong nhóm LC 4h.", message)
 
     @patch("crypto_trader.notifier.send_telegram_message")
+    def test_mini_pool_summary_splits_selection_and_rejection_reasons(self, send_message) -> None:
+        config = self._config()
+        config["ai"]["internal"]["lc_pipeline_notify_mini_pool_summary"] = True
+
+        notify_mini_pool_summary(
+            config,
+            [{"symbol": "KAITO/USDT:USDT", "side": "long", "source_slot": "4h", "source_index": 22}],
+            scan={
+                "mini_index": 1,
+                "selected_symbols": ["KAITO/USDT:USDT"],
+                "selection_reason_vi": "Mini giữ KAITO vì 1h và 5m cùng chiều với setup; RR đạt yêu cầu.",
+                "rejection_reason_vi": "Điểm cần theo dõi: thiếu dữ liệu hoặc xác nhận xu hướng 4h; volume yếu.",
+            },
+            slot_id="slot-1",
+        )
+
+        message = send_message.call_args.args[1]
+        self.assertIn("Lý do chọn: Mini giữ KAITO", message)
+        self.assertIn("Lý do loại: Điểm cần theo dõi", message)
+        self.assertNotIn("Lý do: Mini giữ KAITO", message)
+
+    @patch("crypto_trader.notifier.send_telegram_message")
     def test_mini_pool_summary_includes_four_hour_lineage_when_available(self, send_message) -> None:
         config = self._config()
         config["ai"]["internal"]["lc_pipeline_notify_mini_pool_summary"] = True
