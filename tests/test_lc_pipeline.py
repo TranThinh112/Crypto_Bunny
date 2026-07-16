@@ -1300,6 +1300,66 @@ class LcPipelineTest(TestCase):
         self.assertEqual(state["hourly_windows"][1]["top"], [])
 
     @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_four_hour_empty_summary_notifies_when_aligned_two_hour_pools_are_empty(
+        self,
+        send_message,
+        recheck_rows,
+    ) -> None:
+        config = self._config()
+        config["ai"]["internal"]["lc_pipeline_notify_one_hour_summary"] = False
+        config["ai"]["internal"]["lc_pipeline_notify_two_hour_summary"] = False
+        config["ai"]["internal"]["lc_pipeline_notify_mini_pool_summary"] = True
+        config["ai"]["internal"]["lc_pipeline_recheck_interval_minutes"] = 999
+        start = datetime(2026, 7, 7, 10, 5, tzinfo=timezone.utc)
+        empty_recheck = {
+            "input_count": 6,
+            "refreshed_count": 0,
+            "dropped": [],
+            "warnings": [],
+            "sync_complete": True,
+            "synchronized_count": 6,
+        }
+        recheck_rows.side_effect = [([], empty_recheck), ([], empty_recheck)]
+
+        update_lc_internal_pipeline(
+            config,
+            [_candidate("AAA/USDT:USDT", 64), _candidate("BBB/USDT:USDT", 63), _candidate("CCC/USDT:USDT", 62)],
+            now=start,
+        )
+        first_two_hour = update_lc_internal_pipeline(
+            config,
+            [_candidate("DDD/USDT:USDT", 64), _candidate("EEE/USDT:USDT", 63), _candidate("FFF/USDT:USDT", 62)],
+            now=start + timedelta(hours=1),
+        )
+        update_lc_internal_pipeline(
+            config,
+            [_candidate("GGG/USDT:USDT", 64), _candidate("HHH/USDT:USDT", 63), _candidate("III/USDT:USDT", 62)],
+            now=start + timedelta(hours=2),
+        )
+        result = update_lc_internal_pipeline(
+            config,
+            [_candidate("JJJ/USDT:USDT", 64), _candidate("KKK/USDT:USDT", 63), _candidate("LLL/USDT:USDT", 62)],
+            now=start + timedelta(hours=3),
+        )
+
+        self.assertTrue(first_two_hour["created_two_hour"])
+        self.assertEqual(first_two_hour["two_hour_event"]["approved"], [])
+        self.assertTrue(result["created_two_hour"])
+        self.assertEqual(result["two_hour_event"]["approved"], [])
+        self.assertTrue(result["created_four_hour"])
+        self.assertEqual(result["four_hour_event"]["approved"], [])
+        self.assertEqual(len(result["four_hour_event"]["source_windows"]), 2)
+        self.assertEqual(result["four_hour_sources"]["aligned_event_count"], 2)
+        self.assertEqual(result["four_hour_sources"]["aligned_input_count"], 0)
+        self.assertTrue(result["four_hour_sources"]["has_all_expected_events"])
+        self.assertNotIn("waiting_for_aligned_2h_input", result["skip_reasons"]["four_hour"])
+        self.assertEqual(result["four_hour_recheck"]["skip_reason"], "empty_aligned_2h_sources")
+        self.assertEqual(recheck_rows.call_count, 2)
+        send_message.assert_called_once()
+        self.assertIn("4h", send_message.call_args.args[1])
+
+    @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
     def test_pipeline_stores_hourly_two_hour_four_hour_history_with_lineage(self, recheck_rows) -> None:
         config = self._config()
         config["ai"]["internal"]["lc_pipeline_recheck_interval_minutes"] = 999

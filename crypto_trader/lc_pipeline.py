@@ -3644,6 +3644,9 @@ def _update_lc_internal_pipeline_impl(
     # Chỉ cần 1 pool 2h có approved data là 4h vẫn chạy để kiểm tra hệ thống.
     aligned_two_hour_input_count = sum(1 for window in aligned_two_hour_events if list(window.get("approved") or []))
     has_four_hour_inputs = aligned_two_hour_input_count >= 1
+    has_all_four_hour_source_events = bool(expected_two_hour_slots) and len(aligned_two_hour_events) >= len(
+        expected_two_hour_slots
+    )
     current_four_hour_event = _latest_event_for_slot(
         list(state.get("four_hour_history") or []),
         four_hour_slot,
@@ -3655,25 +3658,38 @@ def _update_lc_internal_pipeline_impl(
         "aligned_slots": [str(window.get("slot") or "") for window in aligned_two_hour_events if isinstance(window, dict)],
         "aligned_event_count": len(aligned_two_hour_events),
         "aligned_input_count": aligned_two_hour_input_count,
+        "has_all_expected_events": has_all_four_hour_source_events,
     }
     if not four_hour_slot_open:
         result["skip_reasons"]["four_hour"].append("slot_closed")
-    if not has_four_hour_inputs:
+    if not has_four_hour_inputs and not has_all_four_hour_source_events:
         result["skip_reasons"]["four_hour"].append("waiting_for_aligned_2h_input")
     if current_four_hour_event is not None:
         result["skip_reasons"]["four_hour"].append("slot_already_created")
-    if four_hour_slot_open and has_four_hour_inputs and current_four_hour_event is None:
-        combined_two_hour: list[dict[str, Any]] = []
-        for window in aligned_two_hour_events:
-            combined_two_hour.extend(window.get("approved") or [])
-        combined_two_hour = _union_rows_by_setup(combined_two_hour, living_hs_internal_lc_rows)
-        refreshed_two_hour, four_hour_recheck = _recheck_rows_with_latest_market_data(config, combined_two_hour, now=now)
-        _sync_state_after_recheck(
-            state,
-            two_hour_slots=[str(window.get("slot") or "") for window in aligned_two_hour_events],
-            refreshed_rows=refreshed_two_hour,
-            dropped=list(four_hour_recheck.get("dropped") or []),
-        )
+    if four_hour_slot_open and (has_four_hour_inputs or has_all_four_hour_source_events) and current_four_hour_event is None:
+        if has_four_hour_inputs:
+            combined_two_hour: list[dict[str, Any]] = []
+            for window in aligned_two_hour_events:
+                combined_two_hour.extend(window.get("approved") or [])
+            combined_two_hour = _union_rows_by_setup(combined_two_hour, living_hs_internal_lc_rows)
+            refreshed_two_hour, four_hour_recheck = _recheck_rows_with_latest_market_data(config, combined_two_hour, now=now)
+            _sync_state_after_recheck(
+                state,
+                two_hour_slots=[str(window.get("slot") or "") for window in aligned_two_hour_events],
+                refreshed_rows=refreshed_two_hour,
+                dropped=list(four_hour_recheck.get("dropped") or []),
+            )
+        else:
+            refreshed_two_hour = []
+            four_hour_recheck = {
+                "input_count": 0,
+                "refreshed_count": 0,
+                "dropped": [],
+                "warnings": [],
+                "sync_complete": True,
+                "synchronized_count": 0,
+                "skip_reason": "empty_aligned_2h_sources",
+            }
         result["four_hour_recheck"] = four_hour_recheck
         eligible_four_hour = [
             row for row in refreshed_two_hour if _candidate_passes_lc_threshold(row, settings, phase="4h")
