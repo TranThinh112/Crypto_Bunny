@@ -229,16 +229,19 @@ class SystemChecklistPayloadTests(unittest.TestCase):
         self.assertEqual(recovery["status"], "fail")
 
     def test_module_one_uses_local_calendar_day_for_ai_decision_stats(self) -> None:
-        with patch(
-            "crypto_trader.dashboard_services.ai_trade_decision_stats",
+        with patch("crypto_trader.dashboard_services.ai_trade_decision_stats", return_value={"totalRecords": 389}) as trade_stats, patch(
+            "crypto_trader.dashboard_services.ai_call_decision_stats",
             return_value={
-                "totalDecisions": 17,
-                "totalRecords": 389,
-                "longCount": 10,
-                "shortCount": 6,
+                "totalDecisions": 5,
+                "totalRecords": 5,
+                "miniCallCount": 4,
+                "okxCallCount": 1,
+                "miniNoTradeCount": 1,
+                "longCount": 3,
+                "shortCount": 0,
                 "noTradeCount": 1,
             },
-        ) as stats:
+        ) as call_stats:
             modules = system_modules_payload(
                 {"timezone": "Asia/Saigon"},
                 checked_date="2026-07-17",
@@ -252,14 +255,16 @@ class SystemChecklistPayloadTests(unittest.TestCase):
                 row_counts={},
             )
 
-        stats.assert_called_once()
-        self.assertEqual(stats.call_args.args[0]["timezone"], "Asia/Saigon")
-        self.assertEqual(stats.call_args.kwargs["created_from"], "2026-07-16T17:00:00+00:00")
-        self.assertEqual(stats.call_args.kwargs["created_to"], "2026-07-17T17:00:00+00:00")
+        trade_stats.assert_called_once()
+        call_stats.assert_called_once()
+        self.assertEqual(call_stats.call_args.args[0]["timezone"], "Asia/Saigon")
+        self.assertEqual(call_stats.call_args.kwargs["created_from"], "2026-07-16T17:00:00+00:00")
+        self.assertEqual(call_stats.call_args.kwargs["created_to"], "2026-07-17T17:00:00+00:00")
         module_one = next(item for item in modules if item["number"] == 1)
         values = {row["label"]: row["value"] for row in module_one["stats"]}
-        self.assertEqual(values["total_decisions"], 17)
-        self.assertEqual(values["Tổng bản ghi thô trong ngày"], 389)
+        self.assertEqual(values["total_decisions"], 5)
+        self.assertEqual(values["Tổng log gọi AI trong ngày"], 5)
+        self.assertEqual(values["mini_no_trade_count"], 1)
 
 
 if __name__ == "__main__":

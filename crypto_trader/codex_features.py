@@ -1436,6 +1436,86 @@ def _ai_call_history_in_period(
     return output
 
 
+def _is_mini_review_call(item: dict[str, Any]) -> bool:
+    model = _ascii_fold(item.get("model"))
+    role = _ascii_fold(item.get("role"))
+    return role == "mini" or "5.4-mini" in model
+
+
+def _mini_selected_side(item: dict[str, Any]) -> str | None:
+    approved = [str(symbol) for symbol in item.get("approved_symbols") or [] if str(symbol)]
+    if not approved:
+        return None
+    selected = approved[0]
+    for detail in item.get("candidate_details") or []:
+        if not isinstance(detail, dict):
+            continue
+        if str(detail.get("symbol") or "") != selected:
+            continue
+        side = str(detail.get("side") or "").strip().lower()
+        if side in {"long", "short"}:
+            return side
+    return None
+
+
+def _mini_call_confidence(item: dict[str, Any]) -> float | None:
+    selected = [str(symbol) for symbol in item.get("approved_symbols") or [] if str(symbol)]
+    if not selected:
+        return None
+    symbol = selected[0]
+    for detail in item.get("candidate_details") or []:
+        if not isinstance(detail, dict) or str(detail.get("symbol") or "") != symbol:
+            continue
+        try:
+            return float(detail.get("confidence"))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def ai_call_decision_stats(
+    config: dict[str, Any],
+    *,
+    created_from: str,
+    created_to: str,
+) -> dict[str, Any]:
+    items = _ai_call_history_in_period(config, created_from=created_from, created_to=created_to)
+    mini_calls = [item for item in items if _is_mini_review_call(item)]
+    okx_calls = [item for item in items if _is_gpt55_review_call(item)]
+    selected_sides = [_mini_selected_side(item) for item in mini_calls]
+    long_count = sum(1 for side in selected_sides if side == "long")
+    short_count = sum(1 for side in selected_sides if side == "short")
+    mini_no_trade_count = sum(1 for item in mini_calls if not _mini_selected_side(item))
+    no_trade_count = sum(1 for item in okx_calls if _is_gpt55_no_trade_rejection(item))
+    total_calls = len(mini_calls) + len(okx_calls)
+
+    def avg_confidence(side_name: str) -> float:
+        values = [
+            confidence
+            for item in mini_calls
+            if _mini_selected_side(item) == side_name
+            for confidence in [_mini_call_confidence(item)]
+            if confidence is not None
+        ]
+        return round(_avg(values), 2) if values else 0.0
+
+    return {
+        "totalDecisions": total_calls,
+        "totalRecords": len(items),
+        "miniCallCount": len(mini_calls),
+        "okxCallCount": len(okx_calls),
+        "miniNoTradeCount": mini_no_trade_count,
+        "longCount": long_count,
+        "shortCount": short_count,
+        "noTradeCount": no_trade_count,
+        "longPercent": round(long_count / total_calls * 100, 2) if total_calls else 0.0,
+        "shortPercent": round(short_count / total_calls * 100, 2) if total_calls else 0.0,
+        "avgConfidenceLong": avg_confidence("long"),
+        "avgConfidenceShort": avg_confidence("short"),
+        "biasWarning": None,
+    }
+
+
 def ai_trade_decision_stats(
     config: dict[str, Any],
     *,

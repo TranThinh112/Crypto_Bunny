@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
 
-from crypto_trader.codex_features import ai_trade_decision_stats, call_openai_json, record_ai_call_event
+from crypto_trader.codex_features import ai_call_decision_stats, ai_trade_decision_stats, call_openai_json, record_ai_call_event
 
 
 class _FakeOpenAIResponse:
@@ -398,3 +398,78 @@ class CodexFeaturesTest(TestCase):
         self.assertEqual(stats["shortCount"], 1)
         self.assertEqual(stats["noTradeCount"], 1)
         self.assertEqual(stats["totalDecisions"], 4)
+
+    def test_ai_call_decision_stats_counts_real_mini_and_gpt55_calls(self) -> None:
+        config = self._config()
+        created_from = "2026-07-16T17:00:00+00:00"
+        created_to = "2026-07-17T17:00:00+00:00"
+        record_ai_call_event(
+            config,
+            {
+                "created_at": "2026-07-16T17:01:00+00:00",
+                "role": "mini",
+                "model": "gpt-5.4-mini",
+                "approved_symbols": ["BTC/USDT:USDT"],
+                "candidate_details": [{"symbol": "BTC/USDT:USDT", "side": "long", "confidence": 90}],
+                "status": "MINI ĐỀ XUẤT LC",
+            },
+            notify_telegram=False,
+        )
+        record_ai_call_event(
+            config,
+            {
+                "created_at": "2026-07-16T18:01:00+00:00",
+                "role": "mini",
+                "model": "gpt-5.4-mini",
+                "approved_symbols": ["ETH/USDT:USDT"],
+                "candidate_details": [{"symbol": "ETH/USDT:USDT", "side": "short", "confidence": 80}],
+                "status": "MINI ĐỀ XUẤT LC",
+            },
+            notify_telegram=False,
+        )
+        record_ai_call_event(
+            config,
+            {
+                "created_at": "2026-07-16T19:01:00+00:00",
+                "role": "mini",
+                "model": "gpt-5.4-mini",
+                "approved_symbols": [],
+                "candidate_details": [{"symbol": "SOL/USDT:USDT", "side": "long", "confidence": 70}],
+                "status": "NO_TRADE",
+            },
+            notify_telegram=False,
+        )
+        record_ai_call_event(
+            config,
+            {
+                "created_at": "2026-07-16T20:01:00+00:00",
+                "role": "okx",
+                "review_kind": "lc_okx_review",
+                "model": "gpt-5.5",
+                "status": "XÓA SETUP",
+            },
+            notify_telegram=False,
+        )
+        record_ai_call_event(
+            config,
+            {
+                "created_at": "2026-07-16T21:01:00+00:00",
+                "role": "okx",
+                "review_kind": "lc_okx_review",
+                "model": "gpt-5.5",
+                "status": "GIỮ SETUP",
+            },
+            notify_telegram=False,
+        )
+
+        stats = ai_call_decision_stats(config, created_from=created_from, created_to=created_to)
+
+        self.assertEqual(stats["totalDecisions"], 5)
+        self.assertEqual(stats["miniCallCount"], 3)
+        self.assertEqual(stats["okxCallCount"], 2)
+        self.assertEqual(stats["longCount"], 1)
+        self.assertEqual(stats["shortCount"], 1)
+        self.assertEqual(stats["miniNoTradeCount"], 1)
+        self.assertEqual(stats["noTradeCount"], 1)
+        self.assertEqual(stats["avgConfidenceLong"], 90.0)
+        self.assertEqual(stats["avgConfidenceShort"], 80.0)

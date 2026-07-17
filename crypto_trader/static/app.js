@@ -1247,7 +1247,7 @@ function aiDecisionUnit(row) {
   const key = String(row?.aiDecisionKey || "");
   if (key === "total_decisions") return "lần";
   if (key === "long_count" || key === "short_count") return "lệnh";
-  if (key === "no_trade_count") return "lần";
+  if (key === "no_trade_count" || key === "mini_no_trade_count") return "lần";
   if (key.includes("percent") || key.includes("winrate")) return "%";
   if (key.includes("confidence")) return "điểm";
   if (key.includes("profit_factor")) return "hệ số";
@@ -1325,9 +1325,10 @@ function moduleChangedVariableCount(module, rows = null) {
 }
 
 const AI_DECISION_ROW_CONFIG = [
-  ["total_decisions", "Tổng quyết định AI thực hôm nay", "LONG + SHORT + số lần GPT-5.5 từ chối hoặc xóa setup trong ngày; không tính nhật ký các lần quét NO_TRADE thường.", "AI đã đưa ra nhiều quyết định thực hơn trong ngày.", "AI đưa ra ít quyết định thực hơn trong ngày."],
-  ["long_count", "Số LONG", "Số lần AI quyết định ENTER_LONG.", "AI ưu tiên LONG nhiều hơn.", "AI giảm số quyết định LONG."],
-  ["short_count", "Số SHORT", "Số lần AI quyết định ENTER_SHORT.", "AI ưu tiên SHORT nhiều hơn.", "AI giảm số quyết định SHORT."],
+  ["total_decisions", "Tổng lần AI được gọi hôm nay", "Tổng số lần Mini và 5.5 được gọi thật trong ngày; không tính record scan nội bộ.", "AI được gọi nhiều hơn trong ngày.", "AI được gọi ít hơn trong ngày."],
+  ["long_count", "Mini chọn LONG", "Số lần Mini gọi thật và chọn setup LONG.", "Mini chọn LONG nhiều hơn.", "Mini chọn LONG ít hơn."],
+  ["short_count", "Mini chọn SHORT", "Số lần Mini gọi thật và chọn setup SHORT.", "Mini chọn SHORT nhiều hơn.", "Mini chọn SHORT ít hơn."],
+  ["mini_no_trade_count", "Mini không chọn lệnh", "Số lần Mini được gọi nhưng trả NO_TRADE hoặc không chọn cặp nào.", "Mini từ chối nhiều hơn.", "Mini từ chối ít hơn."],
   ["no_trade_count", "5.5 từ chối/xóa setup", "Số lần GPT-5.5 từ chối vào lệnh hoặc xóa setup; không tính các lần giữ setup.", "5.5 từ chối/xóa setup nhiều hơn.", "5.5 từ chối/xóa setup ít hơn."],
   ["long_percent", "Tỷ lệ LONG", "Tỷ lệ quyết định LONG trên tổng quyết định AI thực.", "AI đang thiên về LONG.", "AI giảm xu hướng LONG."],
   ["short_percent", "Tỷ lệ SHORT", "Tỷ lệ quyết định SHORT trên tổng quyết định AI thực.", "AI đang thiên về SHORT.", "AI giảm xu hướng SHORT."],
