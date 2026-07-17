@@ -38,6 +38,7 @@ from .storage import (
     list_ai_experiment_rows,
     list_ai_trade_decision_rows,
     list_ai_trade_decision_stat_rows,
+    list_ai_trade_decision_stat_rows_for_period,
     list_market_regime_rows,
     list_prompt_versions,
     list_replay_history_rows,
@@ -1416,12 +1417,49 @@ def recent_ai_trade_decisions(
     return result
 
 
-def ai_trade_decision_stats(config: dict[str, Any]) -> dict[str, Any]:
-    rows = list_ai_trade_decision_stat_rows(config, limit=5000)
+def _ai_call_history_in_period(
+    config: dict[str, Any],
+    *,
+    created_from: str,
+    created_to: str,
+) -> list[dict[str, Any]]:
+    start = _parse_time(created_from)
+    end = _parse_time(created_to)
+    if start is None or end is None:
+        return []
+    items = recent_ai_call_history(config, limit=50)
+    output: list[dict[str, Any]] = []
+    for item in items:
+        created_at = _parse_time(item.get("created_at"))
+        if created_at is not None and start <= created_at < end:
+            output.append(item)
+    return output
+
+
+def ai_trade_decision_stats(
+    config: dict[str, Any],
+    *,
+    created_from: str | None = None,
+    created_to: str | None = None,
+) -> dict[str, Any]:
+    if created_from and created_to:
+        rows = list_ai_trade_decision_stat_rows_for_period(
+            config,
+            created_from=created_from,
+            created_to=created_to,
+            limit=5000,
+        )
+    else:
+        rows = list_ai_trade_decision_stat_rows(config, limit=5000)
     raw_total = len(rows)
     long_rows = [row for row in rows if row.get("decision") == "ENTER_LONG"]
     short_rows = [row for row in rows if row.get("decision") == "ENTER_SHORT"]
-    ai_call_stats = _load_ai_call_status_stats(config)
+    if created_from and created_to:
+        ai_call_stats = _ai_call_status_stats_from_history(
+            _ai_call_history_in_period(config, created_from=created_from, created_to=created_to)
+        )
+    else:
+        ai_call_stats = _load_ai_call_status_stats(config)
     no_trade_count = max(0, int(ai_call_stats.get("no_trade_count") or 0))
     total = len(long_rows) + len(short_rows) + no_trade_count
 

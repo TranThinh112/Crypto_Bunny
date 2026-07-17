@@ -228,6 +228,39 @@ class SystemChecklistPayloadTests(unittest.TestCase):
         recovery = next(item for item in modules if item["name"] == "Recovery Chain Manager")
         self.assertEqual(recovery["status"], "fail")
 
+    def test_module_one_uses_local_calendar_day_for_ai_decision_stats(self) -> None:
+        with patch(
+            "crypto_trader.dashboard_services.ai_trade_decision_stats",
+            return_value={
+                "totalDecisions": 17,
+                "totalRecords": 389,
+                "longCount": 10,
+                "shortCount": 6,
+                "noTradeCount": 1,
+            },
+        ) as stats:
+            modules = system_modules_payload(
+                {"timezone": "Asia/Saigon"},
+                checked_date="2026-07-17",
+                checked_at_iso="2026-07-17T06:30:00+00:00",
+                ai_history=[],
+                replay={},
+                strategy={},
+                regime={},
+                health={},
+                risk_state={},
+                row_counts={},
+            )
+
+        stats.assert_called_once()
+        self.assertEqual(stats.call_args.args[0]["timezone"], "Asia/Saigon")
+        self.assertEqual(stats.call_args.kwargs["created_from"], "2026-07-16T17:00:00+00:00")
+        self.assertEqual(stats.call_args.kwargs["created_to"], "2026-07-17T17:00:00+00:00")
+        module_one = next(item for item in modules if item["number"] == 1)
+        values = {row["label"]: row["value"] for row in module_one["stats"]}
+        self.assertEqual(values["total_decisions"], 17)
+        self.assertEqual(values["Tổng bản ghi thô trong ngày"], 389)
+
 
 if __name__ == "__main__":
     unittest.main()

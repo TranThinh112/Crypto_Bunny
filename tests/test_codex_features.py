@@ -345,3 +345,56 @@ class CodexFeaturesTest(TestCase):
         self.assertEqual(stats["noTradeCount"], 3)
         self.assertEqual(stats["longPercent"], 20.0)
         self.assertEqual(stats["shortPercent"], 20.0)
+
+    @patch("crypto_trader.codex_features.list_ai_trade_decision_stat_rows_for_period")
+    def test_ai_trade_decision_stats_filters_real_decisions_and_gpt55_rejects_by_period(self, list_rows) -> None:
+        config = self._config()
+        list_rows.return_value = [
+            {"decision": "ENTER_LONG", "trade_status": None, "confidence": 91, "pnl": 0},
+            {"decision": "ENTER_SHORT", "trade_status": None, "confidence": 83, "pnl": 0},
+            {"decision": "ENTER_LONG", "trade_status": None, "confidence": 88, "pnl": 0},
+        ]
+        created_from = "2026-07-16T17:00:00+00:00"
+        created_to = "2026-07-17T17:00:00+00:00"
+
+        record_ai_call_event(
+            config,
+            {
+                "created_at": "2026-07-16T16:59:59+00:00",
+                "role": "okx",
+                "review_kind": "lc_okx_review",
+                "model": "gpt-5.5",
+                "status": "XÓA SETUP",
+            },
+            notify_telegram=False,
+        )
+        record_ai_call_event(
+            config,
+            {
+                "created_at": "2026-07-16T17:00:00+00:00",
+                "role": "okx",
+                "review_kind": "lc_okx_review",
+                "model": "gpt-5.5",
+                "status": "XÓA SETUP",
+            },
+            notify_telegram=False,
+        )
+        record_ai_call_event(
+            config,
+            {
+                "created_at": "2026-07-17T17:00:00+00:00",
+                "role": "okx",
+                "review_kind": "lc_okx_review",
+                "model": "gpt-5.5",
+                "status": "XÓA SETUP",
+            },
+            notify_telegram=False,
+        )
+
+        stats = ai_trade_decision_stats(config, created_from=created_from, created_to=created_to)
+
+        list_rows.assert_called_once_with(config, created_from=created_from, created_to=created_to, limit=5000)
+        self.assertEqual(stats["longCount"], 2)
+        self.assertEqual(stats["shortCount"], 1)
+        self.assertEqual(stats["noTradeCount"], 1)
+        self.assertEqual(stats["totalDecisions"], 4)

@@ -996,14 +996,34 @@ def list_ai_trade_decision_rows(
 
 def list_ai_trade_decision_stat_rows(config: dict[str, Any], *, limit: int = 50) -> list[dict[str, Any]]:
     safe_limit = max(1, int(limit))
+    return _list_ai_trade_decision_stat_rows(config, limit=safe_limit)
+
+
+def _list_ai_trade_decision_stat_rows(
+    config: dict[str, Any],
+    *,
+    limit: int,
+    created_from: str | None = None,
+    created_to: str | None = None,
+) -> list[dict[str, Any]]:
+    safe_limit = max(1, int(limit))
+    query: dict[str, Any] = {}
+    created_range: dict[str, str] = {}
+    if created_from:
+        created_range["$gte"] = str(created_from)
+    if created_to:
+        created_range["$lt"] = str(created_to)
+    if created_range:
+        query["created_at"] = created_range
 
     def _operation() -> list[dict[str, Any]]:
         cursor = (
             _mongo_collection(config, "ai_trade_decisions")
             .find(
-                {},
+                query,
                 {
                     "_id": 0,
+                    "created_at": 1,
                     "decision": 1,
                     "trade_status": 1,
                     "confidence": 1,
@@ -1016,6 +1036,21 @@ def list_ai_trade_decision_stat_rows(config: dict[str, Any], *, limit: int = 50)
         return [dict(row) for row in cursor]
 
     return _mongo_call_with_retry(config, _operation)
+
+
+def list_ai_trade_decision_stat_rows_for_period(
+    config: dict[str, Any],
+    *,
+    created_from: str,
+    created_to: str,
+    limit: int = 5000,
+) -> list[dict[str, Any]]:
+    return _list_ai_trade_decision_stat_rows(
+        config,
+        limit=limit,
+        created_from=created_from,
+        created_to=created_to,
+    )
 
 
 def mark_ai_trade_decisions_closed(

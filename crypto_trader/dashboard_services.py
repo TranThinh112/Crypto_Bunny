@@ -106,6 +106,13 @@ def _system_report_date(config: dict[str, Any] | None = None, value: datetime | 
     return local_value.date().isoformat()
 
 
+def _local_calendar_day_bounds(config: dict[str, Any], date_key: str) -> tuple[str, str]:
+    local_tz = _system_timezone(config)
+    local_start = datetime.fromisoformat(str(date_key)).replace(tzinfo=local_tz)
+    local_end = local_start + timedelta(days=1)
+    return local_start.astimezone(timezone.utc).isoformat(), local_end.astimezone(timezone.utc).isoformat()
+
+
 def _period_start(date_value: datetime, period: str) -> datetime:
     if period == "week":
         return date_value - timedelta(days=date_value.weekday())
@@ -565,7 +572,14 @@ def system_modules_payload(
     latest_ai_time = latest_ai.get("created_at") or latest_ai.get("updated_at")
 
     try:
-        decision_stats = ai_trade_decision_stats(config)
+        decision_created_from, decision_created_to = _local_calendar_day_bounds(config, checked_date)
+        decision_stats = ai_trade_decision_stats(
+            config,
+            created_from=decision_created_from,
+            created_to=decision_created_to,
+        )
+        decision_stats["periodStart"] = decision_created_from
+        decision_stats["periodEnd"] = decision_created_to
     except Exception as exc:
         decision_stats = {"error": str(exc)}
 
@@ -680,8 +694,8 @@ def system_modules_payload(
                 _module_row("Ngày kiểm tra", checked_date, "Ngày local của lần tổng hợp dữ liệu module."),
                 _module_row("Cập nhật lúc", checked_at_iso, "Dấu thời gian UTC của payload hiện tại."),
                 _module_row("Số lần gọi AI gần nhất", len(ai_history), "Số lần gọi AI đã được nhật ký lưu gần nhất."),
-                _module_row("total_decisions", decision_stats.get("totalDecisions"), "Tổng quyết định AI thực: LONG + SHORT + số lần GPT-5.5 từ chối hoặc xóa setup; không tính nhật ký các lần quét thường.", attention=True),
-                _module_row("Tổng bản ghi thô", decision_stats.get("totalRecords"), "Tổng số bản ghi thô trong ai_trade_decisions, bao gồm cả các lần quét NO_TRADE thường."),
+                _module_row("total_decisions", decision_stats.get("totalDecisions"), "Tổng quyết định AI thực trong ngày: LONG + SHORT + số lần GPT-5.5 từ chối hoặc xóa setup; không tính nhật ký các lần quét thường.", attention=True),
+                _module_row("Tổng bản ghi thô trong ngày", decision_stats.get("totalRecords"), "Tổng số bản ghi thô trong ai_trade_decisions của ngày đang kiểm tra, bao gồm cả các lần quét NO_TRADE thường."),
                 _module_row("long_count", decision_stats.get("longCount"), "Số quyết định vào lệnh LONG đã được ghi nhận."),
                 _module_row("short_count", decision_stats.get("shortCount"), "Số quyết định vào lệnh SHORT đã được ghi nhận."),
                 _module_row("no_trade_count", decision_stats.get("noTradeCount"), "Số lần GPT-5.5 từ chối vào lệnh hoặc xóa setup; không tính các lần giữ setup."),

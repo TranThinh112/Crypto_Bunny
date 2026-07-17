@@ -1325,7 +1325,7 @@ function moduleChangedVariableCount(module, rows = null) {
 }
 
 const AI_DECISION_ROW_CONFIG = [
-  ["total_decisions", "Tổng quyết định AI thực", "LONG + SHORT + số lần GPT-5.5 từ chối hoặc xóa setup; không tính nhật ký các lần quét NO_TRADE thường.", "AI đã đưa ra nhiều quyết định thực hơn.", "AI đưa ra ít quyết định thực hơn."],
+  ["total_decisions", "Tổng quyết định AI thực hôm nay", "LONG + SHORT + số lần GPT-5.5 từ chối hoặc xóa setup trong ngày; không tính nhật ký các lần quét NO_TRADE thường.", "AI đã đưa ra nhiều quyết định thực hơn trong ngày.", "AI đưa ra ít quyết định thực hơn trong ngày."],
   ["long_count", "Số LONG", "Số lần AI quyết định ENTER_LONG.", "AI ưu tiên LONG nhiều hơn.", "AI giảm số quyết định LONG."],
   ["short_count", "Số SHORT", "Số lần AI quyết định ENTER_SHORT.", "AI ưu tiên SHORT nhiều hơn.", "AI giảm số quyết định SHORT."],
   ["no_trade_count", "5.5 từ chối/xóa setup", "Số lần GPT-5.5 từ chối vào lệnh hoặc xóa setup; không tính các lần giữ setup.", "5.5 từ chối/xóa setup nhiều hơn.", "5.5 từ chối/xóa setup ít hơn."],
