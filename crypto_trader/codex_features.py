@@ -1476,10 +1476,14 @@ def _mini_call_confidence(item: dict[str, Any]) -> float | None:
 def ai_call_decision_stats(
     config: dict[str, Any],
     *,
-    created_from: str,
-    created_to: str,
+    created_from: str | None = None,
+    created_to: str | None = None,
 ) -> dict[str, Any]:
-    items = _ai_call_history_in_period(config, created_from=created_from, created_to=created_to)
+    items = (
+        _ai_call_history_in_period(config, created_from=created_from, created_to=created_to)
+        if created_from and created_to
+        else recent_ai_call_history(config, limit=5000)
+    )
     mini_calls = [item for item in items if _is_mini_review_call(item)]
     okx_calls = [item for item in items if _is_gpt55_review_call(item)]
     selected_sides = [_mini_selected_side(item) for item in mini_calls]

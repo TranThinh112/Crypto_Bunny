@@ -2988,7 +2988,11 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
         )
 
     @app.get("/api/system-checklist")
-    def system_checklist_endpoint(date: str | None = None, force_refresh: bool = False) -> dict[str, Any]:
+    def system_checklist_endpoint(
+        date: str | None = None,
+        force_refresh: bool = False,
+        ai_range: str = "current",
+    ) -> dict[str, Any]:
         config = load_config(app.state.config_path)
         if date:
             snapshot = dashboard_system_checklist_snapshot(config, date)
@@ -2999,6 +3003,7 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
             config,
             automation=_automation_status_payload(app),
             force_refresh=force_refresh,
+            ai_range=ai_range,
         )
 
     @app.get("/api/system-checklist/history")

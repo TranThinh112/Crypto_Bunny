@@ -473,3 +473,37 @@ class CodexFeaturesTest(TestCase):
         self.assertEqual(stats["noTradeCount"], 1)
         self.assertEqual(stats["avgConfidenceLong"], 90.0)
         self.assertEqual(stats["avgConfidenceShort"], 80.0)
+
+    def test_ai_call_decision_stats_without_period_counts_all_stored_history(self) -> None:
+        config = self._config()
+        record_ai_call_event(
+            config,
+            {
+                "created_at": "2026-07-15T01:00:00+00:00",
+                "role": "mini",
+                "model": "gpt-5.4-mini",
+                "approved_symbols": ["BTC/USDT:USDT"],
+                "candidate_details": [{"symbol": "BTC/USDT:USDT", "side": "long", "confidence": 88}],
+                "status": "MINI ĐỀ XUẤT LC",
+            },
+            notify_telegram=False,
+        )
+        record_ai_call_event(
+            config,
+            {
+                "created_at": "2026-07-17T01:00:00+00:00",
+                "role": "okx",
+                "review_kind": "lc_okx_review",
+                "model": "gpt-5.5",
+                "status": "XÓA SETUP",
+            },
+            notify_telegram=False,
+        )
+
+        stats = ai_call_decision_stats(config)
+
+        self.assertEqual(stats["totalDecisions"], 2)
+        self.assertEqual(stats["miniCallCount"], 1)
+        self.assertEqual(stats["okxCallCount"], 1)
+        self.assertEqual(stats["longCount"], 1)
+        self.assertEqual(stats["noTradeCount"], 1)

@@ -553,6 +553,10 @@ def _default_automation_status(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _normalize_ai_decision_range(value: Any) -> str:
+    return "all" if str(value or "").strip().lower() == "all" else "current"
+
+
 def system_modules_payload(
     config: dict[str, Any],
     *,
@@ -565,25 +569,34 @@ def system_modules_payload(
     health: dict[str, Any],
     risk_state: dict[str, Any],
     row_counts: dict[str, Any] | None = None,
+    ai_range: str = "current",
 ) -> list[dict[str, Any]]:
     files = _module_file_index(config)
+    ai_range_key = _normalize_ai_decision_range(ai_range)
+    ai_range_label = "Toàn bộ dữ liệu đang lưu" if ai_range_key == "all" else "Hôm nay"
     active_strategies = strategy.get("active") or []
     latest_ai = ai_history[-1] if ai_history else {}
     latest_ai_status = latest_ai.get("status") or latest_ai.get("result")
     latest_ai_time = latest_ai.get("created_at") or latest_ai.get("updated_at")
 
     try:
-        decision_created_from, decision_created_to = _local_calendar_day_bounds(config, checked_date)
-        trade_decision_stats = ai_trade_decision_stats(
-            config,
-            created_from=decision_created_from,
-            created_to=decision_created_to,
-        )
-        ai_call_stats = ai_call_decision_stats(
-            config,
-            created_from=decision_created_from,
-            created_to=decision_created_to,
-        )
+        if ai_range_key == "all":
+            decision_created_from = None
+            decision_created_to = checked_at_iso
+            trade_decision_stats = ai_trade_decision_stats(config)
+            ai_call_stats = ai_call_decision_stats(config)
+        else:
+            decision_created_from, decision_created_to = _local_calendar_day_bounds(config, checked_date)
+            trade_decision_stats = ai_trade_decision_stats(
+                config,
+                created_from=decision_created_from,
+                created_to=decision_created_to,
+            )
+            ai_call_stats = ai_call_decision_stats(
+                config,
+                created_from=decision_created_from,
+                created_to=decision_created_to,
+            )
         decision_stats = {
             **trade_decision_stats,
             **ai_call_stats,
@@ -591,6 +604,8 @@ def system_modules_payload(
         }
         decision_stats["periodStart"] = decision_created_from
         decision_stats["periodEnd"] = decision_created_to
+        decision_stats["range"] = ai_range_key
+        decision_stats["rangeLabel"] = ai_range_label
     except Exception as exc:
         decision_stats = {"error": str(exc)}
 
@@ -701,12 +716,15 @@ def system_modules_payload(
             "name": "Bộ nhớ quyết định AI",
             "purpose": "Thống kê quyết định AI giao dịch đã được hệ thống ghi nhận thực tế.",
             "status": "fail" if "error" in str(latest_ai_status or "").lower() else "ok" if _safe_int(decision_stats.get("totalDecisions")) > 0 else "warn",
+            "ai_range": ai_range_key,
+            "ai_range_label": ai_range_label,
             "stats": [
                 _module_row("Ngày kiểm tra", checked_date, "Ngày local của lần tổng hợp dữ liệu module."),
                 _module_row("Cập nhật lúc", checked_at_iso, "Dấu thời gian UTC của payload hiện tại."),
                 _module_row("Số lần gọi AI gần nhất", len(ai_history), "Số lần gọi AI đã được nhật ký lưu gần nhất."),
-                _module_row("total_decisions", decision_stats.get("totalDecisions"), "Tổng lần gọi AI thật trong ngày: Mini + 5.5; không tính các record scan nội bộ.", attention=True),
-                _module_row("Tổng log gọi AI trong ngày", decision_stats.get("totalRecords"), "Tổng số log gọi AI thật trong ngày đang kiểm tra."),
+                _module_row("Phạm vi dữ liệu AI", ai_range_label, "Phạm vi đang được dùng để tính các biến AI trong module."),
+                _module_row("total_decisions", decision_stats.get("totalDecisions"), "Tổng lần gọi AI thật theo phạm vi đang chọn: Mini + 5.5; không tính các record scan nội bộ.", attention=True),
+                _module_row("Tổng log gọi AI trong phạm vi", decision_stats.get("totalRecords"), "Tổng số log gọi AI thật theo phạm vi đang kiểm tra."),
                 _module_row("mini_no_trade_count", decision_stats.get("miniNoTradeCount"), "Số lần Mini được gọi nhưng trả NO_TRADE hoặc không chọn cặp nào."),
                 _module_row("long_count", decision_stats.get("longCount"), "Số quyết định vào lệnh LONG đã được ghi nhận."),
                 _module_row("short_count", decision_stats.get("shortCount"), "Số quyết định vào lệnh SHORT đã được ghi nhận."),
@@ -952,12 +970,14 @@ def _build_system_checklist_payload(
     config: dict[str, Any],
     *,
     automation: dict[str, Any] | None = None,
+    ai_range: str = "current",
 ) -> dict[str, Any]:
     checked_at = datetime.now(timezone.utc)
     checked_at_iso = checked_at.isoformat()
     checked_at_local = checked_at.astimezone(_system_timezone(config))
     checked_date = _system_report_date(config, checked_at)
     automation = automation or _default_automation_status(config)
+    ai_range_key = _normalize_ai_decision_range(ai_range)
 
     stats = storage_stats(config)
     row_counts = stats.get("row_counts", {})
@@ -1179,6 +1199,7 @@ def _build_system_checklist_payload(
         health=health,
         risk_state=risk_state,
         row_counts=row_counts,
+        ai_range=ai_range_key,
     )
     ok_count = sum(1 for item in criteria if item["ok"])
     payload = {
@@ -1198,6 +1219,7 @@ def _build_system_checklist_payload(
         "market_regime": regime,
         "health": health,
         "risk_state": risk_state,
+        "ai_range": ai_range_key,
     }
     return payload
 
@@ -1206,9 +1228,12 @@ def refresh_system_checklist_snapshot(
     config: dict[str, Any],
     *,
     automation: dict[str, Any] | None = None,
+    ai_range: str = "current",
 ) -> dict[str, Any]:
-    payload = _build_system_checklist_payload(config, automation=automation)
-    _persist_system_checklist_snapshot(config, payload)
+    ai_range_key = _normalize_ai_decision_range(ai_range)
+    payload = _build_system_checklist_payload(config, automation=automation, ai_range=ai_range_key)
+    if ai_range_key == "current":
+        _persist_system_checklist_snapshot(config, payload)
     return attach_previous_system_checklist_snapshot(config, payload)
 
 
@@ -1218,8 +1243,13 @@ def system_checklist_payload(
     automation: dict[str, Any] | None = None,
     force_refresh: bool = False,
     max_age_seconds: int | None = SYSTEM_CHECKLIST_DEFAULT_TTL_SECONDS,
+    ai_range: str = "current",
 ) -> dict[str, Any]:
     _ = max_age_seconds
+    ai_range_key = _normalize_ai_decision_range(ai_range)
+    if ai_range_key == "all":
+        payload = _build_system_checklist_payload(config, automation=automation, ai_range=ai_range_key)
+        return attach_previous_system_checklist_snapshot(config, payload)
     date_key = _system_report_date(config)
     if not force_refresh:
         snapshot = _preferred_system_checklist_snapshot(config, date_key)
@@ -1228,7 +1258,7 @@ def system_checklist_payload(
         snapshot = _latest_system_checklist_snapshot(config)
         if isinstance(snapshot, dict) and str(snapshot.get("date") or "") == date_key:
             return attach_previous_system_checklist_snapshot(config, snapshot)
-    return refresh_system_checklist_snapshot(config, automation=automation)
+    return refresh_system_checklist_snapshot(config, automation=automation, ai_range=ai_range_key)
 
 
 def _build_timeframe_state_dashboard(config: dict[str, Any], *, lookback_hours: int = 24) -> dict[str, Any]:

@@ -230,6 +230,7 @@ body.dark-mode .pulse-feed-item,
 body.dark-mode .module-chart-legend-item,
 body.dark-mode .module-chart-meta div,
 body.dark-mode .module-stat-table > div,
+body.dark-mode .module-ai-range-toggle,
 body.dark-mode .health-card,
 body.dark-mode .health-evidence-row,
 body.dark-mode .system-summary-head,
@@ -1632,6 +1633,44 @@ tr:last-child td {
   margin-bottom: 12px;
 }
 
+.module-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.module-ai-range-toggle {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+}
+
+.module-ai-range-btn {
+  min-width: 70px;
+  height: 30px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.module-ai-range-btn.active {
+  background: var(--teal);
+  color: #fff;
+}
+
+.module-ai-range-btn:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
 .module-detail-head h3 {
   margin: 3px 0 5px;
   font-size: 16px;
@@ -2261,6 +2300,15 @@ tr:last-child td {
   .config-control small {
     min-width: 0;
     flex: 1 1 100%;
+  }
+
+  .module-detail-head {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .module-head-actions {
+    justify-content: space-between;
   }
 }
 

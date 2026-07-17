@@ -18,6 +18,7 @@ const state = {
   systemChecklistRefreshInFlight: false,
   lastSystemChecklistRefreshMs: 0,
   selectedSystemModuleKey: null,
+  systemModuleAiRange: "current",
   running: false,
 };
 
@@ -1036,6 +1037,31 @@ function systemModuleKey(module) {
   return `${String(module.number ?? "").trim()}::${String(module.name || "").trim()}`;
 }
 
+function normalizeSystemModuleAiRange(value) {
+  return String(value || "").toLowerCase() === "all" ? "all" : "current";
+}
+
+function systemModuleAiRangeLabel(value) {
+  return normalizeSystemModuleAiRange(value) === "all" ? "All" : "Hiện tại";
+}
+
+function renderSystemModuleAiRangeToggle(module) {
+  if (Number(module?.number || 0) !== 1) return "";
+  const activeRange = normalizeSystemModuleAiRange(module?.ai_range || state.systemModuleAiRange);
+  return `
+    <div class="module-ai-range-toggle" role="group" aria-label="Phạm vi dữ liệu AI">
+      ${["current", "all"].map((range) => `
+        <button
+          type="button"
+          class="module-ai-range-btn ${activeRange === range ? "active" : ""}"
+          data-ai-range="${range}"
+          aria-pressed="${activeRange === range ? "true" : "false"}"
+        >${escapeHtml(systemModuleAiRangeLabel(range))}</button>
+      `).join("")}
+    </div>
+  `;
+}
+
 function moduleDetailScrollTop() {
   return refs.systemModuleDetail?.querySelector(".module-chart-scroll")?.scrollTop || 0;
 }
@@ -1325,7 +1351,7 @@ function moduleChangedVariableCount(module, rows = null) {
 }
 
 const AI_DECISION_ROW_CONFIG = [
-  ["total_decisions", "Tổng lần AI được gọi hôm nay", "Tổng số lần Mini và 5.5 được gọi thật trong ngày; không tính record scan nội bộ.", "AI được gọi nhiều hơn trong ngày.", "AI được gọi ít hơn trong ngày."],
+  ["total_decisions", "Tổng lần AI được gọi", "Tổng số lần Mini và 5.5 được gọi thật theo phạm vi đang chọn; không tính record scan nội bộ.", "AI được gọi nhiều hơn trong phạm vi.", "AI được gọi ít hơn trong phạm vi."],
   ["long_count", "Mini chọn LONG", "Số lần Mini gọi thật và chọn setup LONG.", "Mini chọn LONG nhiều hơn.", "Mini chọn LONG ít hơn."],
   ["short_count", "Mini chọn SHORT", "Số lần Mini gọi thật và chọn setup SHORT.", "Mini chọn SHORT nhiều hơn.", "Mini chọn SHORT ít hơn."],
   ["mini_no_trade_count", "Mini không chọn lệnh", "Số lần Mini được gọi nhưng trả NO_TRADE hoặc không chọn cặp nào.", "Mini từ chối nhiều hơn.", "Mini từ chối ít hơn."],
@@ -2203,6 +2229,7 @@ function renderModuleDetail(module, options = {}) {
   const fileLabel = file.relative_path || file.file_name || "Chưa có file";
   const runtimeUpdatedLabel = moduleUpdatedLabel(module);
   const changedVariableCount = moduleChangedVariableCount(module, rows);
+  const aiRangeToggle = renderSystemModuleAiRangeToggle(module);
   refs.systemModuleOverlay.hidden = false;
   refs.systemModuleDetail.classList.add("module-detail-chart-scroll");
   refs.systemModuleDetail.innerHTML = `
@@ -2216,7 +2243,10 @@ function renderModuleDetail(module, options = {}) {
         </div>
         <p>${escapeHtml(module.purpose || "-")}</p>
       </div>
-      <span class="status-pill ${module.status === "ok" ? "ok" : "warn"}">${moduleStatusLabel(module.status)}</span>
+      <div class="module-head-actions">
+        ${aiRangeToggle}
+        <span class="status-pill ${module.status === "ok" ? "ok" : "warn"}">${moduleStatusLabel(module.status)}</span>
+      </div>
     </div>
     <div class="module-meta">
       <div><span>Ngày đọc</span><strong>${escapeHtml(timeLabel(file.updated_at) || "-")}</strong></div>
@@ -2241,6 +2271,18 @@ function renderModuleDetail(module, options = {}) {
   }
   const closeBtn = refs.systemModuleDetail.querySelector(".module-close");
   if (closeBtn) closeBtn.addEventListener("click", closeSystemModuleDetail);
+  refs.systemModuleDetail.querySelectorAll(".module-ai-range-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      const nextRange = normalizeSystemModuleAiRange(button.getAttribute("data-ai-range"));
+      if (nextRange === normalizeSystemModuleAiRange(state.systemModuleAiRange)) return;
+      state.systemModuleAiRange = nextRange;
+      refs.systemModuleDetail.querySelectorAll(".module-ai-range-btn").forEach((item) => {
+        item.disabled = true;
+      });
+      loadSystemChecklist("", { aiRange: nextRange, forceRefresh: true })
+        .catch((err) => setStatus(`Lỗi tải phạm vi AI: ${err.message}`));
+    });
+  });
   bindModuleChartInteractions();
   if (options.activeChartIndex !== null && options.activeChartIndex !== undefined) {
     const activeItem = refs.systemModuleDetail.querySelector(`.module-chart-legend-item[data-chart-index="${options.activeChartIndex}"]`);
@@ -3068,24 +3110,35 @@ renderSystemSummaryChart = function renderSystemSummaryChartPatched(payload) {
   normalizeVietnameseUi(refs.systemSummaryChart || document.body);
 };
 
-async function loadSystemChecklist(date = "") {
+async function loadSystemChecklist(date = "", options = {}) {
   const hasExistingPayload = Boolean(state.lastSystemChecklistPayload);
   if (!date && !hasExistingPayload && refs.systemChecklistStatus) refs.systemChecklistStatus.textContent = "Đang tải...";
   if (!date && !hasExistingPayload && refs.systemModuleStatus) refs.systemModuleStatus.textContent = "Đang tải...";
+  const aiRange = date ? "current" : normalizeSystemModuleAiRange(options.aiRange || state.systemModuleAiRange);
+  if (!date) state.systemModuleAiRange = aiRange;
+  const forceParam = options.forceRefresh ? "&force_refresh=true" : "";
+  const aiRangeParam = !date ? `&ai_range=${encodeURIComponent(aiRange)}` : "";
   const url = date
     ? `/api/system-checklist?date=${encodeURIComponent(date)}&_=${Date.now()}`
-    : `/api/system-checklist?_=${Date.now()}`;
+    : `/api/system-checklist?_=${Date.now()}${forceParam}${aiRangeParam}`;
   const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const payload = await res.json();
   const backendPreviousPayload = payload && typeof payload.previous_snapshot === "object" ? payload.previous_snapshot : null;
   const lastPayload = state.lastSystemChecklistPayload;
   const sameDateAsLast = Boolean(lastPayload && payload?.date && lastPayload.date === payload.date);
-  state.previousSystemChecklistPayload = sameDateAsLast && lastPayload ? lastPayload : (backendPreviousPayload || lastPayload);
+  const lastRange = normalizeSystemModuleAiRange(lastPayload?.ai_range || "current");
+  const payloadRange = normalizeSystemModuleAiRange(payload?.ai_range || aiRange);
+  const sameRangeAsLast = Boolean(lastPayload && lastRange === payloadRange);
+  state.previousSystemChecklistPayload = sameDateAsLast && sameRangeAsLast && lastPayload
+    ? lastPayload
+    : (sameRangeAsLast
+      ? (backendPreviousPayload || lastPayload)
+      : (lastPayload && payloadRange === "all" ? null : backendPreviousPayload));
   state.lastSystemChecklistPayload = payload;
   renderSystemChecklist(payload);
   if (refs.systemChecklistDate && payload.date) refs.systemChecklistDate.value = payload.date;
-  if (!date) refreshSystemChecklistInBackground();
+  if (!date && aiRange === "current") refreshSystemChecklistInBackground();
 }
 
 function refreshSystemChecklistInBackground() {
@@ -3093,7 +3146,7 @@ function refreshSystemChecklistInBackground() {
   if (state.systemChecklistRefreshInFlight || now - state.lastSystemChecklistRefreshMs < 5 * 60 * 1000) return;
   state.systemChecklistRefreshInFlight = true;
   state.lastSystemChecklistRefreshMs = now;
-  fetch(`/api/system-checklist?force_refresh=true&_=${now}`, { cache: "no-store" })
+  fetch(`/api/system-checklist?force_refresh=true&ai_range=current&_=${now}`, { cache: "no-store" })
     .then((res) => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return res.json();

@@ -263,8 +263,74 @@ class SystemChecklistPayloadTests(unittest.TestCase):
         module_one = next(item for item in modules if item["number"] == 1)
         values = {row["label"]: row["value"] for row in module_one["stats"]}
         self.assertEqual(values["total_decisions"], 5)
-        self.assertEqual(values["Tổng log gọi AI trong ngày"], 5)
+        self.assertEqual(values["Tổng log gọi AI trong phạm vi"], 5)
         self.assertEqual(values["mini_no_trade_count"], 1)
+
+    def test_module_one_all_range_uses_all_ai_call_history_without_day_bounds(self) -> None:
+        config = {"timezone": "Asia/Saigon"}
+        with patch("crypto_trader.dashboard_services.ai_trade_decision_stats", return_value={"totalRecords": 99}) as trade_stats, patch(
+            "crypto_trader.dashboard_services.ai_call_decision_stats",
+            return_value={
+                "totalDecisions": 12,
+                "totalRecords": 12,
+                "miniCallCount": 8,
+                "okxCallCount": 4,
+                "miniNoTradeCount": 2,
+                "longCount": 5,
+                "shortCount": 3,
+                "noTradeCount": 1,
+            },
+        ) as call_stats:
+            modules = system_modules_payload(
+                config,
+                checked_date="2026-07-17",
+                checked_at_iso="2026-07-17T06:30:00+00:00",
+                ai_history=[],
+                replay={},
+                strategy={},
+                regime={},
+                health={},
+                risk_state={},
+                row_counts={},
+                ai_range="all",
+            )
+
+        trade_stats.assert_called_once_with(config)
+        call_stats.assert_called_once_with(config)
+        module_one = next(item for item in modules if item["number"] == 1)
+        self.assertEqual(module_one["ai_range"], "all")
+        self.assertEqual(module_one["ai_range_label"], "Toàn bộ dữ liệu đang lưu")
+        values = {row["label"]: row["value"] for row in module_one["stats"]}
+        self.assertEqual(values["total_decisions"], 12)
+        self.assertEqual(values["Phạm vi dữ liệu AI"], "Toàn bộ dữ liệu đang lưu")
+        self.assertEqual(values["Tổng log gọi AI trong phạm vi"], 12)
+
+    def test_system_checklist_all_range_builds_fresh_without_daily_snapshot_cache(self) -> None:
+        rebuilt = {
+            "date": "2026-07-10",
+            "created_at": "2026-07-10T13:10:00+00:00",
+            "ai_range": "all",
+            "modules": [],
+        }
+        enriched = {**rebuilt, "previous_snapshot": None}
+
+        with patch("crypto_trader.dashboard_services._preferred_system_checklist_snapshot") as preferred_snapshot, patch(
+            "crypto_trader.dashboard_services._latest_system_checklist_snapshot"
+        ) as latest_snapshot, patch(
+            "crypto_trader.dashboard_services.refresh_system_checklist_snapshot"
+        ) as refresh_snapshot, patch(
+            "crypto_trader.dashboard_services._build_system_checklist_payload", return_value=rebuilt
+        ) as build_payload, patch(
+            "crypto_trader.dashboard_services.attach_previous_system_checklist_snapshot", return_value=enriched
+        ) as attach_previous:
+            payload = system_checklist_payload({}, ai_range="all")
+
+        self.assertEqual(payload, enriched)
+        preferred_snapshot.assert_not_called()
+        latest_snapshot.assert_not_called()
+        refresh_snapshot.assert_not_called()
+        build_payload.assert_called_once_with({}, automation=None, ai_range="all")
+        attach_previous.assert_called_once_with({}, rebuilt)
 
 
 if __name__ == "__main__":
