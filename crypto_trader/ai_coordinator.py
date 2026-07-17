@@ -1353,7 +1353,6 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
     latest_created_at = _parse_time((latest or {}).get("created_at"))
     if (
         fixed_schedule
-        and not force
         and latest
         and (latest.get("slot_id") == slot_id or (latest_created_at and slot_start and latest_created_at >= slot_start))
     ):
@@ -1361,6 +1360,7 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
             **latest,
             "skipped": True,
             "skip_reason": f"mini scan already ran for slot {slot_id}",
+            "duplicate_slot_guard": True,
         }
     max_source_symbols = max(1, min(30, int(internal_config.get("market_scan_source_symbols", 30) or 30)))
     max_symbols = max(1, min(3, int(internal_config.get("market_scan_max_symbols", 3) or 3)))

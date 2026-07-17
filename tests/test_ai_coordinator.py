@@ -12,6 +12,7 @@ from crypto_trader.ai_coordinator import (
     _compact_lc_memory,
     _candidate_summary,
     _candidate_market_summary,
+    _internal_market_scan_slot_id,
     _local_market_scan_result,
     _mini_ai_reason_vi,
     _validated_ai_symbols,
@@ -444,6 +445,41 @@ class AiCoordinatorTest(TestCase):
         )
 
         self.assertFalse(internal_market_scan_due(config, now=now))
+
+    @patch("crypto_trader.ai_coordinator._openai_internal_market_scan")
+    @patch("crypto_trader.ai_coordinator.fetch_top_volume_symbols")
+    def test_internal_market_scan_force_reuses_existing_fixed_slot(self, fetch_top_volume_symbols, openai_internal_market_scan) -> None:
+        config = self._config()
+        config["ai"]["internal"]["provider"] = "openai"
+        config["ai"]["internal"]["market_scan_use_ai"] = True
+        config["ai"]["internal"]["market_scan_fixed_schedule"] = True
+        config["ai"]["internal"]["market_scan_interval_seconds"] = 14400
+        now = datetime.now(timezone.utc)
+        slot_id = _internal_market_scan_slot_id(config, now)
+        save_lc_pipeline_mini_scan(
+            config,
+            {
+                "created_at": now.isoformat(),
+                "slot_id": slot_id,
+                "status": "done",
+                "pool_symbols": ["BTC/USDT:USDT"],
+                "selected_symbols": ["BTC/USDT:USDT"],
+                "approved_symbols": ["BTC/USDT:USDT"],
+                "ai_review": {
+                    "decision": "LC",
+                    "approved_symbols": ["BTC/USDT:USDT"],
+                },
+            },
+        )
+
+        result = run_internal_market_scan(config, force=True)
+
+        fetch_top_volume_symbols.assert_not_called()
+        openai_internal_market_scan.assert_not_called()
+        self.assertTrue(result["skipped"])
+        self.assertTrue(result["duplicate_slot_guard"])
+        self.assertEqual(result["skip_reason"], f"mini scan already ran for slot {slot_id}")
+        self.assertEqual(result["selected_symbols"], ["BTC/USDT:USDT"])
 
     def test_internal_market_scan_not_due_when_current_four_hour_pool_is_empty(self) -> None:
         config = self._config()
