@@ -1325,19 +1325,19 @@ function moduleChangedVariableCount(module, rows = null) {
 }
 
 const AI_DECISION_ROW_CONFIG = [
-  ["total_decisions", "Tổng quyết định AI thực", "LONG + SHORT + số lần GPT-5.5 từ chối hoặc xóa setup; không tính log scan NO_TRADE thường.", "AI đã đưa ra nhiều quyết định thực hơn.", "AI đưa ra ít quyết định thực hơn."],
+  ["total_decisions", "Tổng quyết định AI thực", "LONG + SHORT + số lần GPT-5.5 từ chối hoặc xóa setup; không tính nhật ký các lần quét NO_TRADE thường.", "AI đã đưa ra nhiều quyết định thực hơn.", "AI đưa ra ít quyết định thực hơn."],
   ["long_count", "Số LONG", "Số lần AI quyết định ENTER_LONG.", "AI ưu tiên LONG nhiều hơn.", "AI giảm số quyết định LONG."],
   ["short_count", "Số SHORT", "Số lần AI quyết định ENTER_SHORT.", "AI ưu tiên SHORT nhiều hơn.", "AI giảm số quyết định SHORT."],
   ["no_trade_count", "5.5 từ chối/xóa setup", "Số lần GPT-5.5 từ chối vào lệnh hoặc xóa setup; không tính các lần giữ setup.", "5.5 từ chối/xóa setup nhiều hơn.", "5.5 từ chối/xóa setup ít hơn."],
   ["long_percent", "Tỷ lệ LONG", "Tỷ lệ quyết định LONG trên tổng quyết định AI thực.", "AI đang thiên về LONG.", "AI giảm xu hướng LONG."],
   ["short_percent", "Tỷ lệ SHORT", "Tỷ lệ quyết định SHORT trên tổng quyết định AI thực.", "AI đang thiên về SHORT.", "AI giảm xu hướng SHORT."],
-  ["winrate_long", "Winrate LONG", "Tỷ lệ thắng của các lệnh LONG.", "LONG đang hoạt động hiệu quả hơn.", "Hiệu quả LONG giảm."],
-  ["winrate_short", "Winrate SHORT", "Tỷ lệ thắng của các lệnh SHORT.", "SHORT đang hoạt động hiệu quả hơn.", "Hiệu quả SHORT giảm."],
-  ["profit_factor_long", "Profit Factor LONG", "Hiệu quả sinh lời của các lệnh LONG. Giá trị lớn hơn 1 cho thấy LONG đang có lợi nhuận.", "Hiệu quả LONG tăng.", "Hiệu quả LONG giảm."],
-  ["profit_factor_short", "Profit Factor SHORT", "Hiệu quả sinh lời của các lệnh SHORT. Giá trị lớn hơn 1 cho thấy SHORT đang có lợi nhuận.", "Hiệu quả SHORT tăng.", "Hiệu quả SHORT giảm."],
-  ["avg_confidence_long", "Confidence LONG", "Mức độ tự tin trung bình của AI khi quyết định LONG.", "AI tự tin hơn với LONG.", "AI ít tự tin hơn với LONG."],
-  ["avg_confidence_short", "Confidence SHORT", "Mức độ tự tin trung bình của AI khi quyết định SHORT.", "AI tự tin hơn với SHORT.", "AI ít tự tin hơn với SHORT."],
-  ["bias_warning", "Bias Warning", "Cảnh báo khi AI có xu hướng thiên quá nhiều về LONG hoặc SHORT.", "AI đang lệch bias mạnh hơn.", "AI giảm mức lệch bias.", true],
+  ["winrate_long", "Tỷ lệ thắng LONG", "Tỷ lệ thắng của các lệnh LONG.", "LONG đang hoạt động hiệu quả hơn.", "Hiệu quả LONG giảm."],
+  ["winrate_short", "Tỷ lệ thắng SHORT", "Tỷ lệ thắng của các lệnh SHORT.", "SHORT đang hoạt động hiệu quả hơn.", "Hiệu quả SHORT giảm."],
+  ["profit_factor_long", "Hệ số lợi nhuận LONG", "Hiệu quả sinh lời của các lệnh LONG. Giá trị lớn hơn 1 cho thấy LONG đang có lợi nhuận.", "Hiệu quả LONG tăng.", "Hiệu quả LONG giảm."],
+  ["profit_factor_short", "Hệ số lợi nhuận SHORT", "Hiệu quả sinh lời của các lệnh SHORT. Giá trị lớn hơn 1 cho thấy SHORT đang có lợi nhuận.", "Hiệu quả SHORT tăng.", "Hiệu quả SHORT giảm."],
+  ["avg_confidence_long", "Độ tin cậy LONG", "Mức độ tự tin trung bình của AI khi quyết định LONG.", "AI tự tin hơn với LONG.", "AI ít tự tin hơn với LONG."],
+  ["avg_confidence_short", "Độ tin cậy SHORT", "Mức độ tự tin trung bình của AI khi quyết định SHORT.", "AI tự tin hơn với SHORT.", "AI ít tự tin hơn với SHORT."],
+  ["bias_warning", "Cảnh báo lệch hướng", "Cảnh báo khi AI có xu hướng thiên quá nhiều về LONG hoặc SHORT.", "AI đang lệch hướng mạnh hơn.", "AI giảm mức lệch hướng.", true],
 ].map(([key, label, meaning, up, down, isBiasWarning], index) => ({
   key,
   label,
@@ -1531,7 +1531,7 @@ function renderModuleVariableRows(module, chartRows, showShare = false) {
 }
 
 const PROFIT_FACTOR_HELP_TEXT = [
-  "Profit Factor = tổng PnL lời / tổng giá trị tuyệt đối của PnL lỗ.",
+  "Hệ số lợi nhuận = tổng PnL lời / tổng giá trị tuyệt đối của PnL lỗ.",
   "Ý nghĩa: cho biết hướng LONG/SHORT lời gấp bao nhiêu lần phần lỗ của chính hướng đó.",
   "Mốc 1.0 là hòa vốn; >1 là lời nhiều hơn lỗ, <1 là lỗ nhiều hơn lời.",
   "Dùng để so sánh LONG và SHORT: hướng nào hệ số cao hơn thì đang kiếm tiền hiệu quả hơn.",
@@ -1936,11 +1936,11 @@ function renderAiDecisionModuleChart(module, rows) {
       <div class="module-chart-legend module-ai-chart-stack">
         ${renderAiDecisionKpiGroup(module, [totalKpiRow, noTradeRow])}
         ${renderAiDecisionBiasCard(module, biasWarningRow)}
-        ${renderAiDecisionDonut(entryDirectionRows, "Entry Direction", "Phân bổ lệnh LONG và SHORT", entryTotal ? String(entryTotal) : "0", "lệnh")}
-        ${renderAiDecisionBarSvg(directionPercentRows, "Entry Direction · Tỷ lệ", "Tỷ lệ LONG/SHORT trên tổng decision", "ai-entry-percent")}
-        ${renderAiDecisionBarSvg(winrateRows, "Decision Performance · Winrate", "Hiệu suất quyết định · Tỷ lệ thắng", "ai-winrate")}
-        ${renderAiDecisionBarSvg(profitRows, "Decision Performance · Profit Factor", "Hiệu suất quyết định · Hệ số lợi nhuận", "ai-profit")}
-        ${renderAiDecisionBarSvg(confidenceRows, "AI Confidence", "Độ tin cậy của AI", "ai-confidence")}
+        ${renderAiDecisionDonut(entryDirectionRows, "Hướng vào lệnh", "Phân bổ lệnh LONG và SHORT", entryTotal ? String(entryTotal) : "0", "lệnh")}
+        ${renderAiDecisionBarSvg(directionPercentRows, "Hướng vào lệnh · Tỷ lệ", "Tỷ lệ LONG/SHORT trên tổng quyết định", "ai-entry-percent")}
+        ${renderAiDecisionBarSvg(winrateRows, "Tỷ lệ thắng", "Hiệu suất quyết định LONG/SHORT", "ai-winrate")}
+        ${renderAiDecisionBarSvg(profitRows, "Hệ số lợi nhuận", "Hiệu suất sinh lời LONG/SHORT", "ai-profit")}
+        ${renderAiDecisionBarSvg(confidenceRows, "Độ tin cậy của AI", "Mức tự tin trung bình theo LONG/SHORT", "ai-confidence")}
       </div>
       <div class="module-chart-legend compact module-ai-variable-list">${renderModuleVariableRows(module, aiDecisionLegendRows(rows), false)}</div>
     </section>
