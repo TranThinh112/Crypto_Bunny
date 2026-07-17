@@ -1087,7 +1087,7 @@ function closeSystemModuleDetail() {
   if (refs.systemModuleOverlay) refs.systemModuleOverlay.hidden = true;
   state.selectedSystemModuleKey = null;
   if (refs.systemModuleDetail) {
-    refs.systemModuleDetail.classList.remove("module-detail-chart-scroll");
+    refs.systemModuleDetail.classList.remove("module-detail-chart-scroll", "market-regime-detail");
     refs.systemModuleDetail.innerHTML = "";
   }
   if (refs.systemModuleGrid) {
@@ -1103,7 +1103,7 @@ function renderHealthCriterionDetail(item) {
   const evidence = Array.isArray(item.evidence) ? item.evidence : [];
   state.selectedSystemModuleKey = null;
   refs.systemModuleOverlay.hidden = false;
-  refs.systemModuleDetail.classList.remove("module-detail-chart-scroll");
+  refs.systemModuleDetail.classList.remove("module-detail-chart-scroll", "market-regime-detail");
   refs.systemModuleDetail.innerHTML = `
     <button class="module-close" type="button" aria-label="Đóng">×</button>
     <div class="module-detail-head">
@@ -2219,8 +2219,439 @@ function bindModuleChartInteractions() {
   });
 }
 
+const MARKET_REGIME_LABELS = {
+  BULL: "Thị trường tăng",
+  BEAR: "Thị trường giảm",
+  SIDEWAY: "Thị trường đi ngang",
+  HIGH_VOLATILITY: "Biến động cao",
+  LOW_VOLATILITY: "Biến động thấp",
+  UNKNOWN: "Chưa xác định",
+};
+
+function isMarketRegimeModule(module) {
+  return Number(module?.number || 0) === 5 && viLabel(module?.name || "").includes("market regime");
+}
+
+function marketRegimeModuleName(module) {
+  return isMarketRegimeModule(module) ? "Market Regime Detector" : String(module?.name || "-");
+}
+
+function marketRegimeModuleSubtitle(module) {
+  return isMarketRegimeModule(module) ? "Bộ nhận diện trạng thái thị trường" : "";
+}
+
+function marketRegimeFiniteValue(value) {
+  const number = Number(value);
+  return value !== null && value !== undefined && value !== "" && Number.isFinite(number) ? number : null;
+}
+
+function formatMarketRegimeNumber(value, maximumFractionDigits = 4) {
+  const number = marketRegimeFiniteValue(value);
+  if (number === null) return "-";
+  return number.toLocaleString("en-US", {
+    maximumFractionDigits,
+  });
+}
+
+function marketRegimeStat(module, label) {
+  const key = viLabel(label);
+  return (Array.isArray(module?.stats) ? module.stats : []).find((row) => viLabel(row?.label || "") === key) || null;
+}
+
+function marketRegimeLabel(value) {
+  const key = String(value || "UNKNOWN").trim().toUpperCase();
+  return MARKET_REGIME_LABELS[key] || MARKET_REGIME_LABELS.UNKNOWN;
+}
+
+function marketRegimeTone(value) {
+  const key = String(value || "UNKNOWN").trim().toUpperCase();
+  if (key === "BULL") return "bull";
+  if (key === "BEAR") return "bear";
+  if (key === "SIDEWAY") return "sideway";
+  if (key === "HIGH_VOLATILITY") return "high-volatility";
+  if (key === "LOW_VOLATILITY") return "low-volatility";
+  return "unknown";
+}
+
+function marketRegimeReasonRows(reason) {
+  if (Array.isArray(reason)) {
+    return reason.filter((item) => item !== null && item !== undefined && String(item).trim());
+  }
+  if (reason !== null && reason !== undefined && String(reason).trim()) return [reason];
+  return [];
+}
+
+function renderMarketRegimeKpiCard({ title, subtitle, value, unitText, createdAt, stateText = "" }) {
+  const numericValue = marketRegimeFiniteValue(value);
+  return `
+    <article class="market-regime-kpi ${numericValue === null ? "empty" : ""}">
+      <div class="market-regime-kpi-head">
+        <div>
+          <strong>${escapeHtml(title)}</strong>
+          <small>${escapeHtml(subtitle)}</small>
+        </div>
+        ${stateText ? `<span class="market-regime-kpi-state">${escapeHtml(stateText)}</span>` : ""}
+      </div>
+      <div class="market-regime-kpi-value">${numericValue === null ? "Chưa có dữ liệu" : escapeHtml(formatMarketRegimeNumber(numericValue))}</div>
+      <div class="market-regime-kpi-meta">
+        <span>${escapeHtml(unitText || "Chưa có thông tin đơn vị")}</span>
+        <time>${escapeHtml(timeLabel(createdAt))}</time>
+      </div>
+    </article>
+  `;
+}
+
+function renderMarketRegimeIndicatorStrip(indicators) {
+  const rows = [
+    ["last", "Giá hiện tại"],
+    ["bid", "Giá mua"],
+    ["ask", "Giá bán"],
+    ["spread_pct", "Spread (%)"],
+    ["volume_ratio", "Tỷ lệ khối lượng"],
+    ["support", "Hỗ trợ"],
+    ["resistance", "Kháng cự"],
+  ].map(([key, label]) => ({ key, label, value: marketRegimeFiniteValue(indicators?.[key]) }))
+    .filter((row) => row.value !== null);
+  if (!rows.length) {
+    return '<div class="market-regime-empty compact">Chưa có chỉ báo bổ sung trong snapshot hiện tại.</div>';
+  }
+  return rows.map((row) => `
+    <div class="market-regime-indicator">
+      <span>${escapeHtml(row.label)}</span>
+      <strong>${escapeHtml(formatMarketRegimeNumber(row.value))}</strong>
+    </div>
+  `).join("");
+}
+
+function marketRegimeChartAxis(value) {
+  const number = marketRegimeFiniteValue(value);
+  if (number === null) return "-";
+  const clean = Math.abs(number) < 1e-10 ? 0 : number;
+  return clean.toLocaleString("en-US", { maximumFractionDigits: 4 });
+}
+
+function renderMarketRegimeLineChart({
+  id,
+  title,
+  subtitle,
+  createdAt,
+  series,
+  axisLabel = "Giá trị gốc",
+  missing = [],
+  supplemental = [],
+  error = "",
+}) {
+  const availableSeries = (Array.isArray(series) ? series : [])
+    .map((item) => ({ ...item, value: marketRegimeFiniteValue(item.value) }))
+    .filter((item) => item.value !== null);
+  const missingText = (Array.isArray(missing) ? missing : []).filter(Boolean).join(", ");
+  const note = missingText ? `<p class="market-regime-chart-note">Chưa có dữ liệu: ${escapeHtml(missingText)}.</p>` : "";
+  const extraRows = (Array.isArray(supplemental) ? supplemental : [])
+    .map((item) => ({ ...item, value: marketRegimeFiniteValue(item.value) }))
+    .filter((item) => item.value !== null);
+  const supplementalMarkup = extraRows.length ? `
+    <div class="market-regime-chart-supplemental">
+      ${extraRows.map((item) => `
+        <div><span>${escapeHtml(item.label)}</span><strong>${escapeHtml(formatMarketRegimeNumber(item.value))}</strong></div>
+      `).join("")}
+      <p>${escapeHtml(extraRows[0].note || "Hiển thị riêng vì payload không xác nhận cùng đơn vị với series của biểu đồ.")}</p>
+    </div>
+  ` : "";
+  if (error || !availableSeries.length) {
+    return `
+      <article class="market-regime-chart-card" data-regime-chart="${escapeHtml(id)}">
+        <header>
+          <div><strong>${escapeHtml(title)}</strong><small>${escapeHtml(subtitle)}</small></div>
+        </header>
+        <div class="market-regime-empty">${escapeHtml(error || "Chưa có dữ liệu phù hợp để vẽ biểu đồ này.")}</div>
+        ${supplementalMarkup}
+        ${note}
+      </article>
+    `;
+  }
+
+  const values = availableSeries.map((item) => item.value);
+  const rawMin = Math.min(...values);
+  const rawMax = Math.max(...values);
+  const rawSpan = rawMax - rawMin;
+  const padding = rawSpan > 0 ? rawSpan * 0.16 : Math.max(Math.abs(rawMax) * 0.1, 1);
+  const axisMin = rawMin - padding;
+  const axisMax = rawMax + padding;
+  const axisSpan = axisMax - axisMin || 1;
+  const chartLeft = 62;
+  const chartRight = 496;
+  const chartTop = 26;
+  const chartBottom = 184;
+  const chartHeight = chartBottom - chartTop;
+  const pointX = (chartLeft + chartRight) / 2;
+  const pointY = (value) => chartBottom - ((value - axisMin) / axisSpan) * chartHeight;
+  const ticks = Array.from({ length: 5 }, (_, index) => axisMin + (axisSpan * index) / 4);
+  const chartSeries = availableSeries.map((item) => {
+    const y = pointY(item.value);
+    const target = `${id}-${item.key}`;
+    return `
+      <g class="market-regime-series" data-regime-series="${escapeHtml(target)}">
+        <path d="M ${pointX} ${y}" fill="none" stroke="${item.color}" stroke-width="2.5"></path>
+        <circle cx="${pointX}" cy="${y}" r="5.5" fill="${item.color}" stroke="var(--panel)" stroke-width="2">
+          <title>${escapeHtml(timeLabel(createdAt))} | ${escapeHtml(item.label)}: ${escapeHtml(formatMarketRegimeNumber(item.value))}</title>
+        </circle>
+      </g>
+    `;
+  }).join("");
+  const legend = availableSeries.map((item) => {
+    const target = `${id}-${item.key}`;
+    return `
+      <button class="market-regime-legend-btn" type="button" data-regime-target="${escapeHtml(target)}" aria-pressed="true">
+        <i style="background:${item.color}"></i>
+        <span>${escapeHtml(item.label)}</span>
+        <strong>${escapeHtml(formatMarketRegimeNumber(item.value))}</strong>
+      </button>
+    `;
+  }).join("");
+  return `
+    <article class="market-regime-chart-card" data-regime-chart="${escapeHtml(id)}">
+      <header>
+        <div><strong>${escapeHtml(title)}</strong><small>${escapeHtml(subtitle)}</small></div>
+        <span>${escapeHtml(axisLabel)}</span>
+      </header>
+      <div class="market-regime-chart-canvas">
+        <svg viewBox="0 0 540 224" role="img" aria-label="${escapeHtml(title)}">
+          ${ticks.map((value, index) => {
+            const y = chartBottom - (index / 4) * chartHeight;
+            return `
+              <g>
+                <line x1="${chartLeft}" y1="${y}" x2="${chartRight}" y2="${y}" class="market-regime-grid-line"></line>
+                <text x="${chartLeft - 8}" y="${y + 4}" text-anchor="end" class="market-regime-axis-text">${escapeHtml(marketRegimeChartAxis(value))}</text>
+              </g>
+            `;
+          }).join("")}
+          <line x1="${chartLeft}" y1="${chartBottom}" x2="${chartRight}" y2="${chartBottom}" class="market-regime-axis-line"></line>
+          ${chartSeries}
+          <text x="${pointX}" y="210" text-anchor="middle" class="market-regime-axis-text">${escapeHtml(timeLabel(createdAt))}</text>
+        </svg>
+      </div>
+      <div class="market-regime-chart-legend">${legend}</div>
+      ${supplementalMarkup}
+      ${note}
+    </article>
+  `;
+}
+
+function bindMarketRegimeChartInteractions() {
+  if (!refs.systemModuleDetail) return;
+  refs.systemModuleDetail.querySelectorAll(".market-regime-legend-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      const target = button.getAttribute("data-regime-target");
+      if (!target) return;
+      const isVisible = button.getAttribute("aria-pressed") !== "false";
+      button.setAttribute("aria-pressed", isVisible ? "false" : "true");
+      button.classList.toggle("muted", isVisible);
+      refs.systemModuleDetail.querySelectorAll(".market-regime-series").forEach((series) => {
+        if (series.getAttribute("data-regime-series") === target) series.classList.toggle("is-hidden", isVisible);
+      });
+    });
+  });
+}
+
+function renderMarketRegimeLoadingSkeleton() {
+  return `
+    <section class="market-regime-loading" aria-label="Đang tải Market Regime">
+      <div class="market-regime-skeleton status"></div>
+      <div class="market-regime-skeleton-kpis">
+        ${Array.from({ length: 3 }, () => '<div class="market-regime-skeleton kpi"></div>').join("")}
+      </div>
+      <div class="market-regime-skeleton-charts">
+        ${Array.from({ length: 4 }, () => '<div class="market-regime-skeleton chart"></div>').join("")}
+      </div>
+      <div class="market-regime-skeleton table"></div>
+    </section>
+  `;
+}
+
+function renderMarketRegimeLoadError(message) {
+  return `
+    <div class="market-regime-load-error" role="alert">
+      <strong>Không thể tải dữ liệu Market Regime.</strong>
+      <span>${escapeHtml(message || "Lỗi không xác định")}</span>
+    </div>
+  `;
+}
+
+function renderMarketRegimeDetail(module, options = {}) {
+  const regime = module?.market_regime && typeof module.market_regime === "object" ? module.market_regime : {};
+  const indicators = regime.indicators && typeof regime.indicators === "object" ? regime.indicators : {};
+  const createdAt = regime.created_at || marketRegimeStat(module, "updatedAt")?.value || null;
+  const confidence = marketRegimeFiniteValue(regime.confidence);
+  const confidenceWidth = confidence === null ? 0 : Math.max(0, Math.min(100, confidence));
+  const reasons = marketRegimeReasonRows(regime.reason);
+  const regimeCode = String(regime.regime || "UNKNOWN").trim().toUpperCase();
+  const error = String(regime.error || "").trim();
+  const historySamples = marketRegimeFiniteValue(marketRegimeStat(module, "historySamples")?.value);
+  const macd = marketRegimeFiniteValue(indicators.macd);
+  const macdState = macd === null ? "" : macd > 0 ? "Dương" : macd < 0 ? "Âm" : "Trung tính";
+  const trendSeries = [
+    { key: "ema_fast", label: "EMA20", value: indicators.ema_fast, color: "#147a7e" },
+    { key: "ema_slow", label: "EMA50", value: indicators.ema_slow, color: "#315f9f" },
+    { key: "ema200", label: "EMA200", value: indicators.ema200, color: "#1f8a5b" },
+    { key: "vwap", label: "VWAP", value: indicators.vwap, color: "#b7791f" },
+  ];
+  const strengthSeries = [
+    { key: "adx", label: "ADX", value: indicators.adx, color: "#147a7e" },
+    { key: "rsi", label: "RSI", value: indicators.rsi, color: "#315f9f" },
+    { key: "fear_greed", label: "Fear & Greed", value: indicators.fear_greed, color: "#b7791f" },
+  ];
+  const volatilityValue = marketRegimeFiniteValue(indicators.volatility);
+  const fundingValue = marketRegimeFiniteValue(indicators.funding);
+  const volatilityFundingSeries = volatilityValue !== null
+    ? [{ key: "volatility", label: "Volatility", value: volatilityValue, color: "#bd3f32" }]
+    : fundingValue !== null
+      ? [{ key: "funding", label: "Funding", value: fundingValue, color: "#315f9f" }]
+      : [];
+  const volatilityFundingSupplemental = volatilityValue !== null && fundingValue !== null
+    ? [{ label: "Funding", value: fundingValue, note: "Funding hiển thị riêng vì payload không xác nhận cùng đơn vị với Volatility." }]
+    : [];
+  const volumeValue = marketRegimeFiniteValue(indicators.volume);
+  const openInterestValue = marketRegimeFiniteValue(indicators.open_interest);
+  const marketFlowSeries = volumeValue !== null
+    ? [{ key: "volume", label: "Volume", value: volumeValue, color: "#147a7e" }]
+    : openInterestValue !== null
+      ? [{ key: "open_interest", label: "Open Interest", value: openInterestValue, color: "#315f9f" }]
+      : [];
+  const marketFlowSupplemental = volumeValue !== null && openInterestValue !== null
+    ? [{ label: "Open Interest", value: openInterestValue, note: "Open Interest hiển thị riêng vì payload không xác nhận cùng đơn vị với Volume." }]
+    : [];
+
+  state.selectedSystemModuleKey = systemModuleKey(module);
+  refs.systemModuleOverlay.hidden = false;
+  refs.systemModuleDetail.classList.add("module-detail-chart-scroll", "market-regime-detail");
+  refs.systemModuleDetail.innerHTML = `
+    <button class="module-close" type="button" aria-label="Đóng">×</button>
+    <div class="module-detail-head market-regime-head">
+      <div>
+        <span class="module-number">Module ${escapeHtml(module.number || "5")}</span>
+        <h3 id="systemModuleTitle">Market Regime Detector</h3>
+        <p>Bộ nhận diện trạng thái thị trường</p>
+      </div>
+      <div class="module-head-actions">
+        <span class="status-pill ${module.status === "ok" ? "ok" : "warn"}">${moduleStatusLabel(module.status)}</span>
+      </div>
+    </div>
+    <div class="module-chart-scroll market-regime-scroll">
+      ${error ? `<div class="market-regime-load-error" role="alert"><strong>Dữ liệu Market Regime đang lỗi.</strong><span>${escapeHtml(error)}</span></div>` : ""}
+      <section class="market-regime-status-card">
+        <div class="market-regime-status-main">
+          <div>
+            <span>Trạng thái thị trường hiện tại</span>
+            <strong>${escapeHtml(marketRegimeLabel(regimeCode))}</strong>
+            <small>${escapeHtml(regimeCode)}</small>
+          </div>
+          <span class="market-regime-badge ${escapeHtml(marketRegimeTone(regimeCode))}">${escapeHtml(marketRegimeLabel(regimeCode))}</span>
+        </div>
+        <div class="market-regime-confidence">
+          <div><span>Độ tin cậy</span><strong>${confidence === null ? "-" : `${escapeHtml(formatMarketRegimeNumber(confidence, 2))}%`}</strong></div>
+          <div class="market-regime-progress" role="progressbar" aria-label="Độ tin cậy" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${confidence === null ? "0" : confidenceWidth}">
+            <span style="width:${confidenceWidth}%"></span>
+          </div>
+        </div>
+        <div class="market-regime-status-meta">
+          <div><span>Thời điểm ghi nhận</span><strong>${escapeHtml(timeLabel(createdAt))}</strong></div>
+          <div><span>Snapshot tổng hợp</span><strong>${historySamples === null ? "-" : escapeHtml(formatMarketRegimeNumber(historySamples, 0))}</strong></div>
+        </div>
+        <div class="market-regime-reasons">
+          <span>Lý do phân loại</span>
+          ${reasons.length ? `<ul>${reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul>` : '<p>Chưa có lý do phân loại trong dữ liệu hiện tại.</p>'}
+        </div>
+      </section>
+
+      <section class="market-regime-section">
+        <div class="market-regime-section-head"><div><strong>Chỉ báo chính</strong><small>Snapshot hiện tại</small></div></div>
+        <div class="market-regime-kpi-grid">
+          ${renderMarketRegimeKpiCard({ title: "ATR", subtitle: "Biên độ thực trung bình", value: indicators.atr, unitText: "Chưa có thông tin đơn vị", createdAt })}
+          ${renderMarketRegimeKpiCard({ title: "MACD", subtitle: "Đường trung bình hội tụ phân kỳ", value: indicators.macd, unitText: "Chưa có thông tin đơn vị", createdAt, stateText: macdState })}
+          ${renderMarketRegimeKpiCard({ title: "BTC Dominance", subtitle: "Tỷ lệ thống trị Bitcoin", value: indicators.btc_dominance, unitText: "Chưa có thông tin đơn vị", createdAt })}
+        </div>
+        <div class="market-regime-indicator-strip">${renderMarketRegimeIndicatorStrip(indicators)}</div>
+      </section>
+
+      <section class="market-regime-section">
+        <div class="market-regime-section-head"><div><strong>Bốn biểu đồ chính</strong><small>Snapshot hiện tại</small></div></div>
+        <div class="market-regime-chart-grid">
+          ${renderMarketRegimeLineChart({
+            id: "trend-structure",
+            title: "Cấu trúc xu hướng",
+            subtitle: "EMA20, EMA50, EMA200 và VWAP",
+            createdAt,
+            series: trendSeries,
+            axisLabel: "Giá trị giá",
+            missing: trendSeries.filter((item) => marketRegimeFiniteValue(item.value) === null).map((item) => item.label),
+            error,
+          })}
+          ${renderMarketRegimeLineChart({
+            id: "strength-sentiment",
+            title: "Sức mạnh xu hướng và tâm lý thị trường",
+            subtitle: "ADX, RSI, Fear & Greed và News Score",
+            createdAt,
+            series: strengthSeries,
+            axisLabel: "Giá trị gốc",
+            missing: [
+              ...strengthSeries.filter((item) => marketRegimeFiniteValue(item.value) === null).map((item) => item.label),
+              marketRegimeFiniteValue(indicators.news_score) === null ? "News Score" : null,
+            ],
+            supplemental: marketRegimeFiniteValue(indicators.news_score) === null ? [] : [{
+              label: "News Score",
+              value: indicators.news_score,
+              note: "News Score không được gộp do payload chưa xác nhận cùng thang đo.",
+            }],
+            error,
+          })}
+          ${renderMarketRegimeLineChart({
+            id: "volatility-funding",
+            title: "Độ biến động và Funding",
+            subtitle: "Volatility và Funding",
+            createdAt,
+            series: volatilityFundingSeries,
+            axisLabel: "Giá trị gốc",
+            missing: [volatilityValue === null ? "Volatility" : null, fundingValue === null ? "Funding" : null],
+            supplemental: volatilityFundingSupplemental,
+            error,
+          })}
+          ${renderMarketRegimeLineChart({
+            id: "market-flow",
+            title: "Dòng tiền và mức tham gia thị trường",
+            subtitle: "Volume và Open Interest",
+            createdAt,
+            series: marketFlowSeries,
+            axisLabel: "Giá trị gốc",
+            missing: [volumeValue === null ? "Volume" : null, openInterestValue === null ? "Open Interest" : null],
+            supplemental: marketFlowSupplemental,
+            error,
+          })}
+        </div>
+      </section>
+
+      <section class="market-regime-history">
+        <div class="market-regime-section-head"><div><strong>Lịch sử Market Regime</strong><small>Các bản ghi được cung cấp trong luồng frontend hiện tại</small></div></div>
+        <div class="market-regime-empty">Chưa có lịch sử chi tiết trong dữ liệu hiện tại${historySamples === null ? "." : `; hệ thống đang tổng hợp ${escapeHtml(formatMarketRegimeNumber(historySamples, 0))} snapshot.`}</div>
+      </section>
+    </div>
+  `;
+  refs.systemModuleDetail.querySelector(".module-close")?.addEventListener("click", closeSystemModuleDetail);
+  bindMarketRegimeChartInteractions();
+  if (Number.isFinite(Number(options.scrollTop))) {
+    const scrollNode = refs.systemModuleDetail.querySelector(".module-chart-scroll");
+    if (scrollNode) requestAnimationFrame(() => {
+      scrollNode.scrollTop = Number(options.scrollTop);
+    });
+  }
+}
+
 function renderModuleDetail(module, options = {}) {
   if (!refs.systemModuleDetail || !refs.systemModuleOverlay || !module) return;
+  if (isMarketRegimeModule(module)) {
+    renderMarketRegimeDetail(module, options);
+    return;
+  }
+  refs.systemModuleDetail.classList.remove("market-regime-detail");
   state.selectedSystemModuleKey = systemModuleKey(module);
   const allRows = Array.isArray(module.stats) ? module.stats : [];
   const rows = moduleDisplayRows(module, allRows);
@@ -2438,6 +2869,8 @@ function renderSystemModules(modules) {
       const configFileLabel = module.has_file ? (module.file?.relative_path || module.file?.file_name || "-") : "Chưa có file .txt cấu hình";
       const updateIntervalLabel = module.update_interval || module.update_schedule || module.update_event || "-";
       const runtimeUpdatedLabel = moduleUpdatedLabel(module);
+      const displayName = marketRegimeModuleName(module);
+      const displaySubtitle = marketRegimeModuleSubtitle(module);
       const attentionRows = Array.isArray(module.stats) ? module.stats.filter((row) => row && row.attention) : [];
       const displayRows = moduleDisplayRows(module, Array.isArray(module.stats) ? module.stats : []);
       const changedVariableCount = moduleChangedVariableCount(module, displayRows);
@@ -2459,9 +2892,10 @@ function renderSystemModules(modules) {
         </div>
         <div class="module-item-main">
           <div class="module-title-line">
-            <strong>${escapeHtml(module.name || "-")}</strong>
+            <strong>${escapeHtml(displayName)}</strong>
             ${changedVariableCount > 0 ? `<span class="module-change-count" title="${escapeHtml(String(changedVariableCount))} biáº¿n Ä‘ang thay Ä‘á»•i">${escapeHtml(String(changedVariableCount))}</span>` : ""}
           </div>
+          ${displaySubtitle ? `<small class="module-localized-name">${escapeHtml(displaySubtitle)}</small>` : ""}
           <small>${escapeHtml(module.purpose || "-")}</small>
           <span class="module-update-note"><b>Thời gian cập nhật:</b> <span class="module-update-value">${escapeHtml(runtimeUpdatedLabel || "-")}</span><em class="module-update-badge">mỗi ${escapeHtml(updateIntervalLabel)}/1 lần</em></span>
           <span class="module-file"><b>File cấu hình:</b> <span class="module-file-value" title="${escapeHtml(configFileLabel)}">${escapeHtml(configFileLabel)}</span></span>
@@ -2526,7 +2960,12 @@ function renderSystemChecklist(payload) {
     });
     refs.systemChecklistGrid.replaceChildren(fragment);
   }
-  renderSystemModules(data.modules || []);
+  const modules = (Array.isArray(data.modules) ? data.modules : []).map((module) => (
+    isMarketRegimeModule(module)
+      ? { ...module, market_regime: data.market_regime && typeof data.market_regime === "object" ? data.market_regime : {} }
+      : module
+  ));
+  renderSystemModules(modules);
   const storage = data.storage || {};
   const disk = storage.disk || {};
   const files = storage.files || {};
@@ -3114,6 +3553,7 @@ async function loadSystemChecklist(date = "", options = {}) {
   const hasExistingPayload = Boolean(state.lastSystemChecklistPayload);
   if (!date && !hasExistingPayload && refs.systemChecklistStatus) refs.systemChecklistStatus.textContent = "Đang tải...";
   if (!date && !hasExistingPayload && refs.systemModuleStatus) refs.systemModuleStatus.textContent = "Đang tải...";
+  if (!date && !hasExistingPayload && refs.systemModuleGrid) refs.systemModuleGrid.innerHTML = renderMarketRegimeLoadingSkeleton();
   const aiRange = date ? "current" : normalizeSystemModuleAiRange(options.aiRange || state.systemModuleAiRange);
   if (!date) state.systemModuleAiRange = aiRange;
   const forceParam = options.forceRefresh ? "&force_refresh=true" : "";
@@ -3121,9 +3561,17 @@ async function loadSystemChecklist(date = "", options = {}) {
   const url = date
     ? `/api/system-checklist?date=${encodeURIComponent(date)}&_=${Date.now()}`
     : `/api/system-checklist?_=${Date.now()}${forceParam}${aiRangeParam}`;
-  const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const payload = await res.json();
+  let payload;
+  try {
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    payload = await res.json();
+  } catch (err) {
+    if (!date && !hasExistingPayload && refs.systemModuleGrid) {
+      refs.systemModuleGrid.innerHTML = renderMarketRegimeLoadError(err?.message || String(err));
+    }
+    throw err;
+  }
   const backendPreviousPayload = payload && typeof payload.previous_snapshot === "object" ? payload.previous_snapshot : null;
   const lastPayload = state.lastSystemChecklistPayload;
   const sameDateAsLast = Boolean(lastPayload && payload?.date && lastPayload.date === payload.date);
