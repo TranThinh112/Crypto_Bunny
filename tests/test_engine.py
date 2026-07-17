@@ -204,6 +204,42 @@ class EngineMiniQueueTest(TestCase):
         self.assertIn("Setup khong du chat luong", message)
         self.assertEqual(list_pending_orders(config, status="LC_OKX"), [])
 
+    def test_mini_scan_suppresses_cached_permanent_gpt_55_reject_notification(self) -> None:
+        config = self._config()
+        config["mode"] = "demo"
+        scan = {
+            "provider": "openai",
+            "model": "gpt-5.4-mini",
+            "slot_id": "2026-07-17T01:00:00+00:00",
+            "selected_symbols": ["BTC/USDT:USDT"],
+            "approved_symbols": ["BTC/USDT:USDT"],
+            "ai_review": {"approved_symbols": ["BTC/USDT:USDT"]},
+        }
+        cached_reject = {
+            "approved": False,
+            "decision": "DELETE_SETUP",
+            "reason": "Xoa: thieu bias 4h/15m",
+            "cache_mode": "permanent",
+            "cached": True,
+            "cache_reason": "Reused permanent rejected 5.5 setup review",
+            "rejection_policy": "hard_delete",
+            "accepted_for_okx": False,
+        }
+
+        with (
+            patch("crypto_trader.engine.review_candidate_for_lc_okx", side_effect=lambda *args, **kwargs: (args[1], cached_reject)),
+            patch("crypto_trader.engine.execute_candidate") as execute,
+            patch("crypto_trader.notifier.send_telegram_message") as send_message,
+        ):
+            result = _create_pending_from_internal_scan(config, [_candidate()], scan, (5, set(), []), set())
+
+        execute.assert_not_called()
+        send_message.assert_not_called()
+        self.assertEqual(result["created"], 0)
+        self.assertEqual(len(result["skipped"]), 1)
+        self.assertIn("Xoa: thieu bias", result["skipped"][0]["reason"])
+        self.assertEqual(result["system_notifications"], [])
+
     def test_mini_scan_submits_gpt_55_keep_monitor_to_okx_and_blocks_duplicate_review(self) -> None:
         config = self._config()
         config["mode"] = "demo"

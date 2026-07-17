@@ -365,6 +365,22 @@ def _notify_mini_system_block(
     return entry
 
 
+def _is_reused_permanent_okx_rejection(decision: dict[str, Any] | None) -> bool:
+    if not isinstance(decision, dict):
+        return False
+    cache_reason = str(decision.get("cache_reason") or "").strip().lower()
+    is_reused_cache = bool(decision.get("cached")) or "reused permanent rejected" in cache_reason
+    if not is_reused_cache:
+        return False
+    cache_mode = str(decision.get("cache_mode") or "").strip().lower()
+    rejection_policy = str(decision.get("rejection_policy") or "").strip().lower()
+    return (
+        cache_mode == "permanent"
+        or rejection_policy == "hard_delete"
+        or "reused permanent rejected" in cache_reason
+    )
+
+
 def _storage_warning(label: str, exc: Exception) -> str:
     return f"{label} unavailable: {exc}"
 
@@ -1187,15 +1203,16 @@ def _create_pending_from_internal_scan(
                         "reason": reason,
                     }
                 )
-                notification = _notify_mini_system_block(
-                    config,
-                    stage="Mini -> 5.5/LC_OKX",
-                    reason=notify_reason,
-                    scan=internal_scan,
-                    candidate=candidate,
-                )
-                if notification:
-                    result["system_notifications"].append(notification)
+                if not _is_reused_permanent_okx_rejection(okx_review):
+                    notification = _notify_mini_system_block(
+                        config,
+                        stage="Mini -> 5.5/LC_OKX",
+                        reason=notify_reason,
+                        scan=internal_scan,
+                        candidate=candidate,
+                    )
+                    if notification:
+                        result["system_notifications"].append(notification)
                 continue
         exchange_order_id: str | None = None
         order_status = "OPEN"
