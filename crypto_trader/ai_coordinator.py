@@ -1051,7 +1051,12 @@ def latest_internal_market_scan(config: dict[str, Any]) -> dict[str, Any] | None
     return latest_lc_pipeline_mini_scan(config)
 
 
-def _current_four_hour_event_for_market_scan(config: dict[str, Any], now: datetime) -> dict[str, Any] | None:
+def _current_four_hour_event_for_market_scan(
+    config: dict[str, Any],
+    now: datetime,
+    *,
+    require_approved: bool = True,
+) -> dict[str, Any] | None:
     latest_four_hour = latest_lc_pipeline_four_hour_event(config)
     if not latest_four_hour:
         return None
@@ -1059,7 +1064,16 @@ def _current_four_hour_event_for_market_scan(config: dict[str, Any], now: dateti
     current_slot = _internal_market_scan_slot_start(config, now)
     if four_hour_slot is None or four_hour_slot != current_slot:
         return None
+    if require_approved and not list(latest_four_hour.get("approved") or []):
+        return None
     return latest_four_hour
+
+
+def _empty_current_four_hour_event_for_market_scan(config: dict[str, Any], now: datetime) -> dict[str, Any] | None:
+    current_event = _current_four_hour_event_for_market_scan(config, now, require_approved=False)
+    if current_event is not None and not list(current_event.get("approved") or []):
+        return current_event
+    return None
 
 
 def internal_market_scan_due(config: dict[str, Any], now: datetime | None = None) -> bool:
@@ -1310,6 +1324,31 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
     fixed_schedule = bool(internal_config.get("market_scan_fixed_schedule", True))
     slot_id = _internal_market_scan_slot_id(config, now) if fixed_schedule else None
     slot_start = _internal_market_scan_slot_start(config, now) if fixed_schedule else None
+    empty_four_hour = _empty_current_four_hour_event_for_market_scan(config, now)
+    if empty_four_hour is not None:
+        return {
+            "enabled": True,
+            "agent": "internal_market_scan",
+            "created_at": now.isoformat(),
+            "slot_id": slot_id,
+            "slot_start": slot_start.isoformat() if slot_start else None,
+            "status": "waiting_lc",
+            "skipped": True,
+            "skip_reason": "LC 4h pool has no approved symbols; Mini scan skipped",
+            "source": "latest_lc_4h_empty",
+            "source_symbols": [],
+            "source_base_symbols": [],
+            "source_four_hour_symbols": [],
+            "candidate_count": 0,
+            "pool_symbols": [],
+            "selected_symbols": [],
+            "approved_symbols": [],
+            "approved_count": 0,
+            "candidates": [],
+            "suppress_pending_notification": True,
+            "four_hour_slot": empty_four_hour.get("slot") or empty_four_hour.get("created_at"),
+            "four_hour_index": empty_four_hour.get("index"),
+        }
     latest = latest_internal_market_scan(config)
     latest_created_at = _parse_time((latest or {}).get("created_at"))
     if (
@@ -1483,7 +1522,10 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
 
 
 def run_internal_market_scan_if_due(config: dict[str, Any]) -> dict[str, Any] | None:
-    if internal_market_scan_due(config):
+    now = datetime.now(timezone.utc)
+    if _empty_current_four_hour_event_for_market_scan(config, now) is not None:
+        return None
+    if internal_market_scan_due(config, now=now):
         return run_internal_market_scan(config)
     return latest_internal_market_scan(config)
 

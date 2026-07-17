@@ -445,6 +445,48 @@ class AiCoordinatorTest(TestCase):
 
         self.assertFalse(internal_market_scan_due(config, now=now))
 
+    def test_internal_market_scan_not_due_when_current_four_hour_pool_is_empty(self) -> None:
+        config = self._config()
+        config["ai"]["internal"]["market_scan_fixed_schedule"] = True
+        config["ai"]["internal"]["market_scan_interval_seconds"] = 14400
+        config["ai"]["internal"]["market_scan_timezone"] = "UTC"
+        now = datetime(2026, 7, 4, 12, 1, tzinfo=timezone.utc)
+        set_journal_state(
+            config,
+            "lc_internal_pipeline_state",
+            json.dumps(
+                {
+                    "state_version": 3,
+                    "day_key": "2026-07-04",
+                    "four_hour_history": [
+                        {
+                            "frame": "4h",
+                            "slot": "2026-07-04T12:00:00+00:00",
+                            "approved": [],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+        self.assertFalse(internal_market_scan_due(config, now=now))
+
+    @patch("crypto_trader.ai_coordinator.fetch_top_volume_symbols")
+    def test_internal_market_scan_skips_without_fetching_when_four_hour_pool_is_empty(self, fetch_top_volume_symbols) -> None:
+        config = self._config()
+
+        with patch(
+            "crypto_trader.ai_coordinator._empty_current_four_hour_event_for_market_scan",
+            return_value={"slot": "2026-07-04T12:00:00+00:00", "index": 5, "approved": []},
+        ):
+            result = run_internal_market_scan(config, force=True)
+
+        fetch_top_volume_symbols.assert_not_called()
+        self.assertTrue(result["skipped"])
+        self.assertTrue(result["suppress_pending_notification"])
+        self.assertEqual(result["approved_symbols"], [])
+
     def test_saved_no_trade_scan_cannot_reach_lc_okx(self) -> None:
         config = self._config()
         set_journal_state(

@@ -990,6 +990,8 @@ def _create_pending_from_internal_scan(
         "skipped": [],
         "system_notifications": [],
     }
+    if internal_scan and internal_scan.get("suppress_pending_notification"):
+        return result
     if not result["enabled"] or not allowed:
         notification = _notify_mini_system_block(
             config,
@@ -1477,6 +1479,7 @@ def run_once(
         and _internal_scan_to_pending_enabled(config)
         and not defer_new_vt_to_internal_lc
         and config.get("pending_orders", {}).get("enabled", True)
+        and internal_market_scan is not None
     ):
         _report_progress(progress_callback, "create_pending_from_mini")
         mini_pending_queue = _create_pending_from_internal_scan(
