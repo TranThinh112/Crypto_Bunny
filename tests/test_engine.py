@@ -10,9 +10,14 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from crypto_trader.config import DEFAULT_CONFIG
-from crypto_trader.engine import _create_pending_from_internal_scan, run_once
+from crypto_trader.engine import (
+    MINI_SYSTEM_NOTIFICATION_HISTORY_KEY,
+    _create_pending_from_internal_scan,
+    _notify_mini_system_block,
+    run_once,
+)
 from crypto_trader.models import ExecutionResult, RiskCheck, TradeCandidate
-from crypto_trader.storage import list_pending_orders, open_pending_symbols
+from crypto_trader.storage import list_pending_orders, open_pending_symbols, set_journal_state
 
 
 def _candidate(symbol: str = "BTC/USDT:USDT") -> TradeCandidate:
@@ -239,6 +244,62 @@ class EngineMiniQueueTest(TestCase):
         self.assertEqual(len(result["skipped"]), 1)
         self.assertIn("Xoa: thieu bias", result["skipped"][0]["reason"])
         self.assertEqual(result["system_notifications"], [])
+
+    def test_mini_system_block_notification_dedupes_by_stage_slot_pair(self) -> None:
+        config = self._config()
+        candidate = _candidate()
+        scan = {
+            "slot_id": "2026-07-17T01:00:00+00:00",
+            "status": "done",
+            "selected_symbols": ["BTC/USDT:USDT"],
+        }
+
+        with patch("crypto_trader.notifier.send_telegram_message") as send_message:
+            first = _notify_mini_system_block(
+                config,
+                stage="Mini -> 5.5/LC_OKX",
+                reason="Xoa: thieu bias 4h/15m",
+                scan=scan,
+                candidate=candidate,
+            )
+            second = _notify_mini_system_block(
+                config,
+                stage="Mini -> 5.5/LC_OKX",
+                reason="Reused permanent rejected 5.5 setup review: Xoa: thieu bias 4h/15m",
+                scan=scan,
+                candidate=candidate,
+            )
+
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)
+        send_message.assert_called_once()
+
+    def test_mini_system_block_notification_respects_legacy_reason_fingerprint(self) -> None:
+        config = self._config()
+        candidate = _candidate()
+        scan = {
+            "slot_id": "2026-07-17T01:00:00+00:00",
+            "status": "done",
+            "selected_symbols": ["BTC/USDT:USDT"],
+        }
+        legacy_fingerprint = "2026-07-17T01:00:00+00:00|Mini -> 5.5/LC_OKX|BTC/USDT:USDT|long|Xoa: thieu bias 4h/15m"
+        set_journal_state(
+            config,
+            MINI_SYSTEM_NOTIFICATION_HISTORY_KEY,
+            json.dumps([{"fingerprint": legacy_fingerprint}]),
+        )
+
+        with patch("crypto_trader.notifier.send_telegram_message") as send_message:
+            notification = _notify_mini_system_block(
+                config,
+                stage="Mini -> 5.5/LC_OKX",
+                reason="Xoa: thieu bias 4h/15m",
+                scan=scan,
+                candidate=candidate,
+            )
+
+        self.assertIsNone(notification)
+        send_message.assert_not_called()
 
     def test_mini_scan_submits_gpt_55_keep_monitor_to_okx_and_blocks_duplicate_review(self) -> None:
         config = self._config()

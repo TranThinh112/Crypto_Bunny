@@ -279,14 +279,13 @@ def _notify_wait_slot_queued(
 def _mini_system_notification_key(
     *,
     stage: str,
-    reason: str,
     scan: dict[str, Any] | None,
     candidate: TradeCandidate | None,
 ) -> str:
     symbol = str(getattr(candidate, "symbol", "") or "")
     side = str(getattr(candidate, "side", "") or "")
     slot_id = str((scan or {}).get("slot_id") or (scan or {}).get("created_at") or "unknown")
-    return "|".join([slot_id, stage, symbol, side, str(reason or "")[:180]])
+    return "|".join([slot_id, stage, symbol, side])
 
 
 def _mini_system_notification_text(
@@ -330,7 +329,8 @@ def _notify_mini_system_block(
     reason = str(reason or "").strip()
     if not reason:
         return None
-    fingerprint = _mini_system_notification_key(stage=stage, reason=reason, scan=scan, candidate=candidate)
+    fingerprint = _mini_system_notification_key(stage=stage, scan=scan, candidate=candidate)
+    legacy_fingerprint_prefix = f"{fingerprint}|"
     try:
         raw = get_journal_state(config, MINI_SYSTEM_NOTIFICATION_HISTORY_KEY)
         history = json.loads(str(raw or "[]")) if raw else []
@@ -338,7 +338,14 @@ def _notify_mini_system_block(
         history = []
     if not isinstance(history, list):
         history = []
-    if any(isinstance(item, dict) and item.get("fingerprint") == fingerprint for item in history[-80:]):
+    if any(
+        isinstance(item, dict)
+        and (
+            item.get("fingerprint") == fingerprint
+            or str(item.get("fingerprint") or "").startswith(legacy_fingerprint_prefix)
+        )
+        for item in history[-80:]
+    ):
         return None
     text = _mini_system_notification_text(config, stage=stage, reason=reason, scan=scan, candidate=candidate)
     entry = {
