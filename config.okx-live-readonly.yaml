@@ -1,0 +1,70 @@
+mode: live
+
+# Read-only OKX live API test config.
+# This file is for checking real OKX API credentials and market/account reads.
+# It intentionally disables automation and live order execution.
+
+report_path: reports/okx_live_readonly_latest_decision.json
+ledger_path: data/okx_live_readonly_trades.jsonl
+
+runtime:
+  instance_role: secondary
+  interval_seconds: 60
+
+runtime_sync:
+  position_close_grace_seconds: 120
+
+automation:
+  enabled: false
+  execute_demo: false
+  execute_live: false
+  initial_delay_seconds: 999999
+
+paper_trading:
+  enabled: false
+  auto_scan_enabled: false
+  scan_interval_seconds: 60
+  max_active_trades: 1
+
+exchange:
+  name: okx
+  account_type: swap
+  td_mode: isolated
+  leverage: 5
+  api_key_env: OKX_API_KEY
+  secret_env: OKX_SECRET
+  passphrase_env: OKX_PASSPHRASE
+  default_settle: USDT
+  position_side_mode: net
+
+execution:
+  order_type: market
+  attach_tp_sl: false
+  live_confirm_file: .allow-live-trading
+  enable_live: false
+
+pending_orders:
+  enabled: false
+
+ai:
+  enabled: false
+  allow_api_calls: false
+  internal:
+    market_scan_enabled: false
+    market_scan_to_pending: false
+    market_scan_use_ai: false
+  okx:
+    approval_enabled: false
+    auto_openai_enabled: false
+    auto_lc_okx_review_once_enabled: false
+    manual_openai_enabled: false
+
+market_guard:
+  enabled: false
+
+risk:
+  order_usdt: 0
+  max_active_trades: 1
+  max_daily_orders: 0
+  max_daily_planned_risk_usdt: 0
+  cooldown_minutes: 0
