@@ -13,7 +13,7 @@ from .ai_coordinator import (
     okx_review_requests_market_entry,
 )
 from .codex_features import record_trade_execution
-from .executor import execute_candidate
+from .executor import candidate_client_order_id, execute_candidate
 from .ledger import append_event
 from .lc_pipeline import latest_lc_pipeline_mini_scan
 from .market import create_exchange
@@ -40,7 +40,13 @@ def _parse_time(value: str | None) -> datetime | None:
 
 
 def _order_id(order: dict[str, Any]) -> str:
-    return str(order.get("id") or order.get("clientOrderId") or order.get("info", {}).get("ordId") or "")
+    info = order.get("info") if isinstance(order.get("info"), dict) else {}
+    return str(order.get("id") or info.get("ordId") or order.get("clientOrderId") or "")
+
+
+def _order_client_id(order: dict[str, Any]) -> str:
+    info = order.get("info") if isinstance(order.get("info"), dict) else {}
+    return str(order.get("clientOrderId") or info.get("clOrdId") or "").strip()
 
 
 def _float(value: Any) -> float:
@@ -860,6 +866,7 @@ def maintain_pending_orders(
     active_count: int | None = None
     position_count: int | None = None
     exchange = None
+    open_orders: list[dict[str, Any]] = []
     if config.get("mode") != "dry_run":
         try:
             exchange = create_exchange(config, authenticated=True)
@@ -885,6 +892,11 @@ def maintain_pending_orders(
     closed = 0
     converted = 0
     submitted = 0
+    open_orders_by_client_id = {
+        _order_client_id(order): order
+        for order in open_orders
+        if isinstance(order, dict) and _order_client_id(order)
+    }
 
     for record in open_records:
         reviewed += 1
@@ -892,6 +904,29 @@ def maintain_pending_orders(
         lc_id = int(record.get("journal_id") or local_id)
         exchange_order_id = str(record.get("exchange_order_id") or "")
         symbol = str(record.get("symbol") or "")
+        if not exchange_order_id and exchange is not None:
+            stored_candidate = _candidate_from_record(record)
+            expected_client_id = (
+                candidate_client_order_id(stored_candidate, entry_type="mini_lc_okx")
+                if stored_candidate is not None
+                else None
+            )
+            matched_order = open_orders_by_client_id.get(str(expected_client_id or ""))
+            matched_order_id = _order_id(matched_order) if matched_order else ""
+            if stored_candidate is not None and matched_order_id:
+                set_pending_order_exchange_order(
+                    config,
+                    local_id,
+                    stored_candidate,
+                    matched_order_id,
+                    max_age_days=float(lifecycle["exchange_max_age_days"]),
+                )
+                exchange_order_id = matched_order_id
+                record = {
+                    **record,
+                    "status": "LC_OKX",
+                    "exchange_order_id": matched_order_id,
+                }
         if open_exchange_order_ids is not None and exchange_order_id and exchange_order_id not in open_exchange_order_ids:
             side = str(record.get("side") or "")
             if symbol in open_position_symbols:
@@ -967,6 +1002,21 @@ def maintain_pending_orders(
         candidate = candidates_by_key.get(_record_key(record))
 
         if record_status == "WATCHLIST":
+            reason = "Legacy WATCHLIST disabled; Mini setups must be reviewed by GPT-5.5 once and stored on OKX only"
+            close_pending_order(config, local_id, "CANCELED", reason)
+            events.append(
+                {
+                    "type": "pending_canceled",
+                    "source": "legacy_watchlist_disabled",
+                    "lc_id": lc_id,
+                    "symbol": symbol,
+                    "side": str(record.get("side") or ""),
+                    "reason": reason,
+                }
+            )
+            canceled += 1
+            continue
+
             legacy_candidate = _candidate_from_record(record)
             if legacy_candidate is None:
                 reason = "Legacy keep-monitor payload is invalid"
@@ -1184,6 +1234,21 @@ def maintain_pending_orders(
             continue
 
         if record_status == "WAIT_SLOT":
+            reason = "Legacy WAIT_SLOT disabled; Mini setups must be reviewed by GPT-5.5 once and stored on OKX only"
+            close_pending_order(config, local_id, "CANCELED", reason)
+            events.append(
+                {
+                    "type": "pending_canceled",
+                    "source": "legacy_wait_slot_disabled",
+                    "lc_id": lc_id,
+                    "symbol": symbol,
+                    "side": str(record.get("side") or ""),
+                    "reason": reason,
+                }
+            )
+            canceled += 1
+            continue
+
             wait_slot_candidate = _candidate_from_record(record)
             if wait_slot_candidate is None:
                 reason = "WAIT_SLOT khong con payload hop le"
@@ -1442,6 +1507,22 @@ def maintain_pending_orders(
             # must not cancel or convert it; replacement/recheck is handled by
             # the next same-symbol Mini setup in engine.py.
             kept += 1
+            continue
+
+        if config.get("mode") != "dry_run" and record_status == "OPEN" and not exchange_order_id and not _record_mini_setup_id(record):
+            reason = "Legacy local pending disabled; Mini setups must be reviewed by GPT-5.5 once and stored on OKX only"
+            close_pending_order(config, local_id, "CANCELED", reason)
+            events.append(
+                {
+                    "type": "pending_canceled",
+                    "source": "legacy_local_pending_disabled",
+                    "lc_id": lc_id,
+                    "symbol": symbol,
+                    "side": str(record.get("side") or ""),
+                    "reason": reason,
+                }
+            )
+            canceled += 1
             continue
 
         validation_config = mini_pending_risk_config(config) if _record_mini_setup_id(record) else config

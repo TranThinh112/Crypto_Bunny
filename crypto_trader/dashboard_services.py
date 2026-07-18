@@ -534,7 +534,10 @@ def _module_file_payload(file_info: dict[str, Any] | None) -> dict[str, Any] | N
 
 
 def _load_sizing_runtime_state(config: dict[str, Any]) -> dict[str, Any] | None:
-    raw = get_journal_state(config, SIZING_STATE_KEY)
+    try:
+        raw = get_journal_state(config, SIZING_STATE_KEY)
+    except Exception:
+        return None
     if not raw:
         return None
     try:

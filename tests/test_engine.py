@@ -98,6 +98,26 @@ class EngineMiniQueueTest(TestCase):
         self.assertTrue(result["skipped"][0]["retryable"])
         self.assertIn("Another Railway worker", result["skipped"][0]["reason"])
 
+    def test_mini_processing_lease_is_released_when_processing_raises(self) -> None:
+        config = self._config()
+        candidate = _candidate("BTC/USDT:USDT")
+        scan = {
+            "provider": "openai",
+            "slot_id": "2026-07-18T08:00:00+07:00",
+            "selected_symbols": [candidate.symbol],
+            "ai_review": {"approved_symbols": [candidate.symbol]},
+        }
+
+        with (
+            patch("crypto_trader.engine.acquire_journal_lease", return_value=True),
+            patch("crypto_trader.engine.release_journal_lease", return_value=True) as release,
+            patch("crypto_trader.engine._internal_lc_candidate_cache", side_effect=RuntimeError("cache failed")),
+        ):
+            with self.assertRaises(RuntimeError):
+                _create_pending_from_internal_scan(config, [candidate], scan, (0, set(), []), set())
+
+        release.assert_called_once()
+
     def test_mini_scan_creates_only_best_lc_after_ai_review(self) -> None:
         config = self._config()
         config["ai"]["internal"]["market_scan_pending_limit"] = 3
@@ -247,6 +267,82 @@ class EngineMiniQueueTest(TestCase):
 
         self.assertEqual(result["created"], 0)
         self.assertIn("OKX timeout", result["skipped"][0]["reason"])
+        self.assertEqual(list_pending_orders(config, status="ACTIVE"), [])
+
+    def test_mini_scan_keeps_placeholder_when_okx_submit_result_is_unknown(self) -> None:
+        config = self._config()
+        config["mode"] = "demo"
+        candidate = _candidate("BTC/USDT:USDT")
+        scan = {
+            "provider": "openai",
+            "slot_id": "2026-07-18T08:00:00+07:00",
+            "selected_symbols": [candidate.symbol],
+            "ai_review": {"approved_symbols": [candidate.symbol]},
+        }
+
+        with (
+            patch(
+                "crypto_trader.engine.review_candidate_for_lc_okx",
+                side_effect=lambda *args, **kwargs: (
+                    args[1],
+                    {
+                        "approved": True,
+                        "decision": "KEEP_SETUP",
+                        "accepted_for_okx": True,
+                        "gpt55_checked": True,
+                    },
+                ),
+            ),
+            patch(
+                "crypto_trader.engine.execute_candidate",
+                return_value=ExecutionResult(
+                    "demo",
+                    False,
+                    None,
+                    "OKX timeout",
+                    raw={"submission_status": "unknown", "client_order_id": "CB123"},
+                ),
+            ),
+        ):
+            result = _create_pending_from_internal_scan(config, [candidate], scan, (0, set(), []), set())
+
+        self.assertEqual(result["created"], 0)
+        active = list_pending_orders(config, status="ACTIVE")
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0]["status"], "OPEN")
+
+    def test_mini_scan_never_submits_when_5_5_was_not_actually_checked(self) -> None:
+        config = self._config()
+        config["mode"] = "demo"
+        candidate = _candidate("BTC/USDT:USDT")
+        scan = {
+            "provider": "openai",
+            "slot_id": "2026-07-18T08:00:00+07:00",
+            "selected_symbols": [candidate.symbol],
+            "ai_review": {"approved_symbols": [candidate.symbol]},
+        }
+        unavailable = {
+            "approved": False,
+            "decision": "external_ai_unavailable",
+            "reason": "GPT-5.5 timed out",
+            "provider": "openai",
+            "gpt55_checked": False,
+        }
+
+        with (
+            patch(
+                "crypto_trader.engine.review_candidate_for_lc_okx",
+                side_effect=lambda *args, **kwargs: (args[1], unavailable),
+            ),
+            patch("crypto_trader.engine.execute_candidate") as execute,
+            patch("crypto_trader.engine.revalidate_pending_orders_for_symbol") as recheck,
+        ):
+            result = _create_pending_from_internal_scan(config, [candidate], scan, (0, set(), []), set())
+
+        execute.assert_not_called()
+        recheck.assert_not_called()
+        self.assertEqual(result["created"], 0)
+        self.assertIn("GPT-5.5 timed out", result["skipped"][0]["reason"])
         self.assertEqual(list_pending_orders(config, status="ACTIVE"), [])
 
     def test_mini_scan_rejects_lc_okx_when_gpt_55_blocks_setup(self) -> None:
@@ -1055,6 +1151,7 @@ class EngineMiniQueueTest(TestCase):
             stack.enter_context(patch("crypto_trader.engine.latest_decision_payload", return_value=None))
             stack.enter_context(patch("crypto_trader.engine._resolve_strategy_symbols", return_value=([], {}, [])))
             stack.enter_context(patch("crypto_trader.engine.open_pending_symbols", return_value=set()))
+            stack.enter_context(patch("crypto_trader.engine.prefetch_market_data", return_value={}))
             stack.enter_context(patch("crypto_trader.engine.collect_news", return_value=SimpleNamespace(items=[])))
             stack.enter_context(patch("crypto_trader.engine.fetch_market_snapshots", return_value=([], [])))
             stack.enter_context(patch("crypto_trader.engine.market_guard_symbol_layers", return_value={}))
@@ -1087,6 +1184,63 @@ class EngineMiniQueueTest(TestCase):
             run_once(config, execute=False)
 
         self.assertEqual(call_order, ["lc", "mini"])
+
+    def test_existing_lc_memory_does_not_block_new_mini_setup_from_5_5_pipeline(self) -> None:
+        config = self._config()
+        mini_scan = {
+            "provider": "openai",
+            "slot_id": "2026-07-18T08:00:00+07:00",
+            "selected_symbols": ["BTC/USDT:USDT"],
+            "approved_symbols": ["BTC/USDT:USDT"],
+        }
+        queue_result = {
+            "created": 0,
+            "market": 0,
+            "wait_slot": 0,
+            "created_orders": [],
+            "market_orders": [],
+            "wait_slot_orders": [],
+            "reason": "test",
+        }
+
+        with ExitStack() as stack:
+            stack.enter_context(patch("crypto_trader.engine.select_runtime_config", side_effect=lambda value: value))
+            stack.enter_context(patch("crypto_trader.engine.latest_decision_payload", return_value=None))
+            stack.enter_context(patch("crypto_trader.engine._resolve_strategy_symbols", return_value=([], {}, [])))
+            stack.enter_context(patch("crypto_trader.engine.open_pending_symbols", return_value={"ETH/USDT:USDT"}))
+            stack.enter_context(patch("crypto_trader.engine.prefetch_market_data", return_value={}))
+            stack.enter_context(patch("crypto_trader.engine.collect_news", return_value=SimpleNamespace(items=[])))
+            stack.enter_context(patch("crypto_trader.engine.fetch_market_snapshots", return_value=([], [])))
+            stack.enter_context(patch("crypto_trader.engine.market_guard_symbol_layers", return_value={}))
+            stack.enter_context(patch("crypto_trader.engine.build_candidates", return_value=[]))
+            stack.enter_context(patch("crypto_trader.engine.apply_position_sizing", return_value=None))
+            stack.enter_context(patch("crypto_trader.engine.enrich_quantities", return_value=[]))
+            stack.enter_context(patch("crypto_trader.engine.detect_market_regime", return_value={}))
+            stack.enter_context(patch("crypto_trader.engine.record_trade_candidates"))
+            stack.enter_context(patch("crypto_trader.engine.update_lc_internal_pipeline", return_value={}))
+            stack.enter_context(patch("crypto_trader.engine.run_internal_market_scan_if_due", return_value=mini_scan))
+            stack.enter_context(patch("crypto_trader.engine.save_market_scan_observations", return_value=[]))
+            stack.enter_context(patch("crypto_trader.engine._merge_cycle_candidates", return_value=([], {})))
+            stack.enter_context(
+                patch(
+                    "crypto_trader.engine.internal_lc_memory",
+                    return_value={"pending_total": 1, "preferred": {"status": "LC_OKX", "lc_id": 7}},
+                )
+            )
+            stack.enter_context(patch("crypto_trader.engine.maintain_pending_orders", return_value={}))
+            stack.enter_context(patch("crypto_trader.engine.should_defer_new_vt_to_internal_lc", return_value=True))
+            stack.enter_context(patch("crypto_trader.engine.active_trades_summary", return_value=(1, {"ETH/USDT:USDT"}, [])))
+            create_pending = stack.enter_context(
+                patch("crypto_trader.engine._create_pending_from_internal_scan", return_value=queue_result)
+            )
+            stack.enter_context(patch("crypto_trader.engine.write_report", return_value=Path("report.json")))
+            stack.enter_context(patch("crypto_trader.engine.save_decision"))
+            stack.enter_context(patch("crypto_trader.engine.record_ai_trade_decision"))
+
+            run_once(config, execute=True)
+
+        create_pending.assert_called_once()
+        self.assertIs(create_pending.call_args.args[2], mini_scan)
 
     def test_run_once_falls_back_when_retryable_storage_calls_timeout(self) -> None:
         config = self._config()

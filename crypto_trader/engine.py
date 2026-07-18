@@ -31,7 +31,7 @@ from .codex_features import (
     record_trade_candidates,
     select_runtime_config,
 )
-from .executor import execute_candidate
+from .executor import execute_candidate, with_candidate_client_order_id
 from .lc_pipeline import lc_pipeline_pool_rows, update_lc_internal_pipeline
 from .market import fetch_market_snapshots, fetch_top_volume_symbols
 from .market import prefetch_market_data
@@ -399,6 +399,21 @@ def _is_reused_permanent_okx_rejection(decision: dict[str, Any] | None) -> bool:
         or rejection_policy == "hard_delete"
         or "reused permanent rejected" in cache_reason
     )
+
+
+def _okx_review_was_checked_by_5_5(review: dict[str, Any] | None) -> bool:
+    if not isinstance(review, dict):
+        return False
+    if "gpt55_checked" in review:
+        return bool(review.get("gpt55_checked"))
+    provider = str(review.get("provider") or "").strip().lower()
+    decision = str(review.get("decision") or "").strip().lower()
+    return provider not in {"blocked", "disabled", "local_policy"} and decision not in {
+        "approval_disabled",
+        "external_ai_disabled",
+        "external_ai_unavailable",
+        "initial_mini_review_required",
+    }
 
 
 def _storage_warning(label: str, exc: Exception) -> str:
@@ -1137,144 +1152,148 @@ def _create_pending_from_internal_scan(
         if notification:
             result["system_notifications"].append(notification)
         return result
-    current_candidates_by_symbol = {candidate.symbol: candidate for candidate in candidates}
-    cached_candidates_by_symbol = _internal_lc_candidate_cache(config, approved)
-    scan_candidates_by_symbol = _internal_scan_candidate_cache(config, internal_scan, approved)
-    for symbol in approved:
-        if result["created"] >= pending_limit:
-            break
-        candidate = (
-            scan_candidates_by_symbol.get(symbol)
-            or cached_candidates_by_symbol.get(symbol)
-            or current_candidates_by_symbol.get(symbol)
-        )
-        if candidate is None:
-            skip_reason = "approved symbol not available in saved internal LC setup"
-            result["skipped"].append(
-                {
-                    "symbol": symbol,
-                    "reason": skip_reason,
-                }
+    def _release_mini_processing_lease() -> None:
+        try:
+            release_journal_lease(config, MINI_PROCESSING_LEASE_KEY, lease_owner)
+        except Exception as exc:
+            result.setdefault("warnings", []).append(f"Mini processing lease release failed: {exc}")
+
+    try:
+        current_candidates_by_symbol = {candidate.symbol: candidate for candidate in candidates}
+        cached_candidates_by_symbol = _internal_lc_candidate_cache(config, approved)
+        scan_candidates_by_symbol = _internal_scan_candidate_cache(config, internal_scan, approved)
+        for symbol in approved:
+            if result["created"] >= pending_limit:
+                break
+            candidate = (
+                scan_candidates_by_symbol.get(symbol)
+                or cached_candidates_by_symbol.get(symbol)
+                or current_candidates_by_symbol.get(symbol)
             )
-            notification = _notify_mini_system_block(
-                config,
-                stage="Mini -> lấy setup đã lưu",
-                reason=skip_reason,
-                scan=internal_scan,
-            )
-            if notification:
-                result["system_notifications"].append(notification)
-            continue
-        source_meta = _wait_slot_source_meta(config, candidate.symbol)
-        setup_id, setup_identity = _mini_setup_identity(internal_scan, candidate, source_meta)
-        candidate = _with_mini_setup_metadata(
-            candidate,
-            setup_id=setup_id,
-            identity=setup_identity,
-            source_meta=source_meta,
-        )
-        claimed_at = datetime.now(timezone.utc).isoformat()
-        claimed = claim_journal_state(
-            config,
-            _mini_setup_state_key(setup_id),
-            json.dumps(
-                {
-                    "setup_id": setup_id,
-                    "status": "processing",
-                    "claimed_at": claimed_at,
-                    "updated_at": claimed_at,
-                    "identity": setup_identity,
-                    "candidate": to_jsonable(candidate),
-                },
-                ensure_ascii=False,
-            ),
-        )
-        if not claimed:
-            previous_state = _load_mini_setup_state(config, setup_id)
-            result["skipped"].append(
-                {
-                    "symbol": candidate.symbol,
-                    "side": candidate.side,
-                    "setup_id": setup_id,
-                    "reason": f"Mini setup already processed ({previous_state.get('status') or 'claimed'})",
-                }
-            )
-            continue
-        pending_risk_config = _mini_pending_risk_config(config)
-        check = evaluate_candidate(
-            pending_risk_config,
-            candidate,
-            enforce_active_limit=False,
-            check_active_trades=False,
-            check_order_limits=False,
-        )
-        journal_id = next_global_counter(config, "LC") if config.get("mode") != "dry_run" else None
-        reviewed_candidate = candidate
-        okx_review: dict[str, Any] = {}
-        if config.get("mode") != "dry_run":
-            try:
-                reviewed_candidate, okx_review = review_candidate_for_lc_okx(
-                    config,
-                    candidate,
-                    check,
-                    context={
-                        "route": "lc_okx_setup_review",
-                        "lc_id": journal_id,
-                        "source": "mini_lc_okx",
-                        "from_status": "MINI_APPROVED",
-                        "mini_setup_id": setup_id,
-                        "mini_slot_id": setup_identity["mini_slot_id"],
-                    },
-                    force=True,
-                )
-            except Exception as exc:
-                skip_reason = f"5.5 setup review failed: {exc}"
-                _save_mini_setup_state(
-                    config,
-                    setup_id,
-                    status="review_failed",
-                    lc_id=journal_id,
-                    reason=skip_reason,
-                )
+            if candidate is None:
+                skip_reason = "approved symbol not available in saved internal LC setup"
                 result["skipped"].append(
                     {
-                        "symbol": candidate.symbol,
-                        "side": candidate.side,
-                        "setup_id": setup_id,
+                        "symbol": symbol,
                         "reason": skip_reason,
                     }
                 )
                 notification = _notify_mini_system_block(
                     config,
-                    stage="Mini -> 5.5/LC_OKX",
+                    stage="Mini -> lấy setup đã lưu",
                     reason=skip_reason,
                     scan=internal_scan,
-                    candidate=candidate,
                 )
                 if notification:
                     result["system_notifications"].append(notification)
                 continue
-            _save_mini_setup_state(
-                config,
-                setup_id,
-                status="reviewed",
-                lc_id=journal_id,
-                okx_review=okx_review,
-                reviewed_candidate=to_jsonable(reviewed_candidate),
+            source_meta = _wait_slot_source_meta(config, candidate.symbol)
+            setup_id, setup_identity = _mini_setup_identity(internal_scan, candidate, source_meta)
+            candidate = _with_mini_setup_metadata(
+                candidate,
+                setup_id=setup_id,
+                identity=setup_identity,
+                source_meta=source_meta,
             )
-            if okx_review_requests_market_entry(okx_review):
-                replacement = cancel_pending_orders_for_symbol(
-                    config,
-                    candidate.symbol,
-                    reason=f"Replaced by Mini setup {setup_id} approved for ENTER_MARKET",
+            claimed_at = datetime.now(timezone.utc).isoformat()
+            claimed = claim_journal_state(
+                config,
+                _mini_setup_state_key(setup_id),
+                json.dumps(
+                    {
+                        "setup_id": setup_id,
+                        "status": "processing",
+                        "claimed_at": claimed_at,
+                        "updated_at": claimed_at,
+                        "identity": setup_identity,
+                        "candidate": to_jsonable(candidate),
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            if not claimed:
+                previous_state = _load_mini_setup_state(config, setup_id)
+                result["skipped"].append(
+                    {
+                        "symbol": candidate.symbol,
+                        "side": candidate.side,
+                        "setup_id": setup_id,
+                        "reason": f"Mini setup already processed ({previous_state.get('status') or 'claimed'})",
+                    }
                 )
-                result["replacements"].append({"setup_id": setup_id, **replacement})
-                if not replacement["ok"]:
-                    skip_reason = "; ".join(replacement["warnings"][:3]) or "Could not remove previous pending setup"
+                continue
+            pending_risk_config = _mini_pending_risk_config(config)
+            check = evaluate_candidate(
+                pending_risk_config,
+                candidate,
+                enforce_active_limit=False,
+                check_active_trades=False,
+                check_order_limits=False,
+            )
+            journal_id = next_global_counter(config, "LC") if config.get("mode") != "dry_run" else None
+            reviewed_candidate = candidate
+            okx_review: dict[str, Any] = {}
+            if config.get("mode") != "dry_run":
+                try:
+                    reviewed_candidate, okx_review = review_candidate_for_lc_okx(
+                        config,
+                        candidate,
+                        check,
+                        context={
+                            "route": "lc_okx_setup_review",
+                            "lc_id": journal_id,
+                            "source": "mini_lc_okx",
+                            "from_status": "MINI_APPROVED",
+                            "mini_setup_id": setup_id,
+                            "mini_slot_id": setup_identity["mini_slot_id"],
+                        },
+                        force=True,
+                    )
+                except Exception as exc:
+                    skip_reason = f"5.5 setup review failed: {exc}"
                     _save_mini_setup_state(
                         config,
                         setup_id,
-                        status="replacement_failed",
+                        status="review_failed",
+                        lc_id=journal_id,
+                        reason=skip_reason,
+                    )
+                    result["skipped"].append(
+                        {
+                            "symbol": candidate.symbol,
+                            "side": candidate.side,
+                            "setup_id": setup_id,
+                            "reason": skip_reason,
+                        }
+                    )
+                    notification = _notify_mini_system_block(
+                        config,
+                        stage="Mini -> 5.5/LC_OKX",
+                        reason=skip_reason,
+                        scan=internal_scan,
+                        candidate=candidate,
+                    )
+                    if notification:
+                        result["system_notifications"].append(notification)
+                    continue
+                _save_mini_setup_state(
+                    config,
+                    setup_id,
+                    status="reviewed",
+                    lc_id=journal_id,
+                    okx_review=okx_review,
+                    reviewed_candidate=to_jsonable(reviewed_candidate),
+                )
+                if not _okx_review_was_checked_by_5_5(okx_review):
+                    skip_reason = str(
+                        okx_review.get("reason")
+                        or okx_review.get("decision")
+                        or "GPT-5.5 did not return a verified setup decision"
+                    )
+                    _save_mini_setup_state(
+                        config,
+                        setup_id,
+                        status="review_failed",
                         lc_id=journal_id,
                         okx_review=okx_review,
                         reason=skip_reason,
@@ -1289,31 +1308,257 @@ def _create_pending_from_internal_scan(
                     )
                     notification = _notify_mini_system_block(
                         config,
-                        stage="5.5 -> thay thế setup cũ",
+                        stage="Mini -> 5.5",
                         reason=skip_reason,
                         scan=internal_scan,
-                        candidate=reviewed_candidate,
+                        candidate=candidate,
                     )
                     if notification:
                         result["system_notifications"].append(notification)
                     continue
-                vt_id = next_global_counter(config, "VT") if config.get("mode") != "dry_run" else None
-                execution = execute_candidate(
-                    config,
-                    reviewed_candidate,
-                    order_type_override="market",
-                    entry_type="mini_lc_market",
-                    journal_type="VT",
-                    journal_id=vt_id,
-                )
-                if not execution.submitted:
-                    skip_reason = f"OKX market entry failed: {execution.message}"
+                if okx_review_requests_market_entry(okx_review):
+                    reviewed_candidate = with_candidate_client_order_id(
+                        reviewed_candidate,
+                        entry_type="mini_lc_market",
+                    )
+                    replacement = cancel_pending_orders_for_symbol(
+                        config,
+                        candidate.symbol,
+                        reason=f"Replaced by Mini setup {setup_id} approved for ENTER_MARKET",
+                    )
+                    result["replacements"].append({"setup_id": setup_id, **replacement})
+                    if not replacement["ok"]:
+                        skip_reason = "; ".join(replacement["warnings"][:3]) or "Could not remove previous pending setup"
+                        _save_mini_setup_state(
+                            config,
+                            setup_id,
+                            status="replacement_failed",
+                            lc_id=journal_id,
+                            okx_review=okx_review,
+                            reason=skip_reason,
+                        )
+                        result["skipped"].append(
+                            {
+                                "symbol": candidate.symbol,
+                                "side": candidate.side,
+                                "setup_id": setup_id,
+                                "reason": skip_reason,
+                            }
+                        )
+                        notification = _notify_mini_system_block(
+                            config,
+                            stage="5.5 -> thay thế setup cũ",
+                            reason=skip_reason,
+                            scan=internal_scan,
+                            candidate=reviewed_candidate,
+                        )
+                        if notification:
+                            result["system_notifications"].append(notification)
+                        continue
+                    vt_id = next_global_counter(config, "VT") if config.get("mode") != "dry_run" else None
+                    execution = execute_candidate(
+                        config,
+                        reviewed_candidate,
+                        order_type_override="market",
+                        entry_type="mini_lc_market",
+                        journal_type="VT",
+                        journal_id=vt_id,
+                    )
+                    if not execution.submitted:
+                        skip_reason = f"OKX market entry failed: {execution.message}"
+                        _save_mini_setup_state(
+                            config,
+                            setup_id,
+                            status="market_submit_failed",
+                            lc_id=journal_id,
+                            vt_id=vt_id,
+                            okx_review=okx_review,
+                            reason=skip_reason,
+                            execution=to_jsonable(execution),
+                        )
+                        result["skipped"].append(
+                            {
+                                "symbol": candidate.symbol,
+                                "side": candidate.side,
+                                "reason": skip_reason,
+                            }
+                        )
+                        notification = _notify_mini_system_block(
+                            config,
+                            stage="Mini -> Market",
+                            reason=skip_reason,
+                            scan=internal_scan,
+                            candidate=reviewed_candidate,
+                        )
+                        if notification:
+                            result["system_notifications"].append(notification)
+                        continue
+                    result["market"] += 1
                     _save_mini_setup_state(
                         config,
                         setup_id,
-                        status="market_submit_failed",
+                        status="market_submitted",
                         lc_id=journal_id,
                         vt_id=vt_id,
+                        exchange_order_id=execution.order_id,
+                        okx_review=okx_review,
+                        execution=to_jsonable(execution),
+                    )
+                    result["market_orders"].append(
+                        {
+                            "setup_id": setup_id,
+                            "vt_id": vt_id,
+                            "symbol": reviewed_candidate.symbol,
+                            "side": reviewed_candidate.side,
+                            "exchange_order_id": execution.order_id,
+                            "win_probability_pct": reviewed_candidate.win_probability_pct,
+                            "confidence": reviewed_candidate.confidence,
+                            "okx_review": candidate_okx_review(reviewed_candidate, route="lc_okx_setup_review"),
+                            "execution": to_jsonable(execution),
+                        }
+                    )
+                    continue
+                if not okx_review_allows_okx_submission(okx_review):
+                    reason = str(okx_review.get("reason") or okx_review.get("decision") or "GPT-5.5 rejected LC_OKX setup")
+                    cache_reason = str(okx_review.get("cache_reason") or "").strip()
+                    notify_reason = f"{cache_reason}: {reason}" if cache_reason else reason
+                    result["skipped"].append(
+                        {
+                            "symbol": candidate.symbol,
+                            "side": candidate.side,
+                            "setup_id": setup_id,
+                            "reason": reason,
+                        }
+                    )
+                    recheck = revalidate_pending_orders_for_symbol(
+                        config,
+                        candidate,
+                        reason_prefix=f"Mini setup {setup_id} was deleted by 5.5",
+                        market_layers=market_layers,
+                    )
+                    result["rechecks"].append({"setup_id": setup_id, **recheck})
+                    if recheck.get("cancellation_warnings"):
+                        notification = _notify_mini_system_block(
+                            config,
+                            stage="5.5 DELETE_SETUP -> recheck LC_OKX cũ",
+                            reason="; ".join(str(item) for item in recheck["cancellation_warnings"][:3]),
+                            scan=internal_scan,
+                            candidate=candidate,
+                        )
+                        if notification:
+                            result["system_notifications"].append(notification)
+                    _save_mini_setup_state(
+                        config,
+                        setup_id,
+                        status="deleted_by_5_5",
+                        lc_id=journal_id,
+                        okx_review=okx_review,
+                        old_setup_recheck=recheck,
+                        reason=reason,
+                    )
+                    if not _is_reused_permanent_okx_rejection(okx_review):
+                        notification = _notify_mini_system_block(
+                            config,
+                            stage="Mini -> 5.5/LC_OKX",
+                            reason=notify_reason,
+                            scan=internal_scan,
+                            candidate=candidate,
+                        )
+                        if notification:
+                            result["system_notifications"].append(notification)
+                    continue
+            reviewed_candidate = with_candidate_client_order_id(
+                reviewed_candidate,
+                entry_type="mini_lc_okx",
+            )
+            replacement = cancel_pending_orders_for_symbol(
+                config,
+                candidate.symbol,
+                reason=f"Replaced by newer Mini setup {setup_id} approved for KEEP_SETUP",
+            )
+            result["replacements"].append({"setup_id": setup_id, **replacement})
+            if not replacement["ok"]:
+                skip_reason = "; ".join(replacement["warnings"][:3]) or "Could not remove previous pending setup"
+                _save_mini_setup_state(
+                    config,
+                    setup_id,
+                    status="replacement_failed",
+                    lc_id=journal_id,
+                    okx_review=okx_review,
+                    reason=skip_reason,
+                )
+                result["skipped"].append(
+                    {
+                        "symbol": candidate.symbol,
+                        "side": candidate.side,
+                        "setup_id": setup_id,
+                        "reason": skip_reason,
+                    }
+                )
+                notification = _notify_mini_system_block(
+                    config,
+                    stage="5.5 -> thay thế setup cũ",
+                    reason=skip_reason,
+                    scan=internal_scan,
+                    candidate=reviewed_candidate,
+                )
+                if notification:
+                    result["system_notifications"].append(notification)
+                continue
+            exchange_order_id: str | None = None
+            order_status = "OPEN"
+            exchange_max_age_days = float(
+                config.get("pending_orders", {}).get("exchange_max_age_days", 1.5) or 1.5
+            )
+            local_max_age_hours = float(
+                config.get("pending_orders", {}).get("local_max_age_hours", 6) or 6
+            )
+            if config.get("mode") == "dry_run":
+                record = save_pending_order(
+                    config,
+                    reviewed_candidate,
+                    None,
+                    max_age_days=float(config.get("pending_orders", {}).get("max_age_days", 3) or 3),
+                    max_age_hours=local_max_age_hours,
+                    journal_id=journal_id,
+                )
+            if config.get("mode") != "dry_run":
+                record = save_pending_order(
+                    config,
+                    reviewed_candidate,
+                    None,
+                    status="OPEN",
+                    max_age_hours=local_max_age_hours,
+                    journal_id=journal_id,
+                )
+                _save_mini_setup_state(
+                    config,
+                    setup_id,
+                    status="pending_submit_started",
+                    lc_id=journal_id or record.get("id"),
+                    pending_record_id=record.get("id"),
+                    okx_review=okx_review,
+                )
+                order_type = str(config.get("pending_orders", {}).get("order_type", "limit") or "limit")
+                execution = execute_candidate(
+                    config,
+                    reviewed_candidate,
+                    order_type_override=order_type,
+                    entry_type="mini_lc_okx",
+                    journal_type="LC",
+                    journal_id=journal_id,
+                )
+                if not execution.submitted or not execution.order_id:
+                    skip_reason = f"OKX LC submit failed: {execution.message}"
+                    submission_status = str((execution.raw or {}).get("submission_status") or "")
+                    if submission_status != "unknown":
+                        close_pending_order(config, int(record["id"]), "CANCELED", skip_reason)
+                    _save_mini_setup_state(
+                        config,
+                        setup_id,
+                        status="pending_submit_unknown" if submission_status == "unknown" else "pending_submit_failed",
+                        lc_id=journal_id,
+                        pending_record_id=record.get("id"),
                         okx_review=okx_review,
                         reason=skip_reason,
                         execution=to_jsonable(execution),
@@ -1327,7 +1572,7 @@ def _create_pending_from_internal_scan(
                     )
                     notification = _notify_mini_system_block(
                         config,
-                        stage="Mini -> Market",
+                        stage="Mini -> gửi lệnh chờ OKX",
                         reason=skip_reason,
                         scan=internal_scan,
                         candidate=reviewed_candidate,
@@ -1335,223 +1580,41 @@ def _create_pending_from_internal_scan(
                     if notification:
                         result["system_notifications"].append(notification)
                     continue
-                result["market"] += 1
-                _save_mini_setup_state(
+                exchange_order_id = execution.order_id
+                order_status = "LC_OKX"
+                set_pending_order_exchange_order(
                     config,
-                    setup_id,
-                    status="market_submitted",
-                    lc_id=journal_id,
-                    vt_id=vt_id,
-                    exchange_order_id=execution.order_id,
-                    okx_review=okx_review,
-                    execution=to_jsonable(execution),
+                    int(record["id"]),
+                    reviewed_candidate,
+                    exchange_order_id,
+                    max_age_days=exchange_max_age_days,
                 )
-                result["market_orders"].append(
-                    {
-                        "setup_id": setup_id,
-                        "vt_id": vt_id,
-                        "symbol": reviewed_candidate.symbol,
-                        "side": reviewed_candidate.side,
-                        "exchange_order_id": execution.order_id,
-                        "win_probability_pct": reviewed_candidate.win_probability_pct,
-                        "confidence": reviewed_candidate.confidence,
-                        "okx_review": candidate_okx_review(reviewed_candidate, route="lc_okx_setup_review"),
-                        "execution": to_jsonable(execution),
-                    }
-                )
-                continue
-            if not okx_review_allows_okx_submission(okx_review):
-                reason = str(okx_review.get("reason") or okx_review.get("decision") or "GPT-5.5 rejected LC_OKX setup")
-                cache_reason = str(okx_review.get("cache_reason") or "").strip()
-                notify_reason = f"{cache_reason}: {reason}" if cache_reason else reason
-                result["skipped"].append(
-                    {
-                        "symbol": candidate.symbol,
-                        "side": candidate.side,
-                        "setup_id": setup_id,
-                        "reason": reason,
-                    }
-                )
-                recheck = revalidate_pending_orders_for_symbol(
-                    config,
-                    candidate,
-                    reason_prefix=f"Mini setup {setup_id} was deleted by 5.5",
-                    market_layers=market_layers,
-                )
-                result["rechecks"].append({"setup_id": setup_id, **recheck})
-                if recheck.get("cancellation_warnings"):
-                    notification = _notify_mini_system_block(
-                        config,
-                        stage="5.5 DELETE_SETUP -> recheck LC_OKX cũ",
-                        reason="; ".join(str(item) for item in recheck["cancellation_warnings"][:3]),
-                        scan=internal_scan,
-                        candidate=candidate,
-                    )
-                    if notification:
-                        result["system_notifications"].append(notification)
-                _save_mini_setup_state(
-                    config,
-                    setup_id,
-                    status="deleted_by_5_5",
-                    lc_id=journal_id,
-                    okx_review=okx_review,
-                    old_setup_recheck=recheck,
-                    reason=reason,
-                )
-                if not _is_reused_permanent_okx_rejection(okx_review):
-                    notification = _notify_mini_system_block(
-                        config,
-                        stage="Mini -> 5.5/LC_OKX",
-                        reason=notify_reason,
-                        scan=internal_scan,
-                        candidate=candidate,
-                    )
-                    if notification:
-                        result["system_notifications"].append(notification)
-                continue
-        replacement = cancel_pending_orders_for_symbol(
-            config,
-            candidate.symbol,
-            reason=f"Replaced by newer Mini setup {setup_id} approved for KEEP_SETUP",
-        )
-        result["replacements"].append({"setup_id": setup_id, **replacement})
-        if not replacement["ok"]:
-            skip_reason = "; ".join(replacement["warnings"][:3]) or "Could not remove previous pending setup"
+            result["created"] += 1
             _save_mini_setup_state(
                 config,
                 setup_id,
-                status="replacement_failed",
-                lc_id=journal_id,
-                okx_review=okx_review,
-                reason=skip_reason,
-            )
-            result["skipped"].append(
-                {
-                    "symbol": candidate.symbol,
-                    "side": candidate.side,
-                    "setup_id": setup_id,
-                    "reason": skip_reason,
-                }
-            )
-            notification = _notify_mini_system_block(
-                config,
-                stage="5.5 -> thay thế setup cũ",
-                reason=skip_reason,
-                scan=internal_scan,
-                candidate=reviewed_candidate,
-            )
-            if notification:
-                result["system_notifications"].append(notification)
-            continue
-        exchange_order_id: str | None = None
-        order_status = "OPEN"
-        exchange_max_age_days = float(
-            config.get("pending_orders", {}).get("exchange_max_age_days", 1.5) or 1.5
-        )
-        local_max_age_hours = float(
-            config.get("pending_orders", {}).get("local_max_age_hours", 6) or 6
-        )
-        if config.get("mode") == "dry_run":
-            record = save_pending_order(
-                config,
-                reviewed_candidate,
-                None,
-                max_age_days=float(config.get("pending_orders", {}).get("max_age_days", 3) or 3),
-                max_age_hours=local_max_age_hours,
-                journal_id=journal_id,
-            )
-        if config.get("mode") != "dry_run":
-            record = save_pending_order(
-                config,
-                reviewed_candidate,
-                None,
-                status="OPEN",
-                max_age_hours=local_max_age_hours,
-                journal_id=journal_id,
-            )
-            _save_mini_setup_state(
-                config,
-                setup_id,
-                status="pending_submit_started",
+                status="pending_submitted" if exchange_order_id else "dry_run_pending_created",
                 lc_id=journal_id or record.get("id"),
                 pending_record_id=record.get("id"),
+                exchange_order_id=exchange_order_id,
                 okx_review=okx_review,
             )
-            order_type = str(config.get("pending_orders", {}).get("order_type", "limit") or "limit")
-            execution = execute_candidate(
-                config,
-                reviewed_candidate,
-                order_type_override=order_type,
-                entry_type="mini_lc_okx",
-                journal_type="LC",
-                journal_id=journal_id,
+            result["created_orders"].append(
+                {
+                    "setup_id": setup_id,
+                    "id": record.get("id"),
+                    "lc_id": journal_id or record.get("id"),
+                    "status": order_status,
+                    "symbol": reviewed_candidate.symbol,
+                    "side": reviewed_candidate.side,
+                    "exchange_order_id": exchange_order_id,
+                    "win_probability_pct": reviewed_candidate.win_probability_pct,
+                    "confidence": reviewed_candidate.confidence,
+                    "okx_review": candidate_okx_review(reviewed_candidate, route="lc_okx_setup_review"),
+                }
             )
-            if not execution.submitted or not execution.order_id:
-                skip_reason = f"OKX LC submit failed: {execution.message}"
-                close_pending_order(config, int(record["id"]), "CANCELED", skip_reason)
-                _save_mini_setup_state(
-                    config,
-                    setup_id,
-                    status="pending_submit_failed",
-                    lc_id=journal_id,
-                    okx_review=okx_review,
-                    reason=skip_reason,
-                    execution=to_jsonable(execution),
-                )
-                result["skipped"].append(
-                    {
-                        "symbol": candidate.symbol,
-                        "side": candidate.side,
-                        "reason": skip_reason,
-                    }
-                )
-                notification = _notify_mini_system_block(
-                    config,
-                    stage="Mini -> gửi lệnh chờ OKX",
-                    reason=skip_reason,
-                    scan=internal_scan,
-                    candidate=reviewed_candidate,
-                )
-                if notification:
-                    result["system_notifications"].append(notification)
-                continue
-            exchange_order_id = execution.order_id
-            order_status = "LC_OKX"
-            set_pending_order_exchange_order(
-                config,
-                int(record["id"]),
-                reviewed_candidate,
-                exchange_order_id,
-                max_age_days=exchange_max_age_days,
-            )
-        result["created"] += 1
-        _save_mini_setup_state(
-            config,
-            setup_id,
-            status="pending_submitted" if exchange_order_id else "dry_run_pending_created",
-            lc_id=journal_id or record.get("id"),
-            pending_record_id=record.get("id"),
-            exchange_order_id=exchange_order_id,
-            okx_review=okx_review,
-        )
-        result["created_orders"].append(
-            {
-                "setup_id": setup_id,
-                "id": record.get("id"),
-                "lc_id": journal_id or record.get("id"),
-                "status": order_status,
-                "symbol": reviewed_candidate.symbol,
-                "side": reviewed_candidate.side,
-                "exchange_order_id": exchange_order_id,
-                "win_probability_pct": reviewed_candidate.win_probability_pct,
-                "confidence": reviewed_candidate.confidence,
-                "okx_review": candidate_okx_review(reviewed_candidate, route="lc_okx_setup_review"),
-            }
-        )
-    try:
-        release_journal_lease(config, MINI_PROCESSING_LEASE_KEY, lease_owner)
-    except Exception as exc:
-        result.setdefault("warnings", []).append(f"Mini processing lease release failed: {exc}")
+    finally:
+        _release_mini_processing_lease()
     return result
 
 
@@ -1784,7 +1847,6 @@ def run_once(
     if (
         execute
         and _internal_scan_to_pending_enabled(config)
-        and not defer_new_vt_to_internal_lc
         and config.get("pending_orders", {}).get("enabled", True)
         and internal_market_scan is not None
     ):

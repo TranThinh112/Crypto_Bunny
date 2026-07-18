@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from crypto_trader.atlas_mirror import atlas_database
 from crypto_trader.config import DEFAULT_CONFIG
+from crypto_trader.executor import with_candidate_client_order_id
 from crypto_trader.lc_pipeline import save_lc_pipeline_mini_scan
 from crypto_trader.models import ExecutionResult, TradeCandidate
 from crypto_trader.pending import maintain_pending_orders
@@ -187,7 +188,7 @@ class PendingTest(TestCase):
         self.assertEqual(len(list_pending_orders(config, status="FILLED")), 0)
         self.assertEqual(self._pending_record_total(config), 0)
 
-    def test_keeps_local_pending_when_active_limit_is_full(self) -> None:
+    def test_cancels_legacy_local_pending_when_active_limit_is_full(self) -> None:
         class FakeExchange:
             def load_markets(self) -> None:
                 return None
@@ -212,11 +213,13 @@ class PendingTest(TestCase):
             result = maintain_pending_orders(config, [_candidate()])
 
         execute.assert_not_called()
-        self.assertEqual(result["kept"], 1)
+        self.assertEqual(result["kept"], 0)
+        self.assertEqual(result["canceled"], 1)
         self.assertEqual(result["converted"], 0)
-        self.assertEqual(len(list_pending_orders(config, status="OPEN")), 1)
+        self.assertEqual(result["events"][0]["source"], "legacy_local_pending_disabled")
+        self.assertEqual(len(list_pending_orders(config, status="OPEN")), 0)
 
-    def test_submits_old_local_pending_to_okx_when_active_limit_is_full(self) -> None:
+    def test_cancels_old_local_pending_instead_of_submitting_when_active_limit_is_full(self) -> None:
         class FakeExchange:
             def load_markets(self) -> None:
                 return None
@@ -255,21 +258,15 @@ class PendingTest(TestCase):
         ):
             result = maintain_pending_orders(config, [_candidate()])
 
-        execute.assert_called_once()
-        self.assertEqual(execute.call_args.kwargs["order_type_override"], "limit")
-        self.assertEqual(result["events"][0]["type"], "pending_submitted")
-        self.assertEqual(result["events"][0]["status"], "LC_OKX")
-        self.assertEqual(result["events"][0]["exchange_order_id"], "limit-1")
-        open_order = list_pending_orders(config, status="OPEN")[0]
-        self.assertEqual(open_order["status"], "LC_OKX")
-        self.assertEqual(open_order["exchange_order_id"], "limit-1")
-        self.assertEqual(len(list_pending_orders(config, status="LC_OKX")), 1)
-        self.assertEqual(count_pending_orders(config), 1)
-        self.assertEqual(open_pending_symbols(config), {"BTC/USDT:USDT"})
-        expires_at = datetime.fromisoformat(str(open_order["expires_at"]))
-        self.assertGreater(expires_at, datetime.now(timezone.utc) + timedelta(days=1))
+        execute.assert_not_called()
+        self.assertEqual(result["submitted"], 0)
+        self.assertEqual(result["canceled"], 1)
+        self.assertEqual(result["events"][0]["source"], "legacy_local_pending_disabled")
+        self.assertEqual(len(list_pending_orders(config, status="LC_OKX")), 0)
+        self.assertEqual(count_pending_orders(config), 0)
+        self.assertEqual(open_pending_symbols(config), set())
 
-    def test_old_local_pending_keep_monitor_review_submits_without_reasking_gpt(self) -> None:
+    def test_old_local_pending_keep_monitor_review_is_canceled_without_reasking_gpt(self) -> None:
         class FakeExchange:
             def load_markets(self) -> None:
                 return None
@@ -307,16 +304,13 @@ class PendingTest(TestCase):
             result = maintain_pending_orders(config, [_candidate("INJ/USDT:USDT")])
 
         approval.assert_not_called()
-        execute.assert_called_once()
-        self.assertEqual(result["submitted"], 1)
-        self.assertEqual(result["kept"], 1)
-        order = list_pending_orders(config, status="LC_OKX")[0]
-        self.assertEqual(order["exchange_order_id"], "limit-keep-local-1")
-        payload = json.loads(str(order["payload_json"]))
-        self.assertEqual(payload["decision_metadata"]["okx_review"]["reviewed_at"], review["reviewed_at"])
-        self.assertTrue(payload["decision_metadata"]["okx_review"]["accepted_for_okx"])
+        execute.assert_not_called()
+        self.assertEqual(result["submitted"], 0)
+        self.assertEqual(result["canceled"], 1)
+        self.assertEqual(result["events"][0]["source"], "legacy_local_pending_disabled")
+        self.assertEqual(list_pending_orders(config, status="LC_OKX"), [])
 
-    def test_releases_local_pending_when_active_slot_is_available(self) -> None:
+    def test_cancels_legacy_local_pending_when_active_slot_is_available(self) -> None:
         class FakeExchange:
             def load_markets(self) -> None:
                 return None
@@ -352,15 +346,14 @@ class PendingTest(TestCase):
         ):
             result = maintain_pending_orders(config, [_candidate()])
 
-        execute.assert_called_once()
-        self.assertEqual(execute.call_args.kwargs["order_type_override"], "limit")
-        self.assertEqual(result["submitted"], 1)
+        execute.assert_not_called()
+        self.assertEqual(result["submitted"], 0)
+        self.assertEqual(result["canceled"], 1)
         self.assertEqual(result["events"][0]["lc_id"], 12)
-        self.assertEqual(result["events"][0]["source"], "local_pending_okx")
-        self.assertEqual(result["events"][0]["exchange_order_id"], "limit-2")
-        self.assertEqual(len(list_pending_orders(config, status="LC_OKX")), 1)
+        self.assertEqual(result["events"][0]["source"], "legacy_local_pending_disabled")
+        self.assertEqual(len(list_pending_orders(config, status="LC_OKX")), 0)
 
-    def test_rechecks_wait_slot_and_submits_to_okx_when_slot_opens(self) -> None:
+    def test_legacy_wait_slot_is_canceled_instead_of_submitted_to_okx(self) -> None:
         class FakeExchange:
             def load_markets(self) -> None:
                 return None
@@ -422,15 +415,13 @@ class PendingTest(TestCase):
         ):
             result = maintain_pending_orders(config, [refreshed])
 
-        execute.assert_called_once()
-        self.assertEqual(result["submitted"], 1)
-        self.assertEqual(result["events"][0]["source"], "mini_wait_slot_release")
-        self.assertEqual(result["events"][0]["status"], "LC_OKX")
-        order = list_pending_orders(config, status="LC_OKX")[0]
-        self.assertEqual(order["status"], "LC_OKX")
-        self.assertEqual(order["exchange_order_id"], "limit-wait-1")
+        execute.assert_not_called()
+        self.assertEqual(result["submitted"], 0)
+        self.assertEqual(result["canceled"], 1)
+        self.assertEqual(result["events"][0]["source"], "legacy_wait_slot_disabled")
+        self.assertEqual(list_pending_orders(config, status="LC_OKX"), [])
 
-    def test_legacy_wait_slot_keep_monitor_submits_to_okx_without_reasking_gpt(self) -> None:
+    def test_legacy_wait_slot_keep_monitor_is_canceled_without_reasking_gpt(self) -> None:
         class FakeExchange:
             def load_markets(self) -> None:
                 return None
@@ -481,18 +472,13 @@ class PendingTest(TestCase):
             result = maintain_pending_orders(config, [refreshed])
 
         approval.assert_not_called()
-        execute.assert_called_once()
-        self.assertEqual(result["submitted"], 1)
-        self.assertEqual(result["kept"], 1)
-        self.assertEqual(result["events"][0]["source"], "mini_wait_slot_release")
-        order = list_pending_orders(config, status="LC_OKX")[0]
-        self.assertEqual(order["status"], "LC_OKX")
-        self.assertEqual(order["exchange_order_id"], "limit-keep-wait-1")
-        payload = json.loads(str(order["payload_json"]))
-        self.assertEqual(payload["decision_metadata"]["okx_review"]["reviewed_at"], review["reviewed_at"])
-        self.assertEqual(payload["decision_metadata"]["wait_slot_queue"]["scan_slot_id"], "slot-1")
+        execute.assert_not_called()
+        self.assertEqual(result["submitted"], 0)
+        self.assertEqual(result["canceled"], 1)
+        self.assertEqual(result["events"][0]["source"], "legacy_wait_slot_disabled")
+        self.assertEqual(list_pending_orders(config, status="LC_OKX"), [])
 
-    def test_legacy_watchlist_keep_monitor_submits_without_reasking_gpt(self) -> None:
+    def test_legacy_watchlist_keep_monitor_is_canceled_without_reasking_gpt(self) -> None:
         class FakeExchange:
             def load_markets(self) -> None:
                 return None
@@ -542,16 +528,13 @@ class PendingTest(TestCase):
             result = maintain_pending_orders(config, [_candidate("INJ/USDT:USDT")])
 
         approval.assert_not_called()
-        execute.assert_called_once()
-        self.assertEqual(result["submitted"], 1)
-        self.assertEqual(result["kept"], 1)
-        self.assertEqual(result["events"][0]["source"], "legacy_keep_monitor_release")
-        order = list_pending_orders(config, status="LC_OKX")[0]
-        self.assertEqual(order["exchange_order_id"], "limit-legacy-watch-1")
-        payload = json.loads(str(order["payload_json"]))
-        self.assertEqual(payload["decision_metadata"]["okx_review"]["reviewed_at"], review["reviewed_at"])
+        execute.assert_not_called()
+        self.assertEqual(result["submitted"], 0)
+        self.assertEqual(result["canceled"], 1)
+        self.assertEqual(result["events"][0]["source"], "legacy_watchlist_disabled")
+        self.assertEqual(list_pending_orders(config, status="LC_OKX"), [])
 
-    def test_old_legacy_watchlist_keep_monitor_also_submits_without_reasking_gpt(self) -> None:
+    def test_old_legacy_watchlist_keep_monitor_is_canceled_without_reasking_gpt(self) -> None:
         class FakeExchange:
             def load_markets(self) -> None:
                 return None
@@ -600,10 +583,11 @@ class PendingTest(TestCase):
             result = maintain_pending_orders(config, [_candidate("INJ/USDT:USDT")])
 
         approval.assert_not_called()
-        execute.assert_called_once()
-        self.assertEqual(result["submitted"], 1)
-        self.assertEqual(result["events"][0]["source"], "legacy_keep_monitor_release")
-        self.assertEqual(list_pending_orders(config, status="LC_OKX")[0]["exchange_order_id"], "limit-legacy-watch-old-1")
+        execute.assert_not_called()
+        self.assertEqual(result["submitted"], 0)
+        self.assertEqual(result["canceled"], 1)
+        self.assertEqual(result["events"][0]["source"], "legacy_watchlist_disabled")
+        self.assertEqual(list_pending_orders(config, status="LC_OKX"), [])
 
     def test_keeps_lc_okx_without_reasking_gpt_when_setup_review_already_saved(self) -> None:
         class FakeExchange:
@@ -713,6 +697,54 @@ class PendingTest(TestCase):
         self.assertEqual(len(list_pending_orders(config, status="FILLED")), 0)
         self.assertEqual(self._pending_record_total(config), 0)
 
+    def test_maintenance_attaches_timeout_placeholder_by_exact_client_order_id(self) -> None:
+        candidate = _candidate()
+        candidate.decision_metadata = {
+            "mini_setup": {"setup_id": "mini-btc-08"},
+            "okx_review": {
+                "route": "lc_okx_setup_review",
+                "approved": True,
+                "decision": "KEEP_SETUP",
+                "setup_action": "keep_setup",
+                "accepted_for_okx": True,
+                "gpt55_checked": True,
+            },
+        }
+        candidate = with_candidate_client_order_id(candidate, entry_type="mini_lc_okx")
+        client_order_id = candidate.decision_metadata["okx_client_order_id"]
+
+        class FakeExchange:
+            def load_markets(self) -> None:
+                return None
+
+            def fetch_open_orders(self) -> list[dict]:
+                return [
+                    {
+                        "id": "okx-recovered",
+                        "clientOrderId": client_order_id,
+                        "symbol": candidate.symbol,
+                        "side": "buy",
+                    }
+                ]
+
+            def fetch_positions(self) -> list[dict]:
+                return []
+
+        config = self._config(mode="demo")
+        placeholder = save_pending_order(config, candidate, None, status="OPEN", journal_id=12)
+
+        with (
+            patch("crypto_trader.pending.create_exchange", return_value=FakeExchange()),
+            patch("crypto_trader.pending.execute_candidate") as execute,
+        ):
+            maintain_pending_orders(config, [candidate])
+
+        execute.assert_not_called()
+        active = list_pending_orders(config, status="ACTIVE")
+        recovered = next(row for row in active if row["id"] == placeholder["id"])
+        self.assertEqual(recovered["status"], "LC_OKX")
+        self.assertEqual(recovered["exchange_order_id"], "okx-recovered")
+
     def test_mini_5_5_keep_setup_is_not_canceled_by_missing_news_or_routine_scan(self) -> None:
         class FakeExchange:
             def load_markets(self) -> None:
@@ -804,6 +836,9 @@ class PendingTest(TestCase):
         self.assertEqual(exchange.canceled, [])
         execute.assert_not_called()
         self.assertEqual(result["converted"], 0)
-        self.assertEqual(result["events"][0]["source"], "lc_okx_stored_setup")
+        self.assertEqual(
+            {event["source"] for event in result["events"]},
+            {"legacy_local_pending_disabled", "lc_okx_stored_setup"},
+        )
         open_orders = list_pending_orders(config, status="OPEN")
-        self.assertEqual({order["symbol"] for order in open_orders}, {"ETH/USDT:USDT", "BTC/USDT:USDT"})
+        self.assertEqual({order["symbol"] for order in open_orders}, {"BTC/USDT:USDT"})

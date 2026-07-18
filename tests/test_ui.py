@@ -441,6 +441,7 @@ class UiTest(TestCase):
             config_path = Path(tmpdir) / "config.yaml"
             deployed_config = (
                 "mode: dry_run\n"
+                "_atlas_test_mode: true\n"
                 "exchange:\n"
                 "  leverage: 25\n"
                 "position_sizing:\n"

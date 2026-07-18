@@ -8,6 +8,7 @@ from unittest import TestCase
 from crypto_trader.atlas_mirror import atlas_database_for_collection
 from crypto_trader.codex_features import _slot_state
 from crypto_trader.config import DEFAULT_CONFIG
+from crypto_trader.executor import candidate_client_order_id
 from crypto_trader.models import TradeCandidate
 from crypto_trader.runtime_sync import sync_runtime_state
 from crypto_trader.storage import (
@@ -94,6 +95,41 @@ class RuntimeSyncTest(TestCase):
 
     def test_runtime_sync_attaches_orphan_okx_order_to_reviewed_mini_placeholder(self) -> None:
         config = self._config()
+        candidate = self._mini_candidate()
+        placeholder = save_pending_order(
+            config,
+            candidate,
+            None,
+            status="OPEN",
+            max_age_hours=6,
+            journal_id=12,
+        )
+
+        sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-07-18T00:00:00+00:00",
+                "positions": [],
+                "open_orders": [
+                    {
+                        **self._open_order("limit-recovered"),
+                        "clientOrderId": candidate_client_order_id(candidate, entry_type="mini_lc_okx"),
+                    }
+                ],
+            },
+        )
+
+        pending = list_pending_orders(config, status="LC_OKX")
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["id"], placeholder["id"])
+        self.assertEqual(pending[0]["exchange_order_id"], "limit-recovered")
+        payload = json.loads(str(pending[0]["payload_json"]))
+        self.assertEqual(payload["decision_metadata"]["mini_setup"]["setup_id"], "mini-btc-08")
+
+    def test_runtime_sync_does_not_attach_same_symbol_manual_order_to_mini_placeholder(self) -> None:
+        config = self._config()
         placeholder = save_pending_order(
             config,
             self._mini_candidate(),
@@ -110,16 +146,19 @@ class RuntimeSyncTest(TestCase):
                 "mode": "demo",
                 "created_at": "2026-07-18T00:00:00+00:00",
                 "positions": [],
-                "open_orders": [self._open_order("limit-recovered")],
+                "open_orders": [
+                    {
+                        **self._open_order("manual-limit"),
+                        "clientOrderId": "manual-btc-order",
+                    }
+                ],
             },
         )
 
-        pending = list_pending_orders(config, status="LC_OKX")
-        self.assertEqual(len(pending), 1)
-        self.assertEqual(pending[0]["id"], placeholder["id"])
-        self.assertEqual(pending[0]["exchange_order_id"], "limit-recovered")
-        payload = json.loads(str(pending[0]["payload_json"]))
-        self.assertEqual(payload["decision_metadata"]["mini_setup"]["setup_id"], "mini-btc-08")
+        active = list_pending_orders(config, status="ACTIVE")
+        placeholder_row = next(row for row in active if row["id"] == placeholder["id"])
+        self.assertFalse(placeholder_row.get("exchange_order_id"))
+        self.assertTrue(any(row.get("exchange_order_id") == "manual-limit" for row in active))
 
     def test_sync_runtime_state_seeds_ai_metadata(self) -> None:
         config = self._config()

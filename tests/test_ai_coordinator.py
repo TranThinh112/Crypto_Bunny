@@ -244,6 +244,32 @@ class AiCoordinatorTest(TestCase):
         self.assertEqual(second_decision["decision"], "APPROVE")
         self.assertIs(reused, reviewed)
 
+    def test_initial_mini_5_5_timeout_never_falls_back_to_local_approval(self) -> None:
+        config = self._config()
+        config["ai"]["okx"]["auto_lc_okx_review_once_enabled"] = True
+        config["ai"]["okx"]["approval_enabled"] = True
+
+        with patch(
+            "crypto_trader.ai_coordinator._openai_json_decision",
+            side_effect=TimeoutError("GPT-5.5 timed out"),
+        ):
+            decision = okx_ai_approval(
+                config,
+                _candidate("SOL/USDT:USDT"),
+                RiskCheck(True, [], []),
+                context={
+                    "route": "lc_okx_setup_review",
+                    "source": "mini_lc_okx",
+                    "from_status": "MINI_APPROVED",
+                    "mini_setup_id": "setup-08",
+                },
+            )
+
+        self.assertFalse(decision["approved"])
+        self.assertEqual(decision["decision"], "external_ai_unavailable")
+        self.assertFalse(decision["gpt55_checked"])
+        self.assertNotEqual(decision["provider"], "local_policy")
+
     def test_reuses_recent_keep_monitor_okx_setup_review_without_recalling_ai(self) -> None:
         config = self._config()
         candidate = _candidate("SUI/USDT:USDT")

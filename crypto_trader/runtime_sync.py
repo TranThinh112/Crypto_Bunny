@@ -11,6 +11,7 @@ from .codex_features import (
     refresh_bunny_health_state,
     refresh_trading_system_state,
 )
+from .executor import candidate_client_order_id
 from .market import create_exchange
 from .models import TradeCandidate, to_jsonable
 from .storage import (
@@ -94,6 +95,16 @@ def _position_side(position: dict[str, Any]) -> str:
 def _order_side(order: dict[str, Any]) -> str:
     raw_side = str(order.get("side") or "").lower()
     return "long" if raw_side == "buy" else "short" if raw_side == "sell" else raw_side
+
+
+def _order_client_id(order: dict[str, Any]) -> str:
+    info = order.get("info") if isinstance(order.get("info"), dict) else {}
+    return str(order.get("clientOrderId") or info.get("clOrdId") or "").strip()
+
+
+def _order_exchange_id(order: dict[str, Any]) -> str:
+    info = order.get("info") if isinstance(order.get("info"), dict) else {}
+    return str(order.get("id") or info.get("ordId") or "").strip()
 
 
 def _base_symbol(symbol: str) -> str:
@@ -268,16 +279,20 @@ def sync_exchange_runtime_state(
         for row in active_pending
         if str(row.get("exchange_order_id") or "")
     }
-    mini_placeholders_by_key: dict[tuple[str, str], list[tuple[dict[str, Any], TradeCandidate]]] = {}
+    mini_placeholders_by_client_id: dict[str, tuple[dict[str, Any], TradeCandidate]] = {}
     for row in active_pending:
         placeholder_candidate = _mini_pending_placeholder_candidate(row)
         if placeholder_candidate is None:
             continue
-        key = (placeholder_candidate.symbol, placeholder_candidate.side)
-        mini_placeholders_by_key.setdefault(key, []).append((row, placeholder_candidate))
+        expected_client_id = candidate_client_order_id(
+            placeholder_candidate,
+            entry_type="mini_lc_okx",
+        )
+        if expected_client_id:
+            mini_placeholders_by_client_id[expected_client_id] = (row, placeholder_candidate)
     orders_synced = 0
     for order in open_orders:
-        exchange_order_id = str(order.get("id") or order.get("clientOrderId") or "")
+        exchange_order_id = _order_exchange_id(order)
         if not exchange_order_id:
             continue
         candidate = _candidate_from_open_order(config, order)
@@ -295,8 +310,7 @@ def sync_exchange_runtime_state(
                 max_age_days=float(config.get("pending_orders", {}).get("exchange_max_age_days", 1.5) or 1.5),
             )
         else:
-            placeholder_rows = mini_placeholders_by_key.get((candidate.symbol, candidate.side)) or []
-            placeholder = placeholder_rows.pop(0) if placeholder_rows else None
+            placeholder = mini_placeholders_by_client_id.pop(_order_client_id(order), None)
             if placeholder:
                 placeholder_row, placeholder_candidate = placeholder
                 set_pending_order_exchange_order(

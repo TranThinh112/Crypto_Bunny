@@ -1689,6 +1689,7 @@ def _openai_json_decision(
         "latency_ms": response.get("latency_ms"),
         "pending_memory": pending_memory,
         "raw": decision,
+        "gpt55_checked": True,
     }
     result["setup_action"] = okx_review_action(result)
     if route == "lc_okx_setup_review" and not result["approved"]:
@@ -1749,7 +1750,19 @@ def okx_ai_approval(
     context: dict[str, Any] | None = None,
     pending_memory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    context = context or {}
+    route = str(context.get("route") or "")
+    initial_mini_review = route == "lc_okx_setup_review" and _okx_initial_mini_review_context(context)
     if not ai_enabled(config):
+        if initial_mini_review:
+            return {
+                "approved": False,
+                "decision": "external_ai_disabled",
+                "reason": "GPT-5.5 is disabled; the Mini setup cannot continue to OKX.",
+                "provider": "disabled",
+                "model": None,
+                "gpt55_checked": False,
+            }
         return {
             "approved": True,
             "decision": "ai_disabled",
@@ -1758,16 +1771,13 @@ def okx_ai_approval(
             "model": None,
         }
 
-    context = context or {}
     pending_memory = pending_memory or internal_lc_memory(config)
     local_decision = _local_okx_policy(config, candidate, risk_check, context, pending_memory)
     okx_config = ai_config(config).get("okx", {})
     manual_openai_once = bool(context.get("manual_openai_once"))
-    route = str(context.get("route") or "")
     lc_okx_review_once = (
-        route == "lc_okx_setup_review"
+        initial_mini_review
         and not manual_openai_once
-        and _okx_initial_mini_review_context(context)
         and bool(okx_config.get("auto_lc_okx_review_once_enabled", False))
     )
     if manual_openai_once:
@@ -1776,11 +1786,15 @@ def okx_ai_approval(
             "decision": "manual_openai_blocked",
             "reason": "5.5 is restricted to the initial Mini LC_OKX setup review and cannot be called manually.",
         }
-    if route == "lc_okx_setup_review" and not lc_okx_review_once and not candidate_okx_review(candidate, route=route):
+    if initial_mini_review and not lc_okx_review_once:
         return {
-            **local_decision,
+            "approved": False,
             "decision": "initial_mini_review_required",
-            "reason": "5.5 can only be called once when Mini first promotes this setup.",
+            "reason": "GPT-5.5 initial Mini review is not enabled; the setup cannot continue to OKX.",
+            "provider": "blocked",
+            "model": str(okx_config.get("model", "gpt-5.5")),
+            "pending_memory": pending_memory,
+            "gpt55_checked": False,
         }
     if manual_openai_once or lc_okx_review_once:
         if manual_openai_once and not bool(okx_config.get("manual_openai_enabled", False)):
@@ -1790,6 +1804,16 @@ def okx_ai_approval(
                 "reason": "Manual OKX OpenAI approval is disabled; using local policy only",
             }
         if not bool(okx_config.get("approval_enabled", True)):
+            if initial_mini_review:
+                return {
+                    "approved": False,
+                    "decision": "approval_disabled",
+                    "reason": "GPT-5.5 approval is disabled; the Mini setup cannot continue to OKX.",
+                    "provider": "blocked",
+                    "model": str(okx_config.get("model", "gpt-5.5")),
+                    "pending_memory": pending_memory,
+                    "gpt55_checked": False,
+                }
             return {
                 **local_decision,
                 "decision": "approval_disabled",
@@ -1805,8 +1829,8 @@ def okx_ai_approval(
                 manual_trigger=manual_openai_once,
                 lc_okx_review_once=lc_okx_review_once,
             )
-        except (RuntimeError, urllib.error.URLError, urllib.error.HTTPError, KeyError, json.JSONDecodeError) as exc:
-            if bool(okx_config.get("require_external_approval", False)):
+        except Exception as exc:
+            if initial_mini_review or bool(okx_config.get("require_external_approval", False)):
                 return {
                     "approved": False,
                     "decision": "external_ai_unavailable",
@@ -1814,6 +1838,7 @@ def okx_ai_approval(
                     "provider": "openai",
                     "model": str(okx_config.get("model", "gpt-5.5")),
                     "pending_memory": pending_memory,
+                    "gpt55_checked": False,
                 }
             return {
                 **local_decision,
