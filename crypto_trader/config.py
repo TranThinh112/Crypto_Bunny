@@ -37,6 +37,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "atr_multiplier": 1.5,
         "min_improvement_price": 0.0,
         "trigger_price_type": "last",
+        "algo_order_types": ["oco", "conditional", "trigger"],
         "symbol_overrides": {
             "BTC": {
                 "min_improvement_points": 2000,

@@ -30,6 +30,7 @@ def _settings(config: dict[str, Any]) -> dict[str, Any]:
         "atr_timeframe": str(raw.get("atr_timeframe", "1m") or "1m"),
         "min_improvement_price": max(0.0, float(raw.get("min_improvement_price", 0.0) or 0.0)),
         "trigger_price_type": str(raw.get("trigger_price_type", "last") or "last"),
+        "algo_order_types": list(raw.get("algo_order_types") or ["oco", "conditional", "trigger"]),
         "symbol_overrides": raw.get("symbol_overrides", {}) if isinstance(raw.get("symbol_overrides"), dict) else {},
     }
 
@@ -148,7 +149,7 @@ def _position_r_multiple(side: str, entry: float, initial_stop: float, mark: flo
     return initial_r, open_profit / initial_r
 
 
-def _find_stop_loss_algo(exchange: Any, symbol: str, side: str, current_sl: float | None) -> dict[str, Any] | None:
+def _find_stop_loss_algo(exchange: Any, symbol: str, side: str, current_sl: float | None, settings: dict[str, Any]) -> dict[str, Any] | None:
     market = exchange.market(symbol) if hasattr(exchange, "market") else {"id": symbol}
     inst_id = str(market.get("id") or symbol)
     fetch_algos = getattr(exchange, "privateGetTradeOrdersAlgoPending", None)
@@ -156,9 +157,16 @@ def _find_stop_loss_algo(exchange: Any, symbol: str, side: str, current_sl: floa
         fetch_algos = getattr(exchange, "private_get_trade_orders_algo_pending", None)
     if not callable(fetch_algos):
         return None
-    response = fetch_algos({"instId": inst_id})
-    rows = response.get("data") if isinstance(response, dict) else response
-    if not isinstance(rows, list):
+    rows: list[Any] = []
+    for ord_type in settings.get("algo_order_types") or ["oco", "conditional", "trigger"]:
+        try:
+            response = fetch_algos({"instId": inst_id, "ordType": str(ord_type)})
+        except Exception:
+            continue
+        chunk = response.get("data") if isinstance(response, dict) else response
+        if isinstance(chunk, list):
+            rows.extend(chunk)
+    if not rows:
         return None
     candidates: list[dict[str, Any]] = []
     for row in rows:
@@ -275,7 +283,7 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
         initial_entry = _initial_entry(execution, entry)
         initial_sl = _initial_stop_loss(execution)
         current_sl = _float(execution.get("stop_loss")) or initial_sl
-        algo = _find_stop_loss_algo(exchange, symbol, side, current_sl)
+        algo = _find_stop_loss_algo(exchange, symbol, side, current_sl, settings)
         if algo is not None:
             algo_sl = _float(algo.get("slTriggerPx") or algo.get("slOrdPx"))
             if algo_sl is not None:
