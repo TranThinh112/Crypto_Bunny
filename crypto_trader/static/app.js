@@ -167,6 +167,23 @@ function timeLabel(value) {
   });
 }
 
+function timeOnlyLabel(value) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    const text = String(value || "").trim();
+    const timeMatch = text.match(/(\d{1,2}:\d{2}(?::\d{2})?)/);
+    return timeMatch ? timeMatch[1] : text || "-";
+  }
+  return date.toLocaleTimeString("vi-VN", {
+    timeZone: "Asia/Ho_Chi_Minh",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
+
 function dateOnlyLabel(value) {
   const text = String(value ?? "").trim();
   const match = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -2430,7 +2447,7 @@ function renderMarketRegimeLineChart({
           }).join("")}
           <line x1="${chartLeft}" y1="${chartBottom}" x2="${chartRight}" y2="${chartBottom}" class="market-regime-axis-line"></line>
           ${chartSeries}
-          <text x="${pointX}" y="210" text-anchor="middle" class="market-regime-axis-text">${escapeHtml(timeLabel(createdAt))}</text>
+          <text x="${pointX}" y="210" text-anchor="middle" class="market-regime-axis-text">${escapeHtml(timeOnlyLabel(createdAt))}</text>
         </svg>
       </div>
       <div class="market-regime-chart-legend">${legend}</div>
@@ -2787,7 +2804,7 @@ function renderMarketRegimeSnapshotChart({
           ${chartSeries}
           ${rows.map((snapshot, index) => (
             index % xLabelStep === 0 || index === rows.length - 1
-              ? `<text x="${pointX(index)}" y="210" text-anchor="middle" class="market-regime-axis-text">${escapeHtml(timeLabel(marketRegimeSnapshotCreatedAt(snapshot)))}</text>`
+              ? `<text x="${pointX(index)}" y="210" text-anchor="middle" class="market-regime-axis-text">${escapeHtml(timeOnlyLabel(marketRegimeSnapshotCreatedAt(snapshot)))}</text>`
               : ""
           )).join("")}
         </svg>
