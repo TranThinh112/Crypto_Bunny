@@ -20,6 +20,7 @@ database:
 
 exchange:
   leverage: 25
+  position_side_mode: long_short
   leverage_presets:
   - 5
   - 10

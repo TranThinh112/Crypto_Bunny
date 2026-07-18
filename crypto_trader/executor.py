@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from copy import deepcopy
 from typing import Any
 
@@ -139,6 +140,37 @@ def _okx_params(
     return params
 
 
+def _is_okx_pos_side_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "posside" in message and ("51000" in message or "parameter" in message or "error" in message)
+
+
+def _pos_side_retry_params(params: dict[str, Any], candidate: TradeCandidate) -> dict[str, Any]:
+    retry = deepcopy(params)
+    if "posSide" in retry:
+        retry.pop("posSide", None)
+    else:
+        retry["posSide"] = "long" if candidate.side == "long" else "short"
+    return retry
+
+
+def _readable_submit_error(exc: Exception) -> str:
+    message = re.sub(r"\s+", " ", str(exc or "").strip())
+    lower = message.lower()
+    if "posside" in lower:
+        return (
+            "OKX từ chối lệnh: chế độ vị thế posSide không khớp tài khoản "
+            "(Net/Hedge). Bot đã thử tự điều chỉnh, nhưng OKX vẫn từ chối."
+        )
+    if "insufficient" in lower or "balance" in lower:
+        return "OKX từ chối lệnh: số dư hoặc margin không đủ."
+    if "timeout" in lower or "timed out" in lower:
+        return "OKX chưa xác nhận trạng thái lệnh do timeout kết nối."
+    if not message:
+        return "OKX từ chối lệnh nhưng không trả lý do rõ ràng."
+    return f"OKX từ chối lệnh: {message[:220]}"
+
+
 def execute_candidate(
     config: dict[str, Any],
     candidate: TradeCandidate,
@@ -190,7 +222,10 @@ def execute_candidate(
     price = None if order_type == "market" else candidate.entry
     client_order_id = candidate_client_order_id(candidate, entry_type=entry_type)
     params = _okx_params(config, candidate, client_order_id=client_order_id)
+    order: dict[str, Any] | None = None
     recovered: dict[str, Any] | None = None
+    pos_side_retry = False
+    first_error: Exception | None = None
     try:
         order = exchange.create_order(
             candidate.symbol,
@@ -201,34 +236,63 @@ def execute_candidate(
             params,
         )
     except Exception as exc:
-        ambiguous = _is_ambiguous_submit_error(exc)
-        recovered = (
-            _recover_order_after_submit_error(
-                exchange,
-                symbol=candidate.symbol,
-                client_order_id=client_order_id,
+        first_error = exc
+        if _is_okx_pos_side_error(exc):
+            retry_params = _pos_side_retry_params(params, candidate)
+            try:
+                order = exchange.create_order(
+                    candidate.symbol,
+                    order_type,
+                    side,
+                    candidate.quantity,
+                    price,
+                    retry_params,
+                )
+                params = retry_params
+                pos_side_retry = True
+            except Exception as retry_exc:
+                exc = retry_exc
+        if order is None:
+            ambiguous = _is_ambiguous_submit_error(exc)
+            recovered = (
+                _recover_order_after_submit_error(
+                    exchange,
+                    symbol=candidate.symbol,
+                    client_order_id=client_order_id,
+                )
+                if ambiguous and client_order_id
+                else None
             )
-            if ambiguous and client_order_id
-            else None
+            recovered_order_id = _order_exchange_id(recovered or {})
+            if recovered is not None and recovered_order_id:
+                order = recovered
+            else:
+                return ExecutionResult(
+                    mode=mode,
+                    submitted=False,
+                    order_id=None,
+                    message=_readable_submit_error(exc),
+                    raw={
+                        "error": str(exc),
+                        "first_error": str(first_error) if first_error and first_error is not exc else None,
+                        "client_order_id": client_order_id,
+                        "submission_status": "unknown" if ambiguous else "not_submitted",
+                    },
+                    journal_type=journal_type,
+                    journal_id=journal_id,
+                    linked_journal_id=linked_journal_id,
+                )
+    if order is None:
+        return ExecutionResult(
+            mode=mode,
+            submitted=False,
+            order_id=None,
+            message="OKX từ chối lệnh nhưng bot không nhận được phản hồi order.",
+            raw={"client_order_id": client_order_id, "submission_status": "not_submitted"},
+            journal_type=journal_type,
+            journal_id=journal_id,
+            linked_journal_id=linked_journal_id,
         )
-        recovered_order_id = _order_exchange_id(recovered or {})
-        if recovered is not None and recovered_order_id:
-            order = recovered
-        else:
-            return ExecutionResult(
-                mode=mode,
-                submitted=False,
-                order_id=None,
-                message=str(exc),
-                raw={
-                    "error": str(exc),
-                    "client_order_id": client_order_id,
-                    "submission_status": "unknown" if ambiguous else "not_submitted",
-                },
-                journal_type=journal_type,
-                journal_id=journal_id,
-                linked_journal_id=linked_journal_id,
-            )
     order_id = _order_exchange_id(order)
     if not order_id:
         return ExecutionResult(
@@ -254,6 +318,7 @@ def execute_candidate(
             **order,
             "client_order_id": client_order_id,
             "submission_status": "recovered" if order is recovered else "submitted",
+            "pos_side_retry": pos_side_retry,
         },
         journal_type=journal_type,
         journal_id=journal_id,
