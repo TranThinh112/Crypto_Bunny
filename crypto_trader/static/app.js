@@ -3288,7 +3288,7 @@ function renderMarketPatternBarChart({ id, title, subtitle, axisLabel, rows, fix
     }))
     .filter((row) => row.value !== null);
   const hasPositiveValue = chartRows.some((row) => Number(row.value) > 0);
-  if (!chartRows.length || !hasPositiveValue) {
+  if (!chartRows.length) {
     return "";
   }
   const chartLeft = 58;
@@ -3304,13 +3304,15 @@ function renderMarketPatternBarChart({ id, title, subtitle, axisLabel, rows, fix
   const width = Math.max(22, Math.min(54, slot - gap));
   const bars = chartRows.map((row, index) => {
     const safeValue = Math.max(0, Number(row.value) || 0);
-    const height = Math.max(0, Math.min(chartHeight, (safeValue / axisSpan) * chartHeight));
+    const height = safeValue > 0
+      ? Math.max(6, Math.min(chartHeight, (safeValue / axisSpan) * chartHeight))
+      : 4;
     const x = chartLeft + slot * index + (slot - width) / 2;
     const y = chartBottom - height;
     const label = row.shortLabel || row.label;
     return `
       <g>
-        <rect x="${x}" y="${y}" width="${width}" height="${height}" rx="4" fill="${row.color}" class="market-pattern-bar">
+        <rect x="${x}" y="${y}" width="${width}" height="${height}" rx="4" fill="${row.color}" class="market-pattern-bar" opacity="${hasPositiveValue ? "1" : "0.42"}">
           <title>${escapeHtml(row.label)}: ${escapeHtml(marketPatternBarAxis(row.value))}${row.unit ? ` ${escapeHtml(row.unit)}` : ""}</title>
         </rect>
         <text x="${x + width / 2}" y="${Math.max(chartTop + 10, y - 7)}" text-anchor="middle" class="market-regime-axis-text">${escapeHtml(marketPatternBarAxis(row.value))}</text>
@@ -3404,6 +3406,30 @@ function renderMarketPatternDetailV2(module, options = {}) {
     { label: "Sức mạnh xu hướng", shortLabel: "Xu hướng", value: structure.trend_strength, unit: "điểm", color: MODULE_CHART_COLORS[1] },
     { label: "Chất lượng dữ liệu", shortLabel: "Dữ liệu", value: feature.data_quality_score ?? latest?.data_quality?.score, unit: "điểm", color: MODULE_CHART_COLORS[2] },
   ];
+  const overviewMarkup = latest ? renderMarketPatternSnapshotStrip(latest, structure, confluence, feature) : `
+    <div class="market-pattern-summary-grid market-pattern-empty-overview">
+      <article class="market-pattern-summary-card">
+        <span>Snapshot mới nhất</span>
+        <strong>Chưa có</strong>
+        <small>Chờ Mini/5.5 gửi OHLCV vào engine</small>
+      </article>
+      <article class="market-pattern-summary-card">
+        <span>Bản phân tích</span>
+        <strong>${escapeHtml(marketPatternBarAxis(recordRows[0]?.value || 0))}</strong>
+        <small>MongoDB market_analysis_snapshots</small>
+      </article>
+      <article class="market-pattern-summary-card">
+        <span>Mô hình đã lưu</span>
+        <strong>${escapeHtml(marketPatternBarAxis(recordRows[1]?.value || 0))}</strong>
+        <small>Candle, chart pattern, Smart Money</small>
+      </article>
+      <article class="market-pattern-summary-card">
+        <span>Vùng giá / cấu trúc</span>
+        <strong>${escapeHtml(marketPatternBarAxis((Number(recordRows[2]?.value) || 0) + (Number(recordRows[3]?.value) || 0)))}</strong>
+        <small>Support, resistance, BOS/CHoCH</small>
+      </article>
+    </div>
+  `;
   state.selectedSystemModuleKey = systemModuleKey(module);
   refs.systemModuleOverlay.hidden = false;
   refs.systemModuleDetail.classList.add("module-detail-chart-scroll", "market-regime-detail");
@@ -3423,7 +3449,7 @@ function renderMarketPatternDetailV2(module, options = {}) {
       ${payload.error ? `<div class="market-regime-load-error" role="alert"><strong>Market Pattern Engine đang lỗi.</strong><span>${escapeHtml(payload.error)}</span></div>` : ""}
       <section class="market-regime-section">
         <div class="market-regime-section-head"><div><strong>Tổng quan engine</strong><small>Rule-based, chỉ phân tích và xuất feature cho AI</small></div></div>
-        ${latest ? renderMarketPatternSnapshotStrip(latest, structure, confluence, feature) : `<div class="market-regime-empty compact">Chưa có snapshot mới nhất. Các chart bên dưới vẫn hiển thị số bản ghi MongoDB hiện có.</div>`}
+        ${overviewMarkup}
       </section>
       <section class="market-regime-section">
         <div class="market-regime-section-head"><div><strong>Biểu đồ tổng hợp</strong><small>Gom biến cùng đơn vị tính và cùng mục đích</small></div></div>
@@ -3460,7 +3486,7 @@ function renderMarketPatternDetailV2(module, options = {}) {
             ${renderMarketPatternList("Vùng kháng cự", resistance, "Chưa có vùng resistance đủ điều kiện.")}
           </div>
         </section>
-      ` : `<div class="market-regime-empty">Chưa có snapshot. Engine sẽ có dữ liệu sau khi Mini nhận pool hoặc Final Re-check gọi endpoint analyze/recheck.</div>`}
+      ` : ""}
     </div>
   `;
   refs.systemModuleDetail.querySelector(".module-close")?.addEventListener("click", closeSystemModuleDetail);
