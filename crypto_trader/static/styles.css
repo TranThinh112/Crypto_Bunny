@@ -2595,6 +2595,28 @@ tr:last-child td {
   filter: drop-shadow(0 4px 6px rgba(10, 31, 68, 0.24));
 }
 
+.market-regime-snapshot-chart .market-regime-series circle {
+  transition: r 0.12s ease;
+}
+
+.market-regime-snapshot-chart .market-regime-series circle:hover {
+  r: 5.5;
+  filter: none;
+}
+
+.market-regime-snapshot-hint {
+  margin: 6px 0 2px;
+  border: 1px solid color-mix(in srgb, var(--amber) 32%, var(--line));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--amber) 8%, var(--panel));
+  color: var(--muted);
+  padding: 7px 9px;
+  text-align: center;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
 .market-regime-chart-legend {
   display: flex;
   flex-wrap: wrap;

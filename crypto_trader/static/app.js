@@ -2437,6 +2437,185 @@ function renderMarketRegimeLineChart({
   `;
 }
 
+function marketRegimeSnapshotCreatedAt(snapshot) {
+  return snapshot?.created_at || snapshot?.createdAt || null;
+}
+
+function marketRegimeSameSnapshot(left, right) {
+  const leftCreatedAt = marketRegimeSnapshotCreatedAt(left);
+  const rightCreatedAt = marketRegimeSnapshotCreatedAt(right);
+  if (leftCreatedAt === rightCreatedAt) return true;
+  const leftTime = Date.parse(leftCreatedAt);
+  const rightTime = Date.parse(rightCreatedAt);
+  return Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime === rightTime;
+}
+
+function marketRegimeChartSnapshots(currentSnapshot, history) {
+  const rows = (Array.isArray(history) ? history : [])
+    .filter((snapshot) => snapshot && typeof snapshot === "object" && marketRegimeSnapshotCreatedAt(snapshot));
+  const currentCreatedAt = marketRegimeSnapshotCreatedAt(currentSnapshot);
+  if (!rows.length) return currentCreatedAt ? [currentSnapshot] : [];
+  if (currentCreatedAt && !rows.some((snapshot) => marketRegimeSameSnapshot(snapshot, currentSnapshot))) {
+    rows.push(currentSnapshot);
+  }
+  return rows.sort((left, right) => {
+    const leftCreatedAt = marketRegimeSnapshotCreatedAt(left);
+    const rightCreatedAt = marketRegimeSnapshotCreatedAt(right);
+    const leftTime = Date.parse(leftCreatedAt);
+    const rightTime = Date.parse(rightCreatedAt);
+    if (Number.isFinite(leftTime) && Number.isFinite(rightTime)) return leftTime - rightTime;
+    return String(leftCreatedAt).localeCompare(String(rightCreatedAt));
+  });
+}
+
+function renderMarketRegimeSnapshotChart({
+  id,
+  title,
+  subtitle,
+  snapshots,
+  series,
+  axisLabel = "Giá trị gốc",
+  error = "",
+}) {
+  const rows = Array.isArray(snapshots) ? snapshots : [];
+  const latestSnapshot = rows.at(-1) || null;
+  const latestIndicators = latestSnapshot?.indicators && typeof latestSnapshot.indicators === "object"
+    ? latestSnapshot.indicators
+    : {};
+  const normalizedSeries = (Array.isArray(series) ? series : []).map((item) => ({
+    ...item,
+    currentValue: marketRegimeFiniteValue(latestIndicators[item.key]),
+    points: rows.map((snapshot, index) => ({
+      index,
+      createdAt: marketRegimeSnapshotCreatedAt(snapshot),
+      value: marketRegimeFiniteValue(snapshot?.indicators?.[item.key]),
+    })),
+  }));
+  const availableSeries = normalizedSeries.filter((item) => item.currentValue !== null);
+  const missingText = normalizedSeries
+    .filter((item) => item.currentValue === null)
+    .map((item) => item.label)
+    .join(", ");
+  const missingNote = missingText
+    ? `<p class="market-regime-chart-note">Chưa có dữ liệu: ${escapeHtml(missingText)}.</p>`
+    : "";
+  if (error || !rows.length || !availableSeries.length) {
+    return `
+      <article class="market-regime-chart-card market-regime-snapshot-chart" data-regime-chart="${escapeHtml(id)}">
+        <header>
+          <div><strong>${escapeHtml(title)}</strong><small>${escapeHtml(subtitle)}</small></div>
+        </header>
+        <div class="market-regime-empty">${escapeHtml(error || "Chưa có dữ liệu phù hợp để vẽ biểu đồ này.")}</div>
+        ${missingNote}
+      </article>
+    `;
+  }
+
+  const values = availableSeries.flatMap((item) => item.points
+    .filter((point) => point.value !== null)
+    .map((point) => point.value));
+  const rawMin = Math.min(...values);
+  const rawMax = Math.max(...values);
+  const rawSpan = rawMax - rawMin;
+  const valueReference = Math.max(Math.abs(rawMin), Math.abs(rawMax), Number.EPSILON);
+  const padding = rows.length === 1
+    ? Math.max(rawSpan * 0.2, valueReference * 0.04, Number.EPSILON)
+    : rawSpan > 0
+      ? rawSpan * 0.16
+      : Math.max(valueReference * 0.1, Number.EPSILON);
+  const axisMin = rawMin - padding;
+  const axisMax = rawMax + padding;
+  const axisSpan = axisMax - axisMin || 1;
+  const chartLeft = 62;
+  const chartRight = 496;
+  const chartTop = 26;
+  const chartBottom = 184;
+  const chartWidth = chartRight - chartLeft;
+  const chartHeight = chartBottom - chartTop;
+  const pointX = (index) => rows.length === 1
+    ? chartLeft + chartWidth / 2
+    : chartLeft + (index / (rows.length - 1)) * chartWidth;
+  const pointY = (value) => chartBottom - ((value - axisMin) / axisSpan) * chartHeight;
+  const ticks = Array.from({ length: 5 }, (_, index) => axisMin + (axisSpan * index) / 4);
+  const xLabelStep = rows.length <= 5 ? 1 : Math.ceil((rows.length - 1) / 4);
+  const chartSeries = availableSeries.map((item) => {
+    const target = `${id}-${item.key}`;
+    const segments = [];
+    let activeSegment = [];
+    item.points.forEach((point) => {
+      if (point.value === null) {
+        if (activeSegment.length >= 2) segments.push(activeSegment);
+        activeSegment = [];
+        return;
+      }
+      activeSegment.push(point);
+    });
+    if (activeSegment.length >= 2) segments.push(activeSegment);
+    const paths = rows.length >= 2 ? segments.map((segment) => {
+      const path = segment.map((point, index) => {
+        const command = index === 0 ? "M" : "L";
+        return `${command} ${pointX(point.index)} ${pointY(point.value)}`;
+      }).join(" ");
+      return `<path d="${path}" fill="none" stroke="${item.color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"></path>`;
+    }).join("") : "";
+    const markers = item.points.filter((point) => point.value !== null).map((point) => `
+      <circle cx="${pointX(point.index)}" cy="${pointY(point.value)}" r="4.5" fill="${item.color}" stroke="var(--panel)" stroke-width="2">
+        <title>${escapeHtml(timeLabel(point.createdAt))} | ${escapeHtml(item.label)}: ${escapeHtml(formatMarketRegimeNumber(point.value))}</title>
+      </circle>
+    `).join("");
+    return `
+      <g class="market-regime-series" data-regime-series="${escapeHtml(target)}">
+        ${paths}
+        ${markers}
+      </g>
+    `;
+  }).join("");
+  const legend = availableSeries.map((item) => {
+    const target = `${id}-${item.key}`;
+    return `
+      <button class="market-regime-legend-btn" type="button" data-regime-target="${escapeHtml(target)}" aria-pressed="true">
+        <i style="background:${item.color}"></i>
+        <span>${escapeHtml(item.label)}</span>
+        <strong>${escapeHtml(formatMarketRegimeNumber(item.currentValue))}</strong>
+      </button>
+    `;
+  }).join("");
+  const snapshotHint = rows.length === 1
+    ? '<p class="market-regime-snapshot-hint">Cần ít nhất 2 snapshot để hiển thị xu hướng.</p>'
+    : "";
+  return `
+    <article class="market-regime-chart-card market-regime-snapshot-chart" data-regime-chart="${escapeHtml(id)}" data-snapshot-count="${rows.length}">
+      <header>
+        <div><strong>${escapeHtml(title)}</strong><small>${escapeHtml(subtitle)}</small></div>
+        <span>${escapeHtml(rows.length === 1 ? "Snapshot hiện tại" : axisLabel)}</span>
+      </header>
+      <div class="market-regime-chart-canvas">
+        <svg viewBox="0 0 540 224" role="img" aria-label="${escapeHtml(title)}">
+          ${ticks.map((value, index) => {
+            const y = chartBottom - (index / 4) * chartHeight;
+            return `
+              <g>
+                <line x1="${chartLeft}" y1="${y}" x2="${chartRight}" y2="${y}" class="market-regime-grid-line"></line>
+                <text x="${chartLeft - 8}" y="${y + 4}" text-anchor="end" class="market-regime-axis-text">${escapeHtml(marketRegimeChartAxis(value))}</text>
+              </g>
+            `;
+          }).join("")}
+          <line x1="${chartLeft}" y1="${chartBottom}" x2="${chartRight}" y2="${chartBottom}" class="market-regime-axis-line"></line>
+          ${chartSeries}
+          ${rows.map((snapshot, index) => (
+            index % xLabelStep === 0 || index === rows.length - 1
+              ? `<text x="${pointX(index)}" y="210" text-anchor="middle" class="market-regime-axis-text">${escapeHtml(timeLabel(marketRegimeSnapshotCreatedAt(snapshot)))}</text>`
+              : ""
+          )).join("")}
+        </svg>
+      </div>
+      ${snapshotHint}
+      <div class="market-regime-chart-legend">${legend}</div>
+      ${missingNote}
+    </article>
+  `;
+}
+
 function bindMarketRegimeChartInteractions() {
   if (!refs.systemModuleDetail) return;
   refs.systemModuleDetail.querySelectorAll(".market-regime-legend-btn").forEach((button) => {
@@ -2490,16 +2669,27 @@ function renderMarketRegimeDetail(module, options = {}) {
   const macd = marketRegimeFiniteValue(indicators.macd);
   const macdState = macd === null ? "" : macd > 0 ? "Dương" : macd < 0 ? "Âm" : "Trung tính";
   const trendSeries = [
-    { key: "ema_fast", label: "EMA20", value: indicators.ema_fast, color: "#147a7e" },
-    { key: "ema_slow", label: "EMA50", value: indicators.ema_slow, color: "#315f9f" },
-    { key: "ema200", label: "EMA200", value: indicators.ema200, color: "#1f8a5b" },
-    { key: "vwap", label: "VWAP", value: indicators.vwap, color: "#b7791f" },
+    { key: "ema_fast", label: "EMA20", color: "#147a7e" },
+    { key: "ema_slow", label: "EMA50", color: "#315f9f" },
+    { key: "ema200", label: "EMA200", color: "#1f8a5b" },
+    { key: "vwap", label: "VWAP", color: "#b7791f" },
   ];
   const strengthSeries = [
-    { key: "adx", label: "ADX", value: indicators.adx, color: "#147a7e" },
-    { key: "rsi", label: "RSI", value: indicators.rsi, color: "#315f9f" },
-    { key: "fear_greed", label: "Fear & Greed", value: indicators.fear_greed, color: "#b7791f" },
+    { key: "adx", label: "ADX", color: "#147a7e" },
+    { key: "rsi", label: "RSI", color: "#315f9f" },
+    { key: "fear_greed", label: "Fear & Greed", color: "#b7791f" },
+    { key: "news_score", label: "News Score", color: "#bd3f32" },
   ];
+  const historyPayload = module?.market_regime_history
+    || regime.history
+    || state.lastSystemChecklistPayload?.market_regime_history
+    || [];
+  const regimeHistory = Array.isArray(historyPayload)
+    ? historyPayload
+    : Array.isArray(historyPayload?.items)
+      ? historyPayload.items
+      : [];
+  const chartSnapshots = marketRegimeChartSnapshots(regime, regimeHistory);
   const volatilityValue = marketRegimeFiniteValue(indicators.volatility);
   const fundingValue = marketRegimeFiniteValue(indicators.funding);
   const volatilityFundingSeries = volatilityValue !== null
@@ -2576,32 +2766,22 @@ function renderMarketRegimeDetail(module, options = {}) {
       <section class="market-regime-section">
         <div class="market-regime-section-head"><div><strong>Bốn biểu đồ chính</strong><small>Snapshot hiện tại</small></div></div>
         <div class="market-regime-chart-grid">
-          ${renderMarketRegimeLineChart({
+          ${renderMarketRegimeSnapshotChart({
             id: "trend-structure",
             title: "Cấu trúc xu hướng",
             subtitle: "EMA20, EMA50, EMA200 và VWAP",
-            createdAt,
+            snapshots: chartSnapshots,
             series: trendSeries,
             axisLabel: "Giá trị giá",
-            missing: trendSeries.filter((item) => marketRegimeFiniteValue(item.value) === null).map((item) => item.label),
             error,
           })}
-          ${renderMarketRegimeLineChart({
+          ${renderMarketRegimeSnapshotChart({
             id: "strength-sentiment",
             title: "Sức mạnh xu hướng và tâm lý thị trường",
             subtitle: "ADX, RSI, Fear & Greed và News Score",
-            createdAt,
+            snapshots: chartSnapshots,
             series: strengthSeries,
             axisLabel: "Giá trị gốc",
-            missing: [
-              ...strengthSeries.filter((item) => marketRegimeFiniteValue(item.value) === null).map((item) => item.label),
-              marketRegimeFiniteValue(indicators.news_score) === null ? "News Score" : null,
-            ],
-            supplemental: marketRegimeFiniteValue(indicators.news_score) === null ? [] : [{
-              label: "News Score",
-              value: indicators.news_score,
-              note: "News Score không được gộp do payload chưa xác nhận cùng thang đo.",
-            }],
             error,
           })}
           ${renderMarketRegimeLineChart({
