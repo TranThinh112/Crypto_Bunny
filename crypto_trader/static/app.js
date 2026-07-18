@@ -3287,11 +3287,19 @@ function renderMarketPatternBarChart({ id, title, subtitle, axisLabel, rows, fix
       color: row.color || MODULE_CHART_COLORS[index % MODULE_CHART_COLORS.length],
     }))
     .filter((row) => row.value !== null);
-  if (!chartRows.length) {
+  const hasPositiveValue = chartRows.some((row) => Number(row.value) > 0);
+  if (!chartRows.length || !hasPositiveValue) {
     return `
       <article class="market-regime-chart-card market-pattern-chart-card" data-pattern-chart="${escapeHtml(id)}">
         <header><div><strong>${escapeHtml(title)}</strong><small>${escapeHtml(subtitle)}</small></div><span>${escapeHtml(axisLabel)}</span></header>
         <div class="market-regime-empty">${escapeHtml(emptyText)}</div>
+        ${chartRows.length ? `<div class="market-pattern-chart-legend">${chartRows.map((row) => `
+          <div class="market-pattern-legend-item">
+            <i style="background:${row.color}"></i>
+            <span>${escapeHtml(row.label)}</span>
+            <strong>0${row.unit ? ` ${escapeHtml(row.unit)}` : ""}</strong>
+          </div>
+        `).join("")}</div>` : ""}
       </article>
     `;
   }
