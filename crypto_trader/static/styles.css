@@ -2722,6 +2722,96 @@ tr:last-child td {
   margin-top: 4px;
 }
 
+.market-pattern-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.market-pattern-summary-card {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 12px;
+}
+
+.market-pattern-summary-card span,
+.market-pattern-summary-card small,
+.market-pattern-legend-item span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.market-pattern-summary-card strong {
+  display: block;
+  margin: 6px 0 4px;
+  font-size: 14px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.market-pattern-chart-card {
+  min-height: 342px;
+}
+
+.market-pattern-bar {
+  transition: filter 0.16s ease, opacity 0.16s ease;
+}
+
+.market-pattern-bar:hover {
+  filter: drop-shadow(0 5px 8px rgba(10, 31, 68, 0.22));
+}
+
+.market-pattern-chart-legend {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.market-pattern-legend-item {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: 4px 7px;
+}
+
+.market-pattern-legend-item i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.market-pattern-legend-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.market-pattern-legend-item strong {
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.market-pattern-status-card {
+  min-height: 342px;
+  align-content: start;
+}
+
+.market-pattern-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
 .market-regime-legend-btn {
   display: inline-grid;
   grid-template-columns: 8px auto auto;
@@ -2895,12 +2985,14 @@ body.dark-mode .market-regime-indicator {
   }
 
   .market-regime-kpi-grid,
-  .market-regime-indicator-strip {
+  .market-regime-indicator-strip,
+  .market-pattern-summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .market-regime-chart-grid,
-  .market-regime-skeleton-charts {
+  .market-regime-skeleton-charts,
+  .market-pattern-detail-grid {
     grid-template-columns: 1fr;
   }
 
@@ -2933,7 +3025,9 @@ body.dark-mode .market-regime-indicator {
   .market-regime-kpi-grid,
   .market-regime-indicator-strip,
   .market-regime-view-selector,
-  .market-regime-skeleton-kpis {
+  .market-regime-skeleton-kpis,
+  .market-pattern-summary-grid,
+  .market-pattern-chart-legend {
     grid-template-columns: 1fr;
   }
 

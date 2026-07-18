@@ -3246,10 +3246,240 @@ function renderMarketPatternDetail(module, options = {}) {
   }
 }
 
+function marketPatternItems(module) {
+  const payload = module?.market_pattern_engine && typeof module.market_pattern_engine === "object"
+    ? module.market_pattern_engine
+    : {};
+  return Array.isArray(payload.latest_items) ? payload.latest_items : [];
+}
+
+function marketPatternTone(value) {
+  const clean = String(value || "").toLowerCase();
+  if (clean.includes("bull")) return "bull";
+  if (clean.includes("bear")) return "bear";
+  if (clean.includes("range") || clean.includes("neutral") || clean.includes("mixed")) return "sideway";
+  return "unknown";
+}
+
+function marketPatternBarAxis(value) {
+  const number = marketRegimeFiniteValue(value);
+  if (number === null) return "-";
+  if (Math.abs(number) >= 10) return formatMarketRegimeNumber(number, 0);
+  return formatMarketRegimeNumber(number, 2);
+}
+
+function marketPatternNiceMax(values, fallback = 1) {
+  const maxValue = Math.max(...values.map((value) => Math.max(0, Number(value) || 0)), 0);
+  if (maxValue <= 0) return fallback;
+  if (maxValue <= 1) return 1;
+  const padded = maxValue * 1.18;
+  const magnitude = 10 ** Math.floor(Math.log10(padded));
+  const normalized = padded / magnitude;
+  const step = normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+  return step * magnitude;
+}
+
+function renderMarketPatternBarChart({ id, title, subtitle, axisLabel, rows, fixedMax = null, emptyText = "Chưa có dữ liệu phù hợp để vẽ biểu đồ này." }) {
+  const chartRows = (Array.isArray(rows) ? rows : [])
+    .map((row, index) => ({
+      ...row,
+      value: marketRegimeFiniteValue(row.value),
+      color: row.color || MODULE_CHART_COLORS[index % MODULE_CHART_COLORS.length],
+    }))
+    .filter((row) => row.value !== null);
+  if (!chartRows.length) {
+    return `
+      <article class="market-regime-chart-card market-pattern-chart-card" data-pattern-chart="${escapeHtml(id)}">
+        <header><div><strong>${escapeHtml(title)}</strong><small>${escapeHtml(subtitle)}</small></div><span>${escapeHtml(axisLabel)}</span></header>
+        <div class="market-regime-empty">${escapeHtml(emptyText)}</div>
+      </article>
+    `;
+  }
+  const chartLeft = 58;
+  const chartRight = 504;
+  const chartTop = 24;
+  const chartBottom = 184;
+  const chartHeight = chartBottom - chartTop;
+  const axisMax = fixedMax !== null ? Number(fixedMax) || 1 : marketPatternNiceMax(chartRows.map((row) => row.value));
+  const axisSpan = axisMax || 1;
+  const ticks = Array.from({ length: 5 }, (_, index) => (axisSpan * index) / 4);
+  const gap = 16;
+  const slot = (chartRight - chartLeft) / chartRows.length;
+  const width = Math.max(22, Math.min(54, slot - gap));
+  const bars = chartRows.map((row, index) => {
+    const safeValue = Math.max(0, Number(row.value) || 0);
+    const height = Math.max(0, Math.min(chartHeight, (safeValue / axisSpan) * chartHeight));
+    const x = chartLeft + slot * index + (slot - width) / 2;
+    const y = chartBottom - height;
+    const label = row.shortLabel || row.label;
+    return `
+      <g>
+        <rect x="${x}" y="${y}" width="${width}" height="${height}" rx="4" fill="${row.color}" class="market-pattern-bar">
+          <title>${escapeHtml(row.label)}: ${escapeHtml(marketPatternBarAxis(row.value))}${row.unit ? ` ${escapeHtml(row.unit)}` : ""}</title>
+        </rect>
+        <text x="${x + width / 2}" y="${Math.max(chartTop + 10, y - 7)}" text-anchor="middle" class="market-regime-axis-text">${escapeHtml(marketPatternBarAxis(row.value))}</text>
+        <text x="${x + width / 2}" y="207" text-anchor="middle" class="market-regime-axis-text">${escapeHtml(label)}</text>
+      </g>
+    `;
+  }).join("");
+  const legend = chartRows.map((row) => `
+    <div class="market-pattern-legend-item">
+      <i style="background:${row.color}"></i>
+      <span>${escapeHtml(row.label)}</span>
+      <strong>${escapeHtml(marketPatternBarAxis(row.value))}${row.unit ? ` ${escapeHtml(row.unit)}` : ""}</strong>
+    </div>
+  `).join("");
+  return `
+    <article class="market-regime-chart-card market-pattern-chart-card" data-pattern-chart="${escapeHtml(id)}">
+      <header>
+        <div><strong>${escapeHtml(title)}</strong><small>${escapeHtml(subtitle)}</small></div>
+        <span>${escapeHtml(axisLabel)}</span>
+      </header>
+      <div class="market-regime-chart-canvas">
+        <svg viewBox="0 0 540 224" role="img" aria-label="${escapeHtml(title)}">
+          ${ticks.map((value, index) => {
+            const y = chartBottom - (index / 4) * chartHeight;
+            return `
+              <g>
+                <line x1="${chartLeft}" y1="${y}" x2="${chartRight}" y2="${y}" class="market-regime-grid-line"></line>
+                <text x="${chartLeft - 8}" y="${y + 4}" text-anchor="end" class="market-regime-axis-text">${escapeHtml(marketPatternBarAxis(value))}</text>
+              </g>
+            `;
+          }).join("")}
+          <line x1="${chartLeft}" y1="${chartBottom}" x2="${chartRight}" y2="${chartBottom}" class="market-regime-axis-line"></line>
+          ${bars}
+        </svg>
+      </div>
+      <div class="market-pattern-chart-legend">${legend}</div>
+    </article>
+  `;
+}
+
+function renderMarketPatternSnapshotStrip(latest, structure, confluence, feature) {
+  const createdAt = latest?.updated_at || latest?.created_at || latest?.candle_close_time;
+  const rows = [
+    { title: "Snapshot mới nhất", value: `${latest?.symbol || "-"} · ${latest?.timeframe || "-"}`, meta: timeLabel(createdAt) },
+    { title: "Regime", value: structure?.trend_regime || "-", meta: structure?.structure_state || "-" },
+    { title: "Bias kỹ thuật", value: confluence?.bias || "-", meta: `Score ${formatMarketRegimeNumber(confluence?.confluence_score)}` },
+    { title: "Dữ liệu", value: formatMarketRegimeNumber(feature?.data_quality_score ?? latest?.data_quality?.score), meta: "Thang 0-1" },
+  ];
+  return `
+    <div class="market-pattern-summary-grid">
+      ${rows.map((row) => `
+        <article class="market-pattern-summary-card">
+          <span>${escapeHtml(row.title)}</span>
+          <strong>${escapeHtml(row.value ?? "-")}</strong>
+          <small>${escapeHtml(row.meta || "-")}</small>
+        </article>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderMarketPatternDetailV2(module, options = {}) {
+  if (!refs.systemModuleDetail || !refs.systemModuleOverlay || !module) return;
+  const payload = module.market_pattern_engine && typeof module.market_pattern_engine === "object" ? module.market_pattern_engine : {};
+  const latest = marketPatternLatest(module);
+  const structure = latest?.market_structure && typeof latest.market_structure === "object" ? latest.market_structure : {};
+  const confluence = latest?.confluence && typeof latest.confluence === "object" ? latest.confluence : {};
+  const feature = latest?.feature_vector && typeof latest.feature_vector === "object" ? latest.feature_vector : {};
+  const support = Array.isArray(latest?.support_zones) ? latest.support_zones : [];
+  const resistance = Array.isArray(latest?.resistance_zones) ? latest.resistance_zones : [];
+  const candles = Array.isArray(latest?.candlestick_patterns) ? latest.candlestick_patterns : [];
+  const charts = Array.isArray(latest?.chart_patterns) ? latest.chart_patterns : [];
+  const smartMoney = Array.isArray(latest?.smart_money) ? latest.smart_money : [];
+  const latestItems = marketPatternItems(module);
+  const latestSampleText = latestItems.length ? `${formatMarketRegimeNumber(latestItems.length, 0)} snapshot gần nhất` : "Snapshot hiện tại";
+  const recordRows = [
+    { label: "Bản phân tích", shortLabel: "Phân tích", value: marketPatternCount(module, "market_analysis_snapshots"), unit: "bản ghi", color: MODULE_CHART_COLORS[0] },
+    { label: "Mô hình đã lưu", shortLabel: "Mô hình", value: marketPatternCount(module, "pattern_detections"), unit: "bản ghi", color: MODULE_CHART_COLORS[1] },
+    { label: "Vùng giá đã lưu", shortLabel: "Vùng giá", value: marketPatternCount(module, "support_resistance_zones"), unit: "bản ghi", color: MODULE_CHART_COLORS[2] },
+    { label: "Sự kiện cấu trúc", shortLabel: "Cấu trúc", value: marketPatternCount(module, "market_structure_events"), unit: "bản ghi", color: MODULE_CHART_COLORS[3] },
+  ];
+  const latestDetectionRows = [
+    { label: "Mô hình nến", shortLabel: "Nến", value: candles.length, unit: "mục", color: MODULE_CHART_COLORS[0] },
+    { label: "Mô hình giá", shortLabel: "Giá", value: charts.length, unit: "mục", color: MODULE_CHART_COLORS[1] },
+    { label: "Smart Money", shortLabel: "SMC", value: smartMoney.length, unit: "mục", color: MODULE_CHART_COLORS[2] },
+    { label: "Vùng hỗ trợ", shortLabel: "Hỗ trợ", value: support.length, unit: "mục", color: MODULE_CHART_COLORS[4] },
+    { label: "Vùng kháng cự", shortLabel: "Kháng cự", value: resistance.length, unit: "mục", color: MODULE_CHART_COLORS[5] },
+  ];
+  const scoreRows = [
+    { label: "Đồng thuận kỹ thuật", shortLabel: "Đồng thuận", value: confluence.confluence_score, unit: "điểm", color: MODULE_CHART_COLORS[0] },
+    { label: "Sức mạnh xu hướng", shortLabel: "Xu hướng", value: structure.trend_strength, unit: "điểm", color: MODULE_CHART_COLORS[1] },
+    { label: "Chất lượng dữ liệu", shortLabel: "Dữ liệu", value: feature.data_quality_score ?? latest?.data_quality?.score, unit: "điểm", color: MODULE_CHART_COLORS[2] },
+  ];
+  state.selectedSystemModuleKey = systemModuleKey(module);
+  refs.systemModuleOverlay.hidden = false;
+  refs.systemModuleDetail.classList.add("module-detail-chart-scroll", "market-regime-detail");
+  refs.systemModuleDetail.innerHTML = `
+    <button class="module-close" type="button" aria-label="Đóng">×</button>
+    <div class="module-detail-head market-regime-head">
+      <div>
+        <span class="module-number">Module ${escapeHtml(module.number || "14")}</span>
+        <h3 id="systemModuleTitle">Market Structure & Pattern Engine</h3>
+        <p>Bộ máy nhận diện cấu trúc thị trường, mô hình nến, mô hình giá và vùng giá cho Mini/5.5.</p>
+      </div>
+      <div class="module-head-actions">
+        <span class="status-pill ${module.status === "ok" ? "ok" : "warn"}">${moduleStatusLabel(module.status)}</span>
+      </div>
+    </div>
+    <div class="module-chart-scroll market-regime-scroll">
+      ${payload.error ? `<div class="market-regime-load-error" role="alert"><strong>Market Pattern Engine đang lỗi.</strong><span>${escapeHtml(payload.error)}</span></div>` : ""}
+      <section class="market-regime-section">
+        <div class="market-regime-section-head"><div><strong>Tổng quan engine</strong><small>Rule-based, chỉ phân tích và xuất feature cho AI</small></div></div>
+        ${latest ? renderMarketPatternSnapshotStrip(latest, structure, confluence, feature) : `<div class="market-regime-empty compact">Chưa có snapshot mới nhất. Các chart bên dưới vẫn hiển thị số bản ghi MongoDB hiện có.</div>`}
+      </section>
+      <section class="market-regime-section">
+        <div class="market-regime-section-head"><div><strong>Biểu đồ tổng hợp</strong><small>Gom biến cùng đơn vị tính và cùng mục đích</small></div></div>
+        <div class="market-regime-chart-grid market-pattern-chart-grid">
+          ${renderMarketPatternBarChart({ id: "market-pattern-records", title: "Dữ liệu đã lưu trong MongoDB", subtitle: "Các collection cùng đơn vị bản ghi", axisLabel: "Bản ghi", rows: recordRows })}
+          ${renderMarketPatternBarChart({ id: "market-pattern-latest-detections", title: "Kết quả nhận diện snapshot mới nhất", subtitle: "Các nhóm mô hình/vùng giá cùng đơn vị mục", axisLabel: "Mục", rows: latestDetectionRows })}
+          ${renderMarketPatternBarChart({ id: "market-pattern-scores", title: "Điểm chất lượng và đồng thuận", subtitle: "Các biến cùng thang đo 0-1", axisLabel: "Điểm 0-1", rows: scoreRows, fixedMax: 1 })}
+          <article class="market-regime-status-card market-pattern-status-card">
+            <div class="market-regime-status-main">
+              <div>
+                <span>${escapeHtml(latest ? `${latest.symbol || "-"} · ${latest.timeframe || "-"}` : "Chưa có snapshot")}</span>
+                <strong>${escapeHtml(structure.trend_regime || "Chưa có dữ liệu")}</strong>
+                <small>${escapeHtml(latest ? `${latestSampleText} · ${timeLabel(latest.candle_close_time || latest.created_at)}` : "Engine sẽ có dữ liệu sau pool Mini/recheck.")}</small>
+              </div>
+              <span class="market-regime-badge ${escapeHtml(marketPatternTone(confluence.bias || structure.trend_regime))}">${escapeHtml(confluence.bias || "neutral")}</span>
+            </div>
+            <div class="market-regime-status-meta">
+              ${renderMarketPatternMetric("Cấu trúc", structure.structure_state || "-")}
+              ${renderMarketPatternMetric("BOS", structure.bos?.detected ? (structure.bos.direction || "detected") : "Không")}
+              ${renderMarketPatternMetric("CHoCH", structure.choch?.detected ? (structure.choch.direction || "detected") : "Không")}
+              ${renderMarketPatternMetric("Cập nhật", timeLabel(latest?.updated_at || latest?.created_at) || "-")}
+            </div>
+          </article>
+        </div>
+      </section>
+      ${latest ? `
+        <section class="market-regime-section">
+          <div class="market-regime-section-head"><div><strong>Chi tiết snapshot mới nhất</strong><small>Danh sách pattern và vùng giá đã nhận diện</small></div></div>
+          <div class="market-pattern-detail-grid">
+            ${renderMarketPatternList("Mô hình nến", candles, "Chưa có mô hình nến được xác nhận.")}
+            ${renderMarketPatternList("Mô hình giá", charts, "Chưa có chart pattern phù hợp.")}
+            ${renderMarketPatternList("Smart Money", smartMoney, "Chưa có FVG, liquidity sweep hoặc order block heuristic.")}
+            ${renderMarketPatternList("Vùng hỗ trợ", support, "Chưa có vùng support đủ điều kiện.")}
+            ${renderMarketPatternList("Vùng kháng cự", resistance, "Chưa có vùng resistance đủ điều kiện.")}
+          </div>
+        </section>
+      ` : `<div class="market-regime-empty">Chưa có snapshot. Engine sẽ có dữ liệu sau khi Mini nhận pool hoặc Final Re-check gọi endpoint analyze/recheck.</div>`}
+    </div>
+  `;
+  refs.systemModuleDetail.querySelector(".module-close")?.addEventListener("click", closeSystemModuleDetail);
+  if (Number.isFinite(Number(options.scrollTop))) {
+    const scrollNode = refs.systemModuleDetail.querySelector(".module-chart-scroll");
+    if (scrollNode) requestAnimationFrame(() => {
+      scrollNode.scrollTop = Number(options.scrollTop);
+    });
+  }
+}
+
 function renderModuleDetail(module, options = {}) {
   if (!refs.systemModuleDetail || !refs.systemModuleOverlay || !module) return;
   if (isMarketPatternEngineModule(module)) {
-    renderMarketPatternDetail(module, options);
+    renderMarketPatternDetailV2(module, options);
     return;
   }
   if (isMarketRegimeModule(module)) {

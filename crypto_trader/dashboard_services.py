@@ -63,13 +63,13 @@ DASHBOARD_DEFAULT_TTL_SECONDS = 300
 def _market_pattern_engine_dashboard() -> dict[str, Any]:
     try:
         repository = AnalysisRepository(config=load_engine_config())
-        latest = repository.latest(limit=1)
+        latest = repository.latest(limit=20)
         health = repository.health()
     except Exception as exc:
-        return {"ok": False, "error": str(exc), "latest": None, "counts": {}}
+        return {"ok": False, "error": str(exc), "latest": None, "latest_items": [], "counts": {}}
     latest_snapshot = latest[0] if latest else None
     counts = health.get("collections", {}) if isinstance(health, dict) else {}
-    return {"ok": True, "error": None, "latest": latest_snapshot, "counts": counts}
+    return {"ok": True, "error": None, "latest": latest_snapshot, "latest_items": latest, "counts": counts}
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
