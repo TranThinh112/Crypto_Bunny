@@ -9,7 +9,7 @@ from typing import Any
 from dotenv import load_dotenv
 
 from .candles import detect_candlestick_patterns
-from .indicators import atr, ema, rsi, volume_ratio
+from .indicators import atr, ema, rsi, volume_ratio, vwap
 from .models import MarketSnapshot
 
 
@@ -351,6 +351,8 @@ def _frame_summary(timeframe: str, symbol: str, ohlcv: list[list[float]], last: 
     lows = [float(row[3]) for row in ohlcv]
     ema_fast = ema(closes, 20)
     ema_slow = ema(closes, 50)
+    ema_long = ema(closes, 200) if len(closes) >= 200 else None
+    current_vwap = vwap(ohlcv, 200)
     current_atr = atr(ohlcv, 14)
     recent_lows = lows[-40:]
     recent_highs = highs[-40:]
@@ -369,8 +371,12 @@ def _frame_summary(timeframe: str, symbol: str, ohlcv: list[list[float]], last: 
         "last": last,
         "ema_fast": ema_fast,
         "ema_slow": ema_slow,
+        "ema200": ema_long,
+        "vwap": current_vwap,
         "ema_gap_pct": ((ema_fast - ema_slow) / ema_slow) * 100 if ema_slow else 0.0,
         "price_vs_ema_slow_pct": ((last - ema_slow) / ema_slow) * 100 if ema_slow else 0.0,
+        "price_vs_ema200_pct": ((last - ema_long) / ema_long) * 100 if ema_long else None,
+        "price_vs_vwap_pct": ((last - current_vwap) / current_vwap) * 100 if current_vwap else None,
         "rsi": rsi(closes, 14),
         "atr_pct": (current_atr / last) * 100 if last else 0.0,
         "volume_ratio": volume_ratio(ohlcv, 20),
@@ -398,6 +404,7 @@ def snapshot_from_ohlcv(
     current_atr = atr(ohlcv, 14)
     recent_lows = lows[-40:]
     recent_highs = highs[-40:]
+    ema_long = ema(closes, 200) if len(closes) >= 200 else None
     return MarketSnapshot(
         symbol=symbol,
         timestamp=datetime.now(timezone.utc),
@@ -407,6 +414,8 @@ def snapshot_from_ohlcv(
         spread_pct=_spread_pct(ticker, last),
         ema_fast=ema(closes, 20),
         ema_slow=ema(closes, 50),
+        ema200=ema_long,
+        vwap=vwap(ohlcv, 200),
         rsi=rsi(closes, 14),
         atr=current_atr,
         atr_pct=(current_atr / last) * 100 if last else 0.0,
@@ -500,7 +509,7 @@ def fetch_market_snapshots(
     market_data: dict[str, Any] | None = None,
 ) -> tuple[list[MarketSnapshot], list[str]]:
     timeframe = config["strategy"].get("timeframe", "15m")
-    limit = int(config["strategy"].get("ohlcv_limit", 180))
+    limit = max(200, int(config["strategy"].get("ohlcv_limit", 180)))
     higher_enabled, higher_frames, higher_limit = _confirmation_timeframes(config)
     snapshots: list[MarketSnapshot] = []
     warnings: list[str] = list((market_data or {}).get("warnings") or [])

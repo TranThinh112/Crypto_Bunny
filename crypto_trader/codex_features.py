@@ -1165,6 +1165,183 @@ def select_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
     return runtime
 
 
+MARKET_REGIME_DEFAULT_TOP_SYMBOLS = ("BTC/USDT:USDT", "SOL/USDT:USDT", "ETH/USDT:USDT")
+
+
+def _market_regime_top_symbols(config: dict[str, Any]) -> list[str]:
+    raw = config.get("market_regime", {}).get("top_symbols")
+    symbols = raw if isinstance(raw, list) else list(MARKET_REGIME_DEFAULT_TOP_SYMBOLS)
+    result: list[str] = []
+    for symbol in symbols:
+        clean = str(symbol or "").strip()
+        if clean and clean not in result:
+            result.append(clean)
+    return result or list(MARKET_REGIME_DEFAULT_TOP_SYMBOLS)
+
+
+def _market_regime_indicator_from_snapshot(snapshot: Any) -> dict[str, Any]:
+    indicator = to_jsonable(getattr(snapshot, "indicator_summary", None) or getattr(snapshot, "__dict__", {}) or {})
+    if not isinstance(indicator, dict):
+        indicator = {}
+    symbol = str(indicator.get("symbol") or getattr(snapshot, "symbol", "") or "").strip()
+    if symbol:
+        indicator["symbol"] = symbol
+    return indicator
+
+
+def _finite_market_number(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number in {float("inf"), float("-inf")}:
+        return None
+    return number
+
+
+def _market_numbers(indicators: list[dict[str, Any]], key: str) -> list[float]:
+    numbers: list[float] = []
+    for indicator in indicators:
+        value = _finite_market_number(indicator.get(key))
+        if value is not None:
+            numbers.append(value)
+    return numbers
+
+
+def _market_average(values: list[float]) -> float | None:
+    return (sum(values) / len(values)) if values else None
+
+
+def _market_median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
+def _market_percent_true(indicators: list[dict[str, Any]], left_key: str, right_key: str) -> float | None:
+    valid = 0
+    passed = 0
+    for indicator in indicators:
+        left = _finite_market_number(indicator.get(left_key))
+        right = _finite_market_number(indicator.get(right_key))
+        if left is None or right is None:
+            continue
+        valid += 1
+        if left >= right:
+            passed += 1
+    if not valid:
+        return None
+    return round((passed / valid) * 100.0, 2)
+
+
+def _market_symbol_trend_score(indicator: dict[str, Any]) -> float | None:
+    checks: list[bool] = []
+    last = _finite_market_number(indicator.get("last"))
+    ema_fast = _finite_market_number(indicator.get("ema_fast"))
+    ema_slow = _finite_market_number(indicator.get("ema_slow"))
+    ema_long = _finite_market_number(indicator.get("ema200"))
+    current_vwap = _finite_market_number(indicator.get("vwap"))
+    if last is not None and ema_fast is not None:
+        checks.append(last >= ema_fast)
+    if ema_fast is not None and ema_slow is not None:
+        checks.append(ema_fast >= ema_slow)
+    if last is not None and ema_long is not None:
+        checks.append(last >= ema_long)
+    if last is not None and current_vwap is not None:
+        checks.append(last >= current_vwap)
+    if not checks:
+        return None
+    return (sum(1 for item in checks if item) / len(checks)) * 100.0
+
+
+def _aggregate_market_regime_indicators(
+    config: dict[str, Any],
+    indicators: list[dict[str, Any]],
+    *,
+    target_symbols: list[str],
+    created_at: str,
+) -> tuple[dict[str, Any], str, float, str]:
+    covered_symbols = [str(item.get("symbol") or "").strip() for item in indicators if str(item.get("symbol") or "").strip()]
+    missing_symbols = [symbol for symbol in target_symbols if symbol not in covered_symbols]
+    target_count = len(target_symbols)
+    coverage_pct = round((len(covered_symbols) / target_count) * 100.0, 2) if target_count else 0.0
+    trend_scores = [
+        score
+        for score in (_market_symbol_trend_score(indicator) for indicator in indicators)
+        if score is not None
+    ]
+    trend_score = _market_average(trend_scores)
+    rsi_values = _market_numbers(indicators, "rsi")
+    atr_pct_values = _market_numbers(indicators, "atr_pct")
+    volume_ratio_values = _market_numbers(indicators, "volume_ratio")
+    adx_values = _market_numbers(indicators, "adx")
+    fear_greed_values = _market_numbers(indicators, "fear_greed")
+    news_score_values = _market_numbers(indicators, "news_score")
+    aggregate = {
+        "scope": "aggregate",
+        "symbol": "MARKET",
+        "created_at": created_at,
+        "top_symbols": target_symbols,
+        "covered_symbols": covered_symbols,
+        "missing_symbols": missing_symbols,
+        "coverage_count": len(covered_symbols),
+        "target_count": target_count,
+        "coverage_pct": coverage_pct,
+        "trend_score": None if trend_score is None else round(trend_score, 2),
+        "price_above_ema20_pct": _market_percent_true(indicators, "last", "ema_fast"),
+        "ema20_above_ema50_pct": _market_percent_true(indicators, "ema_fast", "ema_slow"),
+        "price_above_ema200_pct": _market_percent_true(indicators, "last", "ema200"),
+        "price_above_vwap_pct": _market_percent_true(indicators, "last", "vwap"),
+        "rsi": None if not rsi_values else round(_market_median(rsi_values) or 0.0, 2),
+        "median_rsi": None if not rsi_values else round(_market_median(rsi_values) or 0.0, 2),
+        "average_rsi": None if not rsi_values else round(_market_average(rsi_values) or 0.0, 2),
+        "adx": None if not adx_values else round(_market_median(adx_values) or 0.0, 2),
+        "fear_greed": None if not fear_greed_values else round(_market_average(fear_greed_values) or 0.0, 2),
+        "news_score": None if not news_score_values else round(_market_average(news_score_values) or 0.0, 2),
+        "median_atr_pct": None if not atr_pct_values else round(_market_median(atr_pct_values) or 0.0, 4),
+        "median_volume_ratio": None if not volume_ratio_values else round(_market_median(volume_ratio_values) or 0.0, 4),
+    }
+    settings = config.get("market_regime", {})
+    atr_pct = _finite_market_number(aggregate.get("median_atr_pct")) or 0.0
+    median_rsi = _finite_market_number(aggregate.get("median_rsi"))
+    score = _finite_market_number(aggregate.get("trend_score"))
+    if not indicators:
+        regime = "UNKNOWN"
+        confidence = 0.0
+        reason = "Khong co snapshot top 3 de danh gia toan thi truong"
+    elif atr_pct >= _safe_float(settings.get("high_volatility_atr_pct"), 4.0):
+        regime = "HIGH_VOLATILITY"
+        confidence = min(99.0, 60.0 + atr_pct * 6.0)
+        reason = f"ATR trung vi top 3 {atr_pct:.2f}% cao; do phu {len(covered_symbols)}/{target_count}"
+    elif atr_pct and atr_pct <= _safe_float(settings.get("low_volatility_atr_pct"), 1.2):
+        regime = "LOW_VOLATILITY"
+        confidence = min(95.0, 58.0 + max(0.0, 1.2 - atr_pct) * 12.0)
+        reason = f"ATR trung vi top 3 {atr_pct:.2f}% thap; do phu {len(covered_symbols)}/{target_count}"
+    elif score is not None and score >= 66.0 and (median_rsi is None or median_rsi >= 50.0):
+        regime = "BULL"
+        confidence = min(96.0, 52.0 + score * 0.35 + coverage_pct * 0.12)
+        reason = f"Trend score top 3 {score:.2f}/100 nghieng tang; do phu {len(covered_symbols)}/{target_count}"
+    elif score is not None and score <= 34.0 and (median_rsi is None or median_rsi <= 50.0):
+        regime = "BEAR"
+        confidence = min(96.0, 52.0 + (100.0 - score) * 0.35 + coverage_pct * 0.12)
+        reason = f"Trend score top 3 {score:.2f}/100 nghieng giam; do phu {len(covered_symbols)}/{target_count}"
+    elif score is not None:
+        regime = "SIDEWAY"
+        confidence = min(88.0, 50.0 + (100.0 - abs(score - 50.0)) * 0.22 + coverage_pct * 0.08)
+        reason = f"Trend score top 3 {score:.2f}/100 chua lech manh; do phu {len(covered_symbols)}/{target_count}"
+    else:
+        regime = "UNKNOWN"
+        confidence = 40.0 + coverage_pct * 0.2
+        reason = f"Chua du chi bao xu huong top 3; do phu {len(covered_symbols)}/{target_count}"
+    if target_count and len(covered_symbols) < target_count:
+        confidence *= max(0.45, len(covered_symbols) / target_count)
+    return aggregate, regime, round(confidence, 2), reason
+
+
 def _market_regime_from_indicators(config: dict[str, Any], indicator: dict[str, Any]) -> tuple[str, float, str]:
     settings = config.get("market_regime", {})
     ema_fast = _safe_float(indicator.get("ema_fast"))
@@ -1199,7 +1376,7 @@ def detect_market_regime(config: dict[str, Any], snapshots: list[Any]) -> dict[s
             "reason": "Khong co snapshot de danh gia",
         }
     else:
-        indicator = to_jsonable(getattr(snapshots[0], "indicator_summary", None) or snapshots[0].__dict__)
+        indicator = _market_regime_indicator_from_snapshot(snapshots[0])
         regime, confidence, reason = _market_regime_from_indicators(config, indicator)
         result = {
             "created_at": _iso_now(),
@@ -1208,16 +1385,60 @@ def detect_market_regime(config: dict[str, Any], snapshots: list[Any]) -> dict[s
             "indicators": indicator,
             "reason": reason,
         }
-    insert_market_regime_history(
-        config,
-        {
-            "created_at": result["created_at"],
-            "regime": result["regime"],
-            "confidence": result["confidence"],
-            "indicators_json": json.dumps(result["indicators"], ensure_ascii=False),
-            "reason": result["reason"],
-        },
-    )
+    created_at = str(result["created_at"])
+    target_symbols = _market_regime_top_symbols(config)
+    indicators_by_symbol: dict[str, dict[str, Any]] = {}
+    for snapshot in snapshots:
+        indicator = _market_regime_indicator_from_snapshot(snapshot)
+        symbol = str(indicator.get("symbol") or "").strip()
+        if symbol and symbol not in indicators_by_symbol:
+            indicators_by_symbol[symbol] = indicator
+    target_indicators: list[dict[str, Any]] = []
+    for symbol in target_symbols:
+        indicator = indicators_by_symbol.get(symbol)
+        if not indicator:
+            continue
+        scoped_indicator = {**indicator, "scope": "symbol", "created_at": created_at}
+        target_indicators.append(scoped_indicator)
+        regime, confidence, reason = _market_regime_from_indicators(config, scoped_indicator)
+        insert_market_regime_history(
+            config,
+            {
+                "created_at": created_at,
+                "regime": regime,
+                "confidence": round(confidence, 2),
+                "indicators_json": json.dumps(scoped_indicator, ensure_ascii=False),
+                "reason": reason,
+            },
+        )
+    if target_indicators:
+        aggregate_indicator, aggregate_regime, aggregate_confidence, aggregate_reason = _aggregate_market_regime_indicators(
+            config,
+            target_indicators,
+            target_symbols=target_symbols,
+            created_at=created_at,
+        )
+        insert_market_regime_history(
+            config,
+            {
+                "created_at": created_at,
+                "regime": aggregate_regime,
+                "confidence": aggregate_confidence,
+                "indicators_json": json.dumps(aggregate_indicator, ensure_ascii=False),
+                "reason": aggregate_reason,
+            },
+        )
+    elif not snapshots:
+        insert_market_regime_history(
+            config,
+            {
+                "created_at": created_at,
+                "regime": result["regime"],
+                "confidence": result["confidence"],
+                "indicators_json": json.dumps(result["indicators"], ensure_ascii=False),
+                "reason": result["reason"],
+            },
+        )
     return result
 
 

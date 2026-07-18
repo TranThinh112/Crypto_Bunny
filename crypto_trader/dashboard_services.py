@@ -22,6 +22,7 @@ from .config import project_path
 from .codex_features import (
     ai_call_decision_stats,
     ai_trade_decision_stats,
+    _market_regime_top_symbols,
     current_market_regime,
     current_strategy_state,
     get_bunny_health_state,
@@ -564,6 +565,13 @@ def _market_regime_snapshot_symbol(snapshot: dict[str, Any] | None) -> str:
     return str(snapshot.get("symbol") or indicators.get("symbol") or "").strip()
 
 
+def _market_regime_snapshot_scope(snapshot: dict[str, Any] | None) -> str:
+    if not isinstance(snapshot, dict):
+        return ""
+    indicators = snapshot.get("indicators") if isinstance(snapshot.get("indicators"), dict) else {}
+    return str(snapshot.get("scope") or indicators.get("scope") or "").strip().lower()
+
+
 def _market_regime_history_items(
     config: dict[str, Any],
     *,
@@ -577,6 +585,73 @@ def _market_regime_history_items(
     if symbol:
         rows = [item for item in rows if _market_regime_snapshot_symbol(item) == symbol]
     return rows[:limit]
+
+
+def _market_regime_history_payload(
+    config: dict[str, Any],
+    *,
+    limit: int = 30,
+    current_regime: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    top_symbols = _market_regime_top_symbols(config)
+    read_limit = max(100, limit * max(4, len(top_symbols) + 2))
+    try:
+        rows = market_regime_history(config, limit=read_limit)
+    except Exception:
+        rows = []
+    aggregate_items: list[dict[str, Any]] = []
+    by_symbol: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in top_symbols}
+    for item in rows:
+        scope = _market_regime_snapshot_scope(item)
+        symbol = _market_regime_snapshot_symbol(item)
+        if scope == "aggregate" or symbol == "MARKET":
+            aggregate_items.append(item)
+            continue
+        if symbol in by_symbol:
+            by_symbol[symbol].append(item)
+    if (
+        not aggregate_items
+        and isinstance(current_regime, dict)
+        and (_market_regime_snapshot_scope(current_regime) == "aggregate" or _market_regime_snapshot_symbol(current_regime) == "MARKET")
+        and current_regime.get("created_at")
+    ):
+        aggregate_items.append(current_regime)
+    symbol_payload = {
+        symbol: {
+            "label": symbol.split("/", 1)[0],
+            "items": items[:limit],
+            "count": len(items[:limit]),
+            "latest_created_at": items[0].get("created_at") if items else None,
+        }
+        for symbol, items in by_symbol.items()
+    }
+    fallback_symbol = _market_regime_snapshot_symbol(current_regime) if isinstance(current_regime, dict) else ""
+    fallback_items = by_symbol.get(fallback_symbol, [])[:limit] if fallback_symbol in by_symbol else []
+    active_items = aggregate_items[:limit] if aggregate_items else fallback_items
+    latest_aggregate = aggregate_items[0] if aggregate_items else None
+    aggregate_indicators = latest_aggregate.get("indicators") if isinstance(latest_aggregate, dict) and isinstance(latest_aggregate.get("indicators"), dict) else {}
+    coverage_count = aggregate_indicators.get("coverage_count")
+    target_count = aggregate_indicators.get("target_count") or len(top_symbols)
+    return {
+        "items": active_items,
+        "aggregate": {
+            "label": "Thị trường",
+            "items": aggregate_items[:limit],
+            "count": len(aggregate_items[:limit]),
+            "latest_created_at": latest_aggregate.get("created_at") if latest_aggregate else None,
+        },
+        "top_symbols": top_symbols,
+        "by_symbol": symbol_payload,
+        "coverage": {
+            "coverage_count": coverage_count,
+            "target_count": target_count,
+            "covered_symbols": aggregate_indicators.get("covered_symbols") or [],
+            "missing_symbols": aggregate_indicators.get("missing_symbols") or [
+                symbol for symbol in top_symbols if not by_symbol.get(symbol)
+            ],
+            "coverage_pct": aggregate_indicators.get("coverage_pct"),
+        },
+    }
 
 
 def system_modules_payload(
@@ -593,6 +668,7 @@ def system_modules_payload(
     row_counts: dict[str, Any] | None = None,
     ai_range: str = "current",
     regime_history_items: list[dict[str, Any]] | None = None,
+    regime_history_payload: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     files = _module_file_index(config)
     ai_range_key = _normalize_ai_decision_range(ai_range)
@@ -639,11 +715,20 @@ def system_modules_payload(
     prompt_metrics = prompt_runtime.get("metrics") if isinstance(prompt_runtime.get("metrics"), dict) else {}
 
     if regime_history_items is None:
-        regime_history_items = _market_regime_history_items(
+        regime_history_payload = regime_history_payload or _market_regime_history_payload(
             config,
             limit=30,
-            symbol=_market_regime_snapshot_symbol(regime),
+            current_regime=regime,
         )
+        regime_history_items = list(regime_history_payload.get("items") or [])
+    if regime_history_payload is None:
+        regime_history_payload = {
+            "items": regime_history_items,
+            "aggregate": {"label": "Thị trường", "items": [], "count": 0, "latest_created_at": None},
+            "top_symbols": _market_regime_top_symbols(config),
+            "by_symbol": {},
+            "coverage": {},
+        }
     regime_counts: dict[str, int] = {}
     for item in regime_history_items:
         name = str(item.get("regime") or "UNKNOWN").upper()
@@ -826,6 +911,8 @@ def system_modules_payload(
             "name": "Market Regime",
             "purpose": "Tổng hợp trạng thái thị trường từ lịch sử regime mà hệ thống đã ghi nhận.",
             "status": "ok" if regime_history_total > 0 else "warn",
+            "market_regime": regime,
+            "market_regime_history": regime_history_payload,
             "stats": [
                 _module_row("historySamples", regime_history_total, "Số snapshot regime gần nhất dùng để tổng hợp module này."),
                 _module_row("currentConfidence", regime.get("confidence"), "Độ tin cậy của regime hiện tại.", attention=True),
@@ -1051,11 +1138,8 @@ def _build_system_checklist_payload(
     except Exception as exc:
         regime = {"error": str(exc)}
         regime_ok = False
-    regime_history_items = _market_regime_history_items(
-        config,
-        limit=30,
-        symbol=_market_regime_snapshot_symbol(regime),
-    )
+    regime_history_payload = _market_regime_history_payload(config, limit=30, current_regime=regime)
+    regime_history_items = list(regime_history_payload.get("items") or [])
 
     try:
         health = get_bunny_health_state(config)
@@ -1231,6 +1315,7 @@ def _build_system_checklist_payload(
         row_counts=row_counts,
         ai_range=ai_range_key,
         regime_history_items=regime_history_items,
+        regime_history_payload=regime_history_payload,
     )
     ok_count = sum(1 for item in criteria if item["ok"])
     payload = {
@@ -1248,7 +1333,7 @@ def _build_system_checklist_payload(
         "replay": replay,
         "strategy": strategy,
         "market_regime": regime,
-        "market_regime_history": {"items": regime_history_items},
+        "market_regime_history": regime_history_payload,
         "health": health,
         "risk_state": risk_state,
         "ai_range": ai_range_key,

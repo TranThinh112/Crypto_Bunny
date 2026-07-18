@@ -2,10 +2,37 @@ from __future__ import annotations
 
 from unittest import TestCase
 
-from crypto_trader.market import select_top_volume_symbols_from_tickers
+from crypto_trader.market import select_top_volume_symbols_from_tickers, snapshot_from_ohlcv
 
 
 class MarketUniverseTest(TestCase):
+    def test_snapshot_from_ohlcv_adds_true_ema200_and_vwap(self) -> None:
+        rows = []
+        for index in range(200):
+            open_price = 100.0 + index
+            high = open_price + 2.0
+            low = open_price - 1.0
+            close = open_price + 1.0
+            volume = 10.0 + index
+            rows.append([index, open_price, high, low, close, volume])
+
+        snapshot = snapshot_from_ohlcv("BTC/USDT:USDT", rows, {"last": rows[-1][4]})
+
+        self.assertIsNotNone(snapshot.ema200)
+        self.assertIsNotNone(snapshot.vwap)
+        expected_vwap = sum((((row[2] + row[3] + row[4]) / 3.0) * row[5]) for row in rows) / sum(
+            row[5] for row in rows
+        )
+        self.assertAlmostEqual(snapshot.vwap or 0.0, expected_vwap)
+
+    def test_snapshot_from_ohlcv_leaves_ema200_empty_until_enough_rows(self) -> None:
+        rows = [[index, 100.0, 102.0, 99.0, 101.0, 10.0] for index in range(120)]
+
+        snapshot = snapshot_from_ohlcv("BTC/USDT:USDT", rows, {"last": 101.0})
+
+        self.assertIsNone(snapshot.ema200)
+        self.assertIsNotNone(snapshot.vwap)
+
     def test_selects_top_usdt_swap_symbols_by_24h_volume(self) -> None:
         markets = {
             "BTC/USDT:USDT": {"active": True, "quote": "USDT", "settle": "USDT", "type": "swap", "swap": True},

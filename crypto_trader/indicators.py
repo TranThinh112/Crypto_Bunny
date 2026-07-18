@@ -61,3 +61,24 @@ def volume_ratio(ohlcv: list[list[float]], period: int = 20) -> float:
     if average == 0:
         return 1.0
     return recent_volume / average
+
+
+def vwap(ohlcv: list[list[float]], period: int | None = None) -> float | None:
+    rows = ohlcv[-period:] if period and period > 0 else ohlcv
+    total_volume = 0.0
+    weighted_price = 0.0
+    for row in rows:
+        if len(row) < 6:
+            continue
+        high = float(row[2])
+        low = float(row[3])
+        close = float(row[4])
+        volume = float(row[5])
+        if volume <= 0:
+            continue
+        typical_price = (high + low + close) / 3.0
+        weighted_price += typical_price * volume
+        total_volume += volume
+    if total_volume <= 0:
+        return None
+    return weighted_price / total_volume

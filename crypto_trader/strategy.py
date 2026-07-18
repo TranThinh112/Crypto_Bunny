@@ -289,6 +289,8 @@ def _indicator_summary(snapshot: MarketSnapshot) -> dict[str, Any]:
         "last": snapshot.last,
         "ema_fast": snapshot.ema_fast,
         "ema_slow": snapshot.ema_slow,
+        "ema200": snapshot.ema200,
+        "vwap": snapshot.vwap,
         "rsi": snapshot.rsi,
         "atr": snapshot.atr,
         "atr_pct": snapshot.atr_pct,

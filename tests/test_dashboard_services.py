@@ -361,10 +361,17 @@ class SystemChecklistPayloadTests(unittest.TestCase):
         ) as history_reader:
             payload = _build_system_checklist_payload(config, automation={"last_result": ""})
 
-        self.assertEqual(payload["market_regime_history"], {"items": btc_history})
-        history_reader.assert_called_once_with(config, limit=100)
+        history_payload = payload["market_regime_history"]
+        self.assertEqual(history_payload["items"], btc_history)
+        self.assertEqual(history_payload["top_symbols"], ["BTC/USDT:USDT", "SOL/USDT:USDT", "ETH/USDT:USDT"])
+        self.assertEqual(history_payload["by_symbol"]["BTC/USDT:USDT"]["items"], btc_history)
+        self.assertEqual(history_payload["by_symbol"]["SOL/USDT:USDT"]["items"], [])
+        self.assertEqual(history_payload["by_symbol"]["ETH/USDT:USDT"]["items"], [regime_history[-1]])
+        self.assertIn("SOL/USDT:USDT", history_payload["coverage"]["missing_symbols"])
+        history_reader.assert_called_once_with(config, limit=150)
         modules_payload.assert_called_once()
         self.assertEqual(modules_payload.call_args.kwargs["regime_history_items"], btc_history)
+        self.assertEqual(modules_payload.call_args.kwargs["regime_history_payload"], history_payload)
 
     def test_system_checklist_all_range_builds_fresh_without_daily_snapshot_cache(self) -> None:
         rebuilt = {

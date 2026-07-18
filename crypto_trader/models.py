@@ -46,6 +46,8 @@ class MarketSnapshot:
     resistance: float
     higher_timeframes: dict[str, dict[str, Any]] = field(default_factory=dict)
     candlestick_patterns: dict[str, Any] = field(default_factory=dict)
+    ema200: float | None = None
+    vwap: float | None = None
 
 
 @dataclass
