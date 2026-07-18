@@ -242,6 +242,17 @@ strategy:
     quote: USDT
     max_symbols: 20
     asset_class: crypto
+    priority_symbols_enabled: true
+    priority_symbols:
+    - BTC/USDT:USDT
+    - SOL/USDT:USDT
+    - ETH/USDT:USDT
+    - BNB/USDT:USDT
+    - XRP/USDT:USDT
+    weekday_priority_enabled: true
+    weekday_priority_symbols:
+    - XAU/USDT:USDT
+    weekday_priority_timezone: Asia/Ho_Chi_Minh
   long_short_bias:
     enabled: true
     target_long_ratio: 0.6

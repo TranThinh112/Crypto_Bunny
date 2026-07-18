@@ -4,9 +4,10 @@ import json
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 import urllib.request
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
@@ -54,6 +55,14 @@ NON_CRYPTO_KEYWORDS = {
     "METAL",
     "FOREX",
 }
+DEFAULT_PRIORITY_SYMBOLS = [
+    "BTC/USDT:USDT",
+    "SOL/USDT:USDT",
+    "ETH/USDT:USDT",
+    "BNB/USDT:USDT",
+    "XRP/USDT:USDT",
+]
+DEFAULT_WEEKDAY_PRIORITY_SYMBOLS = ["XAU/USDT:USDT"]
 
 
 def prefetch_market_data(
@@ -317,6 +326,65 @@ def _market_matches_universe(
     return True
 
 
+def _symbol_list(value: Any, fallback: list[str] | None = None) -> list[str]:
+    if value is None:
+        return list(fallback or [])
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return list(fallback or [])
+
+
+def _local_scan_now(now: datetime | None, timezone_name: str | None) -> datetime:
+    value = now or datetime.now(timezone.utc)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    name = str(timezone_name or "Asia/Ho_Chi_Minh")
+    try:
+        return value.astimezone(ZoneInfo(name))
+    except Exception:
+        if name in {"Asia/Ho_Chi_Minh", "Asia/Saigon", "UTC+7", "+07:00"}:
+            return value.astimezone(timezone(timedelta(hours=7)))
+        return value.astimezone(timezone.utc)
+
+
+def _append_priority_symbols(
+    selected: list[str],
+    markets: dict[str, Any],
+    symbols: list[str],
+    *,
+    quote: str,
+    account_type: str,
+    asset_class: str,
+    excluded_bases: set[str],
+    excluded_keywords: set[str],
+    limit: int,
+) -> None:
+    seen = {symbol.upper() for symbol in selected}
+    for symbol in symbols:
+        if len(selected) >= limit:
+            return
+        market = markets.get(symbol)
+        if not isinstance(market, dict):
+            continue
+        if not _market_matches_universe(
+            symbol,
+            market,
+            quote,
+            account_type,
+            asset_class=asset_class,
+            excluded_bases=excluded_bases,
+            excluded_keywords=excluded_keywords,
+        ):
+            continue
+        key = symbol.upper()
+        if key in seen:
+            continue
+        selected.append(symbol)
+        seen.add(key)
+
+
 def select_top_volume_symbols_from_tickers(
     markets: dict[str, Any],
     tickers: dict[str, Any],
@@ -327,6 +395,12 @@ def select_top_volume_symbols_from_tickers(
     asset_class: str = "crypto",
     excluded_bases: list[str] | set[str] | None = None,
     excluded_keywords: list[str] | set[str] | None = None,
+    priority_symbols: list[str] | set[str] | None = None,
+    weekday_priority_symbols: list[str] | set[str] | None = None,
+    priority_symbols_enabled: bool = True,
+    weekday_priority_enabled: bool = True,
+    now: datetime | None = None,
+    timezone_name: str | None = None,
 ) -> list[str]:
     max_symbols = max(1, min(40, int(limit or 40)))
     ranked: list[tuple[float, str]] = []
@@ -354,7 +428,41 @@ def select_top_volume_symbols_from_tickers(
         ranked.append((volume, str(symbol)))
 
     ranked.sort(key=lambda item: item[0], reverse=True)
-    return [symbol for _, symbol in ranked[:max_symbols]]
+    selected: list[str] = []
+    if priority_symbols_enabled:
+        _append_priority_symbols(
+            selected,
+            markets,
+            _symbol_list(priority_symbols),
+            quote=quote,
+            account_type=account_type,
+            asset_class=asset_class,
+            excluded_bases=excluded_base_set,
+            excluded_keywords=excluded_keyword_set,
+            limit=max_symbols,
+        )
+    if weekday_priority_enabled and _local_scan_now(now, timezone_name).weekday() < 5:
+        _append_priority_symbols(
+            selected,
+            markets,
+            _symbol_list(weekday_priority_symbols),
+            quote=quote,
+            account_type=account_type,
+            asset_class="all",
+            excluded_bases=set(),
+            excluded_keywords=set(),
+            limit=max_symbols,
+        )
+    seen = {symbol.upper() for symbol in selected}
+    for _, symbol in ranked:
+        if len(selected) >= max_symbols:
+            break
+        key = symbol.upper()
+        if key in seen:
+            continue
+        selected.append(symbol)
+        seen.add(key)
+    return selected
 
 
 def _fetch_tickers_batch(exchange: Any, symbols: list[str] | None = None) -> dict[str, Any]:
@@ -383,6 +491,14 @@ def fetch_top_volume_symbols(
     asset_class = str(universe.get("asset_class", "crypto") or "crypto")
     excluded_bases = universe.get("exclude_bases") or list(NON_CRYPTO_BASES)
     excluded_keywords = universe.get("exclude_keywords") or list(NON_CRYPTO_KEYWORDS)
+    priority_symbols = _symbol_list(universe.get("priority_symbols"), DEFAULT_PRIORITY_SYMBOLS)
+    weekday_priority_symbols = _symbol_list(universe.get("weekday_priority_symbols"), DEFAULT_WEEKDAY_PRIORITY_SYMBOLS)
+    timezone_name = (
+        universe.get("weekday_priority_timezone")
+        or config.get("ai", {}).get("internal", {}).get("market_scan_timezone")
+        or config.get("timezone")
+        or "Asia/Ho_Chi_Minh"
+    )
     warnings: list[str] = list((market_data or {}).get("warnings") or [])
     try:
         if market_data:
@@ -410,6 +526,11 @@ def fetch_top_volume_symbols(
             asset_class=asset_class,
             excluded_bases=excluded_bases,
             excluded_keywords=excluded_keywords,
+            priority_symbols=priority_symbols,
+            weekday_priority_symbols=weekday_priority_symbols,
+            priority_symbols_enabled=bool(universe.get("priority_symbols_enabled", True)),
+            weekday_priority_enabled=bool(universe.get("weekday_priority_enabled", True)),
+            timezone_name=str(timezone_name),
         )
         if not symbols:
             return [], warnings + ["Top-volume universe returned no eligible symbols"]

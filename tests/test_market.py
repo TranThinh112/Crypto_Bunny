@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest import TestCase
 
 from types import SimpleNamespace
@@ -203,6 +204,137 @@ class MarketUniverseTest(TestCase):
             quote="USDT",
             account_type="swap",
             asset_class="crypto",
+        )
+
+        self.assertEqual(symbols, ["BTC/USDT:USDT"])
+
+    def test_priority_symbols_are_kept_before_top_volume_fill(self) -> None:
+        priority = ["BTC/USDT:USDT", "SOL/USDT:USDT", "ETH/USDT:USDT", "BNB/USDT:USDT", "XRP/USDT:USDT"]
+        markets = {
+            symbol: {
+                "active": True,
+                "base": symbol.split("/")[0],
+                "quote": "USDT",
+                "settle": "USDT",
+                "type": "swap",
+                "swap": True,
+            }
+            for symbol in priority
+        }
+        for index in range(10):
+            markets[f"COIN{index}/USDT:USDT"] = {
+                "active": True,
+                "base": f"COIN{index}",
+                "quote": "USDT",
+                "settle": "USDT",
+                "type": "swap",
+                "swap": True,
+            }
+        tickers = {symbol: {"quoteVolume": 1} for symbol in priority}
+        tickers.update({f"COIN{index}/USDT:USDT": {"quoteVolume": 1000 - index} for index in range(10)})
+
+        symbols = select_top_volume_symbols_from_tickers(
+            markets,
+            tickers,
+            limit=8,
+            quote="USDT",
+            account_type="swap",
+            asset_class="crypto",
+            priority_symbols=priority,
+            now=datetime(2026, 7, 19, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(symbols[:5], priority)
+        self.assertEqual(len(symbols), 8)
+        self.assertEqual(symbols[5:], ["COIN0/USDT:USDT", "COIN1/USDT:USDT", "COIN2/USDT:USDT"])
+
+    def test_weekday_priority_can_include_xau_without_crypto_universe_leak(self) -> None:
+        markets = {
+            "BTC/USDT:USDT": {
+                "active": True,
+                "base": "BTC",
+                "quote": "USDT",
+                "settle": "USDT",
+                "type": "swap",
+                "swap": True,
+                "info": {"instCategory": "1"},
+            },
+            "XAU/USDT:USDT": {
+                "active": True,
+                "base": "XAU",
+                "quote": "USDT",
+                "settle": "USDT",
+                "type": "swap",
+                "swap": True,
+                "info": {"instCategory": "4"},
+            },
+            "TSLA/USDT:USDT": {
+                "active": True,
+                "base": "TSLA",
+                "quote": "USDT",
+                "settle": "USDT",
+                "type": "swap",
+                "swap": True,
+                "info": {"instCategory": "3"},
+            },
+        }
+        tickers = {
+            "BTC/USDT:USDT": {"quoteVolume": 100},
+            "XAU/USDT:USDT": {"quoteVolume": 9000},
+            "TSLA/USDT:USDT": {"quoteVolume": 8000},
+        }
+
+        symbols = select_top_volume_symbols_from_tickers(
+            markets,
+            tickers,
+            limit=5,
+            quote="USDT",
+            account_type="swap",
+            asset_class="crypto",
+            weekday_priority_symbols=["XAU/USDT:USDT"],
+            now=datetime(2026, 7, 20, tzinfo=timezone.utc),
+            timezone_name="Asia/Ho_Chi_Minh",
+        )
+
+        self.assertIn("XAU/USDT:USDT", symbols)
+        self.assertNotIn("TSLA/USDT:USDT", symbols)
+
+    def test_weekday_priority_skips_xau_on_weekends(self) -> None:
+        markets = {
+            "BTC/USDT:USDT": {
+                "active": True,
+                "base": "BTC",
+                "quote": "USDT",
+                "settle": "USDT",
+                "type": "swap",
+                "swap": True,
+                "info": {"instCategory": "1"},
+            },
+            "XAU/USDT:USDT": {
+                "active": True,
+                "base": "XAU",
+                "quote": "USDT",
+                "settle": "USDT",
+                "type": "swap",
+                "swap": True,
+                "info": {"instCategory": "4"},
+            },
+        }
+        tickers = {
+            "BTC/USDT:USDT": {"quoteVolume": 100},
+            "XAU/USDT:USDT": {"quoteVolume": 9000},
+        }
+
+        symbols = select_top_volume_symbols_from_tickers(
+            markets,
+            tickers,
+            limit=5,
+            quote="USDT",
+            account_type="swap",
+            asset_class="crypto",
+            weekday_priority_symbols=["XAU/USDT:USDT"],
+            now=datetime(2026, 7, 19, tzinfo=timezone.utc),
+            timezone_name="Asia/Ho_Chi_Minh",
         )
 
         self.assertEqual(symbols, ["BTC/USDT:USDT"])
