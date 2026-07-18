@@ -307,6 +307,14 @@ def _okx_review_cache_key(candidate: TradeCandidate, route: str) -> str:
     )
 
 
+def _candidate_mini_setup_id(candidate: TradeCandidate) -> str:
+    metadata = candidate.decision_metadata if isinstance(candidate.decision_metadata, dict) else {}
+    mini_setup = metadata.get("mini_setup")
+    if not isinstance(mini_setup, dict):
+        return ""
+    return str(mini_setup.get("setup_id") or "").strip()
+
+
 def _load_okx_review_cache(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
     try:
         from .storage import get_journal_state
@@ -343,6 +351,8 @@ def _recent_rejected_okx_review(
     route: str,
 ) -> dict[str, Any] | None:
     if route != "lc_okx_setup_review":
+        return None
+    if _candidate_mini_setup_id(candidate):
         return None
     cache = _load_okx_review_cache(config)
     cache_key = _okx_review_cache_key(candidate, route)
@@ -383,6 +393,10 @@ def _remember_okx_review_cache(
     decision: dict[str, Any],
 ) -> None:
     if route != "lc_okx_setup_review":
+        return
+    # Mini setup lineage is persisted by setup_id in journal_state. Keeping a
+    # second symbol/side cache here could leak a decision into a later pool.
+    if _candidate_mini_setup_id(candidate):
         return
     cache = _load_okx_review_cache(config)
     cache_key = _okx_review_cache_key(candidate, route)
@@ -1964,9 +1978,14 @@ def review_candidate_for_lc_okx(
     review_context = dict(context or {})
     route = str(review_context.get("route") or "lc_okx_setup_review")
     review_context["route"] = route
+    fresh_mini_setup = (
+        route == "lc_okx_setup_review"
+        and _okx_initial_mini_review_context(review_context)
+        and bool(review_context.get("mini_setup_id") or _candidate_mini_setup_id(candidate))
+    )
     existing_state = okx_setup_review_recheck_state(config, candidate, route=route)
     existing = existing_state.get("review")
-    if existing is not None and not force:
+    if existing is not None and not force and not fresh_mini_setup:
         if route != "lc_okx_setup_review" or bool(existing.get("approved")):
             return candidate, existing
         if (
@@ -1983,7 +2002,7 @@ def review_candidate_for_lc_okx(
                     route=route,
                 )
             return attach_okx_review_metadata(candidate, existing, route=route, context=review_context), existing
-    cached = _recent_rejected_okx_review(config, candidate, route=route)
+    cached = None if fresh_mini_setup else _recent_rejected_okx_review(config, candidate, route=route)
     if cached is not None and not force:
         if cached.get("rejection_policy") == OKX_REJECTION_HARD_DELETE:
             reject_lc_pipeline_setup(

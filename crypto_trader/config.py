@@ -327,6 +327,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "lc_pipeline_candidate_cache_keep_hours": 6,
         "telegram_message_id_keep_days": 10,
         "dashboard_snapshot_keep_days": 1,
+        "mini_setup_keep_days": 7,
     },
     "storage_retention": {
         "pending_orders_keep_days": 5,

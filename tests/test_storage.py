@@ -8,6 +8,7 @@ from unittest.mock import patch
 from crypto_trader.atlas_mirror import atlas_database, atlas_database_for_collection
 from crypto_trader.models import Decision, RiskCheck, TradeCandidate
 from crypto_trader.storage import (
+    claim_journal_state,
     clear_dashboard_snapshot_cache,
     compact_market_scan_observations,
     ensure_ai_model_version,
@@ -360,6 +361,7 @@ class StorageTest(TestCase):
                 "lc_pipeline_candidate_cache_keep_hours": 24,
                 "telegram_message_id_keep_days": 30,
                 "dashboard_snapshot_keep_days": 7,
+                "mini_setup_keep_days": 7,
             }
             now = datetime.now(timezone.utc)
             old = (now - timedelta(days=120)).isoformat()
@@ -380,6 +382,7 @@ class StorageTest(TestCase):
                 "lc_pipeline_candidate_cache_v1",
                 "telegram_last_message_id:123",
                 "dashboard_snapshot:analytics:v=old",
+                "mini_setup:old-setup-id",
             ]
             for key in stale_cache_keys:
                 put(key)
@@ -407,6 +410,15 @@ class StorageTest(TestCase):
         self.assertTrue(set(protected_keys).issubset(remaining))
         self.assertIn("system_checklist:recent", remaining)
         self.assertIn("telegram_last_message_id:recent", remaining)
+
+    def test_claim_journal_state_only_allows_one_setup_owner(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config = self._config(tmpdir)
+            first = claim_journal_state(config, "mini_setup:abc", '{"status":"processing"}')
+            second = claim_journal_state(config, "mini_setup:abc", '{"status":"processing"}')
+
+        self.assertTrue(first)
+        self.assertFalse(second)
 
     def test_clear_dashboard_snapshot_cache_deletes_old_snapshot_keys(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:

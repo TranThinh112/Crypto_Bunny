@@ -18,7 +18,7 @@ from .ledger import append_event
 from .lc_pipeline import latest_lc_pipeline_mini_scan
 from .market import create_exchange
 from .models import RiskCheck, TradeCandidate
-from .risk import evaluate_candidate
+from .risk import evaluate_candidate, mini_pending_risk_config
 from .storage import (
     close_latest_trade_execution_by_status,
     close_pending_order,
@@ -184,6 +184,97 @@ def _close_latest_lc_trade_execution(
     )
 
 
+def _record_mini_setup_id(record: dict[str, Any]) -> str:
+    candidate = _candidate_from_record(record)
+    metadata = candidate.decision_metadata if candidate and isinstance(candidate.decision_metadata, dict) else {}
+    mini_setup = metadata.get("mini_setup")
+    if not isinstance(mini_setup, dict):
+        return ""
+    return str(mini_setup.get("setup_id") or "").strip()
+
+
+def _record_is_mini_keep_setup(record: dict[str, Any]) -> bool:
+    candidate = _candidate_from_record(record)
+    if candidate is None or not _record_mini_setup_id(record):
+        return False
+    review = candidate_okx_review(candidate, route="lc_okx_setup_review")
+    return bool(review and okx_review_allows_okx_submission(review))
+
+
+def _cancel_pending_records(
+    config: dict[str, Any],
+    records: list[dict[str, Any]],
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    canceled: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    exchange = None
+    needs_exchange = config.get("mode") != "dry_run" and any(
+        str(record.get("exchange_order_id") or "") for record in records
+    )
+    if needs_exchange:
+        try:
+            exchange = create_exchange(config, authenticated=True)
+            exchange.load_markets()
+        except Exception as exc:
+            return {
+                "ok": False,
+                "canceled": [],
+                "warnings": [f"Could not connect to OKX to cancel the previous setup: {exc}"],
+            }
+
+    for record in records:
+        local_id = int(record["id"])
+        symbol = str(record.get("symbol") or "")
+        exchange_order_id = str(record.get("exchange_order_id") or "")
+        if exchange_order_id and exchange is not None:
+            try:
+                exchange.cancel_order(exchange_order_id, symbol)
+            except Exception as exc:
+                warnings.append(f"{symbol} order {exchange_order_id} could not be canceled: {exc}")
+                continue
+        close_pending_order(config, local_id, "CANCELED", reason)
+        _close_latest_lc_trade_execution(
+            config,
+            symbol=symbol,
+            side=str(record.get("side") or ""),
+            status="CANCELED",
+            reason=reason,
+        )
+        canceled.append(
+            {
+                "id": local_id,
+                "lc_id": record.get("journal_id") or local_id,
+                "symbol": symbol,
+                "side": str(record.get("side") or ""),
+                "exchange_order_id": exchange_order_id or None,
+                "setup_id": _record_mini_setup_id(record) or None,
+            }
+        )
+    return {
+        "ok": len(canceled) == len(records),
+        "canceled": canceled,
+        "warnings": warnings,
+    }
+
+
+def cancel_pending_orders_for_symbol(
+    config: dict[str, Any],
+    symbol: str,
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    records = [
+        record
+        for record in list_pending_orders(config, status="OPEN", limit=200)
+        if str(record.get("symbol") or "") == str(symbol or "")
+    ]
+    if not records:
+        return {"ok": True, "canceled": [], "warnings": []}
+    return _cancel_pending_records(config, records, reason=reason)
+
+
 def _record_vt_from_pending(config: dict[str, Any], record: dict[str, Any], *, vt_id: int, lc_id: int) -> None:
     candidate = _candidate_from_record(record)
     if candidate is None:
@@ -336,6 +427,75 @@ def _pending_review_reasons(
     symbol_layers = (market_layers or {}).get(candidate.symbol) or {}
     reasons.extend(_guard_review_reasons(symbol_layers, candidate.side, review))
     return reasons
+
+
+def revalidate_pending_orders_for_symbol(
+    config: dict[str, Any],
+    current_candidate: TradeCandidate,
+    *,
+    reason_prefix: str = "New Mini setup was rejected by 5.5",
+    market_layers: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Locally revalidate older same-symbol pending setups without recalling 5.5."""
+    records = [
+        record
+        for record in list_pending_orders(config, status="OPEN", limit=200)
+        if str(record.get("symbol") or "") == current_candidate.symbol
+    ]
+    invalid: list[dict[str, Any]] = []
+    kept: list[dict[str, Any]] = []
+    validation_config = mini_pending_risk_config(config)
+    for record in records:
+        record_side = str(record.get("side") or "").lower()
+        if record_side != str(current_candidate.side or "").lower():
+            reasons = [
+                f"Latest Mini signal is {str(current_candidate.side or '').upper()}, opposite to the old setup"
+            ]
+        else:
+            check = evaluate_candidate(
+                validation_config,
+                current_candidate,
+                check_active_trades=False,
+                check_order_limits=False,
+            )
+            reasons = _pending_review_reasons(config, record, current_candidate, check, market_layers)
+        if reasons:
+            invalid.append({"record": record, "reasons": reasons})
+        else:
+            kept.append(
+                {
+                    "id": record.get("id"),
+                    "lc_id": record.get("journal_id") or record.get("id"),
+                    "symbol": record.get("symbol"),
+                    "side": record.get("side"),
+                    "exchange_order_id": record.get("exchange_order_id"),
+                    "setup_id": _record_mini_setup_id(record) or None,
+                }
+            )
+
+    canceled: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for item in invalid:
+        reasons = item["reasons"]
+        cancel_reason = f"{reason_prefix}; old setup is no longer valid: " + "; ".join(reasons[:3])
+        cancel_result = _cancel_pending_records(config, [item["record"]], reason=cancel_reason)
+        canceled.extend(cancel_result["canceled"])
+        warnings.extend(cancel_result["warnings"])
+        if not cancel_result["ok"]:
+            kept.append(
+                {
+                    "id": item["record"].get("id"),
+                    "symbol": item["record"].get("symbol"),
+                    "side": item["record"].get("side"),
+                    "reason": "Cancellation failed; kept to avoid losing OKX/local synchronization",
+                }
+            )
+    return {
+        "checked": len(records),
+        "kept": kept,
+        "canceled": canceled,
+        "warnings": warnings,
+    }
 
 
 def _missing_candidate_reason(record: dict[str, Any], candidates_by_symbol: dict[str, TradeCandidate]) -> str:
@@ -1112,9 +1272,54 @@ def maintain_pending_orders(
             active_symbols.add(symbol)
             continue
 
+        if exchange_order_id and _record_is_mini_keep_setup(record):
+            cancel_reason = ""
+            if expires_at and expires_at <= now:
+                cancel_reason = f"LC OKX expired after {lifecycle['exchange_max_age_days']:.1f} day(s)"
+            elif symbol in open_position_symbols:
+                cancel_reason = f"Active OKX position already exists for {symbol}"
+            if cancel_reason:
+                if exchange is None and config.get("mode") != "dry_run":
+                    warnings.append(f"{symbol}: 5.5-kept pending order could not be canceled because OKX sync is unavailable")
+                    kept += 1
+                    continue
+                if exchange is not None:
+                    try:
+                        exchange.cancel_order(exchange_order_id, symbol)
+                    except Exception as exc:
+                        warnings.append(f"{symbol}: 5.5-kept pending cancel failed: {exc}")
+                        kept += 1
+                        continue
+                close_pending_order(config, local_id, "CANCELED", cancel_reason)
+                _close_latest_lc_trade_execution(
+                    config,
+                    symbol=symbol,
+                    side=str(record.get("side") or ""),
+                    status="CANCELED",
+                    reason=cancel_reason,
+                )
+                events.append(
+                    {
+                        "type": "pending_canceled",
+                        "source": "mini_5_5_keep_setup_lifecycle",
+                        "lc_id": lc_id,
+                        "symbol": symbol,
+                        "side": str(record.get("side") or ""),
+                        "reason": cancel_reason,
+                    }
+                )
+                canceled += 1
+                continue
+            # KEEP_SETUP is an explicit OKX pending instruction. Routine scans
+            # must not cancel or convert it; replacement/recheck is handled by
+            # the next same-symbol Mini setup in engine.py.
+            kept += 1
+            continue
+
+        validation_config = mini_pending_risk_config(config) if _record_mini_setup_id(record) else config
         check = (
             evaluate_candidate(
-                config,
+                validation_config,
                 candidate,
                 check_active_trades=False,
                 check_order_limits=False,

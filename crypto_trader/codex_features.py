@@ -1145,8 +1145,12 @@ def select_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
             if ticket <= cumulative:
                 selected = item
                 break
+    default_version = str(config.get("strategy_versioning", {}).get("default_version", "strategy-v1"))
     overrides = _json_loads(selected.get("payload_json"), {})
-    if isinstance(overrides, dict) and overrides:
+    # The default Mongo row mirrors the deployed repository config. It is not
+    # an override source; otherwise an old cooldown/slot limit survives every
+    # deployment and also masks newer runtime UI settings.
+    if str(selected.get("version") or "") != default_version and isinstance(overrides, dict) and overrides:
         runtime = deep_merge(runtime, overrides)
     runtime["selected_strategy_version"] = selected.get("version")
     return runtime

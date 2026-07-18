@@ -299,6 +299,50 @@ class AiCoordinatorTest(TestCase):
         self.assertIsNotNone(first_candidate.decision_metadata.get("okx_review"))
         self.assertIsNotNone(second_candidate.decision_metadata.get("okx_review"))
 
+    def test_distinct_mini_setup_ids_never_reuse_symbol_side_review_cache(self) -> None:
+        config = self._config()
+        first = _candidate("SUI/USDT:USDT")
+        second = _candidate("SUI/USDT:USDT")
+        first.decision_metadata = {"mini_setup": {"setup_id": "slot-04-sui"}}
+        second.decision_metadata = {"mini_setup": {"setup_id": "slot-08-sui"}}
+        check = RiskCheck(True, [], [])
+        decisions = [
+            {
+                "approved": False,
+                "decision": "KEEP_SETUP",
+                "reason": "Keep the 04:00 setup",
+                "rejection_policy": "keep_monitor",
+            },
+            {
+                "approved": False,
+                "decision": "DELETE_SETUP",
+                "reason": "Delete the 08:00 setup",
+                "rejection_policy": "hard_delete",
+            },
+        ]
+
+        with (
+            patch("crypto_trader.ai_coordinator.okx_ai_approval", side_effect=decisions) as approval,
+            patch("crypto_trader.ai_coordinator.reject_lc_pipeline_setup"),
+        ):
+            _, first_decision = review_candidate_for_lc_okx(
+                config,
+                first,
+                check,
+                context={"route": "lc_okx_setup_review", "source": "mini_lc_okx", "from_status": "MINI_APPROVED"},
+            )
+            _, second_decision = review_candidate_for_lc_okx(
+                config,
+                second,
+                check,
+                context={"route": "lc_okx_setup_review", "source": "mini_lc_okx", "from_status": "MINI_APPROVED"},
+            )
+
+        self.assertEqual(approval.call_count, 2)
+        self.assertEqual(first_decision["reason"], "Keep the 04:00 setup")
+        self.assertEqual(second_decision["reason"], "Delete the 08:00 setup")
+        self.assertFalse(second_decision.get("cached", False))
+
     def test_reuses_old_hard_rejected_okx_setup_review_without_recalling_ai(self) -> None:
         config = self._config()
         candidate = _candidate("CRV/USDT:USDT")

@@ -713,6 +713,49 @@ class PendingTest(TestCase):
         self.assertEqual(len(list_pending_orders(config, status="FILLED")), 0)
         self.assertEqual(self._pending_record_total(config), 0)
 
+    def test_mini_5_5_keep_setup_is_not_canceled_by_missing_news_or_routine_scan(self) -> None:
+        class FakeExchange:
+            def load_markets(self) -> None:
+                return None
+
+            def fetch_open_orders(self) -> list[dict]:
+                return [{"id": "limit-mini-1", "symbol": "BTC/USDT:USDT"}]
+
+            def fetch_positions(self) -> list[dict]:
+                return []
+
+            def cancel_order(self, order_id: str, symbol: str) -> None:
+                raise AssertionError(f"Unexpected cancellation: {order_id} {symbol}")
+
+        config = self._config(mode="demo")
+        config["news"]["require_symbol_news"] = True
+        candidate = _candidate()
+        candidate.news_count = 0
+        candidate.decision_metadata = {
+            "mini_setup": {
+                "setup_id": "mini-setup-04",
+                "mini_slot_id": "2026-07-18T04:00:00+07:00",
+            },
+            "okx_review": {
+                "route": "lc_okx_setup_review",
+                "approved": True,
+                "setup_action": "keep_setup",
+                "decision": "KEEP_SETUP",
+                "accepted_for_okx": True,
+            },
+        }
+        save_pending_order(config, candidate, "limit-mini-1", journal_id=12)
+
+        with patch("crypto_trader.pending.create_exchange", return_value=FakeExchange()):
+            result = maintain_pending_orders(config, [])
+
+        self.assertEqual(result["kept"], 1)
+        self.assertEqual(result["canceled"], 0)
+        self.assertEqual(result["converted"], 0)
+        orders = list_pending_orders(config, status="LC_OKX")
+        self.assertEqual(len(orders), 1)
+        self.assertEqual(orders[0]["exchange_order_id"], "limit-mini-1")
+
     def test_prioritizes_lc_okx_before_local_lc_when_slot_is_available(self) -> None:
         class FakeExchange:
             def __init__(self) -> None:

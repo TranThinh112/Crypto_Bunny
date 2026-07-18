@@ -347,6 +347,7 @@ class EngineMiniQueueTest(TestCase):
             ) as execute,
         ):
             first = _create_pending_from_internal_scan(config, [candidate], scan, (5, set(), []), set())
+            candidate.entry = 101.0
             second = _create_pending_from_internal_scan(
                 config,
                 [candidate],
@@ -362,7 +363,7 @@ class EngineMiniQueueTest(TestCase):
         self.assertEqual(first["skipped"], [])
         self.assertEqual(second["created"], 0)
         self.assertEqual(second["wait_slot"], 0)
-        self.assertEqual(second["skipped"][0]["reason"], "already pending or active in LC memory")
+        self.assertEqual(second["skipped"][0]["reason"], "Mini setup already processed (pending_submitted)")
         orders = list_pending_orders(config, status="LC_OKX")
         self.assertEqual(len(orders), 1)
         self.assertEqual(orders[0]["symbol"], "INJ/USDT:USDT")
@@ -373,14 +374,212 @@ class EngineMiniQueueTest(TestCase):
         self.assertEqual(payload["decision_metadata"]["okx_review"]["review_state"], "GPT55_KEEP_SETUP")
         self.assertTrue(payload["decision_metadata"]["okx_review"]["accepted_for_okx"])
 
+    @patch("crypto_trader.engine.lc_pipeline_pool_rows", return_value=[])
+    def test_same_symbol_in_later_pool_gets_fresh_5_5_review_and_replaces_old_order(self, _pool_rows) -> None:
+        config = self._config()
+        config["mode"] = "demo"
+        first_candidate = _candidate("BTC/USDT:USDT")
+        second_candidate = _candidate("BTC/USDT:USDT")
+        second_candidate.entry = 99.0
+        first_scan = {
+            "provider": "openai",
+            "slot_id": "2026-07-18T04:00:00+07:00",
+            "selected_symbols": [first_candidate.symbol],
+            "ai_review": {"approved_symbols": [first_candidate.symbol]},
+        }
+        second_scan = {
+            **first_scan,
+            "slot_id": "2026-07-18T08:00:00+07:00",
+        }
+
+        with (
+            patch(
+                "crypto_trader.engine.review_candidate_for_lc_okx",
+                side_effect=lambda *args, **kwargs: (
+                    args[1],
+                    {"approved": True, "decision": "KEEP_SETUP", "accepted_for_okx": True},
+                ),
+            ) as review,
+            patch(
+                "crypto_trader.engine.execute_candidate",
+                side_effect=[
+                    ExecutionResult("demo", True, "limit-04", "submitted"),
+                    ExecutionResult("demo", True, "limit-08", "submitted"),
+                ],
+            ) as execute,
+            patch("crypto_trader.pending.create_exchange") as create_exchange,
+        ):
+            create_exchange.return_value.load_markets.return_value = None
+            first = _create_pending_from_internal_scan(config, [first_candidate], first_scan, (0, set(), []), set())
+            second = _create_pending_from_internal_scan(
+                config,
+                [second_candidate],
+                second_scan,
+                (1, {first_candidate.symbol}, []),
+                open_pending_symbols(config),
+            )
+
+        self.assertEqual(first["created"], 1)
+        self.assertEqual(second["created"], 1)
+        self.assertEqual(review.call_count, 2)
+        self.assertTrue(all(call.kwargs["force"] for call in review.call_args_list))
+        self.assertEqual(execute.call_count, 2)
+        create_exchange.return_value.cancel_order.assert_called_once_with("limit-04", first_candidate.symbol)
+        orders = list_pending_orders(config, status="LC_OKX")
+        self.assertEqual(len(orders), 1)
+        self.assertEqual(orders[0]["exchange_order_id"], "limit-08")
+        self.assertEqual(orders[0]["entry"], 99.0)
+
+    @patch("crypto_trader.engine.lc_pipeline_pool_rows", return_value=[])
+    def test_enter_market_decision_executes_exact_setup_once(self, _pool_rows) -> None:
+        config = self._config()
+        config["mode"] = "demo"
+        candidate = _candidate("SOL/USDT:USDT")
+        scan = {
+            "provider": "openai",
+            "slot_id": "2026-07-18T08:00:00+07:00",
+            "selected_symbols": [candidate.symbol],
+            "ai_review": {"approved_symbols": [candidate.symbol]},
+        }
+        market_decision = {
+            "approved": True,
+            "setup_action": "enter_market",
+            "decision": "ENTER_MARKET",
+            "accepted_for_okx": False,
+        }
+
+        with (
+            patch(
+                "crypto_trader.engine.review_candidate_for_lc_okx",
+                side_effect=lambda *args, **kwargs: (args[1], market_decision),
+            ) as review,
+            patch(
+                "crypto_trader.engine.execute_candidate",
+                return_value=ExecutionResult("demo", True, "market-08", "submitted"),
+            ) as execute,
+        ):
+            first = _create_pending_from_internal_scan(config, [candidate], scan, (0, set(), []), set())
+            second = _create_pending_from_internal_scan(config, [candidate], scan, (1, {candidate.symbol}, []), set())
+
+        review.assert_called_once()
+        execute.assert_called_once()
+        self.assertEqual(first["market"], 1)
+        self.assertEqual(first["market_orders"][0]["exchange_order_id"], "market-08")
+        self.assertEqual(second["market"], 0)
+        self.assertIn("already processed", second["skipped"][0]["reason"])
+
+    @patch("crypto_trader.engine.lc_pipeline_pool_rows", return_value=[])
+    def test_rejected_later_setup_keeps_locally_valid_older_pending_order(self, _pool_rows) -> None:
+        config = self._config()
+        config["mode"] = "demo"
+        first_candidate = _candidate("BTC/USDT:USDT")
+        second_candidate = _candidate("BTC/USDT:USDT")
+        second_candidate.entry = 100.2
+        first_scan = {
+            "provider": "openai",
+            "slot_id": "2026-07-18T04:00:00+07:00",
+            "selected_symbols": [first_candidate.symbol],
+            "ai_review": {"approved_symbols": [first_candidate.symbol]},
+        }
+        second_scan = {**first_scan, "slot_id": "2026-07-18T08:00:00+07:00"}
+        decisions = [
+            {"approved": True, "decision": "KEEP_SETUP", "accepted_for_okx": True},
+            {
+                "approved": False,
+                "decision": "DELETE_SETUP",
+                "reason": "New 08:00 setup is not good enough",
+                "rejection_policy": "hard_delete",
+                "accepted_for_okx": False,
+            },
+        ]
+
+        with (
+            patch(
+                "crypto_trader.engine.review_candidate_for_lc_okx",
+                side_effect=lambda *args, **kwargs: (args[1], decisions.pop(0)),
+            ) as review,
+            patch(
+                "crypto_trader.engine.execute_candidate",
+                return_value=ExecutionResult("demo", True, "limit-04", "submitted"),
+            ) as execute,
+        ):
+            _create_pending_from_internal_scan(config, [first_candidate], first_scan, (0, set(), []), set())
+            rejected = _create_pending_from_internal_scan(
+                config,
+                [second_candidate],
+                second_scan,
+                (1, {first_candidate.symbol}, []),
+                open_pending_symbols(config),
+            )
+
+        self.assertEqual(review.call_count, 2)
+        execute.assert_called_once()
+        self.assertEqual(rejected["created"], 0)
+        self.assertEqual(rejected["rechecks"][0]["checked"], 1)
+        self.assertEqual(len(rejected["rechecks"][0]["kept"]), 1)
+        orders = list_pending_orders(config, status="LC_OKX")
+        self.assertEqual(len(orders), 1)
+        self.assertEqual(orders[0]["exchange_order_id"], "limit-04")
+
+    @patch("crypto_trader.engine.lc_pipeline_pool_rows", return_value=[])
+    def test_rejected_later_setup_cancels_older_order_only_when_local_recheck_fails(self, _pool_rows) -> None:
+        config = self._config()
+        config["mode"] = "demo"
+        first_candidate = _candidate("BTC/USDT:USDT")
+        invalid_candidate = _candidate("BTC/USDT:USDT")
+        invalid_candidate.entry = 90.0
+        first_scan = {
+            "provider": "openai",
+            "slot_id": "2026-07-18T04:00:00+07:00",
+            "selected_symbols": [first_candidate.symbol],
+            "ai_review": {"approved_symbols": [first_candidate.symbol]},
+        }
+        second_scan = {**first_scan, "slot_id": "2026-07-18T08:00:00+07:00"}
+        decisions = [
+            {"approved": True, "decision": "KEEP_SETUP", "accepted_for_okx": True},
+            {
+                "approved": False,
+                "decision": "DELETE_SETUP",
+                "reason": "Delete the new setup",
+                "rejection_policy": "hard_delete",
+                "accepted_for_okx": False,
+            },
+        ]
+
+        with (
+            patch(
+                "crypto_trader.engine.review_candidate_for_lc_okx",
+                side_effect=lambda *args, **kwargs: (args[1], decisions.pop(0)),
+            ),
+            patch(
+                "crypto_trader.engine.execute_candidate",
+                return_value=ExecutionResult("demo", True, "limit-04", "submitted"),
+            ),
+            patch("crypto_trader.pending.create_exchange") as create_exchange,
+        ):
+            create_exchange.return_value.load_markets.return_value = None
+            _create_pending_from_internal_scan(config, [first_candidate], first_scan, (0, set(), []), set())
+            rejected = _create_pending_from_internal_scan(
+                config,
+                [invalid_candidate],
+                second_scan,
+                (1, {first_candidate.symbol}, []),
+                open_pending_symbols(config),
+            )
+
+        create_exchange.return_value.cancel_order.assert_called_once_with("limit-04", first_candidate.symbol)
+        self.assertEqual(len(rejected["rechecks"][0]["canceled"]), 1)
+        self.assertEqual(list_pending_orders(config, status="LC_OKX"), [])
+
     @patch("crypto_trader.notifier.send_telegram_message")
     @patch("crypto_trader.engine.lc_pipeline_pool_rows")
-    def test_mini_scan_queues_wait_slot_for_recheck_when_only_slot_is_full(
+    def test_mini_scan_calls_5_5_instead_of_wait_slot_when_old_slot_gate_is_full(
         self,
         lc_pipeline_pool_rows,
         send_telegram_message,
     ) -> None:
         config = self._config()
+        config["mode"] = "demo"
         config["ai"]["internal"]["market_scan_pending_limit"] = 3
         candidate = _candidate("LIT/USDT:USDT")
         lc_pipeline_pool_rows.return_value = [
@@ -401,9 +600,27 @@ class EngineMiniQueueTest(TestCase):
             "ai_review": {"approved_symbols": ["LIT/USDT:USDT", "BTC/USDT:USDT"]},
         }
 
-        with patch(
-            "crypto_trader.engine.evaluate_candidate",
-            return_value=RiskCheck(False, ["Da het slot: 2/2"], []),
+        with (
+            patch(
+                "crypto_trader.engine.evaluate_candidate",
+                return_value=RiskCheck(False, ["Da het slot: 2/2"], []),
+            ),
+            patch(
+                "crypto_trader.engine.review_candidate_for_lc_okx",
+                side_effect=lambda *args, **kwargs: (
+                    args[1],
+                    {"approved": True, "decision": "KEEP_SETUP", "accepted_for_okx": True},
+                ),
+            ) as review,
+            patch(
+                "crypto_trader.engine.execute_candidate",
+                return_value=ExecutionResult(
+                    mode="demo",
+                    submitted=True,
+                    order_id="limit-slot-1",
+                    message="demo: limit order submitted",
+                ),
+            ),
         ):
             result = _create_pending_from_internal_scan(
                 config,
@@ -416,21 +633,17 @@ class EngineMiniQueueTest(TestCase):
         self.assertTrue(result["allowed"])
         self.assertEqual(result["configured_limit"], 3)
         self.assertEqual(result["limit"], 1)
-        self.assertEqual(result["created"], 0)
-        self.assertEqual(result["wait_slot"], 1)
+        self.assertEqual(result["created"], 1)
+        self.assertEqual(result["wait_slot"], 0)
         self.assertEqual(result["skipped"], [])
-        orders = list_pending_orders(config, status="WAIT_SLOT")
+        review.assert_called_once()
+        self.assertTrue(review.call_args.kwargs["force"])
+        orders = list_pending_orders(config, status="LC_OKX")
         self.assertEqual(len(orders), 1)
         self.assertEqual(orders[0]["symbol"], "LIT/USDT:USDT")
-        self.assertEqual(orders[0]["status"], "WAIT_SLOT")
-        self.assertEqual(result["wait_slot_orders"][0]["source"], "4h #2 (16:00:00)")
-        self.assertEqual(result["wait_slot_orders"][0]["wait_slot_id"], "#1_WS")
-        send_telegram_message.assert_called_once()
-        message = send_telegram_message.call_args.args[1]
-        self.assertIn("🟡 WAIT_SLOT #1_WS", message)
-        self.assertIn("Cặp: LIT/USDT:USDT | LONG", message)
-        self.assertIn("Nguồn lọc: 4h #2 (16:00:00)", message)
-        self.assertIn("Đã chuyển vào wait_slot lúc", message)
+        self.assertEqual(orders[0]["status"], "LC_OKX")
+        self.assertEqual(orders[0]["exchange_order_id"], "limit-slot-1")
+        send_telegram_message.assert_not_called()
 
     def test_mini_scan_fallback_does_not_create_local_lc(self) -> None:
         config = self._config()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,28 @@ def _capital_reserve_check_is_advisory(config: dict[str, Any]) -> bool:
 
 
 ActiveSummary = tuple[int | None, set[str], list[str]]
+
+
+def mini_pending_risk_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Return the validation profile used by Mini-approved pending setups."""
+    pending_config = config.get("pending_orders", {})
+    review_config = pending_config.get("review", {})
+    risk_config = deepcopy(config)
+    risk_config.setdefault("strategy", {})
+    risk_config.setdefault("news", {})
+    risk_config["strategy"]["min_confidence"] = float(
+        review_config.get("min_confidence", risk_config["strategy"].get("min_confidence", 75)) or 75
+    )
+    risk_config["strategy"]["min_win_probability_pct"] = float(
+        review_config.get("min_win_probability_pct", 50) or 50
+    )
+    risk_config["strategy"]["min_risk_reward"] = float(
+        review_config.get("min_risk_reward", risk_config["strategy"].get("min_risk_reward", 1.5)) or 1.5
+    )
+    risk_config["news"]["require_symbol_news"] = bool(
+        pending_config.get("require_symbol_news_for_mini_lc", False)
+    )
+    return risk_config
 
 
 def active_trades_summary(config: dict[str, Any]) -> ActiveSummary:

@@ -597,6 +597,11 @@ def prune_journal_state(config: dict[str, Any]) -> dict[str, Any]:
             cutoff=_iso_cutoff_days(_journal_retention_float(settings, "dashboard_snapshot_keep_days", 7)),
             preserve_keys={DASHBOARD_SNAPSHOT_VERSION_KEY},
         ),
+        "mini_setup_states": _delete_stale_journal_state_prefix(
+            config,
+            prefix="mini_setup:",
+            cutoff=_iso_cutoff_days(_journal_retention_float(settings, "mini_setup_keep_days", 7)),
+        ),
     }
     return {
         "enabled": True,
@@ -1389,6 +1394,35 @@ def set_journal_state(config: dict[str, Any], key: str, value: str) -> None:
     )
     _journal_state_cache_set(config, key, str(value or ""))
     return
+
+
+def claim_journal_state(config: dict[str, Any], key: str, value: str) -> bool:
+    """Create a journal-state key exactly once and report whether this caller won."""
+    if _is_deprecated_journal_state_key(key):
+        return False
+    now = datetime.now(timezone.utc).isoformat()
+    _ensure_mongo_write_allowed(config)
+    payload = _encode_journal_state_payload(value)
+    result = _mongo_collection(config, "journal_state").update_one(
+        {"_id": key},
+        {
+            "$setOnInsert": {
+                "_id": key,
+                "key": key,
+                **payload,
+                "updated_at": now,
+            }
+        },
+        upsert=True,
+    )
+    claimed = result.upserted_id is not None
+    if claimed:
+        _journal_state_cache_set(config, key, str(value or ""))
+    else:
+        _journal_state_cache_invalidate(config, key)
+    return claimed
+
+
 def next_global_counter(config: dict[str, Any], name: str) -> int:
     key = f"counter:{name}"
     _ensure_mongo_write_allowed(config)
