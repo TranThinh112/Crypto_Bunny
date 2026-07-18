@@ -557,6 +557,13 @@ def _normalize_ai_decision_range(value: Any) -> str:
     return "all" if str(value or "").strip().lower() == "all" else "current"
 
 
+def _market_regime_history_items(config: dict[str, Any], *, limit: int = 30) -> list[dict[str, Any]]:
+    try:
+        return market_regime_history(config, limit=limit)
+    except Exception:
+        return []
+
+
 def system_modules_payload(
     config: dict[str, Any],
     *,
@@ -570,6 +577,7 @@ def system_modules_payload(
     risk_state: dict[str, Any],
     row_counts: dict[str, Any] | None = None,
     ai_range: str = "current",
+    regime_history_items: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     files = _module_file_index(config)
     ai_range_key = _normalize_ai_decision_range(ai_range)
@@ -615,10 +623,8 @@ def system_modules_payload(
         prompt_runtime = {"error": str(exc)}
     prompt_metrics = prompt_runtime.get("metrics") if isinstance(prompt_runtime.get("metrics"), dict) else {}
 
-    try:
-        regime_history_items = market_regime_history(config, limit=30)
-    except Exception:
-        regime_history_items = []
+    if regime_history_items is None:
+        regime_history_items = _market_regime_history_items(config, limit=30)
     regime_counts: dict[str, int] = {}
     for item in regime_history_items:
         name = str(item.get("regime") or "UNKNOWN").upper()
@@ -1026,6 +1032,7 @@ def _build_system_checklist_payload(
     except Exception as exc:
         regime = {"error": str(exc)}
         regime_ok = False
+    regime_history_items = _market_regime_history_items(config, limit=30)
 
     try:
         health = get_bunny_health_state(config)
@@ -1200,6 +1207,7 @@ def _build_system_checklist_payload(
         risk_state=risk_state,
         row_counts=row_counts,
         ai_range=ai_range_key,
+        regime_history_items=regime_history_items,
     )
     ok_count = sum(1 for item in criteria if item["ok"])
     payload = {
@@ -1217,6 +1225,7 @@ def _build_system_checklist_payload(
         "replay": replay,
         "strategy": strategy,
         "market_regime": regime,
+        "market_regime_history": {"items": regime_history_items},
         "health": health,
         "risk_state": risk_state,
         "ai_range": ai_range_key,

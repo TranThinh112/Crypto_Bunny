@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 from crypto_trader.dashboard_services import (
+    _build_system_checklist_payload,
     _persist_cached_payload,
     _persist_system_checklist_snapshot,
     attach_previous_system_checklist_snapshot,
@@ -304,6 +305,58 @@ class SystemChecklistPayloadTests(unittest.TestCase):
         self.assertEqual(values["total_decisions"], 12)
         self.assertEqual(values["Phạm vi dữ liệu AI"], "Toàn bộ dữ liệu đang lưu")
         self.assertEqual(values["Tổng log gọi AI trong phạm vi"], 12)
+
+    def test_system_checklist_payload_embeds_market_regime_history(self) -> None:
+        config = {"mode": "dry_run"}
+        regime_history = [
+            {
+                "created_at": "2026-07-18T05:00:00+00:00",
+                "regime": "LOW_VOLATILITY",
+                "indicators": {"ema_fast": 100.0, "ema_slow": 99.0, "rsi": 56.0},
+            },
+            {
+                "created_at": "2026-07-18T05:01:00+00:00",
+                "regime": "LOW_VOLATILITY",
+                "indicators": {"ema_fast": 101.0, "ema_slow": 99.5, "rsi": 57.0},
+            },
+        ]
+
+        with patch(
+            "crypto_trader.dashboard_services.storage_stats",
+            return_value={"backend": "atlas", "disk": {}, "row_counts": {}, "payload_bytes": {}},
+        ), patch(
+            "crypto_trader.dashboard_services.recent_ai_call_history", return_value=[]
+        ), patch(
+            "crypto_trader.dashboard_services.replay_stats", return_value={}
+        ), patch(
+            "crypto_trader.dashboard_services.current_strategy_state", return_value={}
+        ), patch(
+            "crypto_trader.dashboard_services.current_market_regime",
+            return_value={
+                "regime": "LOW_VOLATILITY",
+                "confidence": 76.0,
+                "created_at": "2026-07-18T05:01:00+00:00",
+                "indicators": {"ema_fast": 101.0, "ema_slow": 99.5, "rsi": 57.0},
+            },
+        ), patch(
+            "crypto_trader.dashboard_services.get_bunny_health_state", return_value={}
+        ), patch(
+            "crypto_trader.dashboard_services.get_trading_system_state", return_value={}
+        ), patch(
+            "crypto_trader.dashboard_services.market_guard_block_status", return_value={}
+        ), patch(
+            "crypto_trader.dashboard_services.list_paper_trades", return_value=[]
+        ), patch(
+            "crypto_trader.dashboard_services.system_modules_payload", return_value=[]
+        ) as modules_payload, patch(
+            "crypto_trader.dashboard_services.market_regime_history", return_value=regime_history
+        ) as history_reader:
+            payload = _build_system_checklist_payload(config, automation={"last_result": ""})
+
+        self.assertEqual(payload["market_regime_history"], {"items": regime_history})
+        history_reader.assert_called_once_with(config, limit=30)
+        modules_payload.assert_called_once()
+        self.assertEqual(modules_payload.call_args.kwargs["regime_history_items"], regime_history)
 
     def test_system_checklist_all_range_builds_fresh_without_daily_snapshot_cache(self) -> None:
         rebuilt = {
