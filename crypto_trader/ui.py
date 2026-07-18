@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from market_pattern_engine.api.router import router as market_pattern_router
 
 from . import __version__
 from .atlas_mirror import atlas_runtime_is_primary, atlas_runtime_is_read_only
@@ -2603,6 +2604,7 @@ def _open_okx_positions(config: dict[str, Any]) -> dict[str, Any]:
 
 def create_app(config_path: str = "config.example.yaml") -> FastAPI:
     app = FastAPI(title="Crypto Signal Bot UI")
+    app.include_router(market_pattern_router)
     app.state.config_path = config_path
     app.state.lock = threading.Lock()
     app.state.mini_force_lock = threading.Lock()

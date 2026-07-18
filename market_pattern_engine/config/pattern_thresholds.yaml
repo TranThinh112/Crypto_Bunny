@@ -1,0 +1,59 @@
+candlestick:
+  doji:
+    max_body_to_range_ratio: 0.10
+    dragonfly_min_lower_shadow_to_range_ratio: 0.55
+    gravestone_min_upper_shadow_to_range_ratio: 0.55
+  spinning_top:
+    max_body_to_range_ratio: 0.35
+    min_each_shadow_to_range_ratio: 0.25
+  hammer:
+    max_body_to_range_ratio: 0.40
+    min_lower_shadow_to_body_ratio: 2.0
+    max_upper_shadow_to_range_ratio: 0.22
+  inverted_hammer:
+    max_body_to_range_ratio: 0.40
+    min_upper_shadow_to_body_ratio: 2.0
+    max_lower_shadow_to_range_ratio: 0.22
+  engulfing:
+    min_body_cover_ratio: 0.80
+  harami:
+    min_previous_body_ratio: 1.5
+  star:
+    max_middle_body_to_range_ratio: 0.35
+  marubozu:
+    min_body_to_range_ratio: 0.75
+
+support_resistance:
+  pivot_left_bars: 3
+  pivot_right_bars: 3
+  clustering_atr_multiplier: 0.35
+  minimum_touch_count: 2
+  breakout_close_atr_buffer: 0.15
+  reaction_atr_multiplier: 0.50
+  near_price_atr_multiplier: 2.0
+
+market_structure:
+  swing_method: "fractal"
+  minimum_swing_distance_atr: 0.5
+  bos_require_close_confirmation: true
+  choch_require_previous_structure: true
+  false_breakout_lookback: 3
+
+chart_patterns:
+  pivot_tolerance_atr: 0.75
+  min_pivot_count: 4
+  breakout_atr_buffer: 0.15
+  symmetry_tolerance: 0.45
+
+smart_money:
+  fvg_min_gap_atr: 0.12
+  equal_level_tolerance_atr: 0.20
+  sweep_close_back_inside: true
+  displacement_body_atr: 1.20
+  order_block_lookback: 5
+
+recheck:
+  maximum_entry_distance_atr: 1.5
+  setup_expiration_candles: 6
+  invalidate_on_opposite_choch: true
+  invalidate_on_support_break: true

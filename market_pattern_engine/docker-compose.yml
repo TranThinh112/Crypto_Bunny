@@ -1,0 +1,10 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: market_pattern_engine/Dockerfile
+    environment:
+      MONGODB_URI: ${MONGODB_URI}
+      MONGODB_DATABASE: ${MONGODB_DATABASE:-Bunny_Runtime_Live}
+    ports:
+      - "8000:8000"

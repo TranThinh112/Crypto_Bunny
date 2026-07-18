@@ -1,0 +1,21 @@
+timeframes:
+  5m:
+    role: "timing"
+    confidence_weight: 0.70
+    min_candles: 80
+  15m:
+    role: "timing_context"
+    confidence_weight: 0.80
+    min_candles: 80
+  1h:
+    role: "context"
+    confidence_weight: 0.95
+    min_candles: 100
+  4h:
+    role: "major_context"
+    confidence_weight: 1.10
+    min_candles: 120
+  1d:
+    role: "macro_context"
+    confidence_weight: 1.20
+    min_candles: 120

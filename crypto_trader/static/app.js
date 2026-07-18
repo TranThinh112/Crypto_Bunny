@@ -2280,6 +2280,11 @@ function isMarketRegimeModule(module) {
   return Number(module?.number || 0) === 5 && viLabel(module?.name || "").includes("market regime");
 }
 
+function isMarketPatternEngineModule(module) {
+  const name = viLabel(module?.name || "");
+  return Number(module?.number || 0) === 14 || name.includes("market structure") || name.includes("pattern engine");
+}
+
 function marketRegimeModuleName(module) {
   return isMarketRegimeModule(module) ? "Market Regime Detector" : String(module?.name || "-");
 }
@@ -3112,8 +3117,141 @@ function renderMarketRegimeDetail(module, options = {}) {
   }
 }
 
+function marketPatternLatest(module) {
+  const payload = module?.market_pattern_engine && typeof module.market_pattern_engine === "object"
+    ? module.market_pattern_engine
+    : {};
+  return payload.latest && typeof payload.latest === "object" ? payload.latest : null;
+}
+
+function marketPatternCount(module, key) {
+  const counts = module?.market_pattern_engine?.counts && typeof module.market_pattern_engine.counts === "object"
+    ? module.market_pattern_engine.counts
+    : {};
+  return Number(counts[key] || 0);
+}
+
+function renderMarketPatternPill(label, value) {
+  return `
+    <div class="market-regime-kpi">
+      <div class="market-regime-kpi-head">
+        <div>
+          <strong>${escapeHtml(label)}</strong>
+          <small>MongoDB</small>
+        </div>
+      </div>
+      <div class="market-regime-kpi-value">${escapeHtml(value ?? "-")}</div>
+      <div class="market-regime-kpi-meta">
+        <span>Market Pattern Engine</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderMarketPatternMetric(label, value, unit = "") {
+  return `
+    <div>
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value ?? "-")}${unit ? ` ${escapeHtml(unit)}` : ""}</strong>
+    </div>
+  `;
+}
+
+function renderMarketPatternList(title, rows, emptyText) {
+  const items = Array.isArray(rows) ? rows : [];
+  return `
+    <section class="market-regime-section">
+      <div class="market-regime-section-head"><div><strong>${escapeHtml(title)}</strong></div></div>
+      ${items.length
+        ? `<div class="module-table-wrap"><table><tbody>${items.map((item) => `
+            <tr>
+              <td>${escapeHtml(item.pattern_type || item.pattern || item.type || "-")}</td>
+              <td>${escapeHtml(item.direction || item.status || "-")}</td>
+              <td>${escapeHtml(formatMarketRegimeNumber(item.confidence ?? item.strength_score ?? item.confluence_score))}</td>
+            </tr>
+          `).join("")}</tbody></table></div>`
+        : `<div class="market-regime-empty">${escapeHtml(emptyText)}</div>`}
+    </section>
+  `;
+}
+
+function renderMarketPatternDetail(module, options = {}) {
+  if (!refs.systemModuleDetail || !refs.systemModuleOverlay || !module) return;
+  const payload = module.market_pattern_engine && typeof module.market_pattern_engine === "object" ? module.market_pattern_engine : {};
+  const latest = marketPatternLatest(module);
+  const structure = latest?.market_structure && typeof latest.market_structure === "object" ? latest.market_structure : {};
+  const confluence = latest?.confluence && typeof latest.confluence === "object" ? latest.confluence : {};
+  const feature = latest?.feature_vector && typeof latest.feature_vector === "object" ? latest.feature_vector : {};
+  const support = Array.isArray(latest?.support_zones) ? latest.support_zones : [];
+  const resistance = Array.isArray(latest?.resistance_zones) ? latest.resistance_zones : [];
+  const candles = Array.isArray(latest?.candlestick_patterns) ? latest.candlestick_patterns : [];
+  const charts = Array.isArray(latest?.chart_patterns) ? latest.chart_patterns : [];
+  const smartMoney = Array.isArray(latest?.smart_money) ? latest.smart_money : [];
+  state.selectedSystemModuleKey = systemModuleKey(module);
+  refs.systemModuleOverlay.hidden = false;
+  refs.systemModuleDetail.classList.add("module-detail-chart-scroll", "market-regime-detail");
+  refs.systemModuleDetail.innerHTML = `
+    <button class="module-close" type="button" aria-label="Đóng">×</button>
+    <div class="module-detail-head market-regime-head">
+      <div>
+        <span class="module-number">Module ${escapeHtml(module.number || "14")}</span>
+        <h3 id="systemModuleTitle">Market Structure & Pattern Engine</h3>
+        <p>Bộ máy nhận diện cấu trúc thị trường và mô hình giá</p>
+      </div>
+      <div class="module-head-actions">
+        <span class="status-pill ${module.status === "ok" ? "ok" : "warn"}">${moduleStatusLabel(module.status)}</span>
+      </div>
+    </div>
+    <div class="module-chart-scroll market-regime-scroll">
+      ${payload.error ? `<div class="market-regime-load-error" role="alert"><strong>Market Pattern Engine đang lỗi.</strong><span>${escapeHtml(payload.error)}</span></div>` : ""}
+      <section class="market-regime-section">
+        <div class="market-regime-section-head"><div><strong>Trạng thái engine</strong><small>Rule-based, không tự đặt lệnh</small></div></div>
+        <div class="market-regime-kpi-grid">
+          ${renderMarketPatternPill("Bản phân tích", formatMarketRegimeNumber(marketPatternCount(module, "market_analysis_snapshots"), 0))}
+          ${renderMarketPatternPill("Mô hình", formatMarketRegimeNumber(marketPatternCount(module, "pattern_detections"), 0))}
+          ${renderMarketPatternPill("Vùng giá", formatMarketRegimeNumber(marketPatternCount(module, "support_resistance_zones"), 0))}
+          ${renderMarketPatternPill("Sự kiện cấu trúc", formatMarketRegimeNumber(marketPatternCount(module, "market_structure_events"), 0))}
+        </div>
+      </section>
+      ${latest ? `
+        <section class="market-regime-status-card">
+          <div class="market-regime-status-main">
+            <div>
+              <span>${escapeHtml(`${latest.symbol || "-"} · ${latest.timeframe || "-"}`)}</span>
+              <strong>${escapeHtml(structure.trend_regime || "range")}</strong>
+              <small>${escapeHtml(latest.analysis_mode || "-")} · ${escapeHtml(timeLabel(latest.candle_close_time || latest.created_at))}</small>
+            </div>
+            <span class="market-regime-badge ${escapeHtml(String(confluence.bias || "neutral").toLowerCase())}">${escapeHtml(confluence.bias || "neutral")}</span>
+          </div>
+          <div class="market-regime-status-meta">
+            ${renderMarketPatternMetric("Cấu trúc", structure.structure_state || "-")}
+            ${renderMarketPatternMetric("Đồng thuận kỹ thuật", formatMarketRegimeNumber(confluence.confluence_score))}
+            ${renderMarketPatternMetric("Chất lượng dữ liệu", formatMarketRegimeNumber(feature.data_quality_score ?? latest.data_quality?.score))}
+          </div>
+        </section>
+        ${renderMarketPatternList("Mô hình nến", candles, "Chưa có mô hình nến được xác nhận.")}
+        ${renderMarketPatternList("Mô hình giá", charts, "Chưa có chart pattern phù hợp.")}
+        ${renderMarketPatternList("Smart Money", smartMoney, "Chưa có FVG, liquidity sweep hoặc order block heuristic.")}
+        ${renderMarketPatternList("Vùng hỗ trợ", support, "Chưa có vùng support đủ điều kiện.")}
+        ${renderMarketPatternList("Vùng kháng cự", resistance, "Chưa có vùng resistance đủ điều kiện.")}
+      ` : `<div class="market-regime-empty">Chưa có snapshot. Engine sẽ có dữ liệu sau khi Opportunity Scanner hoặc Final Re-check gọi endpoint analyze/recheck.</div>`}
+    </div>
+  `;
+  refs.systemModuleDetail.querySelector(".module-close")?.addEventListener("click", closeSystemModuleDetail);
+  if (Number.isFinite(Number(options.scrollTop))) {
+    const scrollNode = refs.systemModuleDetail.querySelector(".module-chart-scroll");
+    if (scrollNode) requestAnimationFrame(() => {
+      scrollNode.scrollTop = Number(options.scrollTop);
+    });
+  }
+}
+
 function renderModuleDetail(module, options = {}) {
   if (!refs.systemModuleDetail || !refs.systemModuleOverlay || !module) return;
+  if (isMarketPatternEngineModule(module)) {
+    renderMarketPatternDetail(module, options);
+    return;
+  }
   if (isMarketRegimeModule(module)) {
     renderMarketRegimeDetail(module, options);
     return;
@@ -3209,6 +3347,7 @@ function groupedSystemModules(modules) {
   const eventScheduleByName = {
     "Bộ nhớ quyết định AI": { event: "Ghi nhớ sau mỗi quyết định", schedule: "Sau mỗi lệnh đóng", interval: "lệnh đóng" },
     "Market Regime": { event: "Theo snapshot data hệ thống", schedule: dataUpdateSchedule, interval: dataUpdateInterval },
+    "Market Structure & Pattern Engine": { event: "Khi scanner hoặc final re-check gửi OHLCV", schedule: "Theo request analyze/recheck", interval: "event-driven" },
     "Strategy Versioning": { event: "Ghi nhớ sau mỗi quyết định", schedule: "6h sáng", interval: "6h sáng" },
     "Replay Engine": { event: "Ghi nhớ sau mỗi quyết định", schedule: "6h sáng", interval: "6h sáng" },
     "Bunny Minimize Losses": { event: "Ngay khi lệnh đóng", schedule: "5 phút/lần để đối chiếu", interval: "5 phút" },
@@ -3248,6 +3387,7 @@ function groupedSystemModules(modules) {
       items: [
         realModules.get("Bộ nhớ quyết định AI"),
         realModules.get("Market Regime"),
+        realModules.get("Market Structure & Pattern Engine"),
         realModules.get("Strategy Versioning"),
         realModules.get("Replay Engine"),
       ].filter(Boolean),

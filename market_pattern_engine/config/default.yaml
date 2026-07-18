@@ -1,0 +1,42 @@
+engine:
+  version: "1.0.0"
+  config_version: "2026.07.18"
+  min_candles_scan: 50
+  min_candles_recheck: 80
+  max_concurrency: 8
+
+retention:
+  audit_log_days: 45
+  temporary_scan_days: 7
+  provisional_analysis_hours: 6
+  confirmed_snapshot_ttl_days: null
+
+providers:
+  candlestick:
+    primary: "native"
+    fallback: "native"
+    enabled: true
+    provider_weights:
+      native: 1.0
+      talib: 0.8
+  trendline:
+    primary: "native"
+    fallback: "native"
+    enabled: true
+  chart_pattern:
+    primary: "native"
+    secondary: null
+    fallback: "native"
+    enabled: true
+
+confidence:
+  shape_score: 0.30
+  structure_score: 0.20
+  volume_score: 0.15
+  level_context_score: 0.20
+  freshness_score: 0.15
+
+data_quality:
+  max_gap_multiplier: 3.0
+  zero_volume_penalty: 0.15
+  provisional_penalty: 0.15

@@ -50,12 +50,26 @@ from .storage import (
     set_journal_state,
     storage_stats,
 )
+from market_pattern_engine.infrastructure.config_loader import load_engine_config
+from market_pattern_engine.repositories.analysis_repository import AnalysisRepository
 
 SYSTEM_CHECKLIST_CURRENT_KEY = "system_checklist_current"
 SYSTEM_CHECKLIST_PREVIOUS_KEY = "system_checklist_previous"
 SYSTEM_CHECKLIST_DEFAULT_TTL_SECONDS = 300
 DASHBOARD_SNAPSHOT_PREFIX = "dashboard_snapshot"
 DASHBOARD_DEFAULT_TTL_SECONDS = 300
+
+
+def _market_pattern_engine_dashboard() -> dict[str, Any]:
+    try:
+        repository = AnalysisRepository(config=load_engine_config())
+        latest = repository.latest(limit=1)
+        health = repository.health()
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "latest": None, "counts": {}}
+    latest_snapshot = latest[0] if latest else None
+    counts = health.get("collections", {}) if isinstance(health, dict) else {}
+    return {"ok": True, "error": None, "latest": latest_snapshot, "counts": counts}
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -832,6 +846,12 @@ def system_modules_payload(
     capital_reserve_ok = bool(capital_reserve_state.get("ok", True)) and capital_reserve_state.get("realized_capital") is not None
     capital_position_ok = bool(capital_position_size.get("allowed"))
     config_impact_safe = bool(config_impact.get("is_safe")) and str(config_impact.get("risk_level") or "").upper() not in {"HIGH", "CRITICAL"}
+    market_pattern = _market_pattern_engine_dashboard()
+    market_pattern_latest = market_pattern.get("latest") or {}
+    market_pattern_counts = market_pattern.get("counts") or {}
+    market_pattern_structure = market_pattern_latest.get("market_structure") if isinstance(market_pattern_latest, dict) else {}
+    market_pattern_confluence = market_pattern_latest.get("confluence") if isinstance(market_pattern_latest, dict) else {}
+    market_pattern_feature = market_pattern_latest.get("feature_vector") if isinstance(market_pattern_latest, dict) else {}
 
     definitions = [
         {
@@ -1054,6 +1074,31 @@ def system_modules_payload(
                 _module_row("required_margin", capital_position_size.get("required_margin"), "Margin can dung cho suggested order."),
                 _module_row("allowed", _module_bool_percent(capital_position_size.get("allowed")), "100 nghia la sizing hien tai hop le."),
                 _module_row("reason", capital_position_size.get("reason") or "-", "Ly do sizing duoc chap nhan hoac bi tu choi.", attention=not capital_position_ok),
+            ],
+        },
+        {
+            "number": 14,
+            "name": "Market Structure & Pattern Engine",
+            "purpose": "Bo may nhan dien cau truc thi truong, vung gia, mo hinh nen, chart pattern va Smart Money de xuat feature cho AI.",
+            "status": "ok" if market_pattern.get("ok") and _safe_int(market_pattern_counts.get("market_analysis_snapshots")) > 0 else "warn",
+            "update_event": "Khi scanner hoac final re-check gui OHLCV vao engine",
+            "update_schedule": "Event-driven theo request analyze/recheck",
+            "update_interval": "event-driven",
+            "market_pattern_engine": market_pattern,
+            "stats": [
+                _module_row("snapshots", market_pattern_counts.get("market_analysis_snapshots"), "Tong snapshot market analysis da luu idempotent trong Mongo.", attention=True),
+                _module_row("pattern_detections", market_pattern_counts.get("pattern_detections"), "Tong candlestick/chart/smart-money detection da luu."),
+                _module_row("support_resistance_zones", market_pattern_counts.get("support_resistance_zones"), "Tong vung support/resistance da luu."),
+                _module_row("market_structure_events", market_pattern_counts.get("market_structure_events"), "Tong event cau truc thi truong da luu."),
+                _module_row("latest_symbol", market_pattern_latest.get("symbol"), "Symbol cua snapshot moi nhat."),
+                _module_row("latest_timeframe", market_pattern_latest.get("timeframe"), "Timeframe cua snapshot moi nhat."),
+                _module_row("trend_regime", market_pattern_structure.get("trend_regime") if isinstance(market_pattern_structure, dict) else None, "Regime cau truc moi nhat: bullish, bearish, range hoac transition.", attention=True),
+                _module_row("structure_state", market_pattern_structure.get("structure_state") if isinstance(market_pattern_structure, dict) else None, "Trang thai HH/HL, LH/LL, range hoac mixed."),
+                _module_row("confluence_bias", market_pattern_confluence.get("bias") if isinstance(market_pattern_confluence, dict) else None, "Bias dong thuan ky thuat, khong phai xac suat thang.", attention=True),
+                _module_row("confluence_score", market_pattern_confluence.get("confluence_score") if isinstance(market_pattern_confluence, dict) else None, "Diem dong thuan ky thuat 0-1."),
+                _module_row("data_quality_score", market_pattern_feature.get("data_quality_score") if isinstance(market_pattern_feature, dict) else None, "Chat luong du lieu cua snapshot moi nhat."),
+                _module_row("updated_at", market_pattern_latest.get("updated_at") or market_pattern_latest.get("created_at"), "Thoi diem snapshot moi nhat."),
+                _module_row("error", market_pattern.get("error") or "-", "Loi engine neu chua ket noi duoc Mongo/API.", attention=not market_pattern.get("ok")),
             ],
         },
         {
