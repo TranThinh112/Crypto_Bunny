@@ -1166,6 +1166,7 @@ def select_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
 
 
 MARKET_REGIME_DEFAULT_TOP_SYMBOLS = ("BTC/USDT:USDT", "SOL/USDT:USDT", "ETH/USDT:USDT")
+MARKET_REGIME_DEFAULT_AGGREGATE_LIMIT = 40
 
 
 def _market_regime_top_symbols(config: dict[str, Any]) -> list[str]:
@@ -1177,6 +1178,17 @@ def _market_regime_top_symbols(config: dict[str, Any]) -> list[str]:
         if clean and clean not in result:
             result.append(clean)
     return result or list(MARKET_REGIME_DEFAULT_TOP_SYMBOLS)
+
+
+def _market_regime_aggregate_limit(config: dict[str, Any]) -> int:
+    settings = config.get("market_regime", {})
+    universe = config.get("strategy", {}).get("universe", {})
+    raw = settings.get("aggregate_limit", universe.get("max_symbols", MARKET_REGIME_DEFAULT_AGGREGATE_LIMIT))
+    try:
+        limit = int(raw or MARKET_REGIME_DEFAULT_AGGREGATE_LIMIT)
+    except (TypeError, ValueError):
+        limit = MARKET_REGIME_DEFAULT_AGGREGATE_LIMIT
+    return max(1, min(40, limit))
 
 
 def _market_regime_indicator_from_snapshot(snapshot: Any) -> dict[str, Any]:
@@ -1263,12 +1275,14 @@ def _aggregate_market_regime_indicators(
     indicators: list[dict[str, Any]],
     *,
     target_symbols: list[str],
+    target_count: int | None = None,
+    detail_symbols: list[str] | None = None,
     created_at: str,
 ) -> tuple[dict[str, Any], str, float, str]:
     covered_symbols = [str(item.get("symbol") or "").strip() for item in indicators if str(item.get("symbol") or "").strip()]
     missing_symbols = [symbol for symbol in target_symbols if symbol not in covered_symbols]
-    target_count = len(target_symbols)
-    coverage_pct = round((len(covered_symbols) / target_count) * 100.0, 2) if target_count else 0.0
+    expected_count = max(len(target_symbols), int(target_count or 0))
+    coverage_pct = round((len(covered_symbols) / expected_count) * 100.0, 2) if expected_count else 0.0
     trend_scores = [
         score
         for score in (_market_symbol_trend_score(indicator) for indicator in indicators)
@@ -1284,12 +1298,16 @@ def _aggregate_market_regime_indicators(
     aggregate = {
         "scope": "aggregate",
         "symbol": "MARKET",
+        "market_scope": "top_volume",
         "created_at": created_at,
+        "aggregate_limit": expected_count,
+        "market_symbols": target_symbols,
+        "detail_symbols": detail_symbols or _market_regime_top_symbols(config),
         "top_symbols": target_symbols,
         "covered_symbols": covered_symbols,
         "missing_symbols": missing_symbols,
         "coverage_count": len(covered_symbols),
-        "target_count": target_count,
+        "target_count": expected_count,
         "coverage_pct": coverage_pct,
         "trend_score": None if trend_score is None else round(trend_score, 2),
         "price_above_ema20_pct": _market_percent_true(indicators, "last", "ema_fast"),
@@ -1312,33 +1330,33 @@ def _aggregate_market_regime_indicators(
     if not indicators:
         regime = "UNKNOWN"
         confidence = 0.0
-        reason = "Khong co snapshot top 3 de danh gia toan thi truong"
+        reason = f"Khong co snapshot top {expected_count} de danh gia toan thi truong"
     elif atr_pct >= _safe_float(settings.get("high_volatility_atr_pct"), 4.0):
         regime = "HIGH_VOLATILITY"
         confidence = min(99.0, 60.0 + atr_pct * 6.0)
-        reason = f"ATR trung vi top 3 {atr_pct:.2f}% cao; do phu {len(covered_symbols)}/{target_count}"
+        reason = f"ATR trung vi top {expected_count} {atr_pct:.2f}% cao; do phu {len(covered_symbols)}/{expected_count}"
     elif atr_pct and atr_pct <= _safe_float(settings.get("low_volatility_atr_pct"), 1.2):
         regime = "LOW_VOLATILITY"
         confidence = min(95.0, 58.0 + max(0.0, 1.2 - atr_pct) * 12.0)
-        reason = f"ATR trung vi top 3 {atr_pct:.2f}% thap; do phu {len(covered_symbols)}/{target_count}"
+        reason = f"ATR trung vi top {expected_count} {atr_pct:.2f}% thap; do phu {len(covered_symbols)}/{expected_count}"
     elif score is not None and score >= 66.0 and (median_rsi is None or median_rsi >= 50.0):
         regime = "BULL"
         confidence = min(96.0, 52.0 + score * 0.35 + coverage_pct * 0.12)
-        reason = f"Trend score top 3 {score:.2f}/100 nghieng tang; do phu {len(covered_symbols)}/{target_count}"
+        reason = f"Trend score top {expected_count} {score:.2f}/100 nghieng tang; do phu {len(covered_symbols)}/{expected_count}"
     elif score is not None and score <= 34.0 and (median_rsi is None or median_rsi <= 50.0):
         regime = "BEAR"
         confidence = min(96.0, 52.0 + (100.0 - score) * 0.35 + coverage_pct * 0.12)
-        reason = f"Trend score top 3 {score:.2f}/100 nghieng giam; do phu {len(covered_symbols)}/{target_count}"
+        reason = f"Trend score top {expected_count} {score:.2f}/100 nghieng giam; do phu {len(covered_symbols)}/{expected_count}"
     elif score is not None:
         regime = "SIDEWAY"
         confidence = min(88.0, 50.0 + (100.0 - abs(score - 50.0)) * 0.22 + coverage_pct * 0.08)
-        reason = f"Trend score top 3 {score:.2f}/100 chua lech manh; do phu {len(covered_symbols)}/{target_count}"
+        reason = f"Trend score top {expected_count} {score:.2f}/100 chua lech manh; do phu {len(covered_symbols)}/{expected_count}"
     else:
         regime = "UNKNOWN"
         confidence = 40.0 + coverage_pct * 0.2
-        reason = f"Chua du chi bao xu huong top 3; do phu {len(covered_symbols)}/{target_count}"
-    if target_count and len(covered_symbols) < target_count:
-        confidence *= max(0.45, len(covered_symbols) / target_count)
+        reason = f"Chua du chi bao xu huong top {expected_count}; do phu {len(covered_symbols)}/{expected_count}"
+    if expected_count and len(covered_symbols) < expected_count:
+        confidence *= max(0.45, len(covered_symbols) / expected_count)
     return aggregate, regime, round(confidence, 2), reason
 
 
@@ -1386,15 +1404,19 @@ def detect_market_regime(config: dict[str, Any], snapshots: list[Any]) -> dict[s
             "reason": reason,
         }
     created_at = str(result["created_at"])
-    target_symbols = _market_regime_top_symbols(config)
+    detail_symbols = _market_regime_top_symbols(config)
+    aggregate_limit = _market_regime_aggregate_limit(config)
     indicators_by_symbol: dict[str, dict[str, Any]] = {}
+    aggregate_symbols: list[str] = []
     for snapshot in snapshots:
         indicator = _market_regime_indicator_from_snapshot(snapshot)
         symbol = str(indicator.get("symbol") or "").strip()
         if symbol and symbol not in indicators_by_symbol:
             indicators_by_symbol[symbol] = indicator
+        if symbol and symbol not in aggregate_symbols and len(aggregate_symbols) < aggregate_limit:
+            aggregate_symbols.append(symbol)
     target_indicators: list[dict[str, Any]] = []
-    for symbol in target_symbols:
+    for symbol in detail_symbols:
         indicator = indicators_by_symbol.get(symbol)
         if not indicator:
             continue
@@ -1411,13 +1433,27 @@ def detect_market_regime(config: dict[str, Any], snapshots: list[Any]) -> dict[s
                 "reason": reason,
             },
         )
-    if target_indicators:
+    aggregate_indicators = [
+        {**indicators_by_symbol[symbol], "scope": "market_member", "created_at": created_at}
+        for symbol in aggregate_symbols
+        if symbol in indicators_by_symbol
+    ]
+    if aggregate_indicators:
         aggregate_indicator, aggregate_regime, aggregate_confidence, aggregate_reason = _aggregate_market_regime_indicators(
             config,
-            target_indicators,
-            target_symbols=target_symbols,
+            aggregate_indicators,
+            target_symbols=aggregate_symbols,
+            target_count=aggregate_limit,
+            detail_symbols=detail_symbols,
             created_at=created_at,
         )
+        result = {
+            "created_at": created_at,
+            "regime": aggregate_regime,
+            "confidence": aggregate_confidence,
+            "indicators": aggregate_indicator,
+            "reason": aggregate_reason,
+        }
         insert_market_regime_history(
             config,
             {

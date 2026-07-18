@@ -2489,6 +2489,16 @@ function marketRegimeSymbolLabel(symbol) {
   return String(symbol || "").split("/", 1)[0] || String(symbol || "-");
 }
 
+function marketRegimeCompactSymbolList(symbols, limit = 10) {
+  const rows = (Array.isArray(symbols) ? symbols : [])
+    .map(marketRegimeSymbolLabel)
+    .filter(Boolean);
+  if (!rows.length) return "-";
+  const visible = rows.slice(0, limit).join(", ");
+  const hiddenCount = rows.length - limit;
+  return hiddenCount > 0 ? `${visible} +${hiddenCount}` : visible;
+}
+
 function marketRegimeNormalizeHistoryPayload(module, regime) {
   const raw = module?.market_regime_history
     || regime?.history
@@ -2499,6 +2509,9 @@ function marketRegimeNormalizeHistoryPayload(module, regime) {
       items: raw,
       aggregate: { label: "Thị trường", items: [], count: 0, latest_created_at: null },
       top_symbols: MARKET_REGIME_DEFAULT_TOP_SYMBOLS,
+      detail_symbols: MARKET_REGIME_DEFAULT_TOP_SYMBOLS,
+      aggregate_limit: 40,
+      market_symbols: [],
       by_symbol: {},
       coverage: {},
     };
@@ -2508,6 +2521,9 @@ function marketRegimeNormalizeHistoryPayload(module, regime) {
       items: [],
       aggregate: { label: "Thị trường", items: [], count: 0, latest_created_at: null },
       top_symbols: MARKET_REGIME_DEFAULT_TOP_SYMBOLS,
+      detail_symbols: MARKET_REGIME_DEFAULT_TOP_SYMBOLS,
+      aggregate_limit: 40,
+      market_symbols: [],
       by_symbol: {},
       coverage: {},
     };
@@ -2516,6 +2532,9 @@ function marketRegimeNormalizeHistoryPayload(module, regime) {
     items: Array.isArray(raw.items) ? raw.items : [],
     aggregate: raw.aggregate && typeof raw.aggregate === "object" ? raw.aggregate : { label: "Thị trường", items: [], count: 0, latest_created_at: null },
     top_symbols: Array.isArray(raw.top_symbols) && raw.top_symbols.length ? raw.top_symbols : MARKET_REGIME_DEFAULT_TOP_SYMBOLS,
+    detail_symbols: Array.isArray(raw.detail_symbols) && raw.detail_symbols.length ? raw.detail_symbols : (Array.isArray(raw.top_symbols) && raw.top_symbols.length ? raw.top_symbols : MARKET_REGIME_DEFAULT_TOP_SYMBOLS),
+    aggregate_limit: marketRegimeFiniteValue(raw.aggregate_limit) || 40,
+    market_symbols: Array.isArray(raw.market_symbols) ? raw.market_symbols : [],
     by_symbol: raw.by_symbol && typeof raw.by_symbol === "object" ? raw.by_symbol : {},
     coverage: raw.coverage && typeof raw.coverage === "object" ? raw.coverage : {},
   };
@@ -2544,8 +2563,10 @@ function marketRegimeSnapshotForView(regime, payload, viewKey) {
 }
 
 function marketRegimeViewOptions(payload) {
-  const topSymbols = Array.isArray(payload?.top_symbols) && payload.top_symbols.length
-    ? payload.top_symbols
+  const detailSymbols = Array.isArray(payload?.detail_symbols) && payload.detail_symbols.length
+    ? payload.detail_symbols
+    : Array.isArray(payload?.top_symbols) && payload.top_symbols.length
+      ? payload.top_symbols
     : MARKET_REGIME_DEFAULT_TOP_SYMBOLS;
   const aggregateItems = marketRegimeHistoryItemsForView(payload, MARKET_REGIME_VIEW_MARKET);
   const coverage = payload?.coverage && typeof payload.coverage === "object" ? payload.coverage : {};
@@ -2558,7 +2579,7 @@ function marketRegimeViewOptions(payload) {
         : `${aggregateItems.length} snapshot`,
       count: aggregateItems.length,
     },
-    ...topSymbols.map((symbol) => {
+    ...detailSymbols.map((symbol) => {
       const items = marketRegimeHistoryItemsForView(payload, symbol);
       return {
         key: symbol,
@@ -2602,24 +2623,25 @@ function renderMarketRegimeCoverage(payload, selectedView) {
   const coverage = payload?.coverage && typeof payload.coverage === "object" ? payload.coverage : {};
   const covered = Array.isArray(coverage.covered_symbols) ? coverage.covered_symbols : [];
   const missing = Array.isArray(coverage.missing_symbols) ? coverage.missing_symbols : [];
-  const targetCount = marketRegimeFiniteValue(coverage.target_count);
+  const targetCount = marketRegimeFiniteValue(coverage.target_count) || marketRegimeFiniteValue(payload?.aggregate_limit);
   const coverageCount = marketRegimeFiniteValue(coverage.coverage_count);
   const coverageText = coverageCount !== null && targetCount !== null
     ? `${formatMarketRegimeNumber(coverageCount, 0)}/${formatMarketRegimeNumber(targetCount, 0)}`
     : "-";
+  const scopeLabel = targetCount ? `top ${formatMarketRegimeNumber(targetCount, 0)}` : "top volume";
   return `
     <div class="market-regime-coverage-card">
       <div>
         <span>Phạm vi đang xem</span>
-        <strong>${escapeHtml(selectedView === MARKET_REGIME_VIEW_MARKET ? "Tổng hợp thị trường" : marketRegimeSymbolLabel(selectedView))}</strong>
+        <strong>${escapeHtml(selectedView === MARKET_REGIME_VIEW_MARKET ? `Tổng hợp thị trường ${scopeLabel}` : marketRegimeSymbolLabel(selectedView))}</strong>
       </div>
       <div>
-        <span>Độ phủ top 3</span>
+        <span>Độ phủ ${escapeHtml(scopeLabel)}</span>
         <strong>${escapeHtml(coverageText)}</strong>
       </div>
       <p>
-        Có dữ liệu: ${escapeHtml(covered.map(marketRegimeSymbolLabel).join(", ") || "-")}
-        ${missing.length ? ` · Chưa có: ${escapeHtml(missing.map(marketRegimeSymbolLabel).join(", "))}` : ""}
+        Có dữ liệu: ${escapeHtml(marketRegimeCompactSymbolList(covered))}
+        ${missing.length ? ` · Chưa có: ${escapeHtml(marketRegimeCompactSymbolList(missing, 6))}` : ""}
       </p>
     </div>
   `;
@@ -2632,6 +2654,8 @@ function renderMarketRegimeSnapshotChart({
   snapshots,
   series,
   axisLabel = "Giá trị gốc",
+  fixedYMin = null,
+  fixedYMax = null,
   error = "",
 }) {
   const rows = Array.isArray(snapshots) ? snapshots : [];
@@ -2680,8 +2704,10 @@ function renderMarketRegimeSnapshotChart({
     : rawSpan > 0
       ? rawSpan * 0.16
       : Math.max(valueReference * 0.1, Number.EPSILON);
-  const axisMin = rawMin - padding;
-  const axisMax = rawMax + padding;
+  const fixedMin = marketRegimeFiniteValue(fixedYMin);
+  const fixedMax = marketRegimeFiniteValue(fixedYMax);
+  const axisMin = fixedMin !== null ? fixedMin : rawMin - padding;
+  const axisMax = fixedMax !== null ? fixedMax : rawMax + padding;
   const axisSpan = axisMax - axisMin || 1;
   const chartLeft = 62;
   const chartRight = 496;
@@ -2832,6 +2858,11 @@ function renderMarketRegimeDetail(module, options = {}) {
   const error = String(latestChartSnapshot.error || regime.error || "").trim();
   const historySamples = selectedHistory.length;
   const isAggregateView = selectedView === MARKET_REGIME_VIEW_MARKET;
+  const aggregateTargetCount = marketRegimeFiniteValue(indicators.target_count)
+    || marketRegimeFiniteValue(historyPayload?.coverage?.target_count)
+    || marketRegimeFiniteValue(historyPayload?.aggregate_limit)
+    || 40;
+  const aggregateScopeText = `top ${formatMarketRegimeNumber(aggregateTargetCount, 0)}`;
   const macd = marketRegimeFiniteValue(indicators.macd);
   const macdState = macd === null ? "" : macd > 0 ? "Dương" : macd < 0 ? "Âm" : "Trung tính";
   const trendSeries = isAggregateView
@@ -2876,8 +2907,8 @@ function renderMarketRegimeDetail(module, options = {}) {
     : [];
   const kpiCards = isAggregateView
     ? [
-        renderMarketRegimeKpiCard({ title: "Trend Score", subtitle: "Điểm xu hướng top 3", value: indicators.trend_score, unitText: "0-100", createdAt }),
-        renderMarketRegimeKpiCard({ title: "Độ phủ top 3", subtitle: "Số cặp có snapshot thật", value: indicators.coverage_count, unitText: `${formatMarketRegimeNumber(indicators.target_count, 0)} cặp mục tiêu`, createdAt }),
+        renderMarketRegimeKpiCard({ title: "Trend Score", subtitle: `Điểm xu hướng ${aggregateScopeText}`, value: indicators.trend_score, unitText: "0-100", createdAt }),
+        renderMarketRegimeKpiCard({ title: `Độ phủ ${aggregateScopeText}`, subtitle: "Số cặp có snapshot thật", value: indicators.coverage_count, unitText: `${formatMarketRegimeNumber(aggregateTargetCount, 0)} cặp mục tiêu`, createdAt }),
         renderMarketRegimeKpiCard({ title: "RSI trung vị", subtitle: "Median RSI của nhóm đang có dữ liệu", value: indicators.median_rsi ?? indicators.rsi, unitText: "0-100", createdAt }),
       ]
     : [
@@ -2908,7 +2939,7 @@ function renderMarketRegimeDetail(module, options = {}) {
       <section class="market-regime-status-card">
         <div class="market-regime-status-main">
           <div>
-            <span>${escapeHtml(isAggregateView ? "Trạng thái tổng hợp thị trường" : `Trạng thái ${marketRegimeSymbolLabel(selectedView)}`)}</span>
+            <span>${escapeHtml(isAggregateView ? `Trạng thái tổng hợp thị trường ${aggregateScopeText}` : `Trạng thái ${marketRegimeSymbolLabel(selectedView)}`)}</span>
             <strong>${escapeHtml(marketRegimeLabel(regimeCode))}</strong>
             <small>${escapeHtml(regimeCode)}</small>
           </div>
@@ -2942,10 +2973,12 @@ function renderMarketRegimeDetail(module, options = {}) {
           ${renderMarketRegimeSnapshotChart({
             id: "trend-structure",
             title: "Cấu trúc xu hướng",
-            subtitle: isAggregateView ? "Trend Score và tỷ lệ top 3 theo EMA/VWAP" : "EMA20, EMA50, EMA200 và VWAP",
+            subtitle: isAggregateView ? `Trend Score và tỷ lệ ${aggregateScopeText} theo EMA/VWAP` : "EMA20, EMA50, EMA200 và VWAP",
             snapshots: chartSnapshots,
             series: trendSeries,
             axisLabel: isAggregateView ? "Tỷ lệ / điểm 0-100" : "Giá trị giá",
+            fixedYMin: isAggregateView ? 0 : null,
+            fixedYMax: isAggregateView ? 100 : null,
             error,
           })}
           ${renderMarketRegimeSnapshotChart({
@@ -2955,6 +2988,8 @@ function renderMarketRegimeDetail(module, options = {}) {
             snapshots: chartSnapshots,
             series: strengthSeries,
             axisLabel: isAggregateView ? "Thang 0-100 / điểm" : "Giá trị gốc",
+            fixedYMin: isAggregateView ? 0 : null,
+            fixedYMax: isAggregateView ? 100 : null,
             error,
           })}
           ${renderMarketRegimeLineChart({

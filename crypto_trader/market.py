@@ -245,7 +245,7 @@ def select_top_volume_symbols_from_tickers(
     excluded_bases: list[str] | set[str] | None = None,
     excluded_keywords: list[str] | set[str] | None = None,
 ) -> list[str]:
-    max_symbols = max(1, min(30, int(limit or 30)))
+    max_symbols = max(1, min(40, int(limit or 40)))
     ranked: list[tuple[float, str]] = []
     excluded_base_set = {item.upper() for item in (excluded_bases or NON_CRYPTO_BASES)}
     excluded_keyword_set = {item.upper() for item in (excluded_keywords or NON_CRYPTO_KEYWORDS)}
@@ -294,7 +294,7 @@ def fetch_top_volume_symbols(
 ) -> tuple[list[str], list[str]]:
     strategy_config = config.get("strategy", {})
     universe = strategy_config.get("universe", {})
-    limit = max(1, min(30, int(universe.get("max_symbols", 30) or 30)))
+    limit = max(1, min(40, int(universe.get("max_symbols", 40) or 40)))
     quote = str(universe.get("quote", config.get("exchange", {}).get("default_settle", "USDT")) or "USDT")
     account_type = str(config.get("exchange", {}).get("account_type", "swap") or "swap")
     asset_class = str(universe.get("asset_class", "crypto") or "crypto")

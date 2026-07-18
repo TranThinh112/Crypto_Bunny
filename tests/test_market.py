@@ -81,7 +81,7 @@ class MarketUniverseTest(TestCase):
 
         self.assertEqual(symbols, ["BTC/USDT:USDT", "SHIB/USDT:USDT"])
 
-    def test_caps_top_volume_universe_at_30_symbols(self) -> None:
+    def test_caps_top_volume_universe_at_40_symbols(self) -> None:
         markets = {
             f"COIN{i}/USDT:USDT": {
                 "active": True,
@@ -91,7 +91,7 @@ class MarketUniverseTest(TestCase):
                 "type": "swap",
                 "swap": True,
             }
-            for i in range(35)
+            for i in range(45)
         }
         tickers = {symbol: {"quoteVolume": index + 1} for index, symbol in enumerate(markets)}
 
@@ -103,7 +103,7 @@ class MarketUniverseTest(TestCase):
             account_type="swap",
         )
 
-        self.assertEqual(len(symbols), 30)
+        self.assertEqual(len(symbols), 40)
 
     def test_crypto_universe_excludes_tokenized_equities_and_commodities(self) -> None:
         markets = {

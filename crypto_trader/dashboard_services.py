@@ -22,6 +22,7 @@ from .config import project_path
 from .codex_features import (
     ai_call_decision_stats,
     ai_trade_decision_stats,
+    _market_regime_aggregate_limit,
     _market_regime_top_symbols,
     current_market_regime,
     current_strategy_state,
@@ -593,14 +594,15 @@ def _market_regime_history_payload(
     limit: int = 30,
     current_regime: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    top_symbols = _market_regime_top_symbols(config)
-    read_limit = max(100, limit * max(4, len(top_symbols) + 2))
+    detail_symbols = _market_regime_top_symbols(config)
+    aggregate_limit = _market_regime_aggregate_limit(config)
+    read_limit = max(200, limit * max(4, len(detail_symbols) + 3))
     try:
         rows = market_regime_history(config, limit=read_limit)
     except Exception:
         rows = []
     aggregate_items: list[dict[str, Any]] = []
-    by_symbol: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in top_symbols}
+    by_symbol: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in detail_symbols}
     for item in rows:
         scope = _market_regime_snapshot_scope(item)
         symbol = _market_regime_snapshot_symbol(item)
@@ -631,7 +633,7 @@ def _market_regime_history_payload(
     latest_aggregate = aggregate_items[0] if aggregate_items else None
     aggregate_indicators = latest_aggregate.get("indicators") if isinstance(latest_aggregate, dict) and isinstance(latest_aggregate.get("indicators"), dict) else {}
     coverage_count = aggregate_indicators.get("coverage_count")
-    target_count = aggregate_indicators.get("target_count") or len(top_symbols)
+    target_count = aggregate_indicators.get("target_count") or aggregate_limit
     return {
         "items": active_items,
         "aggregate": {
@@ -640,14 +642,17 @@ def _market_regime_history_payload(
             "count": len(aggregate_items[:limit]),
             "latest_created_at": latest_aggregate.get("created_at") if latest_aggregate else None,
         },
-        "top_symbols": top_symbols,
+        "top_symbols": detail_symbols,
+        "detail_symbols": detail_symbols,
+        "aggregate_limit": target_count,
+        "market_symbols": aggregate_indicators.get("market_symbols") or aggregate_indicators.get("top_symbols") or [],
         "by_symbol": symbol_payload,
         "coverage": {
             "coverage_count": coverage_count,
             "target_count": target_count,
             "covered_symbols": aggregate_indicators.get("covered_symbols") or [],
             "missing_symbols": aggregate_indicators.get("missing_symbols") or [
-                symbol for symbol in top_symbols if not by_symbol.get(symbol)
+                symbol for symbol in detail_symbols if not by_symbol.get(symbol)
             ],
             "coverage_pct": aggregate_indicators.get("coverage_pct"),
         },
@@ -722,12 +727,17 @@ def system_modules_payload(
         )
         regime_history_items = list(regime_history_payload.get("items") or [])
     if regime_history_payload is None:
+        detail_symbols = _market_regime_top_symbols(config)
+        aggregate_limit = _market_regime_aggregate_limit(config)
         regime_history_payload = {
             "items": regime_history_items,
             "aggregate": {"label": "Thị trường", "items": [], "count": 0, "latest_created_at": None},
-            "top_symbols": _market_regime_top_symbols(config),
+            "top_symbols": detail_symbols,
+            "detail_symbols": detail_symbols,
+            "aggregate_limit": aggregate_limit,
+            "market_symbols": [],
             "by_symbol": {},
-            "coverage": {},
+            "coverage": {"coverage_count": None, "target_count": aggregate_limit},
         }
     regime_counts: dict[str, int] = {}
     for item in regime_history_items:

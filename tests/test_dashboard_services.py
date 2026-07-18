@@ -320,7 +320,32 @@ class SystemChecklistPayloadTests(unittest.TestCase):
                 "indicators": {"symbol": "BTC/USDT:USDT", "ema_fast": 101.0, "ema_slow": 99.5, "rsi": 57.0},
             },
         ]
+        aggregate_history = {
+            "created_at": "2026-07-18T05:03:00+00:00",
+            "regime": "LOW_VOLATILITY",
+            "indicators": {
+                "scope": "aggregate",
+                "symbol": "MARKET",
+                "coverage_count": 5,
+                "target_count": 40,
+                "covered_symbols": [
+                    "BTC/USDT:USDT",
+                    "SOL/USDT:USDT",
+                    "ETH/USDT:USDT",
+                    "XRP/USDT:USDT",
+                    "BNB/USDT:USDT",
+                ],
+                "market_symbols": [
+                    "BTC/USDT:USDT",
+                    "SOL/USDT:USDT",
+                    "ETH/USDT:USDT",
+                    "XRP/USDT:USDT",
+                    "BNB/USDT:USDT",
+                ],
+            },
+        }
         regime_history = [
+            aggregate_history,
             *btc_history,
             {
                 "created_at": "2026-07-18T05:02:00+00:00",
@@ -343,8 +368,8 @@ class SystemChecklistPayloadTests(unittest.TestCase):
             return_value={
                 "regime": "LOW_VOLATILITY",
                 "confidence": 76.0,
-                "created_at": "2026-07-18T05:01:00+00:00",
-                "indicators": {"symbol": "BTC/USDT:USDT", "ema_fast": 101.0, "ema_slow": 99.5, "rsi": 57.0},
+                "created_at": "2026-07-18T05:03:00+00:00",
+                "indicators": aggregate_history["indicators"],
             },
         ), patch(
             "crypto_trader.dashboard_services.get_bunny_health_state", return_value={}
@@ -362,15 +387,19 @@ class SystemChecklistPayloadTests(unittest.TestCase):
             payload = _build_system_checklist_payload(config, automation={"last_result": ""})
 
         history_payload = payload["market_regime_history"]
-        self.assertEqual(history_payload["items"], btc_history)
+        self.assertEqual(history_payload["items"], [aggregate_history])
         self.assertEqual(history_payload["top_symbols"], ["BTC/USDT:USDT", "SOL/USDT:USDT", "ETH/USDT:USDT"])
+        self.assertEqual(history_payload["detail_symbols"], ["BTC/USDT:USDT", "SOL/USDT:USDT", "ETH/USDT:USDT"])
+        self.assertEqual(history_payload["aggregate_limit"], 40)
+        self.assertEqual(history_payload["market_symbols"], aggregate_history["indicators"]["market_symbols"])
         self.assertEqual(history_payload["by_symbol"]["BTC/USDT:USDT"]["items"], btc_history)
         self.assertEqual(history_payload["by_symbol"]["SOL/USDT:USDT"]["items"], [])
         self.assertEqual(history_payload["by_symbol"]["ETH/USDT:USDT"]["items"], [regime_history[-1]])
-        self.assertIn("SOL/USDT:USDT", history_payload["coverage"]["missing_symbols"])
-        history_reader.assert_called_once_with(config, limit=150)
+        self.assertEqual(history_payload["coverage"]["coverage_count"], 5)
+        self.assertEqual(history_payload["coverage"]["target_count"], 40)
+        history_reader.assert_called_once_with(config, limit=200)
         modules_payload.assert_called_once()
-        self.assertEqual(modules_payload.call_args.kwargs["regime_history_items"], btc_history)
+        self.assertEqual(modules_payload.call_args.kwargs["regime_history_items"], [aggregate_history])
         self.assertEqual(modules_payload.call_args.kwargs["regime_history_payload"], history_payload)
 
     def test_system_checklist_all_range_builds_fresh_without_daily_snapshot_cache(self) -> None:

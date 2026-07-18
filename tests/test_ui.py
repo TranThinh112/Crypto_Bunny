@@ -291,7 +291,7 @@ class UiTest(TestCase):
         self.assertEqual(payload["order_usdt"], 30.0)
         self.assertEqual(payload["position_sizing"]["max_margin_usdt"], 50)
         self.assertEqual(payload["universe"]["mode"], "top_volume_24h")
-        self.assertEqual(payload["universe"]["max_symbols"], 30)
+        self.assertEqual(payload["universe"]["max_symbols"], 40)
         self.assertEqual(payload["ai"]["internal"]["model"], "gpt-5.4-mini")
         self.assertEqual(payload["ai"]["okx"]["model"], "gpt-5.5")
 

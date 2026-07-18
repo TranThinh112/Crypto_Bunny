@@ -7,6 +7,7 @@ import tempfile
 import urllib.error
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -14,6 +15,7 @@ from crypto_trader.codex_features import (
     ai_call_decision_stats,
     ai_trade_decision_stats,
     call_openai_json,
+    detect_market_regime,
     record_ai_call_event,
     select_runtime_config,
 )
@@ -58,6 +60,51 @@ class CodexFeaturesTest(TestCase):
 
     def _role_config(self) -> dict:
         return {"api_key_env": "OPENAI_API_KEY_TEST", "timeout_seconds": 1}
+
+    def test_detect_market_regime_aggregates_top_volume_scope_separately_from_detail_tabs(self) -> None:
+        config = {
+            "market_regime": {
+                "top_symbols": ["BTC/USDT:USDT", "SOL/USDT:USDT", "ETH/USDT:USDT"],
+                "aggregate_limit": 5,
+            },
+            "strategy": {"universe": {"max_symbols": 5}},
+        }
+        snapshots = [
+            SimpleNamespace(
+                symbol=f"COIN{index}/USDT:USDT",
+                last=100 + index,
+                ema_fast=99 + index,
+                ema_slow=98 + index,
+                ema200=97 + index,
+                vwap=99.5 + index,
+                rsi=50 + index,
+                atr_pct=2.0,
+                volume_ratio=1.2,
+            )
+            for index in range(5)
+        ]
+        snapshots[0].symbol = "BTC/USDT:USDT"
+        snapshots[1].symbol = "SOL/USDT:USDT"
+        snapshots[2].symbol = "ETH/USDT:USDT"
+
+        with patch("crypto_trader.codex_features.insert_market_regime_history") as insert_history:
+            result = detect_market_regime(config, snapshots)
+
+        rows = [call.args[1] for call in insert_history.call_args_list]
+        aggregate_rows = [
+            row for row in rows if json.loads(row["indicators_json"]).get("scope") == "aggregate"
+        ]
+        symbol_rows = [
+            row for row in rows if json.loads(row["indicators_json"]).get("scope") == "symbol"
+        ]
+        aggregate = json.loads(aggregate_rows[0]["indicators_json"])
+        self.assertEqual(len(aggregate_rows), 1)
+        self.assertEqual(len(symbol_rows), 3)
+        self.assertEqual(result["indicators"]["scope"], "aggregate")
+        self.assertEqual(aggregate["coverage_count"], 5)
+        self.assertEqual(aggregate["target_count"], 5)
+        self.assertEqual(aggregate["market_symbols"], [snapshot.symbol for snapshot in snapshots])
+        self.assertEqual(aggregate["detail_symbols"], ["BTC/USDT:USDT", "SOL/USDT:USDT", "ETH/USDT:USDT"])
 
     def _prompt_package(self) -> dict:
         return {

@@ -119,7 +119,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "enabled": True,
             "mode": "top_volume_24h",
             "quote": "USDT",
-            "max_symbols": 30,
+            "max_symbols": 40,
             "asset_class": "crypto",
             "exclude_bases": [],
             "exclude_keywords": [],

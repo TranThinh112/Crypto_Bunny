@@ -222,7 +222,7 @@ strategy:
     enabled: true
     mode: top_volume_24h
     quote: USDT
-    max_symbols: 30
+    max_symbols: 40
     asset_class: crypto
   long_short_bias:
     enabled: true
