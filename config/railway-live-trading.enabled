@@ -1,0 +1,5 @@
+Railway live trading is intentionally enabled for this repository.
+
+This file is referenced by config.railway.yaml via execution.live_confirm_file.
+It contains no secrets. Real OKX credentials must still be provided through
+Railway environment variables.
