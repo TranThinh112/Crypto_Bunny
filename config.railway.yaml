@@ -212,7 +212,7 @@ strategy:
   min_win_probability_pct: 80
   min_risk_reward: 1.5
   target:
-    mode: roi_percent
+    mode: risk_reward
     take_profit_pct: 75
     stop_loss_pct: 50
     risk_reward_ratio: 2.0
