@@ -192,12 +192,48 @@ def _candidate_for_local_pending_recheck(
     return refreshed
 
 
-def _candidate_current_market_price(candidate: TradeCandidate) -> float:
+def _candidate_current_market_price(candidate: TradeCandidate) -> float | None:
     indicator = candidate.indicator_summary if isinstance(candidate.indicator_summary, dict) else {}
     last = _optional_float(indicator.get("last"))
     if last is not None and last > 0:
         return last
-    return float(candidate.entry or 0)
+    entry = _optional_float(candidate.entry)
+    return entry if entry is not None and entry > 0 else None
+
+
+def _fresh_market_guard_layers_for_recheck(
+    config: dict[str, Any],
+    symbol: str,
+    market_layers: dict[str, dict[str, Any]] | None,
+) -> tuple[dict[str, dict[str, Any]], bool, list[str]]:
+    symbol_layers = (market_layers or {}).get(symbol)
+    if not isinstance(symbol_layers, dict):
+        return {}, False, []
+    guard_interval = max(30, int(config.get("market_guard", {}).get("interval_seconds", 60) or 60))
+    review_config = config.get("pending_orders", {}).get("review", {})
+    max_age_seconds = max(
+        guard_interval * 3,
+        int(review_config.get("market_guard_max_age_seconds", 300) or 300),
+    )
+    now = datetime.now(timezone.utc)
+    fresh: dict[str, Any] = {"symbol": symbol}
+    stale_labels: list[str] = []
+    for key, label in (("layer_5m", "5m"), ("layer_20m", "20m")):
+        layer = symbol_layers.get(key)
+        if not isinstance(layer, dict):
+            continue
+        observed_at = _parse_time(str(layer.get("latest_observed_at") or ""))
+        if observed_at is None or (now - observed_at).total_seconds() > max_age_seconds:
+            stale_labels.append(label)
+            continue
+        fresh[key] = layer
+    warnings = []
+    if stale_labels:
+        warnings.append(
+            f"{symbol}: ignored stale Market Guard layer(s) during old setup recheck: {', '.join(stale_labels)}"
+        )
+    checked = any(key in fresh for key in ("layer_5m", "layer_20m"))
+    return ({symbol: fresh} if checked else {}), checked, warnings
 
 
 def _close_latest_lc_trade_execution(
@@ -485,10 +521,29 @@ def revalidate_pending_orders_for_symbol(
         for record in list_pending_orders(config, status="OPEN", limit=200)
         if str(record.get("symbol") or "") == latest_candidate.symbol
     ]
+    records.sort(
+        key=lambda record: (
+            int(bool(_record_mini_setup_id(record))),
+            int(_record_is_mini_keep_setup(record)),
+            str(record.get("updated_at") or ""),
+            str(record.get("created_at") or ""),
+            int(record.get("id") or 0),
+        ),
+        reverse=True,
+    )
     invalid: list[dict[str, Any]] = []
     kept: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    cancellation_warnings: list[str] = []
     validation_config = mini_pending_risk_config(config)
     current_market_price = _candidate_current_market_price(latest_candidate)
+    effective_market_layers, market_guard_checked, market_guard_warnings = _fresh_market_guard_layers_for_recheck(
+        config,
+        latest_candidate.symbol,
+        market_layers,
+    )
+    warnings.extend(market_guard_warnings)
+    keeper_selected = False
     for record in records:
         record_side = str(record.get("side") or "").lower()
         recheck_candidate = _candidate_for_local_pending_recheck(record, latest_candidate)
@@ -510,7 +565,7 @@ def revalidate_pending_orders_for_symbol(
                 record,
                 recheck_candidate,
                 check,
-                market_layers,
+                effective_market_layers,
                 current_market_price=current_market_price,
             )
         expires_at = _parse_time(str(record.get("expires_at") or ""))
@@ -518,7 +573,15 @@ def revalidate_pending_orders_for_symbol(
             reasons.append("Old pending setup has expired")
         if reasons:
             invalid.append({"record": record, "reasons": reasons})
+        elif keeper_selected:
+            invalid.append(
+                {
+                    "record": record,
+                    "reasons": ["A newer valid pending setup for this symbol is already being kept"],
+                }
+            )
         else:
+            keeper_selected = True
             kept.append(
                 {
                     "id": record.get("id"),
@@ -529,18 +592,18 @@ def revalidate_pending_orders_for_symbol(
                     "setup_id": _record_mini_setup_id(record) or None,
                     "validation_source": "old_pending_snapshot_with_latest_market_context",
                     "current_market_price": current_market_price,
-                    "market_guard_checked": bool((market_layers or {}).get(latest_candidate.symbol)),
+                    "market_guard_checked": market_guard_checked,
                 }
             )
 
     canceled: list[dict[str, Any]] = []
-    warnings: list[str] = []
     for item in invalid:
         reasons = item["reasons"]
         cancel_reason = f"{reason_prefix}; old setup is no longer valid: " + "; ".join(reasons[:3])
         cancel_result = _cancel_pending_records(config, [item["record"]], reason=cancel_reason)
         canceled.extend(cancel_result["canceled"])
         warnings.extend(cancel_result["warnings"])
+        cancellation_warnings.extend(cancel_result["warnings"])
         if not cancel_result["ok"]:
             kept.append(
                 {
@@ -557,8 +620,9 @@ def revalidate_pending_orders_for_symbol(
         "kept": kept,
         "canceled": canceled,
         "warnings": warnings,
+        "cancellation_warnings": cancellation_warnings,
         "current_market_price": current_market_price,
-        "market_guard_checked": bool((market_layers or {}).get(latest_candidate.symbol)),
+        "market_guard_checked": market_guard_checked,
     }
 
 

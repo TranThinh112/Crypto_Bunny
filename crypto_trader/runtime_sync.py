@@ -4,7 +4,13 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .codex_features import ensure_prompt_version, prompt_status, refresh_bunny_health_state, refresh_trading_system_state
+from .codex_features import (
+    candidate_from_payload,
+    ensure_prompt_version,
+    prompt_status,
+    refresh_bunny_health_state,
+    refresh_trading_system_state,
+)
 from .market import create_exchange
 from .models import TradeCandidate, to_jsonable
 from .storage import (
@@ -17,6 +23,7 @@ from .storage import (
     reclassify_unknown_trade_closures,
     save_pending_order,
     save_prompt_metric_snapshot,
+    set_pending_order_exchange_order,
     update_trade_execution,
 )
 
@@ -154,6 +161,34 @@ def _candidate_from_open_order(config: dict[str, Any], order: dict[str, Any]) ->
     )
 
 
+def _candidate_from_pending_row(row: dict[str, Any]) -> TradeCandidate | None:
+    try:
+        payload = json.loads(str(row.get("payload_json") or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    candidate = candidate_from_payload(payload)
+    if not candidate.symbol or candidate.side not in {"long", "short"}:
+        return None
+    return candidate
+
+
+def _mini_pending_placeholder_candidate(row: dict[str, Any]) -> TradeCandidate | None:
+    if str(row.get("exchange_order_id") or ""):
+        return None
+    candidate = _candidate_from_pending_row(row)
+    if candidate is None:
+        return None
+    metadata = candidate.decision_metadata
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("mini_setup"), dict):
+        return None
+    review = metadata.get("okx_review")
+    if not isinstance(review, dict) or not bool(review.get("accepted_for_okx")):
+        return None
+    return candidate
+
+
 def _fetch_account_snapshot(config: dict[str, Any]) -> dict[str, Any]:
     exchange = create_exchange(config, authenticated=True)
     exchange.load_markets()
@@ -233,6 +268,13 @@ def sync_exchange_runtime_state(
         for row in active_pending
         if str(row.get("exchange_order_id") or "")
     }
+    mini_placeholders_by_key: dict[tuple[str, str], list[tuple[dict[str, Any], TradeCandidate]]] = {}
+    for row in active_pending:
+        placeholder_candidate = _mini_pending_placeholder_candidate(row)
+        if placeholder_candidate is None:
+            continue
+        key = (placeholder_candidate.symbol, placeholder_candidate.side)
+        mini_placeholders_by_key.setdefault(key, []).append((row, placeholder_candidate))
     orders_synced = 0
     for order in open_orders:
         exchange_order_id = str(order.get("id") or order.get("clientOrderId") or "")
@@ -241,21 +283,41 @@ def sync_exchange_runtime_state(
         candidate = _candidate_from_open_order(config, order)
         existing = pending_by_exchange_id.get(exchange_order_id)
         if existing:
+            stored_candidate = _candidate_from_pending_row(existing)
+            refresh_candidate = stored_candidate or candidate
+            if candidate.quantity and candidate.quantity > 0:
+                refresh_candidate.quantity = candidate.quantity
             refresh_pending_order(
                 config,
                 int(existing["id"]),
-                candidate,
+                refresh_candidate,
                 status="LC_OKX",
                 max_age_days=float(config.get("pending_orders", {}).get("exchange_max_age_days", 1.5) or 1.5),
             )
         else:
-            save_pending_order(
-                config,
-                candidate,
-                exchange_order_id,
-                status="LC_OKX",
-                max_age_days=float(config.get("pending_orders", {}).get("exchange_max_age_days", 1.5) or 1.5),
-            )
+            placeholder_rows = mini_placeholders_by_key.get((candidate.symbol, candidate.side)) or []
+            placeholder = placeholder_rows.pop(0) if placeholder_rows else None
+            if placeholder:
+                placeholder_row, placeholder_candidate = placeholder
+                set_pending_order_exchange_order(
+                    config,
+                    int(placeholder_row["id"]),
+                    placeholder_candidate,
+                    exchange_order_id,
+                    max_age_days=float(
+                        config.get("pending_orders", {}).get("exchange_max_age_days", 1.5) or 1.5
+                    ),
+                )
+            else:
+                save_pending_order(
+                    config,
+                    candidate,
+                    exchange_order_id,
+                    status="LC_OKX",
+                    max_age_days=float(
+                        config.get("pending_orders", {}).get("exchange_max_age_days", 1.5) or 1.5
+                    ),
+                )
         orders_synced += 1
 
     open_execution_rows = list_trade_execution_rows(config, statuses=["OPEN"], limit=1000)

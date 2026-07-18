@@ -4,6 +4,7 @@ import json
 from contextlib import ExitStack
 import tempfile
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase
@@ -17,7 +18,14 @@ from crypto_trader.engine import (
     run_once,
 )
 from crypto_trader.models import ExecutionResult, RiskCheck, TradeCandidate
-from crypto_trader.storage import list_pending_orders, open_pending_symbols, set_journal_state
+from crypto_trader.storage import (
+    acquire_journal_lease,
+    list_pending_orders,
+    open_pending_symbols,
+    release_journal_lease,
+    save_pending_order,
+    set_journal_state,
+)
 
 
 def _candidate(symbol: str = "BTC/USDT:USDT") -> TradeCandidate:
@@ -58,6 +66,37 @@ class EngineMiniQueueTest(TestCase):
         tmpdir = getattr(self, "tmpdir", None)
         if tmpdir:
             tmpdir.cleanup()
+
+    def test_mini_processing_lease_is_exclusive_and_owner_scoped(self) -> None:
+        config = self._config()
+        key = "mini_processing_lease_test"
+
+        self.assertTrue(acquire_journal_lease(config, key, "worker-a", ttl_seconds=60))
+        self.assertFalse(acquire_journal_lease(config, key, "worker-b", ttl_seconds=60))
+        self.assertFalse(release_journal_lease(config, key, "worker-b"))
+        self.assertTrue(release_journal_lease(config, key, "worker-a"))
+        self.assertTrue(acquire_journal_lease(config, key, "worker-b", ttl_seconds=60))
+        self.assertTrue(release_journal_lease(config, key, "worker-b"))
+
+    @patch("crypto_trader.engine.acquire_journal_lease", return_value=False)
+    def test_mini_setup_waits_without_calling_5_5_when_another_worker_holds_lease(self, _lease) -> None:
+        config = self._config()
+        config["mode"] = "demo"
+        candidate = _candidate("BTC/USDT:USDT")
+        scan = {
+            "provider": "openai",
+            "slot_id": "2026-07-18T08:00:00+07:00",
+            "selected_symbols": [candidate.symbol],
+            "ai_review": {"approved_symbols": [candidate.symbol]},
+        }
+
+        with patch("crypto_trader.engine.review_candidate_for_lc_okx") as review:
+            result = _create_pending_from_internal_scan(config, [candidate], scan, (0, set(), []), set())
+
+        review.assert_not_called()
+        self.assertEqual(result["created"], 0)
+        self.assertTrue(result["skipped"][0]["retryable"])
+        self.assertIn("Another Railway worker", result["skipped"][0]["reason"])
 
     def test_mini_scan_creates_only_best_lc_after_ai_review(self) -> None:
         config = self._config()
@@ -179,6 +218,36 @@ class EngineMiniQueueTest(TestCase):
         orders = list_pending_orders(config, status="LC_OKX")
         self.assertEqual(len(orders), 1)
         self.assertEqual(orders[0]["exchange_order_id"], "limit-123")
+
+    def test_mini_scan_closes_placeholder_when_okx_submit_fails(self) -> None:
+        config = self._config()
+        config["mode"] = "demo"
+        candidate = _candidate("BTC/USDT:USDT")
+        scan = {
+            "provider": "openai",
+            "slot_id": "2026-07-18T08:00:00+07:00",
+            "selected_symbols": [candidate.symbol],
+            "ai_review": {"approved_symbols": [candidate.symbol]},
+        }
+
+        with (
+            patch(
+                "crypto_trader.engine.review_candidate_for_lc_okx",
+                side_effect=lambda *args, **kwargs: (
+                    args[1],
+                    {"approved": True, "decision": "KEEP_SETUP", "accepted_for_okx": True},
+                ),
+            ),
+            patch(
+                "crypto_trader.engine.execute_candidate",
+                return_value=ExecutionResult("demo", False, None, "OKX timeout"),
+            ),
+        ):
+            result = _create_pending_from_internal_scan(config, [candidate], scan, (0, set(), []), set())
+
+        self.assertEqual(result["created"], 0)
+        self.assertIn("OKX timeout", result["skipped"][0]["reason"])
+        self.assertEqual(list_pending_orders(config, status="ACTIVE"), [])
 
     def test_mini_scan_rejects_lc_okx_when_gpt_55_blocks_setup(self) -> None:
         config = self._config()
@@ -615,12 +684,14 @@ class EngineMiniQueueTest(TestCase):
                     "action": "avoid_new_entry",
                     "risk_score": 9.0,
                     "direction": "down",
+                    "latest_observed_at": datetime.now(timezone.utc).isoformat(),
                 },
                 "layer_20m": {
                     "sample_count": 20,
                     "action": "normal",
                     "risk_score": 1.0,
                     "direction": "neutral",
+                    "latest_observed_at": datetime.now(timezone.utc).isoformat(),
                 },
             }
         }
@@ -653,6 +724,197 @@ class EngineMiniQueueTest(TestCase):
         self.assertEqual(len(rejected["rechecks"][0]["canceled"]), 1)
         create_exchange.return_value.cancel_order.assert_called_once_with("limit-04", first_candidate.symbol)
         self.assertEqual(list_pending_orders(config, status="LC_OKX"), [])
+
+    @patch("crypto_trader.engine.lc_pipeline_pool_rows", return_value=[])
+    def test_rejected_later_setup_ignores_stale_market_guard(self, _pool_rows) -> None:
+        config = self._config()
+        config["mode"] = "demo"
+        first_candidate = _candidate("BTC/USDT:USDT")
+        second_candidate = _candidate("BTC/USDT:USDT")
+        second_candidate.entry = 100.2
+        first_scan = {
+            "provider": "openai",
+            "slot_id": "2026-07-18T04:00:00+07:00",
+            "selected_symbols": [first_candidate.symbol],
+            "ai_review": {"approved_symbols": [first_candidate.symbol]},
+        }
+        second_scan = {**first_scan, "slot_id": "2026-07-18T08:00:00+07:00"}
+        decisions = [
+            {"approved": True, "decision": "KEEP_SETUP", "accepted_for_okx": True},
+            {
+                "approved": False,
+                "decision": "DELETE_SETUP",
+                "reason": "Delete the new setup",
+                "rejection_policy": "hard_delete",
+                "accepted_for_okx": False,
+            },
+        ]
+        stale_time = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        market_layers = {
+            first_candidate.symbol: {
+                "layer_5m": {
+                    "sample_count": 5,
+                    "action": "avoid_new_entry",
+                    "risk_score": 9.0,
+                    "direction": "down",
+                    "latest_observed_at": stale_time,
+                },
+                "layer_20m": {
+                    "sample_count": 20,
+                    "action": "avoid_new_entry",
+                    "risk_score": 9.0,
+                    "direction": "down",
+                    "latest_observed_at": stale_time,
+                },
+            }
+        }
+
+        with (
+            patch(
+                "crypto_trader.engine.review_candidate_for_lc_okx",
+                side_effect=lambda *args, **kwargs: (args[1], decisions.pop(0)),
+            ) as review,
+            patch(
+                "crypto_trader.engine.execute_candidate",
+                return_value=ExecutionResult("demo", True, "limit-04", "submitted"),
+            ),
+        ):
+            _create_pending_from_internal_scan(config, [first_candidate], first_scan, (0, set(), []), set())
+            rejected = _create_pending_from_internal_scan(
+                config,
+                [second_candidate],
+                second_scan,
+                (1, {first_candidate.symbol}, []),
+                open_pending_symbols(config),
+                market_layers=market_layers,
+            )
+
+        self.assertEqual(review.call_count, 2)
+        self.assertFalse(rejected["rechecks"][0]["market_guard_checked"])
+        self.assertIn("ignored stale Market Guard", rejected["rechecks"][0]["warnings"][0])
+        self.assertEqual(len(rejected["rechecks"][0]["kept"]), 1)
+        self.assertEqual(len(list_pending_orders(config, status="LC_OKX")), 1)
+
+    @patch("crypto_trader.engine.lc_pipeline_pool_rows", return_value=[])
+    def test_rejected_later_setup_keeps_only_one_valid_old_pending_order(self, _pool_rows) -> None:
+        config = self._config()
+        config["mode"] = "demo"
+        first_candidate = _candidate("BTC/USDT:USDT")
+        second_candidate = _candidate("BTC/USDT:USDT")
+        second_candidate.entry = 100.2
+        first_scan = {
+            "provider": "openai",
+            "slot_id": "2026-07-18T04:00:00+07:00",
+            "selected_symbols": [first_candidate.symbol],
+            "ai_review": {"approved_symbols": [first_candidate.symbol]},
+        }
+        second_scan = {**first_scan, "slot_id": "2026-07-18T08:00:00+07:00"}
+        decisions = [
+            {"approved": True, "decision": "KEEP_SETUP", "accepted_for_okx": True},
+            {
+                "approved": False,
+                "decision": "DELETE_SETUP",
+                "reason": "Delete the new setup",
+                "rejection_policy": "hard_delete",
+                "accepted_for_okx": False,
+            },
+        ]
+
+        with (
+            patch(
+                "crypto_trader.engine.review_candidate_for_lc_okx",
+                side_effect=lambda *args, **kwargs: (args[1], decisions.pop(0)),
+            ) as review,
+            patch(
+                "crypto_trader.engine.execute_candidate",
+                return_value=ExecutionResult("demo", True, "limit-04", "submitted"),
+            ),
+            patch("crypto_trader.pending.create_exchange") as create_exchange,
+        ):
+            create_exchange.return_value.load_markets.return_value = None
+            _create_pending_from_internal_scan(config, [first_candidate], first_scan, (0, set(), []), set())
+            save_pending_order(
+                config,
+                _candidate(first_candidate.symbol),
+                "limit-legacy-duplicate",
+                status="LC_OKX",
+                journal_id=99,
+            )
+            rejected = _create_pending_from_internal_scan(
+                config,
+                [second_candidate],
+                second_scan,
+                (2, {first_candidate.symbol}, []),
+                open_pending_symbols(config),
+            )
+
+        self.assertEqual(review.call_count, 2)
+        self.assertEqual(rejected["rechecks"][0]["checked"], 2)
+        self.assertEqual(len(rejected["rechecks"][0]["kept"]), 1)
+        self.assertEqual(len(rejected["rechecks"][0]["canceled"]), 1)
+        remaining = list_pending_orders(config, status="LC_OKX")
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["exchange_order_id"], "limit-04")
+        create_exchange.return_value.cancel_order.assert_called_once_with(
+            "limit-legacy-duplicate",
+            first_candidate.symbol,
+        )
+
+    @patch("crypto_trader.engine.lc_pipeline_pool_rows", return_value=[])
+    def test_rejected_later_setup_notifies_when_old_okx_cancel_fails(self, _pool_rows) -> None:
+        config = self._config()
+        config["mode"] = "demo"
+        first_candidate = _candidate("BTC/USDT:USDT")
+        invalid_candidate = _candidate("BTC/USDT:USDT")
+        invalid_candidate.indicator_summary = {"last": 90.0}
+        first_scan = {
+            "provider": "openai",
+            "slot_id": "2026-07-18T04:00:00+07:00",
+            "selected_symbols": [first_candidate.symbol],
+            "ai_review": {"approved_symbols": [first_candidate.symbol]},
+        }
+        second_scan = {**first_scan, "slot_id": "2026-07-18T08:00:00+07:00"}
+        decisions = [
+            {"approved": True, "decision": "KEEP_SETUP", "accepted_for_okx": True},
+            {
+                "approved": False,
+                "decision": "DELETE_SETUP",
+                "reason": "Delete the new setup",
+                "rejection_policy": "hard_delete",
+                "accepted_for_okx": False,
+            },
+        ]
+
+        with (
+            patch(
+                "crypto_trader.engine.review_candidate_for_lc_okx",
+                side_effect=lambda *args, **kwargs: (args[1], decisions.pop(0)),
+            ),
+            patch(
+                "crypto_trader.engine.execute_candidate",
+                return_value=ExecutionResult("demo", True, "limit-04", "submitted"),
+            ),
+            patch("crypto_trader.pending.create_exchange") as create_exchange,
+            patch("crypto_trader.notifier.send_telegram_message") as send_message,
+        ):
+            create_exchange.return_value.load_markets.return_value = None
+            create_exchange.return_value.cancel_order.side_effect = RuntimeError("OKX cancel timeout")
+            _create_pending_from_internal_scan(config, [first_candidate], first_scan, (0, set(), []), set())
+            rejected = _create_pending_from_internal_scan(
+                config,
+                [invalid_candidate],
+                second_scan,
+                (1, {first_candidate.symbol}, []),
+                open_pending_symbols(config),
+            )
+
+        self.assertEqual(len(rejected["rechecks"][0]["canceled"]), 0)
+        self.assertEqual(len(rejected["rechecks"][0]["kept"]), 1)
+        self.assertIn("OKX cancel timeout", rejected["rechecks"][0]["warnings"][0])
+        self.assertIn("OKX cancel timeout", rejected["rechecks"][0]["cancellation_warnings"][0])
+        messages = [str(call.args[1]) for call in send_message.call_args_list]
+        self.assertTrue(any("recheck LC_OKX cũ" in message for message in messages))
+        self.assertEqual(len(list_pending_orders(config, status="LC_OKX")), 1)
 
     @patch("crypto_trader.notifier.send_telegram_message")
     @patch("crypto_trader.engine.lc_pipeline_pool_rows")

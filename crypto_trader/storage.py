@@ -1423,6 +1423,61 @@ def claim_journal_state(config: dict[str, Any], key: str, value: str) -> bool:
     return claimed
 
 
+def acquire_journal_lease(
+    config: dict[str, Any],
+    key: str,
+    owner: str,
+    *,
+    ttl_seconds: int = 300,
+) -> bool:
+    """Acquire or take over an expired Mongo-backed lease."""
+    from pymongo import ReturnDocument
+    from pymongo.errors import DuplicateKeyError
+
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    expires_at = (now + timedelta(seconds=max(30, int(ttl_seconds or 300)))).isoformat()
+    _ensure_mongo_write_allowed(config)
+    try:
+        row = _mongo_collection(config, "journal_state").find_one_and_update(
+            {
+                "_id": key,
+                "$or": [
+                    {"lease_expires_at": {"$lte": now_iso}},
+                    {"lease_expires_at": {"$exists": False}},
+                ],
+            },
+            {
+                "$setOnInsert": {"_id": key, "key": key},
+                "$set": {
+                    "value": owner,
+                    "lease_owner": owner,
+                    "lease_expires_at": expires_at,
+                    "updated_at": now_iso,
+                },
+                "$unset": {"value_compressed": "", "value_encoding": ""},
+            },
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
+        )
+    except DuplicateKeyError:
+        _journal_state_cache_invalidate(config, key)
+        return False
+    acquired = bool(row and str(row.get("lease_owner") or "") == owner)
+    _journal_state_cache_invalidate(config, key)
+    return acquired
+
+
+def release_journal_lease(config: dict[str, Any], key: str, owner: str) -> bool:
+    """Release a lease only when it is still owned by this caller."""
+    _ensure_mongo_write_allowed(config)
+    result = _mongo_collection(config, "journal_state").delete_one(
+        {"_id": key, "lease_owner": owner}
+    )
+    _journal_state_cache_invalidate(config, key)
+    return bool(result.deleted_count)
+
+
 def next_global_counter(config: dict[str, Any], name: str) -> int:
     key = f"counter:{name}"
     _ensure_mongo_write_allowed(config)

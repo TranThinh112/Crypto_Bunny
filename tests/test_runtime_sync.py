@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 from copy import deepcopy
 from unittest import TestCase
@@ -7,8 +8,14 @@ from unittest import TestCase
 from crypto_trader.atlas_mirror import atlas_database_for_collection
 from crypto_trader.codex_features import _slot_state
 from crypto_trader.config import DEFAULT_CONFIG
+from crypto_trader.models import TradeCandidate
 from crypto_trader.runtime_sync import sync_runtime_state
-from crypto_trader.storage import insert_trade_execution_row, list_pending_orders, list_trade_execution_rows
+from crypto_trader.storage import (
+    insert_trade_execution_row,
+    list_pending_orders,
+    list_trade_execution_rows,
+    save_pending_order,
+)
 
 
 class RuntimeSyncTest(TestCase):
@@ -24,6 +31,95 @@ class RuntimeSyncTest(TestCase):
         tmpdir = getattr(self, "tmpdir", None)
         if tmpdir:
             tmpdir.cleanup()
+
+    @staticmethod
+    def _mini_candidate() -> TradeCandidate:
+        return TradeCandidate(
+            symbol="BTC/USDT:USDT",
+            base="BTC",
+            side="long",
+            confidence=88.0,
+            entry=62000.0,
+            stop_loss=61000.0,
+            take_profit=64000.0,
+            risk_reward=2.0,
+            order_usdt=20.0,
+            quantity=1.25,
+            spread_pct=0.01,
+            news_score=0.0,
+            news_count=1,
+            win_probability_pct=82.0,
+            decision_metadata={
+                "mini_setup": {"setup_id": "mini-btc-08"},
+                "okx_review": {
+                    "route": "lc_okx_setup_review",
+                    "decision": "KEEP_SETUP",
+                    "accepted_for_okx": True,
+                },
+            },
+        )
+
+    @staticmethod
+    def _open_order(order_id: str = "limit-123") -> dict:
+        return {
+            "id": order_id,
+            "symbol": "BTC/USDT:USDT",
+            "side": "buy",
+            "amount": 1.25,
+            "remaining": 1.25,
+            "price": 62000,
+        }
+
+    def test_runtime_sync_preserves_mini_and_5_5_metadata_for_existing_okx_order(self) -> None:
+        config = self._config()
+        save_pending_order(config, self._mini_candidate(), "limit-123", status="LC_OKX", journal_id=12)
+
+        sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-07-18T00:00:00+00:00",
+                "positions": [],
+                "open_orders": [self._open_order()],
+            },
+        )
+
+        pending = list_pending_orders(config, status="LC_OKX")
+        self.assertEqual(len(pending), 1)
+        payload = json.loads(str(pending[0]["payload_json"]))
+        self.assertEqual(payload["confidence"], 88.0)
+        self.assertEqual(payload["decision_metadata"]["mini_setup"]["setup_id"], "mini-btc-08")
+        self.assertTrue(payload["decision_metadata"]["okx_review"]["accepted_for_okx"])
+
+    def test_runtime_sync_attaches_orphan_okx_order_to_reviewed_mini_placeholder(self) -> None:
+        config = self._config()
+        placeholder = save_pending_order(
+            config,
+            self._mini_candidate(),
+            None,
+            status="OPEN",
+            max_age_hours=6,
+            journal_id=12,
+        )
+
+        sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-07-18T00:00:00+00:00",
+                "positions": [],
+                "open_orders": [self._open_order("limit-recovered")],
+            },
+        )
+
+        pending = list_pending_orders(config, status="LC_OKX")
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["id"], placeholder["id"])
+        self.assertEqual(pending[0]["exchange_order_id"], "limit-recovered")
+        payload = json.loads(str(pending[0]["payload_json"]))
+        self.assertEqual(payload["decision_metadata"]["mini_setup"]["setup_id"], "mini-btc-08")
 
     def test_sync_runtime_state_seeds_ai_metadata(self) -> None:
         config = self._config()

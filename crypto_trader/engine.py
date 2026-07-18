@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import uuid
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -45,15 +46,19 @@ from .pending import (
 from .risk import active_trades_summary, evaluate_candidate, mini_pending_risk_config
 from .sizing import apply_position_sizing
 from .storage import (
+    acquire_journal_lease,
     claim_journal_state,
+    close_pending_order,
     get_journal_state,
     is_retryable_storage_error,
     latest_decision_payload,
     next_global_counter,
     open_pending_symbols,
+    release_journal_lease,
     save_decision,
     save_market_scan_observations,
     save_pending_order,
+    set_pending_order_exchange_order,
     set_journal_state,
 )
 from .strategy import build_candidates, enrich_quantities
@@ -63,6 +68,7 @@ WAIT_SLOT_NOTIFICATION_HISTORY_KEY = "wait_slot_notification_history_v1"
 WAIT_SLOT_NOTIFICATION_COUNTER_KEY = "wait_slot_notification_counter_v1"
 MINI_SYSTEM_NOTIFICATION_HISTORY_KEY = "mini_system_notification_history_v1"
 MINI_SETUP_STATE_PREFIX = "mini_setup:"
+MINI_PROCESSING_LEASE_KEY = "mini_processing_lease_v1"
 
 
 def _report_progress(
@@ -1109,6 +1115,28 @@ def _create_pending_from_internal_scan(
 
     approved = [str(symbol) for symbol in (internal_scan or {}).get("selected_symbols") or [] if str(symbol)]
     approved = approved[:pending_limit]
+    lease_owner = uuid.uuid4().hex
+    lease_seconds = max(
+        60,
+        int(internal_config.get("mini_processing_lease_seconds", 300) or 300),
+    )
+    if not acquire_journal_lease(
+        config,
+        MINI_PROCESSING_LEASE_KEY,
+        lease_owner,
+        ttl_seconds=lease_seconds,
+    ):
+        skip_reason = "Another Railway worker is processing a Mini setup; this setup will retry next cycle"
+        result["skipped"].append({"reason": skip_reason, "retryable": True})
+        notification = _notify_mini_system_block(
+            config,
+            stage="Mini -> 5.5/LC_OKX",
+            reason=skip_reason,
+            scan=internal_scan,
+        )
+        if notification:
+            result["system_notifications"].append(notification)
+        return result
     current_candidates_by_symbol = {candidate.symbol: candidate for candidate in candidates}
     cached_candidates_by_symbol = _internal_lc_candidate_cache(config, approved)
     scan_candidates_by_symbol = _internal_scan_candidate_cache(config, internal_scan, approved)
@@ -1351,6 +1379,16 @@ def _create_pending_from_internal_scan(
                     market_layers=market_layers,
                 )
                 result["rechecks"].append({"setup_id": setup_id, **recheck})
+                if recheck.get("cancellation_warnings"):
+                    notification = _notify_mini_system_block(
+                        config,
+                        stage="5.5 DELETE_SETUP -> recheck LC_OKX cũ",
+                        reason="; ".join(str(item) for item in recheck["cancellation_warnings"][:3]),
+                        scan=internal_scan,
+                        candidate=candidate,
+                    )
+                    if notification:
+                        result["system_notifications"].append(notification)
                 _save_mini_setup_state(
                     config,
                     setup_id,
@@ -1407,7 +1445,38 @@ def _create_pending_from_internal_scan(
             continue
         exchange_order_id: str | None = None
         order_status = "OPEN"
+        exchange_max_age_days = float(
+            config.get("pending_orders", {}).get("exchange_max_age_days", 1.5) or 1.5
+        )
+        local_max_age_hours = float(
+            config.get("pending_orders", {}).get("local_max_age_hours", 6) or 6
+        )
+        if config.get("mode") == "dry_run":
+            record = save_pending_order(
+                config,
+                reviewed_candidate,
+                None,
+                max_age_days=float(config.get("pending_orders", {}).get("max_age_days", 3) or 3),
+                max_age_hours=local_max_age_hours,
+                journal_id=journal_id,
+            )
         if config.get("mode") != "dry_run":
+            record = save_pending_order(
+                config,
+                reviewed_candidate,
+                None,
+                status="OPEN",
+                max_age_hours=local_max_age_hours,
+                journal_id=journal_id,
+            )
+            _save_mini_setup_state(
+                config,
+                setup_id,
+                status="pending_submit_started",
+                lc_id=journal_id or record.get("id"),
+                pending_record_id=record.get("id"),
+                okx_review=okx_review,
+            )
             order_type = str(config.get("pending_orders", {}).get("order_type", "limit") or "limit")
             execution = execute_candidate(
                 config,
@@ -1419,6 +1488,7 @@ def _create_pending_from_internal_scan(
             )
             if not execution.submitted or not execution.order_id:
                 skip_reason = f"OKX LC submit failed: {execution.message}"
+                close_pending_order(config, int(record["id"]), "CANCELED", skip_reason)
                 _save_mini_setup_state(
                     config,
                     setup_id,
@@ -1447,16 +1517,13 @@ def _create_pending_from_internal_scan(
                 continue
             exchange_order_id = execution.order_id
             order_status = "LC_OKX"
-        record = save_pending_order(
-            config,
-            reviewed_candidate,
-            exchange_order_id,
-            max_age_days=float(config.get("pending_orders", {}).get("exchange_max_age_days", 1.5) or 1.5)
-            if exchange_order_id
-            else float(config.get("pending_orders", {}).get("max_age_days", 3) or 3),
-            max_age_hours=None if exchange_order_id else float(config.get("pending_orders", {}).get("local_max_age_hours", 6) or 6),
-            journal_id=journal_id,
-        )
+            set_pending_order_exchange_order(
+                config,
+                int(record["id"]),
+                reviewed_candidate,
+                exchange_order_id,
+                max_age_days=exchange_max_age_days,
+            )
         result["created"] += 1
         _save_mini_setup_state(
             config,
@@ -1481,6 +1548,10 @@ def _create_pending_from_internal_scan(
                 "okx_review": candidate_okx_review(reviewed_candidate, route="lc_okx_setup_review"),
             }
         )
+    try:
+        release_journal_lease(config, MINI_PROCESSING_LEASE_KEY, lease_owner)
+    except Exception as exc:
+        result.setdefault("warnings", []).append(f"Mini processing lease release failed: {exc}")
     return result
 
 
