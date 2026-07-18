@@ -3,6 +3,7 @@ Task: review up to 3 code-ranked setups and choose LC candidates.
 Rules:
 - Pick at least 1 symbol when candidates exist, unless all are clearly invalid.
 - Prefer setups with aligned 4h bias, 1h/15m/5m confirmation, acceptable RR, volume support, and clean levels.
+- Use `indicator_summary.market_pattern` when present: candlestick patterns, chart patterns, market structure, confluence bias/score, smart-money events, support/resistance zones.
 - Reject/avoid if 4h conflicts strongly, RR is weak, volume is missing, or warnings show major risk.
 - Treat code fields as precomputed evidence; do not ask for raw candles.
 - Use rolling memory only when present and only to judge improving/weakening momentum.

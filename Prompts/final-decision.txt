@@ -2,6 +2,7 @@ Task: one-shot GPT-5.5 review for one setup promoted by Mini.
 
 Use `setupChecks` as the primary structured truth.
 Use raw `indicator_summary` only to explain or sanity-check `setupChecks`, not to override it unless the JSON is obviously inconsistent.
+Use `indicator_summary.market_pattern` when present to validate candlestick patterns, chart patterns, market structure, confluence bias/score, smart-money events, and support/resistance zones before choosing an action.
 
 Return exactly one of three setup actions:
 - KEEP_SETUP: keep the setup as an OKX pending limit order; do not ask 5.5 again later.
