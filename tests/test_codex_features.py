@@ -5,11 +5,20 @@ import json
 import os
 import tempfile
 import urllib.error
+from copy import deepcopy
 from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
 
-from crypto_trader.codex_features import ai_call_decision_stats, ai_trade_decision_stats, call_openai_json, record_ai_call_event
+from crypto_trader.codex_features import (
+    ai_call_decision_stats,
+    ai_trade_decision_stats,
+    call_openai_json,
+    record_ai_call_event,
+    select_runtime_config,
+)
+from crypto_trader.config import DEFAULT_CONFIG
+from crypto_trader.storage import get_strategy_version, save_strategy_version
 
 
 class _FakeOpenAIResponse:
@@ -507,3 +516,36 @@ class CodexFeaturesTest(TestCase):
         self.assertEqual(stats["okxCallCount"], 1)
         self.assertEqual(stats["longCount"], 1)
         self.assertEqual(stats["noTradeCount"], 1)
+
+    def test_default_strategy_syncs_but_cannot_override_deployed_risk_config(self) -> None:
+        config = deepcopy(DEFAULT_CONFIG)
+        config["_atlas_test_mode"] = True
+        config["_config_path"] = str(Path(self._tmpdir.name) / "strategy-config.yaml")
+        config["_config_dir"] = self._tmpdir.name
+        config["risk"]["max_active_trades"] = 5
+        config["risk"]["cooldown_minutes"] = 0
+        config["trading_risk"]["max_concurrent_positions"] = 5
+        stale_payload = {
+            "risk": {**config["risk"], "max_active_trades": 1, "cooldown_minutes": 60},
+            "trading_risk": {**config["trading_risk"], "max_concurrent_positions": 1},
+        }
+        save_strategy_version(
+            config,
+            {
+                "version": "strategy-v1",
+                "name": "STRATEGY-V1",
+                "is_active": 1,
+                "traffic_percent": 100,
+                "payload_json": json.dumps(stale_payload),
+            },
+        )
+
+        runtime = select_runtime_config(config)
+        stored = get_strategy_version(config, "strategy-v1")
+        stored_payload = json.loads(str((stored or {}).get("payload_json") or "{}"))
+
+        self.assertEqual(runtime["risk"]["max_active_trades"], 5)
+        self.assertEqual(runtime["risk"]["cooldown_minutes"], 0)
+        self.assertEqual(runtime["trading_risk"]["max_concurrent_positions"], 5)
+        self.assertEqual(stored_payload["risk"]["max_active_trades"], 5)
+        self.assertEqual(stored_payload["risk"]["cooldown_minutes"], 0)

@@ -1074,7 +1074,16 @@ def ensure_strategy_versions(config: dict[str, Any]) -> None:
         "risk_config_json": json.dumps(config.get("risk", {}), ensure_ascii=False),
         "payload_json": json.dumps(payload, ensure_ascii=False),
     }
-    ensure_strategy_version(config, record)
+    existing = get_strategy_version(config, version)
+    if existing is None:
+        ensure_strategy_version(config, record)
+        return
+    if str(existing.get("payload_json") or "{}") == str(record["payload_json"]):
+        return
+    record["created_at"] = existing.get("created_at") or record["created_at"]
+    record["is_active"] = int(existing.get("is_active", record["is_active"]) or 0)
+    record["traffic_percent"] = float(existing.get("traffic_percent", record["traffic_percent"]) or 0)
+    save_strategy_version(config, record, deactivate_others=False)
 
 
 def create_strategy_version(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
