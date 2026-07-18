@@ -699,6 +699,24 @@ class UiTest(TestCase):
         finally:
             set_telegram_startup_quiet_until(None)
 
+    @patch("crypto_trader.notifier.urllib.request.urlopen")
+    def test_telegram_api_never_uses_network_in_test_mode(self, urlopen) -> None:
+        from crypto_trader.notifier import _telegram_api_request
+
+        with patch.dict(
+            "os.environ",
+            {"TELEGRAM_BOT_TOKEN": "real-looking-token", "TELEGRAM_CHAT_ID": "123"},
+            clear=False,
+        ):
+            response = _telegram_api_request(
+                {"_atlas_test_mode": True, "notifications": {"telegram": {"enabled": True}}},
+                "sendMessage",
+                {"chat_id": "123", "text": "sample notification"},
+            )
+
+        self.assertIsNone(response)
+        urlopen.assert_not_called()
+
     @patch("crypto_trader.ui.update_lc_internal_pipeline")
     @patch("crypto_trader.ui.collect_lc_pipeline_candidates")
     def test_lc_pipeline_worker_keeps_telegram_config_during_startup_quiet(self, collect_candidates, update_pipeline) -> None:

@@ -261,6 +261,10 @@ def telegram_max_positions_keyboard(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _telegram_api_request(config: dict[str, Any], method: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    # Tests may load the developer's real Telegram credentials from .env. Never
+    # allow a test config or a pytest process to reach the external bot API.
+    if os.getenv("PYTEST_CURRENT_TEST") or config.get("_atlas_test_mode"):
+        return None
     if not telegram_enabled(config):
         return None
 
