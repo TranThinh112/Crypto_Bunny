@@ -51,6 +51,33 @@ def _ohlcv_to_candles(rows: list[list[Any]], *, max_candles: int) -> list[Candle
     return candles
 
 
+def _enum_value(value: Any) -> Any:
+    return getattr(value, "value", value)
+
+
+def _compact_detection(item: Any, *, pattern_key: str = "pattern_type") -> dict[str, Any]:
+    pattern = getattr(item, pattern_key, None)
+    if pattern is None and hasattr(item, "pattern"):
+        pattern = getattr(item, "pattern", None)
+    payload = {
+        "pattern": pattern,
+        "direction": _enum_value(getattr(item, "direction", None)),
+        "confidence": round(float(getattr(item, "confidence", 0.0) or 0.0), 4),
+        "status": _enum_value(getattr(item, "status", None)),
+    }
+    return {key: value for key, value in payload.items() if value not in (None, "", [], {})}
+
+
+def _compact_zone(zone: Any) -> dict[str, Any]:
+    payload = {
+        "type": getattr(zone, "type", None),
+        "center_price": round(float(getattr(zone, "center_price", 0.0) or 0.0), 8),
+        "strength_score": round(float(getattr(zone, "strength_score", 0.0) or 0.0), 4),
+        "touch_count": int(getattr(zone, "touch_count", 0) or 0),
+    }
+    return {key: value for key, value in payload.items() if value not in (None, "", [], {})}
+
+
 def _compact_market_pattern_result(result: MarketAnalysisResult, snapshot_id: str | None) -> dict[str, Any]:
     structure = result.market_structure
     confluence = result.confluence
@@ -74,6 +101,11 @@ def _compact_market_pattern_result(result: MarketAnalysisResult, snapshot_id: st
         "smart_money_count": len(result.smart_money),
         "support_zone_count": len(result.support_zones),
         "resistance_zone_count": len(result.resistance_zones),
+        "candlestick_patterns": [_compact_detection(item) for item in result.candlestick_patterns[:5]],
+        "chart_patterns": [_compact_detection(item, pattern_key="pattern") for item in result.chart_patterns[:5]],
+        "smart_money_events": [_compact_detection(item, pattern_key="type") for item in result.smart_money[:5]],
+        "nearest_support": _compact_zone(result.support_zones[-1]) if result.support_zones else {},
+        "nearest_resistance": _compact_zone(result.resistance_zones[-1]) if result.resistance_zones else {},
         "feature_vector": result.feature_vector.model_dump(mode="json"),
         "warnings": result.warnings[:5],
     }
@@ -158,5 +190,15 @@ def attach_market_pattern_features_to_candidates(candidates: list[TradeCandidate
             "smart_money_count": analysis.get("smart_money_count"),
             "support_zone_count": analysis.get("support_zone_count"),
             "resistance_zone_count": analysis.get("resistance_zone_count"),
+            "candlestick_patterns": analysis.get("candlestick_patterns"),
+            "chart_patterns": analysis.get("chart_patterns"),
+            "smart_money_events": analysis.get("smart_money_events"),
+            "nearest_support": analysis.get("nearest_support"),
+            "nearest_resistance": analysis.get("nearest_resistance"),
+        }
+        candidate.indicator_summary["market_pattern"] = {
+            key: value
+            for key, value in candidate.indicator_summary["market_pattern"].items()
+            if value not in (None, "", [], {})
         }
         candidate.decision_metadata["market_pattern_snapshot_id"] = analysis.get("snapshot_id")

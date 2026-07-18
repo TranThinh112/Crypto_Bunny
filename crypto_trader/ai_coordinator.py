@@ -639,6 +639,11 @@ def _compact_indicator_summary(summary: dict[str, Any] | None) -> dict[str, Any]
                 "smart_money_count",
                 "support_zone_count",
                 "resistance_zone_count",
+                "candlestick_patterns",
+                "chart_patterns",
+                "smart_money_events",
+                "nearest_support",
+                "nearest_resistance",
             )
             if market_pattern.get(key) not in (None, "", [], {})
         }
@@ -678,6 +683,7 @@ def _compact_okx_indicator_summary(summary: dict[str, Any] | None) -> dict[str, 
                 "timeframe",
                 "trend_regime",
                 "structure_state",
+                "trend_strength",
                 "bos_detected",
                 "bos_direction",
                 "choch_detected",
@@ -685,6 +691,16 @@ def _compact_okx_indicator_summary(summary: dict[str, Any] | None) -> dict[str, 
                 "confluence_bias",
                 "confluence_score",
                 "data_quality_score",
+                "candlestick_count",
+                "chart_pattern_count",
+                "smart_money_count",
+                "support_zone_count",
+                "resistance_zone_count",
+                "candlestick_patterns",
+                "chart_patterns",
+                "smart_money_events",
+                "nearest_support",
+                "nearest_resistance",
             )
             if market_pattern.get(key) not in (None, "", [], {})
         }

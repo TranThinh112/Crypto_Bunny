@@ -182,5 +182,7 @@ def test_crypto_trader_helper_analyzes_snapshot_and_attaches_candidate_features(
     assert result["analyzed"] == 1
     assert db["market_analysis_snapshots"].count_documents({}) == 1
     assert snapshot.market_pattern_analysis["snapshot_id"]
+    assert snapshot.market_pattern_analysis["candlestick_patterns"]
     assert candidate.indicator_summary["market_pattern"]["snapshot_id"] == snapshot.market_pattern_analysis["snapshot_id"]
+    assert candidate.indicator_summary["market_pattern"]["candlestick_patterns"]
     assert candidate.decision_metadata["market_pattern_snapshot_id"] == snapshot.market_pattern_analysis["snapshot_id"]

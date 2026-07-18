@@ -12,6 +12,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from crypto_trader.codex_features import (
+    _compact_candidate_storage_payload,
     ai_call_decision_stats,
     ai_trade_decision_stats,
     call_openai_json,
@@ -20,6 +21,7 @@ from crypto_trader.codex_features import (
     select_runtime_config,
 )
 from crypto_trader.config import DEFAULT_CONFIG
+from crypto_trader.models import TradeCandidate
 from crypto_trader.storage import get_strategy_version, save_strategy_version
 
 
@@ -60,6 +62,44 @@ class CodexFeaturesTest(TestCase):
 
     def _role_config(self) -> dict:
         return {"api_key_env": "OPENAI_API_KEY_TEST", "timeout_seconds": 1}
+
+    def test_compact_candidate_storage_payload_preserves_market_pattern_context(self) -> None:
+        candidate = TradeCandidate(
+            symbol="BTC/USDT:USDT",
+            base="BTC",
+            side="long",
+            confidence=86.0,
+            win_probability_pct=82.0,
+            entry=100.0,
+            stop_loss=98.0,
+            take_profit=103.0,
+            risk_reward=1.5,
+            order_usdt=20.0,
+            quantity=1.0,
+            spread_pct=0.01,
+            news_score=0.0,
+            news_count=1,
+            indicator_summary={
+                "trend": "up",
+                "market_pattern": {
+                    "snapshot_id": "mp-storage-1",
+                    "timeframe": "4h",
+                    "trend_regime": "bullish",
+                    "confluence_bias": "bullish",
+                    "confluence_score": 0.72,
+                    "candlestick_count": 2,
+                    "candlestick_patterns": [
+                        {"pattern": "bullish_engulfing", "direction": "bullish", "confidence": 0.81},
+                    ],
+                },
+            },
+        )
+
+        payload = _compact_candidate_storage_payload(candidate)
+
+        market_pattern = payload["indicator_summary"]["market_pattern"]
+        self.assertEqual(market_pattern["snapshot_id"], "mp-storage-1")
+        self.assertEqual(market_pattern["candlestick_patterns"][0]["pattern"], "bullish_engulfing")
 
     def test_detect_market_regime_aggregates_top_volume_scope_separately_from_detail_tabs(self) -> None:
         config = {

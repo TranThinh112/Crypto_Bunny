@@ -1589,6 +1589,36 @@ def _compact_market_indicator(indicator: dict[str, Any] | None) -> dict[str, Any
         }
         if not compact["higher_timeframes"]:
             compact.pop("higher_timeframes", None)
+    market_pattern = indicator.get("market_pattern")
+    if isinstance(market_pattern, dict):
+        compact["market_pattern"] = {
+            key: _round_float(market_pattern.get(key))
+            for key in (
+                "snapshot_id",
+                "timeframe",
+                "trend_regime",
+                "structure_state",
+                "trend_strength",
+                "bos_detected",
+                "bos_direction",
+                "choch_detected",
+                "choch_direction",
+                "confluence_bias",
+                "confluence_score",
+                "data_quality_score",
+                "candlestick_count",
+                "chart_pattern_count",
+                "smart_money_count",
+                "support_zone_count",
+                "resistance_zone_count",
+                "candlestick_patterns",
+                "chart_patterns",
+                "smart_money_events",
+                "nearest_support",
+                "nearest_resistance",
+            )
+            if market_pattern.get(key) not in (None, "", [], {})
+        }
     return {key: value for key, value in compact.items() if value not in (None, "", [], {})}
 
 

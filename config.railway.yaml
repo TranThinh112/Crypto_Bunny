@@ -193,6 +193,17 @@ storage_retention:
   paper_trades_keep_days: 30
   market_regime_history_keep_days: 7
 
+market_pattern_engine:
+  enabled: true
+  max_snapshots_per_scan: 3
+  max_candles: 220
+  requested_detectors:
+  - candlestick
+  - market_structure
+  - support_resistance
+  - chart_patterns
+  - smart_money
+
 strategy:
   timeframe: 1m
   ohlcv_limit: 180

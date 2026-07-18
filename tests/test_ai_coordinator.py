@@ -902,6 +902,19 @@ class AiCoordinatorTest(TestCase):
                     "pattern_details": ["raw"] * 20,
                 },
             },
+            "market_pattern": {
+                "snapshot_id": "mp-1",
+                "timeframe": "4h",
+                "trend_regime": "bullish",
+                "structure_state": "HH/HL",
+                "confluence_bias": "bullish",
+                "confluence_score": 0.72,
+                "candlestick_count": 2,
+                "candlestick_patterns": [
+                    {"pattern": "bullish_engulfing", "direction": "bullish", "confidence": 0.81},
+                    {"pattern": "hammer", "direction": "bullish", "confidence": 0.74},
+                ],
+            },
             "higher_timeframes": {
                 "1m": {"trend": "up", "candles": [1] * 100},
                 "1h": {"trend": "up", "rsi": 55.4, "range_position": "mid", "candles": [1] * 100},
@@ -933,6 +946,8 @@ class AiCoordinatorTest(TestCase):
         self.assertNotIn("1m", indicator["candlestick_patterns"])
         self.assertNotIn("pattern_details", indicator["candlestick_patterns"]["4h"])
         self.assertEqual(indicator["candlestick_patterns"]["4h"]["patterns"], ["morning_star", "hammer", "dragonfly_doji"])
+        self.assertEqual(indicator["market_pattern"]["snapshot_id"], "mp-1")
+        self.assertEqual(indicator["market_pattern"]["candlestick_patterns"][0]["pattern"], "bullish_engulfing")
         self.assertEqual(summary["reasons"], ["r1", "r2", "r3"])
         self.assertEqual(summary["warnings"], ["w1", "w2"])
 
@@ -954,6 +969,21 @@ class AiCoordinatorTest(TestCase):
                 "5m": {"direction": "bullish", "patterns": ["bullish_engulfing"], "signal_summary": "5m supports long"},
                 "1h": {"direction": "bullish", "patterns": ["morning_star"], "signal_summary": "1h supports long"},
                 "4h": {"direction": "bearish", "patterns": ["bearish_engulfing"], "signal_summary": "4h opposes long"},
+            },
+            "market_pattern": {
+                "snapshot_id": "mp-okx-1",
+                "timeframe": "4h",
+                "trend_regime": "range",
+                "confluence_bias": "neutral",
+                "confluence_score": 0.44,
+                "candlestick_count": 1,
+                "chart_pattern_count": 1,
+                "candlestick_patterns": [
+                    {"pattern": "doji", "direction": "neutral", "confidence": 0.66},
+                ],
+                "chart_patterns": [
+                    {"pattern": "triangle", "direction": "neutral", "confidence": 0.58},
+                ],
             },
         }
         candidate.higher_timeframes = {
@@ -982,6 +1012,9 @@ class AiCoordinatorTest(TestCase):
             indicator["candlestick_patterns"]["4h"],
             {"direction": "bearish", "patterns": ["bearish_engulfing"], "signal_summary": "4h opposes long"},
         )
+        self.assertEqual(indicator["market_pattern"]["snapshot_id"], "mp-okx-1")
+        self.assertEqual(indicator["market_pattern"]["candlestick_patterns"][0]["pattern"], "doji")
+        self.assertEqual(indicator["market_pattern"]["chart_patterns"][0]["pattern"], "triangle")
         self.assertNotIn("support_distance_pct", indicator)
         checks = summary["setup_checks"]
         self.assertEqual(checks["bias_4h"]["status"], "conflict")

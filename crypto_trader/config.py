@@ -361,6 +361,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enabled": True,
         "max_snapshots_per_scan": 3,
         "max_candles": 220,
+        "requested_detectors": [
+            "candlestick",
+            "market_structure",
+            "support_resistance",
+            "chart_patterns",
+            "smart_money",
+        ],
     },
     "bunny_health_monitor": {
         "enabled": True,
