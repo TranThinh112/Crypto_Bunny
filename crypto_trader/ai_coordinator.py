@@ -639,7 +639,7 @@ def _compact_okx_indicator_summary(summary: dict[str, Any] | None) -> dict[str, 
     candlesticks = summary.get("candlestick_patterns")
     if isinstance(candlesticks, dict):
         compact["candlestick_patterns"] = {
-            str(frame): _compact_dict(data, ["direction", "strongest_pattern"])
+            str(frame): _compact_dict(data, ["direction", "strongest_pattern", "patterns", "signal_summary"])
             for frame, data in candlesticks.items()
             if str(frame).lower() in {"5m", "15m", "1h", "4h"} and isinstance(data, dict)
         }

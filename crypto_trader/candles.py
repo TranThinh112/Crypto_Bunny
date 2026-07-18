@@ -3,6 +3,16 @@ from __future__ import annotations
 from typing import Any
 
 
+PATTERN_REFERENCES: dict[str, str] = {
+    "cm45t3r/candlestick": "https://github.com/cm45t3r/candlestick",
+    "EarnForex/Candlestick-Pattern": "https://github.com/EarnForex/Candlestick-Pattern",
+    "EarnForex/Pattern-Recognition-Master": "https://github.com/EarnForex/Pattern-Recognition-Master",
+    "shibisuriya/japanese-candlesticks-tradingview-Indicators": (
+        "https://github.com/shibisuriya/japanese-candlesticks-tradingview-Indicators"
+    ),
+}
+
+
 PATTERN_LIBRARY: dict[str, dict[str, str]] = {
     "doji": {
         "bias": "neutral",
@@ -130,6 +140,60 @@ PATTERN_LIBRARY: dict[str, dict[str, str]] = {
         "meaning": "Bearish marubozu shows strong control by sellers.",
         "learning_note": "A bearish marubozu is stronger when it breaks support with volume support.",
     },
+    "spinning_top": {
+        "bias": "neutral",
+        "category": "indecision",
+        "meaning": "Spinning top shows neither buyers nor sellers had clean control.",
+        "learning_note": "A spinning top after a strong move warns mini and OKX review to wait for confirmation.",
+    },
+    "bullish_kicker": {
+        "bias": "bullish_reversal",
+        "category": "reversal",
+        "meaning": "Bullish kicker shows an abrupt shift from selling pressure to buying pressure.",
+        "learning_note": "On crypto, require meaningful body separation because true session gaps are rare.",
+    },
+    "bearish_kicker": {
+        "bias": "bearish_reversal",
+        "category": "reversal",
+        "meaning": "Bearish kicker shows an abrupt shift from buying pressure to selling pressure.",
+        "learning_note": "This pattern is more useful when it appears near resistance or after an extended rise.",
+    },
+    "three_inside_up": {
+        "bias": "bullish_reversal",
+        "category": "reversal",
+        "meaning": "Three inside up confirms a bullish harami with follow-through.",
+        "learning_note": "This is stronger than a standalone harami because the third candle confirms demand.",
+    },
+    "three_inside_down": {
+        "bias": "bearish_reversal",
+        "category": "reversal",
+        "meaning": "Three inside down confirms a bearish harami with follow-through.",
+        "learning_note": "This is stronger than a standalone harami because the third candle confirms supply.",
+    },
+    "three_outside_up": {
+        "bias": "bullish_reversal",
+        "category": "reversal",
+        "meaning": "Three outside up confirms a bullish engulfing with another bullish close.",
+        "learning_note": "Mini should treat it as a stronger reversal clue than a single engulfing candle.",
+    },
+    "three_outside_down": {
+        "bias": "bearish_reversal",
+        "category": "reversal",
+        "meaning": "Three outside down confirms a bearish engulfing with another bearish close.",
+        "learning_note": "Mini should treat it as a stronger downside reversal clue than a single engulfing candle.",
+    },
+    "rising_three_methods": {
+        "bias": "bullish_continuation",
+        "category": "continuation",
+        "meaning": "Rising three methods shows a brief pause inside a bullish impulse before continuation.",
+        "learning_note": "This supports trend-following longs, but entry still needs volume and risk/reward checks.",
+    },
+    "falling_three_methods": {
+        "bias": "bearish_continuation",
+        "category": "continuation",
+        "meaning": "Falling three methods shows a brief pause inside a bearish impulse before continuation.",
+        "learning_note": "This supports trend-following shorts, but entry still needs volume and risk/reward checks.",
+    },
     "bullish_pin_bar": {
         "bias": "bullish_reversal",
         "category": "reversal",
@@ -214,6 +278,26 @@ def _same_level(value_a: float, value_b: float, last_close: float, avg_range: fl
     return abs(value_a - value_b) <= tolerance
 
 
+def _body_low(candle: dict[str, float]) -> float:
+    return min(candle["open"], candle["close"])
+
+
+def _body_high(candle: dict[str, float]) -> float:
+    return max(candle["open"], candle["close"])
+
+
+def _body_engulfs(inner: dict[str, float], outer: dict[str, float]) -> bool:
+    return _body_low(outer) <= _body_low(inner) and _body_high(outer) >= _body_high(inner)
+
+
+def _inside_range(candle: dict[str, float], outer: dict[str, float]) -> bool:
+    return candle["high"] <= outer["high"] and candle["low"] >= outer["low"]
+
+
+def _meaningful_gap(candle_a: dict[str, float], candle_b: dict[str, float], avg_range: float) -> float:
+    return max(candle_b["close"] * 0.0005, avg_range * 0.08, candle_a["range"] * 0.04)
+
+
 def _pattern_detail(name: str, score: float) -> dict[str, Any]:
     metadata = PATTERN_LIBRARY.get(
         name,
@@ -230,6 +314,7 @@ def _pattern_detail(name: str, score: float) -> dict[str, Any]:
         "category": metadata["category"],
         "meaning": metadata["meaning"],
         "learning_note": metadata["learning_note"],
+        "source_tags": list(PATTERN_REFERENCES),
         "score": round(score, 2),
     }
 
@@ -308,6 +393,12 @@ def detect_candlestick_patterns(ohlcv: list[list[Any]]) -> dict[str, Any]:
             add_pattern("dragonfly_doji", bullish=1.6)
         if last["upper_wick"] >= last["range"] * 0.55 and last["lower_wick"] <= last["range"] * 0.12:
             add_pattern("gravestone_doji", bearish=1.6)
+    elif (
+        last["body_ratio"] <= 0.35
+        and last["upper_wick"] >= last["range"] * 0.25
+        and last["lower_wick"] >= last["range"] * 0.25
+    ):
+        add_pattern("spinning_top", bucket="indecision")
 
     if (
         _is_bullish(last)
@@ -326,6 +417,25 @@ def detect_candlestick_patterns(ohlcv: list[list[Any]]) -> dict[str, Any]:
         and last["body"] >= previous["body"] * 0.8
     ):
         add_pattern("bearish_engulfing", bearish=3.0)
+
+    avg_range = sum(item["range"] for item in candles[-3:]) / min(len(candles), 3)
+    gap_threshold = _meaningful_gap(previous, last, avg_range)
+    if (
+        _is_bearish(previous)
+        and _is_bullish(last)
+        and last["body_ratio"] >= 0.45
+        and previous["body_ratio"] >= 0.35
+        and _body_low(last) > _body_high(previous) + gap_threshold
+    ):
+        add_pattern("bullish_kicker", bullish=3.2)
+    if (
+        _is_bullish(previous)
+        and _is_bearish(last)
+        and last["body_ratio"] >= 0.45
+        and previous["body_ratio"] >= 0.35
+        and _body_high(last) < _body_low(previous) - gap_threshold
+    ):
+        add_pattern("bearish_kicker", bearish=3.2)
 
     long_lower_shadow = (
         last["lower_wick"] >= last["body"] * 2.2
@@ -389,7 +499,6 @@ def detect_candlestick_patterns(ohlcv: list[list[Any]]) -> dict[str, Any]:
     ):
         add_pattern("bearish_harami", bearish=2.0)
 
-    avg_range = sum(item["range"] for item in candles[-3:]) / min(len(candles), 3)
     if _same_level(last["low"], previous["low"], last["close"], avg_range) and _is_bearish(previous) and _is_bullish(last):
         add_pattern("tweezer_bottom", bullish=1.6)
     if _same_level(last["high"], previous["high"], last["close"], avg_range) and _is_bullish(previous) and _is_bearish(last):
@@ -417,6 +526,41 @@ def detect_candlestick_patterns(ohlcv: list[list[Any]]) -> dict[str, Any]:
             add_pattern("three_white_soldiers", bullish=2.5, bucket="continuation")
         if all(_is_bearish(item) and item["body_ratio"] >= 0.45 for item in candles[-3:]):
             add_pattern("three_black_crows", bearish=2.5, bucket="continuation")
+
+        if _is_bearish(first) and _is_bullish(middle) and _inside_body(middle, first) and _is_bullish(third):
+            if third["close"] > _body_high(first):
+                add_pattern("three_inside_up", bullish=3.0)
+        if _is_bullish(first) and _is_bearish(middle) and _inside_body(middle, first) and _is_bearish(third):
+            if third["close"] < _body_low(first):
+                add_pattern("three_inside_down", bearish=3.0)
+        if _is_bearish(first) and _is_bullish(middle) and _body_engulfs(first, middle) and _is_bullish(third):
+            if third["close"] > middle["close"]:
+                add_pattern("three_outside_up", bullish=3.2)
+        if _is_bullish(first) and _is_bearish(middle) and _body_engulfs(first, middle) and _is_bearish(third):
+            if third["close"] < middle["close"]:
+                add_pattern("three_outside_down", bearish=3.2)
+
+    if len(candles) >= 5:
+        first, second, third, fourth, fifth = candles[-5:]
+        middle_three = [second, third, fourth]
+        if (
+            _is_bullish(first)
+            and first["body_ratio"] >= 0.5
+            and all(_inside_range(item, first) and item["body"] <= first["body"] * 0.75 for item in middle_three)
+            and sum(1 for item in middle_three if _is_bearish(item)) >= 2
+            and _is_bullish(fifth)
+            and fifth["close"] > first["close"]
+        ):
+            add_pattern("rising_three_methods", bullish=2.8, bucket="continuation")
+        if (
+            _is_bearish(first)
+            and first["body_ratio"] >= 0.5
+            and all(_inside_range(item, first) and item["body"] <= first["body"] * 0.75 for item in middle_three)
+            and sum(1 for item in middle_three if _is_bullish(item)) >= 2
+            and _is_bearish(fifth)
+            and fifth["close"] < first["close"]
+        ):
+            add_pattern("falling_three_methods", bearish=2.8, bucket="continuation")
 
     if _is_bullish(last) and last["body_ratio"] >= 0.75:
         add_pattern("bullish_marubozu", bullish=1.4, bucket="continuation")
@@ -452,6 +596,7 @@ def detect_candlestick_patterns(ohlcv: list[list[Any]]) -> dict[str, Any]:
         "strongest_pattern": strongest_pattern,
         "pattern_details": pattern_details,
         "signal_summary": _signal_summary(direction, strongest_pattern, trend),
+        "reference_sources": PATTERN_REFERENCES,
         "last_body_pct": round(last["body_ratio"] * 100, 2),
         "last_upper_wick_pct": round(last["upper_wick"] / last["range"] * 100, 2),
         "last_lower_wick_pct": round(last["lower_wick"] / last["range"] * 100, 2),

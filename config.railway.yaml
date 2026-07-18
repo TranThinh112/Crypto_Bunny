@@ -207,17 +207,23 @@ strategy:
     enabled: true
     frames:
     - 5m
+    - 15m
     - 1h
+    - 4h
     ohlcv_limit: 180
     weights:
       5m: 5
+      15m: 7
       1h: 8
+      4h: 11
   candlestick_patterns:
     enabled: true
     weights:
       1m: 3
       5m: 5
+      15m: 7
       1h: 8
+      4h: 11
   universe:
     enabled: true
     mode: top_volume_24h

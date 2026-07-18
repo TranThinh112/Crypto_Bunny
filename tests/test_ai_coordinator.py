@@ -978,9 +978,10 @@ class AiCoordinatorTest(TestCase):
         self.assertEqual(indicator["volume_ratio"], 0.774)
         self.assertEqual(indicator["spread_pct"], 0.09)
         self.assertEqual(indicator["higher_timeframes"]["4h"], {"trend": "down"})
-        self.assertEqual(indicator["candlestick_patterns"]["4h"], {"direction": "bearish"})
-        self.assertNotIn("patterns", indicator["candlestick_patterns"]["4h"])
-        self.assertNotIn("signal_summary", indicator["candlestick_patterns"]["4h"])
+        self.assertEqual(
+            indicator["candlestick_patterns"]["4h"],
+            {"direction": "bearish", "patterns": ["bearish_engulfing"], "signal_summary": "4h opposes long"},
+        )
         self.assertNotIn("support_distance_pct", indicator)
         checks = summary["setup_checks"]
         self.assertEqual(checks["bias_4h"]["status"], "conflict")
