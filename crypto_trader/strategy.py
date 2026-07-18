@@ -328,10 +328,35 @@ def _candidate_for_side(
     target_mode = str(target_config.get("mode", "atr_rr"))
     take_profit_pct = float(target_config.get("take_profit_pct", 0) or 0)
     stop_loss_pct = float(target_config.get("stop_loss_pct", 0) or 0)
+    risk_reward_ratio = float(
+        target_config.get("risk_reward_ratio")
+        or target_config.get("rr_ratio")
+        or target_config.get("risk_reward")
+        or 0
+    )
     price_take_profit_pct: float | None = None
     price_stop_loss_pct: float | None = None
 
-    if target_mode in {"roi_percent", "price_percent"} and take_profit_pct > 0 and stop_loss_pct > 0:
+    if target_mode in {"risk_reward", "rr", "rr_percent"} and stop_loss_pct > 0 and risk_reward_ratio > 0:
+        percent_basis = str(target_config.get("percent_basis") or "roi_percent")
+        take_profit_pct = stop_loss_pct * risk_reward_ratio
+        divisor = max(leverage, 1.0) if percent_basis == "roi_percent" else 1.0
+        price_take_profit_pct = take_profit_pct / divisor
+        price_stop_loss_pct = stop_loss_pct / divisor
+        if side == "long":
+            stop = entry * (1 - price_stop_loss_pct / 100)
+            take_profit = entry * (1 + price_take_profit_pct / 100)
+        else:
+            stop = entry * (1 + price_stop_loss_pct / 100)
+            take_profit = max(entry * (1 - price_take_profit_pct / 100), 1e-12)
+        risk = abs(entry - stop)
+        reward = abs(take_profit - entry)
+        rr = reward / max(risk, 1e-12)
+        reasons.append(
+            f"TP/SL target: RR {risk_reward_ratio:.2f}:1, SL {stop_loss_pct:.0f}% "
+            f"({percent_basis}, {leverage:.0f}x)"
+        )
+    elif target_mode in {"roi_percent", "price_percent"} and take_profit_pct > 0 and stop_loss_pct > 0:
         divisor = max(leverage, 1.0) if target_mode == "roi_percent" else 1.0
         price_take_profit_pct = take_profit_pct / divisor
         price_stop_loss_pct = stop_loss_pct / divisor

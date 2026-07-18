@@ -8,6 +8,50 @@ from crypto_trader.strategy import build_candidates
 
 
 class StrategyTest(TestCase):
+    def test_risk_reward_target_derives_take_profit_from_stop_distance(self) -> None:
+        config = {
+            "exchange": {"leverage": 25},
+            "risk": {"order_usdt": 20},
+            "strategy": {
+                "min_risk_reward": 2.0,
+                "target": {
+                    "mode": "risk_reward",
+                    "stop_loss_pct": 50,
+                    "risk_reward_ratio": 2.0,
+                    "percent_basis": "roi_percent",
+                },
+            },
+        }
+        snapshot = MarketSnapshot(
+            symbol="BTC/USDT:USDT",
+            timestamp=datetime.now(timezone.utc),
+            last=100.0,
+            bid=99.9,
+            ask=100.1,
+            spread_pct=0.2,
+            ema_fast=102.0,
+            ema_slow=101.0,
+            rsi=58.0,
+            atr=1.0,
+            atr_pct=1.0,
+            volume_ratio=1.3,
+            support=96.0,
+            resistance=100.2,
+        )
+        digest = NewsDigest(items=[], by_symbol_score={"BTC": 3.0}, by_symbol_count={"BTC": 2})
+
+        candidates = build_candidates(config, [snapshot], digest)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].side, "long")
+        self.assertEqual(candidates[0].stop_loss, 98.0)
+        self.assertEqual(candidates[0].take_profit, 104.0)
+        self.assertEqual(candidates[0].risk_reward, 2.0)
+        self.assertEqual(candidates[0].take_profit_pct, 100.0)
+        self.assertEqual(candidates[0].stop_loss_pct, 50.0)
+        self.assertEqual(candidates[0].price_take_profit_pct, 4.0)
+        self.assertEqual(candidates[0].price_stop_loss_pct, 2.0)
+
     def test_builds_single_best_side_per_symbol(self) -> None:
         config = {
             "risk": {"order_usdt": 20},

@@ -628,6 +628,7 @@ function actionLabel(decision) {
 function targetModeLabel(mode) {
   if (mode === "roi_percent") return "ROI";
   if (mode === "price_percent") return "Gia";
+  if (mode === "risk_reward" || mode === "rr" || mode === "rr_percent") return "RR";
   return "ATR/RR";
 }
 
@@ -695,7 +696,9 @@ function reasonVi(text) {
     .replace(/News sentiment is bearish \(([+-]?[0-9.]+), ([0-9]+) item\(s\)\)/, "Tin tuc nghieng ve giam ($1, $2 bai)")
     .replace(/([0-9]+) related news item\(s\), but sentiment is neutral/, "$1 bai lien quan, nhung sentiment trung lap")
     .replace(/TP\/SL target: TP ([0-9]+)%, SL ([0-9]+)% \(roi_percent, ([0-9]+)x\)/, "Muc tieu TP/SL: TP $1%, SL $2% theo ROI, don bay $3x")
-    .replace(/TP\/SL target: TP ([0-9]+)%, SL ([0-9]+)% \(price_percent, ([0-9]+)x\)/, "Muc tieu TP/SL: TP $1%, SL $2% theo bien dong gia");
+    .replace(/TP\/SL target: TP ([0-9]+)%, SL ([0-9]+)% \(price_percent, ([0-9]+)x\)/, "Muc tieu TP/SL: TP $1%, SL $2% theo bien dong gia")
+    .replace(/TP\/SL target: RR ([0-9.]+):1, SL ([0-9]+)% \(roi_percent, ([0-9]+)x\)/, "Muc tieu TP/SL: RR $1:1, SL $2% theo ROI, don bay $3x")
+    .replace(/TP\/SL target: RR ([0-9.]+):1, SL ([0-9]+)% \(price_percent, ([0-9]+)x\)/, "Muc tieu TP/SL: RR $1:1, SL $2% theo bien dong gia");
 }
 
 function currentPriceFor(symbol) {

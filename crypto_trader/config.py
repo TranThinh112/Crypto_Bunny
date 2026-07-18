@@ -93,6 +93,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "mode": "roi_percent",
             "take_profit_pct": 75,
             "stop_loss_pct": 50,
+            "risk_reward_ratio": 2.0,
+            "percent_basis": "roi_percent",
         },
         "confirmation_timeframes": {
             "enabled": True,
