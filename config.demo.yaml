@@ -171,6 +171,12 @@ market_scan_memory:
   compact_batch_limit: 5000
   emergency_keep_hours: 24
   emergency_max_rows_per_symbol_timeframe: 50
+market_regime:
+  enabled: true
+  derivatives_metrics_enabled: true
+  fear_greed_enabled: true
+  fear_greed_url: https://api.alternative.me/fng/?limit=1&format=json
+  fear_greed_timeout_seconds: 3
 decision_history:
   keep_hours: 24
   max_rows: 120

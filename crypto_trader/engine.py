@@ -33,7 +33,7 @@ from .codex_features import (
 )
 from .executor import execute_candidate, with_candidate_client_order_id
 from .lc_pipeline import lc_pipeline_pool_rows, update_lc_internal_pipeline
-from .market import fetch_market_snapshots, fetch_top_volume_symbols
+from .market import apply_news_scores_to_snapshots, fetch_market_snapshots, fetch_top_volume_symbols
 from .market import prefetch_market_data
 from .market_guard import market_guard_symbol_layers, market_guard_top_risk
 from .models import Decision, ExecutionResult, RiskCheck, TradeCandidate, to_jsonable
@@ -605,6 +605,7 @@ def _collect_realtime_scan_inputs(
     digest = collect_news(config)
     _report_progress(progress_callback, "collect_realtime_scan_inputs.fetch_market_snapshots", symbol_count=len(fetch_symbols))
     snapshots, market_warnings = fetch_market_snapshots(config, fetch_symbols, market_data=prefetched_market_data)
+    apply_news_scores_to_snapshots(snapshots, digest)
     market_warnings = storage_warnings + universe_warnings + market_warnings
     snapshots_by_symbol = {snapshot.symbol: snapshot for snapshot in snapshots}
     market_layers: dict[str, dict[str, Any]] = {}

@@ -50,6 +50,39 @@ def atr(ohlcv: list[list[float]], period: int = 14) -> float:
     return sum(true_ranges) / len(true_ranges)
 
 
+def adx(ohlcv: list[list[float]], period: int = 14) -> float:
+    if len(ohlcv) <= period * 2:
+        return 0.0
+    plus_dm: list[float] = []
+    minus_dm: list[float] = []
+    true_ranges: list[float] = []
+    for previous, current in zip(ohlcv[:-1], ohlcv[1:]):
+        previous_high = float(previous[2])
+        previous_low = float(previous[3])
+        previous_close = float(previous[4])
+        high = float(current[2])
+        low = float(current[3])
+        up_move = high - previous_high
+        down_move = previous_low - low
+        plus_dm.append(up_move if up_move > down_move and up_move > 0 else 0.0)
+        minus_dm.append(down_move if down_move > up_move and down_move > 0 else 0.0)
+        true_ranges.append(max(high - low, abs(high - previous_close), abs(low - previous_close)))
+    dx_values: list[float] = []
+    for index in range(period, len(true_ranges) + 1):
+        tr_sum = sum(true_ranges[index - period : index])
+        if tr_sum <= 0:
+            continue
+        plus_di = 100.0 * sum(plus_dm[index - period : index]) / tr_sum
+        minus_di = 100.0 * sum(minus_dm[index - period : index]) / tr_sum
+        denominator = plus_di + minus_di
+        if denominator <= 0:
+            continue
+        dx_values.append(100.0 * abs(plus_di - minus_di) / denominator)
+    if not dx_values:
+        return 0.0
+    return sum(dx_values[-period:]) / min(period, len(dx_values))
+
+
 def volume_ratio(ohlcv: list[list[float]], period: int = 20) -> float:
     if len(ohlcv) < 2:
         return 1.0

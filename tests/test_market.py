@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from unittest import TestCase
 
-from crypto_trader.market import select_top_volume_symbols_from_tickers, snapshot_from_ohlcv
+from types import SimpleNamespace
+
+from crypto_trader.market import apply_news_scores_to_snapshots, select_top_volume_symbols_from_tickers, snapshot_from_ohlcv
 
 
 class MarketUniverseTest(TestCase):
@@ -20,10 +22,45 @@ class MarketUniverseTest(TestCase):
 
         self.assertIsNotNone(snapshot.ema200)
         self.assertIsNotNone(snapshot.vwap)
+        self.assertIsNotNone(snapshot.adx)
         expected_vwap = sum((((row[2] + row[3] + row[4]) / 3.0) * row[5]) for row in rows) / sum(
             row[5] for row in rows
         )
         self.assertAlmostEqual(snapshot.vwap or 0.0, expected_vwap)
+
+    def test_snapshot_from_ohlcv_attaches_market_regime_metrics(self) -> None:
+        rows = []
+        for index in range(220):
+            open_price = 100.0 + index * 0.1
+            rows.append([index, open_price, open_price + 2.0, open_price - 1.0, open_price + 1.0, 10.0 + index])
+
+        snapshot = snapshot_from_ohlcv(
+            "BTC/USDT:USDT",
+            rows,
+            {"last": rows[-1][4]},
+            market_metrics={
+                "funding_rate": 0.00012,
+                "open_interest": 123456.0,
+                "fear_greed": 71,
+                "news_score": 2.5,
+            },
+        )
+
+        self.assertEqual(snapshot.funding_rate, 0.00012)
+        self.assertEqual(snapshot.open_interest, 123456.0)
+        self.assertEqual(snapshot.fear_greed, 71.0)
+        self.assertEqual(snapshot.news_score, 2.5)
+
+    def test_apply_news_scores_to_snapshots_uses_symbol_base(self) -> None:
+        rows = [[index, 100.0, 102.0, 99.0, 101.0, 10.0] for index in range(120)]
+        snapshot = snapshot_from_ohlcv("BTC/USDT:USDT", rows, {"last": 101.0})
+
+        apply_news_scores_to_snapshots(
+            [snapshot],
+            SimpleNamespace(by_symbol_score={"BTC": -1.75}),
+        )
+
+        self.assertEqual(snapshot.news_score, -1.75)
 
     def test_snapshot_from_ohlcv_leaves_ema200_empty_until_enough_rows(self) -> None:
         rows = [[index, 100.0, 102.0, 99.0, 101.0, 10.0] for index in range(120)]

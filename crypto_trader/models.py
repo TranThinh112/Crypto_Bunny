@@ -46,8 +46,17 @@ class MarketSnapshot:
     resistance: float
     higher_timeframes: dict[str, dict[str, Any]] = field(default_factory=dict)
     candlestick_patterns: dict[str, Any] = field(default_factory=dict)
+    ohlcv_timeframe: str | None = None
+    ohlcv: list[list[float]] = field(default_factory=list)
+    market_pattern_analysis: dict[str, Any] = field(default_factory=dict)
     ema200: float | None = None
     vwap: float | None = None
+    adx: float | None = None
+    funding_rate: float | None = None
+    open_interest: float | None = None
+    open_interest_change: float | None = None
+    fear_greed: float | None = None
+    news_score: float | None = None
 
 
 @dataclass

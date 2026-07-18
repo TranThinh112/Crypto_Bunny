@@ -78,8 +78,13 @@ class CodexFeaturesTest(TestCase):
                 ema200=97 + index,
                 vwap=99.5 + index,
                 rsi=50 + index,
+                adx=25 + index,
                 atr_pct=2.0,
                 volume_ratio=1.2,
+                funding_rate=0.0001 * (index + 1),
+                open_interest=1000 + index,
+                fear_greed=60,
+                news_score=1.5,
             )
             for index in range(5)
         ]
@@ -105,6 +110,11 @@ class CodexFeaturesTest(TestCase):
         self.assertEqual(aggregate["target_count"], 5)
         self.assertEqual(aggregate["market_symbols"], [snapshot.symbol for snapshot in snapshots])
         self.assertEqual(aggregate["detail_symbols"], ["BTC/USDT:USDT", "SOL/USDT:USDT", "ETH/USDT:USDT"])
+        self.assertIsNotNone(aggregate["adx"])
+        self.assertIsNotNone(aggregate["funding_rate"])
+        self.assertIsNotNone(aggregate["open_interest"])
+        self.assertEqual(aggregate["fear_greed"], 60.0)
+        self.assertEqual(aggregate["news_score"], 1.5)
 
     def _prompt_package(self) -> dict:
         return {

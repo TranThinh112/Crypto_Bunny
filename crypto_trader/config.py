@@ -348,10 +348,19 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "market_regime": {
         "enabled": True,
         "history_limit": 200,
+        "derivatives_metrics_enabled": True,
+        "fear_greed_enabled": True,
+        "fear_greed_url": "https://api.alternative.me/fng/?limit=1&format=json",
+        "fear_greed_timeout_seconds": 3,
         "high_volatility_atr_pct": 4.0,
         "low_volatility_atr_pct": 1.2,
         "sideway_adx_max": 20,
         "trend_adx_min": 25,
+    },
+    "market_pattern_engine": {
+        "enabled": True,
+        "max_snapshots_per_scan": 3,
+        "max_candles": 220,
     },
     "bunny_health_monitor": {
         "enabled": True,

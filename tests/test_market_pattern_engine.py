@@ -14,6 +14,8 @@ from market_pattern_engine.domain.models import Candle, MarketAnalysisRequest
 from market_pattern_engine.infrastructure.config_loader import load_engine_config
 from market_pattern_engine.repositories.analysis_repository import AnalysisRepository
 from market_pattern_engine.services.analysis_service import AnalysisService
+from crypto_trader.market_pattern import analyze_market_pattern_snapshots, attach_market_pattern_features_to_candidates
+from crypto_trader.models import MarketSnapshot, TradeCandidate
 
 
 def _candles(count: int = 80) -> list[dict[str, object]]:
@@ -115,3 +117,70 @@ def test_market_pattern_api_analyze_uses_app_state_database() -> None:
     assert payload["snapshot_id"]
     assert payload["result"]["symbol"] == "BTC/USDT:USDT"
     assert app.state.market_pattern_db["market_analysis_snapshots"].count_documents({}) == 1
+
+
+def test_crypto_trader_helper_analyzes_snapshot_and_attaches_candidate_features() -> None:
+    db = mongomock.MongoClient()["market_pattern_crypto_trader_helper"]
+    repository = AnalysisRepository(db=db, config=load_engine_config())
+    ohlcv = []
+    start = datetime(2026, 7, 10, tzinfo=timezone.utc)
+    for index, candle in enumerate(_candles()):
+        timestamp = int((start + timedelta(hours=4 * index)).timestamp() * 1000)
+        ohlcv.append(
+            [
+                timestamp,
+                float(candle["open"]),
+                float(candle["high"]),
+                float(candle["low"]),
+                float(candle["close"]),
+                float(candle["volume"]),
+            ]
+        )
+    snapshot = MarketSnapshot(
+        symbol="BTC/USDT:USDT",
+        timestamp=start,
+        last=float(ohlcv[-1][4]),
+        bid=None,
+        ask=None,
+        spread_pct=None,
+        ema_fast=105.0,
+        ema_slow=104.0,
+        rsi=55.0,
+        atr=2.0,
+        atr_pct=1.8,
+        volume_ratio=1.2,
+        support=99.0,
+        resistance=110.0,
+        ohlcv_timeframe="4h",
+        ohlcv=ohlcv,
+    )
+    candidate = TradeCandidate(
+        symbol="BTC/USDT:USDT",
+        base="BTC",
+        side="long",
+        confidence=80.0,
+        entry=108.0,
+        stop_loss=102.0,
+        take_profit=120.0,
+        risk_reward=2.0,
+        order_usdt=50.0,
+        quantity=None,
+        spread_pct=None,
+        news_score=0.0,
+        news_count=0,
+    )
+
+    result = analyze_market_pattern_snapshots(
+        {"market_pattern_engine": {"enabled": True, "max_snapshots_per_scan": 1}},
+        [snapshot],
+        correlation_id="helper-test",
+        source="unit-test",
+        repository=repository,
+    )
+    attach_market_pattern_features_to_candidates([candidate], result["by_symbol"])
+
+    assert result["analyzed"] == 1
+    assert db["market_analysis_snapshots"].count_documents({}) == 1
+    assert snapshot.market_pattern_analysis["snapshot_id"]
+    assert candidate.indicator_summary["market_pattern"]["snapshot_id"] == snapshot.market_pattern_analysis["snapshot_id"]
+    assert candidate.decision_metadata["market_pattern_snapshot_id"] == snapshot.market_pattern_analysis["snapshot_id"]

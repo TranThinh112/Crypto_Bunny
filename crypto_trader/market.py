@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import json
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
+import urllib.request
 
 from dotenv import load_dotenv
 
 from .candles import detect_candlestick_patterns
-from .indicators import atr, ema, rsi, volume_ratio, vwap
+from .indicators import adx, atr, ema, rsi, volume_ratio, vwap
 from .models import MarketSnapshot
 
 
@@ -139,6 +141,20 @@ def _ticker_number(ticker: dict[str, Any], *keys: str) -> float | None:
     return None
 
 
+def _first_number(source: dict[str, Any] | None, *keys: str) -> float | None:
+    if not isinstance(source, dict):
+        return None
+    info = source.get("info") if isinstance(source.get("info"), dict) else {}
+    for key in keys:
+        value = _as_float(source.get(key))
+        if value is not None:
+            return value
+        value = _as_float(info.get(key))
+        if value is not None:
+            return value
+    return None
+
+
 def _ticker_quote_volume(ticker: dict[str, Any]) -> float:
     quote_volume = _ticker_number(
         ticker,
@@ -157,6 +173,73 @@ def _ticker_quote_volume(ticker: dict[str, Any]) -> float:
     if base_volume is not None and last is not None:
         return max(0.0, base_volume * last)
     return 0.0
+
+
+def _market_regime_metrics_enabled(config: dict[str, Any], key: str, default: bool = False) -> bool:
+    settings = config.get("market_regime", {})
+    if not isinstance(settings, dict):
+        return default
+    return bool(settings.get(key, default))
+
+
+def _fetch_derivative_metrics(exchange: Any, symbol: str) -> tuple[dict[str, float], list[str]]:
+    metrics: dict[str, float] = {}
+    warnings: list[str] = []
+    capabilities = getattr(exchange, "has", {}) if isinstance(getattr(exchange, "has", {}), dict) else {}
+    if capabilities.get("fetchFundingRate") is not False and hasattr(exchange, "fetch_funding_rate"):
+        try:
+            funding = exchange.fetch_funding_rate(symbol)
+            funding_rate = _first_number(funding, "fundingRate", "funding_rate", "funding")
+            if funding_rate is not None:
+                metrics["funding_rate"] = funding_rate
+        except Exception as exc:
+            warnings.append(f"{symbol}: funding rate fetch failed: {exc}")
+    if capabilities.get("fetchOpenInterest") is not False and hasattr(exchange, "fetch_open_interest"):
+        try:
+            interest = exchange.fetch_open_interest(symbol)
+            open_interest = _first_number(
+                interest,
+                "openInterestAmount",
+                "openInterestValue",
+                "openInterest",
+                "open_interest",
+                "oi",
+                "oiCcy",
+                "oiUsd",
+            )
+            if open_interest is not None:
+                metrics["open_interest"] = open_interest
+        except Exception as exc:
+            warnings.append(f"{symbol}: open interest fetch failed: {exc}")
+    return metrics, warnings
+
+
+def _fetch_fear_greed(config: dict[str, Any]) -> tuple[float | None, list[str]]:
+    if not _market_regime_metrics_enabled(config, "fear_greed_enabled", False):
+        return None, []
+    settings = config.get("market_regime", {})
+    url = str(settings.get("fear_greed_url") or "https://api.alternative.me/fng/?limit=1&format=json")
+    timeout = float(settings.get("fear_greed_timeout_seconds", 3) or 3)
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": "Crypto_Bunny/1.0"})
+        with urllib.request.urlopen(request, timeout=max(1.0, timeout)) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        rows = payload.get("data") if isinstance(payload, dict) else None
+        item = rows[0] if isinstance(rows, list) and rows else None
+        value = _as_float(item.get("value")) if isinstance(item, dict) else None
+        return value, [] if value is not None else ["Fear & Greed response did not include a numeric value"]
+    except Exception as exc:
+        return None, [f"Fear & Greed fetch failed: {exc}"]
+
+
+def apply_news_scores_to_snapshots(snapshots: list[MarketSnapshot], digest: Any) -> None:
+    scores = getattr(digest, "by_symbol_score", {}) or {}
+    if not isinstance(scores, dict):
+        return
+    for snapshot in snapshots:
+        base = str(snapshot.symbol or "").split("/", 1)[0].split(":", 1)[0].upper()
+        value = _as_float(scores.get(base))
+        snapshot.news_score = 0.0 if value is None else value
 
 
 def _symbol_base(symbol: str, market: dict[str, Any]) -> str:
@@ -354,6 +437,7 @@ def _frame_summary(timeframe: str, symbol: str, ohlcv: list[list[float]], last: 
     ema_long = ema(closes, 200) if len(closes) >= 200 else None
     current_vwap = vwap(ohlcv, 200)
     current_atr = atr(ohlcv, 14)
+    current_adx = adx(ohlcv, 14)
     recent_lows = lows[-40:]
     recent_highs = highs[-40:]
     support = min(recent_lows)
@@ -378,6 +462,7 @@ def _frame_summary(timeframe: str, symbol: str, ohlcv: list[list[float]], last: 
         "price_vs_ema200_pct": ((last - ema_long) / ema_long) * 100 if ema_long else None,
         "price_vs_vwap_pct": ((last - current_vwap) / current_vwap) * 100 if current_vwap else None,
         "rsi": rsi(closes, 14),
+        "adx": current_adx,
         "atr_pct": (current_atr / last) * 100 if last else 0.0,
         "volume_ratio": volume_ratio(ohlcv, 20),
         "support": support,
@@ -394,6 +479,7 @@ def snapshot_from_ohlcv(
     ticker: dict[str, Any],
     higher_timeframes: dict[str, dict[str, Any]] | None = None,
     timeframe: str = "primary",
+    market_metrics: dict[str, Any] | None = None,
 ) -> MarketSnapshot:
     if len(ohlcv) < 60:
         raise ValueError(f"{symbol} does not have enough OHLCV rows")
@@ -405,6 +491,8 @@ def snapshot_from_ohlcv(
     recent_lows = lows[-40:]
     recent_highs = highs[-40:]
     ema_long = ema(closes, 200) if len(closes) >= 200 else None
+    current_adx = adx(ohlcv, 14)
+    metrics = market_metrics if isinstance(market_metrics, dict) else {}
     return MarketSnapshot(
         symbol=symbol,
         timestamp=datetime.now(timezone.utc),
@@ -417,6 +505,7 @@ def snapshot_from_ohlcv(
         ema200=ema_long,
         vwap=vwap(ohlcv, 200),
         rsi=rsi(closes, 14),
+        adx=current_adx,
         atr=current_atr,
         atr_pct=(current_atr / last) * 100 if last else 0.0,
         volume_ratio=volume_ratio(ohlcv, 20),
@@ -424,6 +513,13 @@ def snapshot_from_ohlcv(
         resistance=max(recent_highs),
         higher_timeframes=higher_timeframes or {},
         candlestick_patterns={timeframe: detect_candlestick_patterns(ohlcv)},
+        ohlcv_timeframe=timeframe,
+        ohlcv=[list(row) for row in ohlcv],
+        funding_rate=_as_float(metrics.get("funding_rate")),
+        open_interest=_as_float(metrics.get("open_interest")),
+        open_interest_change=_as_float(metrics.get("open_interest_change")),
+        fear_greed=_as_float(metrics.get("fear_greed")),
+        news_score=_as_float(metrics.get("news_score")),
     )
 
 
@@ -474,6 +570,8 @@ def _fetch_single_snapshot(
     higher_enabled: bool,
     higher_frames: list[str],
     higher_limit: int,
+    derivatives_metrics_enabled: bool = False,
+    fear_greed_value: float | None = None,
 ) -> tuple[MarketSnapshot | None, list[str]]:
     warnings: list[str] = []
     try:
@@ -497,7 +595,21 @@ def _fetch_single_snapshot(
                     higher_timeframes[frame] = _frame_summary(frame, symbol, frame_ohlcv, last)
                 except Exception as exc:
                     warnings.append(f"{symbol}: {frame} confirmation fetch failed: {exc}")
-        return snapshot_from_ohlcv(symbol, ohlcv, ticker, higher_timeframes, timeframe=timeframe), warnings
+        market_metrics: dict[str, Any] = {}
+        if derivatives_metrics_enabled:
+            derivative_metrics, derivative_warnings = _fetch_derivative_metrics(exchange, symbol)
+            market_metrics.update(derivative_metrics)
+            warnings.extend(derivative_warnings)
+        if fear_greed_value is not None:
+            market_metrics["fear_greed"] = fear_greed_value
+        return snapshot_from_ohlcv(
+            symbol,
+            ohlcv,
+            ticker,
+            higher_timeframes,
+            timeframe=timeframe,
+            market_metrics=market_metrics,
+        ), warnings
     except Exception as exc:
         return None, [f"{symbol}: market fetch failed: {exc}"]
 
@@ -530,6 +642,9 @@ def fetch_market_snapshots(
         return [], warnings + ["Market snapshot exchange is unavailable"]
     if not markets:
         markets = exchange.load_markets() or getattr(exchange, "markets", {}) or {}
+    derivatives_metrics_enabled = _market_regime_metrics_enabled(config, "derivatives_metrics_enabled", False)
+    fear_greed_value, fear_greed_warnings = _fetch_fear_greed(config)
+    warnings.extend(fear_greed_warnings)
     worker_count = _snapshot_worker_count(config, len(active_symbols))
     if worker_count <= 1 or len(active_symbols) <= 1:
         for symbol in active_symbols:
@@ -543,6 +658,8 @@ def fetch_market_snapshots(
                 higher_enabled=higher_enabled,
                 higher_frames=higher_frames,
                 higher_limit=higher_limit,
+                derivatives_metrics_enabled=derivatives_metrics_enabled,
+                fear_greed_value=fear_greed_value,
             )
             warnings.extend(symbol_warnings)
             if snapshot is not None:
@@ -571,6 +688,8 @@ def fetch_market_snapshots(
             higher_enabled=higher_enabled,
             higher_frames=higher_frames,
             higher_limit=higher_limit,
+            derivatives_metrics_enabled=derivatives_metrics_enabled,
+            fear_greed_value=fear_greed_value,
         )
         return symbol, snapshot, symbol_warnings
 
@@ -596,6 +715,8 @@ def fetch_market_snapshots(
                 higher_enabled=higher_enabled,
                 higher_frames=higher_frames,
                 higher_limit=higher_limit,
+                derivatives_metrics_enabled=derivatives_metrics_enabled,
+                fear_greed_value=fear_greed_value,
             )
             warnings.extend(symbol_warnings)
             if snapshot is not None:

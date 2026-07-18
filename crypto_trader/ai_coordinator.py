@@ -27,8 +27,9 @@ from .lc_pipeline import (
     reject_lc_pipeline_setup,
     save_lc_pipeline_mini_scan,
 )
-from .market import fetch_market_snapshots, fetch_top_volume_symbols, prefetch_market_data
+from .market import apply_news_scores_to_snapshots, fetch_market_snapshots, fetch_top_volume_symbols, prefetch_market_data
 from .market_guard import market_guard_symbol_layers
+from .market_pattern import analyze_market_pattern_snapshots, attach_market_pattern_features_to_candidates
 from .models import RiskCheck, TradeCandidate
 from .news import collect_news
 from .sizing import apply_position_sizing
@@ -616,6 +617,31 @@ def _compact_indicator_summary(summary: dict[str, Any] | None) -> dict[str, Any]
             for frame, data in candlesticks.items()
             if str(frame).lower() in {"5m", "15m", "1h", "4h"} and isinstance(data, dict)
         }
+    market_pattern = summary.get("market_pattern")
+    if isinstance(market_pattern, dict):
+        compact["market_pattern"] = {
+            key: market_pattern.get(key)
+            for key in (
+                "snapshot_id",
+                "timeframe",
+                "trend_regime",
+                "structure_state",
+                "trend_strength",
+                "bos_detected",
+                "bos_direction",
+                "choch_detected",
+                "choch_direction",
+                "confluence_bias",
+                "confluence_score",
+                "data_quality_score",
+                "candlestick_count",
+                "chart_pattern_count",
+                "smart_money_count",
+                "support_zone_count",
+                "resistance_zone_count",
+            )
+            if market_pattern.get(key) not in (None, "", [], {})
+        }
     return {key: value for key, value in compact.items() if value not in (None, {}, [])}
 
 
@@ -642,6 +668,25 @@ def _compact_okx_indicator_summary(summary: dict[str, Any] | None) -> dict[str, 
             str(frame): _compact_dict(data, ["direction", "strongest_pattern", "patterns", "signal_summary"])
             for frame, data in candlesticks.items()
             if str(frame).lower() in {"5m", "15m", "1h", "4h"} and isinstance(data, dict)
+        }
+    market_pattern = summary.get("market_pattern")
+    if isinstance(market_pattern, dict):
+        compact["market_pattern"] = {
+            key: market_pattern.get(key)
+            for key in (
+                "snapshot_id",
+                "timeframe",
+                "trend_regime",
+                "structure_state",
+                "bos_detected",
+                "bos_direction",
+                "choch_detected",
+                "choch_direction",
+                "confluence_bias",
+                "confluence_score",
+                "data_quality_score",
+            )
+            if market_pattern.get(key) not in (None, "", [], {})
         }
     return {key: value for key, value in compact.items() if value not in (None, {}, [])}
 
@@ -1396,6 +1441,7 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
     warnings: list[str] = list(source_warnings)
     digest = collect_news(config)
     snapshots, market_warnings = fetch_market_snapshots(config, source_symbols, market_data=prefetched_market_data)
+    apply_news_scores_to_snapshots(snapshots, digest)
     warnings.extend(market_warnings)
     market_layers: dict[str, dict[str, Any]] = {}
     if config.get("market_guard", {}).get("use_memory_in_strategy", True):
@@ -1415,6 +1461,7 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
             "Position sizing state unavailable; mini scan is holding new entries until storage recovers",
         )
     warnings.extend(enrich_quantities(config, candidates))
+    snapshots_by_symbol = {snapshot.symbol: snapshot for snapshot in snapshots}
     scan_memory = recent_market_scan_memory(
         config,
         symbols=source_symbols,
@@ -1423,6 +1470,14 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
         per_symbol_timeframe_limit=1 if compact_payload else 3,
     )
     ranked_candidates = lc_pipeline_mini_pool(config, candidates, limit=max_symbols)
+    market_pattern_result = analyze_market_pattern_snapshots(
+        config,
+        [snapshots_by_symbol[candidate.symbol] for candidate in ranked_candidates[:max_symbols] if candidate.symbol in snapshots_by_symbol],
+        correlation_id=f"mini_scan:{slot_id}",
+        source="internal_market_scan",
+    )
+    attach_market_pattern_features_to_candidates(ranked_candidates, market_pattern_result.get("by_symbol") or {})
+    warnings.extend(str(item) for item in (market_pattern_result.get("warnings") or [])[:5])
     candidate_summaries = [
         _candidate_market_summary(candidate, scan_memory_by_symbol=scan_memory, compact=compact_payload)
         for candidate in ranked_candidates[:max_symbols]
@@ -1461,6 +1516,13 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
         "source_base_symbols": list(base_source_symbols),
         "source_four_hour_symbols": list(latest_four_hour_symbols),
         "candidate_count": len(candidates),
+        "market_pattern_engine": {
+            "enabled": market_pattern_result.get("enabled"),
+            "source": market_pattern_result.get("source"),
+            "analyzed": market_pattern_result.get("analyzed"),
+            "symbols": list((market_pattern_result.get("by_symbol") or {}).keys()),
+            "warnings": (market_pattern_result.get("warnings") or [])[:5],
+        },
         "local_policy": local_result,
         "pool_symbols": list(mini_candidate_symbols or []),
         "selected_symbols": list((local_result.get("approved_symbols") or [])[:pending_limit]),
