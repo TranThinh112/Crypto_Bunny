@@ -475,6 +475,7 @@ class EngineMiniQueueTest(TestCase):
         first_candidate = _candidate("BTC/USDT:USDT")
         second_candidate = _candidate("BTC/USDT:USDT")
         second_candidate.entry = 100.2
+        second_candidate.risk_reward = 0.5
         first_scan = {
             "provider": "openai",
             "slot_id": "2026-07-18T04:00:00+07:00",
@@ -516,7 +517,17 @@ class EngineMiniQueueTest(TestCase):
         execute.assert_called_once()
         self.assertEqual(rejected["created"], 0)
         self.assertEqual(rejected["rechecks"][0]["checked"], 1)
+        self.assertEqual(
+            rejected["rechecks"][0]["method"],
+            "local_old_setup_snapshot_with_latest_market_context",
+        )
+        self.assertFalse(rejected["rechecks"][0]["gpt55_called"])
+        self.assertFalse(rejected["rechecks"][0]["market_guard_checked"])
         self.assertEqual(len(rejected["rechecks"][0]["kept"]), 1)
+        self.assertEqual(
+            rejected["rechecks"][0]["kept"][0]["validation_source"],
+            "old_pending_snapshot_with_latest_market_context",
+        )
         orders = list_pending_orders(config, status="LC_OKX")
         self.assertEqual(len(orders), 1)
         self.assertEqual(orders[0]["exchange_order_id"], "limit-04")
@@ -527,7 +538,8 @@ class EngineMiniQueueTest(TestCase):
         config["mode"] = "demo"
         first_candidate = _candidate("BTC/USDT:USDT")
         invalid_candidate = _candidate("BTC/USDT:USDT")
-        invalid_candidate.entry = 90.0
+        invalid_candidate.entry = 100.2
+        invalid_candidate.indicator_summary = {"last": 90.0}
         first_scan = {
             "provider": "openai",
             "slot_id": "2026-07-18T04:00:00+07:00",
@@ -568,7 +580,78 @@ class EngineMiniQueueTest(TestCase):
             )
 
         create_exchange.return_value.cancel_order.assert_called_once_with("limit-04", first_candidate.symbol)
+        self.assertEqual(rejected["rechecks"][0]["current_market_price"], 90.0)
         self.assertEqual(len(rejected["rechecks"][0]["canceled"]), 1)
+        self.assertEqual(list_pending_orders(config, status="LC_OKX"), [])
+
+    @patch("crypto_trader.engine.lc_pipeline_pool_rows", return_value=[])
+    def test_rejected_later_setup_rechecks_old_order_with_current_market_guard(self, _pool_rows) -> None:
+        config = self._config()
+        config["mode"] = "demo"
+        first_candidate = _candidate("BTC/USDT:USDT")
+        second_candidate = _candidate("BTC/USDT:USDT")
+        second_candidate.entry = 100.2
+        first_scan = {
+            "provider": "openai",
+            "slot_id": "2026-07-18T04:00:00+07:00",
+            "selected_symbols": [first_candidate.symbol],
+            "ai_review": {"approved_symbols": [first_candidate.symbol]},
+        }
+        second_scan = {**first_scan, "slot_id": "2026-07-18T08:00:00+07:00"}
+        decisions = [
+            {"approved": True, "decision": "KEEP_SETUP", "accepted_for_okx": True},
+            {
+                "approved": False,
+                "decision": "DELETE_SETUP",
+                "reason": "Delete the new setup",
+                "rejection_policy": "hard_delete",
+                "accepted_for_okx": False,
+            },
+        ]
+        market_layers = {
+            first_candidate.symbol: {
+                "layer_5m": {
+                    "sample_count": 5,
+                    "action": "avoid_new_entry",
+                    "risk_score": 9.0,
+                    "direction": "down",
+                },
+                "layer_20m": {
+                    "sample_count": 20,
+                    "action": "normal",
+                    "risk_score": 1.0,
+                    "direction": "neutral",
+                },
+            }
+        }
+
+        with (
+            patch(
+                "crypto_trader.engine.review_candidate_for_lc_okx",
+                side_effect=lambda *args, **kwargs: (args[1], decisions.pop(0)),
+            ) as review,
+            patch(
+                "crypto_trader.engine.execute_candidate",
+                return_value=ExecutionResult("demo", True, "limit-04", "submitted"),
+            ),
+            patch("crypto_trader.pending.create_exchange") as create_exchange,
+        ):
+            create_exchange.return_value.load_markets.return_value = None
+            _create_pending_from_internal_scan(config, [first_candidate], first_scan, (0, set(), []), set())
+            rejected = _create_pending_from_internal_scan(
+                config,
+                [second_candidate],
+                second_scan,
+                (1, {first_candidate.symbol}, []),
+                open_pending_symbols(config),
+                market_layers=market_layers,
+            )
+
+        self.assertEqual(review.call_count, 2)
+        self.assertTrue(rejected["rechecks"][0]["market_guard_checked"])
+        self.assertFalse(rejected["rechecks"][0]["gpt55_called"])
+        self.assertEqual(len(rejected["rechecks"][0]["canceled"]), 1)
+        create_exchange.return_value.cancel_order.assert_called_once_with("limit-04", first_candidate.symbol)
         self.assertEqual(list_pending_orders(config, status="LC_OKX"), [])
 
     @patch("crypto_trader.notifier.send_telegram_message")

@@ -162,6 +162,44 @@ def _candidate_with_record_metadata(candidate: TradeCandidate, record: dict[str,
     return merged
 
 
+def _candidate_for_local_pending_recheck(
+    record: dict[str, Any],
+    latest_candidate: TradeCandidate,
+) -> TradeCandidate | None:
+    """Keep the old order geometry while refreshing its current signal context."""
+    old_candidate = _candidate_from_record(record)
+    if old_candidate is None:
+        return None
+    refreshed = deepcopy(old_candidate)
+    for field in (
+        "confidence",
+        "spread_pct",
+        "news_score",
+        "news_count",
+        "higher_timeframes",
+        "indicator_summary",
+        "candlestick_patterns",
+        "rule_score",
+        "win_probability_pct",
+        "setup_quality",
+        "market_regime",
+        "regime_confidence",
+        "reasons",
+        "warnings",
+    ):
+        setattr(refreshed, field, deepcopy(getattr(latest_candidate, field)))
+    refreshed.scan_source = "old_pending_local_recheck"
+    return refreshed
+
+
+def _candidate_current_market_price(candidate: TradeCandidate) -> float:
+    indicator = candidate.indicator_summary if isinstance(candidate.indicator_summary, dict) else {}
+    last = _optional_float(indicator.get("last"))
+    if last is not None and last > 0:
+        return last
+    return float(candidate.entry or 0)
+
+
 def _close_latest_lc_trade_execution(
     config: dict[str, Any],
     *,
@@ -374,6 +412,8 @@ def _pending_review_reasons(
     candidate: TradeCandidate | None,
     check: RiskCheck | None,
     market_layers: dict[str, dict[str, Any]] | None,
+    *,
+    current_market_price: float | None = None,
 ) -> list[str]:
     review = _review_config(config)
     if not review["enabled"]:
@@ -417,10 +457,13 @@ def _pending_review_reasons(
 
     old_entry = _optional_float(record.get("entry"))
     if old_entry and old_entry > 0:
-        entry_drift_pct = abs(float(candidate.entry or 0) - old_entry) / old_entry * 100
+        comparison_price = _optional_float(current_market_price)
+        if comparison_price is None:
+            comparison_price = float(candidate.entry or 0)
+        entry_drift_pct = abs(comparison_price - old_entry) / old_entry * 100
         if entry_drift_pct > review["max_entry_drift_pct"]:
             reasons.append(
-                f"Giá entry mới lệch {entry_drift_pct:.2f}% so với LC cũ "
+                f"Giá thị trường hiện tại lệch {entry_drift_pct:.2f}% so với LC cũ "
                 f"(ngưỡng {review['max_entry_drift_pct']:.2f}%)"
             )
 
@@ -431,34 +474,48 @@ def _pending_review_reasons(
 
 def revalidate_pending_orders_for_symbol(
     config: dict[str, Any],
-    current_candidate: TradeCandidate,
+    latest_candidate: TradeCandidate,
     *,
     reason_prefix: str = "New Mini setup was rejected by 5.5",
     market_layers: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Locally revalidate older same-symbol pending setups without recalling 5.5."""
+    """Recheck old pending snapshots with fresh local signals, without recalling 5.5."""
     records = [
         record
         for record in list_pending_orders(config, status="OPEN", limit=200)
-        if str(record.get("symbol") or "") == current_candidate.symbol
+        if str(record.get("symbol") or "") == latest_candidate.symbol
     ]
     invalid: list[dict[str, Any]] = []
     kept: list[dict[str, Any]] = []
     validation_config = mini_pending_risk_config(config)
+    current_market_price = _candidate_current_market_price(latest_candidate)
     for record in records:
         record_side = str(record.get("side") or "").lower()
-        if record_side != str(current_candidate.side or "").lower():
+        recheck_candidate = _candidate_for_local_pending_recheck(record, latest_candidate)
+        if record_side != str(latest_candidate.side or "").lower():
             reasons = [
-                f"Latest Mini signal is {str(current_candidate.side or '').upper()}, opposite to the old setup"
+                f"Latest Mini signal is {str(latest_candidate.side or '').upper()}, opposite to the old setup"
             ]
+        elif recheck_candidate is None:
+            reasons = ["Old pending setup snapshot is missing or invalid"]
         else:
             check = evaluate_candidate(
                 validation_config,
-                current_candidate,
+                recheck_candidate,
                 check_active_trades=False,
                 check_order_limits=False,
             )
-            reasons = _pending_review_reasons(config, record, current_candidate, check, market_layers)
+            reasons = _pending_review_reasons(
+                config,
+                record,
+                recheck_candidate,
+                check,
+                market_layers,
+                current_market_price=current_market_price,
+            )
+        expires_at = _parse_time(str(record.get("expires_at") or ""))
+        if expires_at is not None and expires_at <= datetime.now(timezone.utc):
+            reasons.append("Old pending setup has expired")
         if reasons:
             invalid.append({"record": record, "reasons": reasons})
         else:
@@ -470,6 +527,9 @@ def revalidate_pending_orders_for_symbol(
                     "side": record.get("side"),
                     "exchange_order_id": record.get("exchange_order_id"),
                     "setup_id": _record_mini_setup_id(record) or None,
+                    "validation_source": "old_pending_snapshot_with_latest_market_context",
+                    "current_market_price": current_market_price,
+                    "market_guard_checked": bool((market_layers or {}).get(latest_candidate.symbol)),
                 }
             )
 
@@ -491,10 +551,14 @@ def revalidate_pending_orders_for_symbol(
                 }
             )
     return {
+        "method": "local_old_setup_snapshot_with_latest_market_context",
+        "gpt55_called": False,
         "checked": len(records),
         "kept": kept,
         "canceled": canceled,
         "warnings": warnings,
+        "current_market_price": current_market_price,
+        "market_guard_checked": bool((market_layers or {}).get(latest_candidate.symbol)),
     }
 
 

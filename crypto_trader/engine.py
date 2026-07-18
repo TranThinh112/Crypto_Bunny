@@ -1069,6 +1069,8 @@ def _create_pending_from_internal_scan(
     internal_scan: dict[str, Any] | None,
     active_summary: Any,
     pending_symbols: set[str],
+    *,
+    market_layers: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     allowed, reason = _internal_scan_allows_pending(config, internal_scan)
     internal_config = config.get("ai", {}).get("internal", {})
@@ -1346,6 +1348,7 @@ def _create_pending_from_internal_scan(
                     config,
                     candidate,
                     reason_prefix=f"Mini setup {setup_id} was deleted by 5.5",
+                    market_layers=market_layers,
                 )
                 result["rechecks"].append({"setup_id": setup_id, **recheck})
                 _save_mini_setup_state(
@@ -1491,12 +1494,22 @@ def write_report(config: dict[str, Any], decision: Decision) -> Path:
 
 def force_mini_scan_from_latest_four_hour(config: dict[str, Any]) -> dict[str, Any]:
     internal_market_scan = run_internal_market_scan(config, force=True)
+    selected_symbols = [
+        str(symbol)
+        for symbol in internal_market_scan.get("selected_symbols") or []
+        if str(symbol)
+    ]
+    try:
+        market_layers = market_guard_symbol_layers(config, selected_symbols) if selected_symbols else {}
+    except Exception:
+        market_layers = {}
     mini_pending_queue = _create_pending_from_internal_scan(
         config,
         [],
         internal_market_scan,
         active_trades_summary(config),
         open_pending_symbols(config),
+        market_layers=market_layers,
     )
     return {
         "internal_market_scan": internal_market_scan,
@@ -1711,6 +1724,7 @@ def run_once(
             internal_market_scan,
             active_summary,
             pending_symbols,
+            market_layers=market_layers,
         )
         scan_comparison["mini_pending_queue"] = mini_pending_queue
 
