@@ -247,6 +247,22 @@ function intervalLabel(seconds) {
   return minutes === 1 ? "1 phút" : `${minutes} phút`;
 }
 
+function systemDataUpdateSeconds() {
+  const payloadSeconds = Number(state.lastSystemChecklistPayload?.automation?.interval_seconds);
+  if (Number.isFinite(payloadSeconds) && payloadSeconds > 0) return payloadSeconds;
+  const paperSeconds = Number(state.paperIntervalSeconds);
+  if (Number.isFinite(paperSeconds) && paperSeconds > 0) return paperSeconds;
+  return 300;
+}
+
+function systemDataUpdateIntervalLabel() {
+  return `${intervalLabel(systemDataUpdateSeconds())}/l\u1ea7n`;
+}
+
+function systemDataUpdateScheduleText() {
+  return `Chu k\u1ef3 c\u1eadp nh\u1eadt data h\u1ec7 th\u1ed1ng: ${systemDataUpdateIntervalLabel()}`;
+}
+
 function setBusy(isBusy) {
   state.running = isBusy;
   refs.analyzeBtn.disabled = isBusy;
@@ -2678,6 +2694,16 @@ function renderMarketRegimeCoverage(payload, selectedView) {
   `;
 }
 
+function marketRegimeIndicatorValue(indicators, keys) {
+  const source = indicators && typeof indicators === "object" ? indicators : {};
+  const candidateKeys = Array.isArray(keys) ? keys : [keys];
+  for (const key of candidateKeys) {
+    const value = marketRegimeFiniteValue(source?.[key]);
+    if (value !== null) return value;
+  }
+  return null;
+}
+
 function renderMarketRegimeSnapshotChart({
   id,
   title,
@@ -2696,16 +2722,23 @@ function renderMarketRegimeSnapshotChart({
     : {};
   const normalizedSeries = (Array.isArray(series) ? series : []).map((item) => ({
     ...item,
-    currentValue: marketRegimeFiniteValue(latestIndicators[item.key]),
+    currentValue: marketRegimeIndicatorValue(latestIndicators, item.keys || item.key),
     points: rows.map((snapshot, index) => ({
       index,
       createdAt: marketRegimeSnapshotCreatedAt(snapshot),
-      value: marketRegimeFiniteValue(snapshot?.indicators?.[item.key]),
+      value: marketRegimeIndicatorValue(snapshot?.indicators, item.keys || item.key),
     })),
-  }));
-  const availableSeries = normalizedSeries.filter((item) => item.currentValue !== null);
+  })).map((item) => {
+    const latestPointValue = [...item.points].reverse().find((point) => point.value !== null)?.value ?? null;
+    return {
+      ...item,
+      hasData: item.points.some((point) => point.value !== null),
+      displayValue: item.currentValue !== null ? item.currentValue : latestPointValue,
+    };
+  });
+  const availableSeries = normalizedSeries.filter((item) => item.hasData);
   const missingText = normalizedSeries
-    .filter((item) => item.currentValue === null)
+    .filter((item) => !item.hasData)
     .map((item) => item.label)
     .join(", ");
   const missingNote = missingText
@@ -2790,7 +2823,7 @@ function renderMarketRegimeSnapshotChart({
       <button class="market-regime-legend-btn" type="button" data-regime-target="${escapeHtml(target)}" aria-pressed="true">
         <i style="background:${item.color}"></i>
         <span>${escapeHtml(item.label)}</span>
-        <strong>${escapeHtml(formatMarketRegimeNumber(item.currentValue))}</strong>
+        <strong>${escapeHtml(formatMarketRegimeNumber(item.displayValue))}</strong>
       </button>
     `;
   }).join("");
@@ -2916,26 +2949,34 @@ function renderMarketRegimeDetail(module, options = {}) {
     { key: "fear_greed", label: "Fear & Greed", color: "#b7791f" },
     { key: "news_score", label: "News Score", color: "#bd3f32" },
   ];
-  const volatilityValue = marketRegimeFiniteValue(indicators.volatility);
-  const fundingValue = marketRegimeFiniteValue(indicators.funding);
-  const volatilityFundingSeries = volatilityValue !== null
-    ? [{ key: "volatility", label: "Volatility", value: volatilityValue, color: "#bd3f32" }]
-    : fundingValue !== null
-      ? [{ key: "funding", label: "Funding", value: fundingValue, color: "#315f9f" }]
-      : [];
-  const volatilityFundingSupplemental = volatilityValue !== null && fundingValue !== null
-    ? [{ label: "Funding", value: fundingValue, note: "Funding hiển thị riêng vì payload không xác nhận cùng đơn vị với Volatility." }]
-    : [];
-  const volumeValue = marketRegimeFiniteValue(indicators.volume);
-  const openInterestValue = marketRegimeFiniteValue(indicators.open_interest);
-  const marketFlowSeries = volumeValue !== null
-    ? [{ key: "volume", label: "Volume", value: volumeValue, color: "#147a7e" }]
-    : openInterestValue !== null
-      ? [{ key: "open_interest", label: "Open Interest", value: openInterestValue, color: "#315f9f" }]
-      : [];
-  const marketFlowSupplemental = volumeValue !== null && openInterestValue !== null
-    ? [{ label: "Open Interest", value: openInterestValue, note: "Open Interest hiển thị riêng vì payload không xác nhận cùng đơn vị với Volume." }]
-    : [];
+  const volatilityFundingSeries = [
+    {
+      key: isAggregateView ? "median_atr_pct" : "atr_pct",
+      keys: isAggregateView ? ["median_atr_pct", "atr_pct", "volatility"] : ["atr_pct", "volatility"],
+      label: "ATR%",
+      color: "#bd3f32",
+    },
+    {
+      key: "funding_rate",
+      keys: ["funding_rate", "funding", "fundingRate"],
+      label: "Funding",
+      color: "#315f9f",
+    },
+  ];
+  const marketFlowSeries = [
+    {
+      key: isAggregateView ? "median_volume_ratio" : "volume_ratio",
+      keys: isAggregateView ? ["median_volume_ratio", "volume_ratio", "volume"] : ["volume_ratio", "volume"],
+      label: "Volume Ratio",
+      color: "#147a7e",
+    },
+    {
+      key: "open_interest",
+      keys: ["open_interest", "open_interest_change", "openInterest", "openInterestChange"],
+      label: "Open Interest",
+      color: "#315f9f",
+    },
+  ];
   const kpiCards = isAggregateView
     ? [
         renderMarketRegimeKpiCard({ title: "Trend Score", subtitle: `Điểm xu hướng ${aggregateScopeText}`, value: indicators.trend_score, unitText: "0-100", createdAt }),
@@ -3023,26 +3064,24 @@ function renderMarketRegimeDetail(module, options = {}) {
             fixedYMax: isAggregateView ? 100 : null,
             error,
           })}
-          ${renderMarketRegimeLineChart({
+          ${renderMarketRegimeSnapshotChart({
             id: "volatility-funding",
             title: "Độ biến động và Funding",
-            subtitle: "Volatility và Funding",
+            subtitle: "ATR% và Funding",
             createdAt,
+            snapshots: chartSnapshots,
             series: volatilityFundingSeries,
-            axisLabel: "Giá trị gốc",
-            missing: [volatilityValue === null ? "Volatility" : null, fundingValue === null ? "Funding" : null],
-            supplemental: volatilityFundingSupplemental,
+            axisLabel: "ATR% / Funding",
             error,
           })}
-          ${renderMarketRegimeLineChart({
+          ${renderMarketRegimeSnapshotChart({
             id: "market-flow",
             title: "Dòng tiền và mức tham gia thị trường",
-            subtitle: "Volume và Open Interest",
+            subtitle: "Volume Ratio và Open Interest",
             createdAt,
+            snapshots: chartSnapshots,
             series: marketFlowSeries,
-            axisLabel: "Giá trị gốc",
-            missing: [volumeValue === null ? "Volume" : null, openInterestValue === null ? "Open Interest" : null],
-            supplemental: marketFlowSupplemental,
+            axisLabel: "Volume Ratio / Open Interest",
             error,
           })}
         </div>
@@ -3165,9 +3204,11 @@ function renderModuleDetail(module, options = {}) {
 
 function groupedSystemModules(modules) {
   const sourceRows = Array.isArray(modules) ? modules : [];
+  const dataUpdateInterval = systemDataUpdateIntervalLabel();
+  const dataUpdateSchedule = systemDataUpdateScheduleText();
   const eventScheduleByName = {
     "Bộ nhớ quyết định AI": { event: "Ghi nhớ sau mỗi quyết định", schedule: "Sau mỗi lệnh đóng", interval: "lệnh đóng" },
-    "Market Regime": { event: "Ghi nhớ sau mỗi quyết định", schedule: "2 giờ/lần", interval: "2 giờ" },
+    "Market Regime": { event: "Theo snapshot data hệ thống", schedule: dataUpdateSchedule, interval: dataUpdateInterval },
     "Strategy Versioning": { event: "Ghi nhớ sau mỗi quyết định", schedule: "6h sáng", interval: "6h sáng" },
     "Replay Engine": { event: "Ghi nhớ sau mỗi quyết định", schedule: "6h sáng", interval: "6h sáng" },
     "Bunny Minimize Losses": { event: "Ngay khi lệnh đóng", schedule: "5 phút/lần để đối chiếu", interval: "5 phút" },
@@ -3203,7 +3244,7 @@ function groupedSystemModules(modules) {
       title: "AI Decision",
       subtitle_vi: "Ra quyết định AI",
       event_text: "Ghi nhớ sau mỗi quyết định",
-      schedule_text: "Market Regime 2 giờ/lần, Replay & Strategy lúc 6h sáng",
+      schedule_text: `Market Regime ${dataUpdateInterval}, Replay & Strategy lúc 6h sáng`,
       items: [
         realModules.get("Bộ nhớ quyết định AI"),
         realModules.get("Market Regime"),

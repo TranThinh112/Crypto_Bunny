@@ -1220,6 +1220,17 @@ def _market_numbers(indicators: list[dict[str, Any]], key: str) -> list[float]:
     return numbers
 
 
+def _market_numbers_any(indicators: list[dict[str, Any]], keys: list[str]) -> list[float]:
+    numbers: list[float] = []
+    for indicator in indicators:
+        for key in keys:
+            value = _finite_market_number(indicator.get(key))
+            if value is not None:
+                numbers.append(value)
+                break
+    return numbers
+
+
 def _market_average(values: list[float]) -> float | None:
     return (sum(values) / len(values)) if values else None
 
@@ -1295,6 +1306,11 @@ def _aggregate_market_regime_indicators(
     adx_values = _market_numbers(indicators, "adx")
     fear_greed_values = _market_numbers(indicators, "fear_greed")
     news_score_values = _market_numbers(indicators, "news_score")
+    funding_rate_values = _market_numbers_any(indicators, ["funding_rate", "funding", "fundingRate"])
+    open_interest_values = _market_numbers_any(
+        indicators,
+        ["open_interest", "open_interest_change", "openInterest", "openInterestChange"],
+    )
     aggregate = {
         "scope": "aggregate",
         "symbol": "MARKET",
@@ -1322,6 +1338,8 @@ def _aggregate_market_regime_indicators(
         "news_score": None if not news_score_values else round(_market_average(news_score_values) or 0.0, 2),
         "median_atr_pct": None if not atr_pct_values else round(_market_median(atr_pct_values) or 0.0, 4),
         "median_volume_ratio": None if not volume_ratio_values else round(_market_median(volume_ratio_values) or 0.0, 4),
+        "funding_rate": None if not funding_rate_values else round(_market_average(funding_rate_values) or 0.0, 6),
+        "open_interest": None if not open_interest_values else round(_market_average(open_interest_values) or 0.0, 4),
     }
     settings = config.get("market_regime", {})
     atr_pct = _finite_market_number(aggregate.get("median_atr_pct")) or 0.0
