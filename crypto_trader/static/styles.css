@@ -1671,6 +1671,15 @@ tr:last-child td {
   opacity: 0.65;
 }
 
+.module-ai-range-loading .module-chart-scroll {
+  opacity: 0.72;
+  transition: opacity 0.16s ease;
+}
+
+.module-ai-range-loading .module-ai-range-btn.active {
+  opacity: 1;
+}
+
 .module-detail-head h3 {
   margin: 3px 0 5px;
   font-size: 16px;

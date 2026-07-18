@@ -14,6 +14,8 @@ const state = {
   currentPositions: [],
   currentPositionsPayload: null,
   lastSystemChecklistPayload: null,
+  systemChecklistPayloadByRange: {},
+  systemChecklistRequestSeq: 0,
   previousSystemChecklistPayload: null,
   systemChecklistRefreshInFlight: false,
   lastSystemChecklistRefreshMs: 0,
@@ -1078,6 +1080,18 @@ function renderSystemModuleAiRangeToggle(module) {
       `).join("")}
     </div>
   `;
+}
+
+function updateSystemModuleAiRangeUi(nextRange, { loading = false } = {}) {
+  const range = normalizeSystemModuleAiRange(nextRange);
+  if (!refs.systemModuleDetail) return;
+  refs.systemModuleDetail.classList.toggle("module-ai-range-loading", Boolean(loading));
+  refs.systemModuleDetail.querySelectorAll(".module-ai-range-btn").forEach((button) => {
+    const isActive = normalizeSystemModuleAiRange(button.getAttribute("data-ai-range")) === range;
+    button.classList.toggle("active", isActive);
+    button.setAttribute("aria-pressed", isActive ? "true" : "false");
+    button.disabled = Boolean(loading);
+  });
 }
 
 function moduleDetailScrollTop() {
@@ -3120,12 +3134,20 @@ function renderModuleDetail(module, options = {}) {
     button.addEventListener("click", () => {
       const nextRange = normalizeSystemModuleAiRange(button.getAttribute("data-ai-range"));
       if (nextRange === normalizeSystemModuleAiRange(state.systemModuleAiRange)) return;
+      const scrollTop = moduleDetailScrollTop();
+      const activeChartIndex = moduleDetailActiveChartIndex();
       state.systemModuleAiRange = nextRange;
-      refs.systemModuleDetail.querySelectorAll(".module-ai-range-btn").forEach((item) => {
-        item.disabled = true;
-      });
+      updateSystemModuleAiRangeUi(nextRange, { loading: true });
+      const cachedPayload = state.systemChecklistPayloadByRange?.[nextRange];
+      if (cachedPayload) {
+        renderSystemChecklist(cachedPayload);
+        const cachedModule = (cachedPayload.modules || []).find((item) => systemModuleKey(item) === state.selectedSystemModuleKey);
+        if (cachedModule) renderModuleDetail(cachedModule, { scrollTop, activeChartIndex });
+        updateSystemModuleAiRangeUi(nextRange, { loading: true });
+      }
       loadSystemChecklist("", { aiRange: nextRange, forceRefresh: true })
-        .catch((err) => setStatus(`Lỗi tải phạm vi AI: ${err.message}`));
+        .catch((err) => setStatus(`Lỗi tải phạm vi AI: ${err.message}`))
+        .finally(() => updateSystemModuleAiRangeUi(state.systemModuleAiRange, { loading: false }));
     });
   });
   bindModuleChartInteractions();
@@ -3970,6 +3992,7 @@ async function loadSystemChecklist(date = "", options = {}) {
   if (!date && !hasExistingPayload && refs.systemModuleGrid) refs.systemModuleGrid.innerHTML = renderMarketRegimeLoadingSkeleton();
   const aiRange = date ? "current" : normalizeSystemModuleAiRange(options.aiRange || state.systemModuleAiRange);
   if (!date) state.systemModuleAiRange = aiRange;
+  const requestSeq = date ? null : ++state.systemChecklistRequestSeq;
   const forceParam = options.forceRefresh ? "&force_refresh=true" : "";
   const aiRangeParam = !date ? `&ai_range=${encodeURIComponent(aiRange)}` : "";
   const url = date
@@ -3986,6 +4009,7 @@ async function loadSystemChecklist(date = "", options = {}) {
     }
     throw err;
   }
+  if (!date && requestSeq !== state.systemChecklistRequestSeq) return;
   const backendPreviousPayload = payload && typeof payload.previous_snapshot === "object" ? payload.previous_snapshot : null;
   const lastPayload = state.lastSystemChecklistPayload;
   const sameDateAsLast = Boolean(lastPayload && payload?.date && lastPayload.date === payload.date);
@@ -3998,6 +4022,9 @@ async function loadSystemChecklist(date = "", options = {}) {
       ? (backendPreviousPayload || lastPayload)
       : (lastPayload && payloadRange === "all" ? null : backendPreviousPayload));
   state.lastSystemChecklistPayload = payload;
+  if (!date) {
+    state.systemChecklistPayloadByRange[payloadRange] = payload;
+  }
   renderSystemChecklist(payload);
   if (refs.systemChecklistDate && payload.date) refs.systemChecklistDate.value = payload.date;
   if (!date && aiRange === "current") refreshSystemChecklistInBackground();
@@ -4014,6 +4041,8 @@ function refreshSystemChecklistInBackground() {
       return res.json();
     })
     .then((payload) => {
+      state.systemChecklistPayloadByRange.current = payload;
+      if (normalizeSystemModuleAiRange(state.systemModuleAiRange) !== "current") return;
       const previous = state.lastSystemChecklistPayload;
       state.previousSystemChecklistPayload = previous || state.previousSystemChecklistPayload;
       state.lastSystemChecklistPayload = payload;
