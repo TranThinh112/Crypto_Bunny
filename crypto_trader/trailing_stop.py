@@ -274,6 +274,14 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
             continue
         initial_entry = _initial_entry(execution, entry)
         initial_sl = _initial_stop_loss(execution)
+        current_sl = _float(execution.get("stop_loss")) or initial_sl
+        algo = _find_stop_loss_algo(exchange, symbol, side, current_sl)
+        if algo is not None:
+            algo_sl = _float(algo.get("slTriggerPx") or algo.get("slOrdPx"))
+            if algo_sl is not None:
+                current_sl = algo_sl
+                if initial_sl is None:
+                    initial_sl = algo_sl
         if initial_entry is None or initial_sl is None:
             skipped += 1
             rows.append(_status_row(symbol, side, "skipped", "missing initial entry or initial SL"))
@@ -296,12 +304,6 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
                 )
             )
             continue
-        current_sl = _float(execution.get("stop_loss")) or initial_sl
-        algo = _find_stop_loss_algo(exchange, symbol, side, current_sl)
-        if algo is not None:
-            algo_sl = _float(algo.get("slTriggerPx") or algo.get("slOrdPx"))
-            if algo_sl is not None:
-                current_sl = algo_sl
         ohlcv = exchange.fetch_ohlcv(symbol, settings["atr_timeframe"], limit=int(settings["atr_period"]) + 1)
         atr = _atr_from_ohlcv(ohlcv or [], int(settings["atr_period"]))
         if atr is None or atr <= 0:

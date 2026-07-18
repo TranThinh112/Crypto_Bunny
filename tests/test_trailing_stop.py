@@ -141,3 +141,28 @@ class TrailingStopTest(TestCase):
         self.assertEqual(result["amended"], 0)
         self.assertEqual(exchange.amend_requests, [])
         self.assertEqual(result["items"][0]["reason"], "minimum improvement not reached")
+
+    def test_uses_okx_algo_sl_as_initial_stop_for_existing_rows(self) -> None:
+        config = self._config()
+        insert_trade_execution_row(
+            config,
+            {
+                "created_at": "2026-07-19T00:00:00+00:00",
+                "updated_at": "2026-07-19T00:00:00+00:00",
+                "symbol": "BTC/USDT:USDT",
+                "side": "LONG",
+                "status": "OPEN",
+                "entry_price": 64532.0,
+                "stop_loss": None,
+                "take_profit": 65032.0,
+            },
+        )
+        exchange = FakeTrailingExchange(mark=64657.0, current_sl=64407.0)
+
+        with patch("crypto_trader.trailing_stop.create_exchange", return_value=exchange):
+            result = run_trailing_stop_cycle(config)
+
+        self.assertEqual(result["amended"], 1)
+        row = list_trade_execution_rows(config, statuses=["OPEN"])[0]
+        self.assertEqual(row["initial_stop_loss"], 64407.0)
+        self.assertAlmostEqual(row["stop_loss"], 64634.5)
