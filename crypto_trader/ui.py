@@ -184,6 +184,10 @@ _SYSTEM_ERROR_NOTIFICATIONS: dict[str, tuple[str, datetime]] = {}
 
 def _notify_system_error(config: dict[str, Any], component: str, error: Any) -> bool:
     now = datetime.now(timezone.utc)
+    raw_error_text = str(error or "").strip()
+    if "cannot schedule new futures after interpreter shutdown" in raw_error_text.lower():
+        LOGGER.info("Suppressing background shutdown error from %s: %s", component, raw_error_text)
+        return False
     message_text = str(error or "Lỗi không xác định").strip() or "Lỗi không xác định"
     fingerprint = hashlib.sha256(message_text.encode("utf-8", errors="replace")).hexdigest()[:16]
     with _SYSTEM_ERROR_NOTIFY_LOCK:
@@ -708,6 +712,21 @@ def _lc_pipeline_worker_enabled(config: dict[str, Any]) -> bool:
     return bool(internal.get("lc_pipeline_enabled", True)) and _automation_enabled(config)
 
 
+def _app_is_stopping(app: FastAPI) -> bool:
+    stop_event = getattr(app.state, "automation_stop", None)
+    return bool(getattr(app.state, "shutdown_started", False)) or bool(
+        stop_event is not None and stop_event.is_set()
+    )
+
+
+def _is_interpreter_shutdown_error(exc: BaseException) -> bool:
+    return "cannot schedule new futures after interpreter shutdown" in str(exc).lower()
+
+
+def _should_suppress_background_error(app: FastAPI, exc: BaseException) -> bool:
+    return _app_is_stopping(app) or _is_interpreter_shutdown_error(exc)
+
+
 def _automation_should_execute(config: dict[str, Any]) -> tuple[bool, str]:
     mode = str(config.get("mode", "dry_run"))
     automation = config.get("automation", {})
@@ -1031,8 +1050,12 @@ def _automation_worker(app: FastAPI) -> None:
 
 
 def _run_lc_pipeline_worker_cycle(app: FastAPI) -> None:
+    if _app_is_stopping(app):
+        return
     now = datetime.now(timezone.utc)
     config = load_config(app.state.config_path)
+    if _app_is_stopping(app):
+        return
     notification_config = config
     interval = _lc_pipeline_worker_interval(config)
     next_scan_at = _next_automation_cycle_at(now, interval)
@@ -1054,7 +1077,13 @@ def _run_lc_pipeline_worker_cycle(app: FastAPI) -> None:
         return
 
     try:
+        if _app_is_stopping(app):
+            status["last_result"] = "stopping"
+            return
         cycle_result = collect_lc_pipeline_candidates(notification_config)
+        if _app_is_stopping(app):
+            status["last_result"] = "stopping"
+            return
         app.state.lc_pipeline_candidate_cache = cycle_result
         pipeline = update_lc_internal_pipeline(
             notification_config,
@@ -1083,7 +1112,10 @@ def _run_lc_pipeline_worker_cycle(app: FastAPI) -> None:
                 "error": str(exc),
             }
         )
-        _notify_system_error(config, "LC Pipeline", exc)
+        if _should_suppress_background_error(app, exc):
+            LOGGER.info("Suppressing LC Pipeline error during shutdown: %s", exc)
+        else:
+            _notify_system_error(config, "LC Pipeline", exc)
     finally:
         app.state.lc_pipeline_status = status
         app.state.lc_pipeline_lock.release()
@@ -1097,20 +1129,30 @@ def _lc_pipeline_worker(app: FastAPI) -> None:
         except Exception:
             interval = 60
         try:
+            if _app_is_stopping(app):
+                return
             _run_lc_pipeline_worker_cycle(app)
         except Exception as exc:
-            try:
-                _notify_system_error(load_config(app.state.config_path), "LC Pipeline Worker", exc)
-            except Exception:
-                LOGGER.exception("LC pipeline worker failed before Telegram notification")
+            if _should_suppress_background_error(app, exc):
+                LOGGER.info("Suppressing LC pipeline worker error during shutdown: %s", exc)
+            else:
+                try:
+                    _notify_system_error(load_config(app.state.config_path), "LC Pipeline Worker", exc)
+                except Exception:
+                    LOGGER.exception("LC pipeline worker failed before Telegram notification")
         next_run_at = _next_automation_cycle_at(datetime.now(timezone.utc), interval)
         wait_seconds = max(1.0, (next_run_at - datetime.now(timezone.utc)).total_seconds())
-        app.state.automation_stop.wait(wait_seconds)
+        if app.state.automation_stop.wait(wait_seconds):
+            return
 
 
 def _run_lc_pipeline_slot_cycle(app: FastAPI) -> None:
+    if _app_is_stopping(app):
+        return
     now = datetime.now(timezone.utc)
     config = load_config(app.state.config_path)
+    if _app_is_stopping(app):
+        return
     notification_config = config
     if not _lc_pipeline_worker_enabled(config):
         return
@@ -1168,7 +1210,11 @@ def _run_lc_pipeline_slot_cycle(app: FastAPI) -> None:
                 return
         if not candidates or created_at is None:
             return
+        if _app_is_stopping(app):
+            return
         pipeline = update_lc_internal_pipeline(notification_config, candidates, now=now)
+        if _app_is_stopping(app):
+            return
         mini_scan = run_internal_market_scan_if_due(notification_config)
         current_status = getattr(app.state, "lc_pipeline_status", {}).copy()
         current_status.update(
@@ -1217,13 +1263,19 @@ def _lc_pipeline_slot_worker(app: FastAPI) -> None:
         except Exception:
             interval = 10
         try:
+            if _app_is_stopping(app):
+                return
             _run_lc_pipeline_slot_cycle(app)
         except Exception as exc:
-            try:
-                _notify_system_error(load_config(app.state.config_path), "LC Slot Worker", exc)
-            except Exception:
-                LOGGER.exception("LC slot worker failed before Telegram notification")
-        app.state.automation_stop.wait(interval)
+            if _should_suppress_background_error(app, exc):
+                LOGGER.info("Suppressing LC slot worker error during shutdown: %s", exc)
+            else:
+                try:
+                    _notify_system_error(load_config(app.state.config_path), "LC Slot Worker", exc)
+                except Exception:
+                    LOGGER.exception("LC slot worker failed before Telegram notification")
+        if app.state.automation_stop.wait(interval):
+            return
 
 
 def _telegram_polling_enabled(config: dict[str, Any]) -> bool:
@@ -2609,6 +2661,7 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
     app.state.lock = threading.Lock()
     app.state.mini_force_lock = threading.Lock()
     app.state.automation_stop = threading.Event()
+    app.state.shutdown_started = False
     app.state.lc_pipeline_lock = threading.Lock()
     app.state.lc_pipeline_slot_lock = threading.Lock()
     app.state.storage_maintenance_lock = threading.Lock()
@@ -2646,6 +2699,7 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
 
     @app.on_event("startup")
     def start_automation() -> None:
+        app.state.shutdown_started = False
         config = load_config(app.state.config_path)
         now = datetime.now(timezone.utc)
         quiet_seconds = _telegram_startup_quiet_seconds(config)
@@ -2721,6 +2775,7 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
 
     @app.on_event("shutdown")
     def stop_automation() -> None:
+        app.state.shutdown_started = True
         app.state.automation_stop.set()
         thread = getattr(app.state, "automation_thread", None)
         if thread and thread.is_alive():

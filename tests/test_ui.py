@@ -760,6 +760,71 @@ class UiTest(TestCase):
         passed_config = update_pipeline.call_args.args[0]
         self.assertTrue(passed_config["notifications"]["telegram"]["enabled"])
 
+    @patch("crypto_trader.ui.collect_lc_pipeline_candidates")
+    def test_lc_pipeline_worker_cycle_skips_when_app_is_stopping(self, collect_candidates) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text(
+                "mode: dry_run\n"
+                "runtime_config_overrides:\n"
+                "  enabled: false\n"
+                "automation:\n"
+                "  enabled: true\n"
+                "ai:\n"
+                "  internal:\n"
+                "    lc_pipeline_enabled: true\n",
+                encoding="utf-8",
+            )
+            stop_event = threading.Event()
+            stop_event.set()
+            app = SimpleNamespace(
+                state=SimpleNamespace(
+                    config_path=config_path,
+                    automation_stop=stop_event,
+                    shutdown_started=True,
+                    lc_pipeline_lock=threading.Lock(),
+                    lc_pipeline_status={},
+                    telegram_startup_quiet_until=None,
+                )
+            )
+
+            _run_lc_pipeline_worker_cycle(app)
+
+        collect_candidates.assert_not_called()
+
+    @patch("crypto_trader.ui._notify_system_error")
+    @patch("crypto_trader.ui.collect_lc_pipeline_candidates")
+    def test_lc_pipeline_worker_suppresses_interpreter_shutdown_error(self, collect_candidates, notify_error) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text(
+                "mode: dry_run\n"
+                "runtime_config_overrides:\n"
+                "  enabled: false\n"
+                "automation:\n"
+                "  enabled: true\n"
+                "ai:\n"
+                "  internal:\n"
+                "    lc_pipeline_enabled: true\n",
+                encoding="utf-8",
+            )
+            collect_candidates.side_effect = RuntimeError("cannot schedule new futures after interpreter shutdown")
+            app = SimpleNamespace(
+                state=SimpleNamespace(
+                    config_path=config_path,
+                    automation_stop=threading.Event(),
+                    shutdown_started=False,
+                    lc_pipeline_lock=threading.Lock(),
+                    lc_pipeline_status={},
+                    telegram_startup_quiet_until=None,
+                )
+            )
+
+            _run_lc_pipeline_worker_cycle(app)
+
+        notify_error.assert_not_called()
+        self.assertEqual(app.state.lc_pipeline_status["last_result"], "error")
+
     def test_healthz_includes_runtime_build_metadata(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             config_path = Path(tmpdir) / "config.yaml"
