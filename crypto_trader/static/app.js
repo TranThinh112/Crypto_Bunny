@@ -3387,9 +3387,19 @@ function groupedSystemModules(modules) {
       items: [
         realModules.get("Bộ nhớ quyết định AI"),
         realModules.get("Market Regime"),
-        realModules.get("Market Structure & Pattern Engine"),
         realModules.get("Strategy Versioning"),
         realModules.get("Replay Engine"),
+      ].filter(Boolean),
+    },
+    {
+      key: "market-structure",
+      icon: "📈",
+      title: "Market Structure",
+      subtitle_vi: "Cấu trúc thị trường & mô hình giá",
+      event_text: "Khi scanner hoặc final re-check gửi OHLCV",
+      schedule_text: "Theo request analyze/recheck",
+      items: [
+        realModules.get("Market Structure & Pattern Engine"),
       ].filter(Boolean),
     },
     {
