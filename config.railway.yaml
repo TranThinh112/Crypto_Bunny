@@ -87,7 +87,7 @@ ai:
     market_scan_fixed_schedule: true
     market_scan_slot_tolerance_minutes: 3
     market_scan_timezone: Asia/Ho_Chi_Minh
-    market_scan_source_symbols: 30
+    market_scan_source_symbols: 20
     market_scan_max_symbols: 3
     market_scan_min_approved_symbols: 1
     market_scan_min_win_probability_pct: 80
@@ -240,7 +240,7 @@ strategy:
     enabled: true
     mode: top_volume_24h
     quote: USDT
-    max_symbols: 40
+    max_symbols: 20
     asset_class: crypto
   long_short_bias:
     enabled: true
