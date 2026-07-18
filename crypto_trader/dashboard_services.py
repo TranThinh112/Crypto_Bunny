@@ -557,11 +557,26 @@ def _normalize_ai_decision_range(value: Any) -> str:
     return "all" if str(value or "").strip().lower() == "all" else "current"
 
 
-def _market_regime_history_items(config: dict[str, Any], *, limit: int = 30) -> list[dict[str, Any]]:
+def _market_regime_snapshot_symbol(snapshot: dict[str, Any] | None) -> str:
+    if not isinstance(snapshot, dict):
+        return ""
+    indicators = snapshot.get("indicators") if isinstance(snapshot.get("indicators"), dict) else {}
+    return str(snapshot.get("symbol") or indicators.get("symbol") or "").strip()
+
+
+def _market_regime_history_items(
+    config: dict[str, Any],
+    *,
+    limit: int = 30,
+    symbol: str = "",
+) -> list[dict[str, Any]]:
     try:
-        return market_regime_history(config, limit=limit)
+        rows = market_regime_history(config, limit=max(limit, 100) if symbol else limit)
     except Exception:
         return []
+    if symbol:
+        rows = [item for item in rows if _market_regime_snapshot_symbol(item) == symbol]
+    return rows[:limit]
 
 
 def system_modules_payload(
@@ -624,7 +639,11 @@ def system_modules_payload(
     prompt_metrics = prompt_runtime.get("metrics") if isinstance(prompt_runtime.get("metrics"), dict) else {}
 
     if regime_history_items is None:
-        regime_history_items = _market_regime_history_items(config, limit=30)
+        regime_history_items = _market_regime_history_items(
+            config,
+            limit=30,
+            symbol=_market_regime_snapshot_symbol(regime),
+        )
     regime_counts: dict[str, int] = {}
     for item in regime_history_items:
         name = str(item.get("regime") or "UNKNOWN").upper()
@@ -1032,7 +1051,11 @@ def _build_system_checklist_payload(
     except Exception as exc:
         regime = {"error": str(exc)}
         regime_ok = False
-    regime_history_items = _market_regime_history_items(config, limit=30)
+    regime_history_items = _market_regime_history_items(
+        config,
+        limit=30,
+        symbol=_market_regime_snapshot_symbol(regime),
+    )
 
     try:
         health = get_bunny_health_state(config)

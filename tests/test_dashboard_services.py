@@ -308,16 +308,24 @@ class SystemChecklistPayloadTests(unittest.TestCase):
 
     def test_system_checklist_payload_embeds_market_regime_history(self) -> None:
         config = {"mode": "dry_run"}
-        regime_history = [
+        btc_history = [
             {
                 "created_at": "2026-07-18T05:00:00+00:00",
                 "regime": "LOW_VOLATILITY",
-                "indicators": {"ema_fast": 100.0, "ema_slow": 99.0, "rsi": 56.0},
+                "indicators": {"symbol": "BTC/USDT:USDT", "ema_fast": 100.0, "ema_slow": 99.0, "rsi": 56.0},
             },
             {
                 "created_at": "2026-07-18T05:01:00+00:00",
                 "regime": "LOW_VOLATILITY",
-                "indicators": {"ema_fast": 101.0, "ema_slow": 99.5, "rsi": 57.0},
+                "indicators": {"symbol": "BTC/USDT:USDT", "ema_fast": 101.0, "ema_slow": 99.5, "rsi": 57.0},
+            },
+        ]
+        regime_history = [
+            *btc_history,
+            {
+                "created_at": "2026-07-18T05:02:00+00:00",
+                "regime": "LOW_VOLATILITY",
+                "indicators": {"symbol": "ETH/USDT:USDT", "ema_fast": 1845.0, "ema_slow": 1844.0, "rsi": 55.0},
             },
         ]
 
@@ -336,7 +344,7 @@ class SystemChecklistPayloadTests(unittest.TestCase):
                 "regime": "LOW_VOLATILITY",
                 "confidence": 76.0,
                 "created_at": "2026-07-18T05:01:00+00:00",
-                "indicators": {"ema_fast": 101.0, "ema_slow": 99.5, "rsi": 57.0},
+                "indicators": {"symbol": "BTC/USDT:USDT", "ema_fast": 101.0, "ema_slow": 99.5, "rsi": 57.0},
             },
         ), patch(
             "crypto_trader.dashboard_services.get_bunny_health_state", return_value={}
@@ -353,10 +361,10 @@ class SystemChecklistPayloadTests(unittest.TestCase):
         ) as history_reader:
             payload = _build_system_checklist_payload(config, automation={"last_result": ""})
 
-        self.assertEqual(payload["market_regime_history"], {"items": regime_history})
-        history_reader.assert_called_once_with(config, limit=30)
+        self.assertEqual(payload["market_regime_history"], {"items": btc_history})
+        history_reader.assert_called_once_with(config, limit=100)
         modules_payload.assert_called_once()
-        self.assertEqual(modules_payload.call_args.kwargs["regime_history_items"], regime_history)
+        self.assertEqual(modules_payload.call_args.kwargs["regime_history_items"], btc_history)
 
     def test_system_checklist_all_range_builds_fresh_without_daily_snapshot_cache(self) -> None:
         rebuilt = {
