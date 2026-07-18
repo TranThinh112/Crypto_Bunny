@@ -8,6 +8,19 @@ runtime:
 runtime_sync:
   position_close_grace_seconds: 120
 
+trailing_stop:
+  enabled: true
+  activation_r_multiple: 1.0
+  atr_timeframe: 1m
+  atr_period: 14
+  atr_multiplier: 1.5
+  min_improvement_price: 0.0
+  trigger_price_type: last
+  symbol_overrides:
+    BTC:
+      min_improvement_points: 2000
+      point_value: 0.01
+
 database:
   backend: atlas
   atlas:

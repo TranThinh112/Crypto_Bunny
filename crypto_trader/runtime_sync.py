@@ -368,6 +368,11 @@ def sync_exchange_runtime_state(
         }
         matching_rows = executions_by_key.get(position_key, [])
         matched = matching_rows[0] if matching_rows else None
+        if matched:
+            if stop_loss is None:
+                stop_loss = _float(matched.get("stop_loss"))
+            if take_profit is None:
+                take_profit = _float(matched.get("take_profit"))
         updates = {
             "updated_at": created_at,
             "status": "OPEN",
@@ -377,6 +382,11 @@ def sync_exchange_runtime_state(
             "pnl": _float(position.get("unrealized_pnl") or position.get("unrealizedPnl") or info.get("upl")),
             "snapshot_json": json.dumps(payload, ensure_ascii=False),
         }
+        if matched:
+            if _float(matched.get("initial_entry_price")) is None and entry_price is not None:
+                updates["initial_entry_price"] = _float(matched.get("entry_price")) or entry_price
+            if _float(matched.get("initial_stop_loss")) is None and stop_loss is not None:
+                updates["initial_stop_loss"] = stop_loss
         if matched:
             update_trade_execution(config, int(matched["id"]), updates)
             matched_execution_ids.add(int(matched["id"]))
@@ -394,6 +404,8 @@ def sync_exchange_runtime_state(
                     "entry_price": entry_price,
                     "stop_loss": stop_loss,
                     "take_profit": take_profit,
+                    "initial_entry_price": entry_price,
+                    "initial_stop_loss": stop_loss,
                     "risk_reward": None,
                     "risk_percent": 0,
                     "rule_score": None,

@@ -170,6 +170,7 @@ from .storage import (
     storage_stats,
 )
 from .sizing import STATE_KEY as SIZING_STATE_KEY
+from .trailing_stop import run_trailing_stop_cycle
 
 
 LOGGER = logging.getLogger(__name__)
@@ -933,6 +934,14 @@ def _run_automation_cycle(app: FastAPI) -> None:
             status["runtime_sync_error"] = str(sync_exc)
             _publish_automation_status(app, status)
             _notify_system_error(config, "Đồng bộ OKX/MongoDB", sync_exc)
+
+        _set_automation_phase(app, status, "trailing_stop")
+        try:
+            status["trailing_stop"] = run_trailing_stop_cycle(config)
+        except Exception as trailing_exc:
+            status["trailing_stop_error"] = str(trailing_exc)
+            _publish_automation_status(app, status)
+            _notify_system_error(config, "Trailing Stop", trailing_exc)
 
         def _progress(phase: str, metadata: dict[str, Any] | None = None) -> None:
             _set_automation_phase(app, status, phase, metadata=metadata)

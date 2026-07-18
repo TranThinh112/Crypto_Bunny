@@ -29,6 +29,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "interval_seconds": 60,
         "instance_role": "primary",
     },
+    "trailing_stop": {
+        "enabled": True,
+        "activation_r_multiple": 1.0,
+        "atr_timeframe": "1m",
+        "atr_period": 14,
+        "atr_multiplier": 1.5,
+        "min_improvement_price": 0.0,
+        "trigger_price_type": "last",
+        "symbol_overrides": {
+            "BTC": {
+                "min_improvement_points": 2000,
+                "point_value": 0.01,
+            },
+        },
+    },
     "runtime_config_overrides": {
         "enabled": True,
         "state_key": RUNTIME_CONFIG_OVERRIDES_STATE_KEY,

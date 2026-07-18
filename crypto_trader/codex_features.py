@@ -2409,6 +2409,8 @@ def record_trade_execution(
         "entry_price": candidate.entry,
         "stop_loss": candidate.stop_loss,
         "take_profit": candidate.take_profit,
+        "initial_entry_price": candidate.entry,
+        "initial_stop_loss": candidate.stop_loss,
         "risk_reward": candidate.risk_reward,
         "risk_percent": validation.get("riskPercent") or candidate.risk_percent or 0,
         "rule_score": _candidate_rule_score(candidate),

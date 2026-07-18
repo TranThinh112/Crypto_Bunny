@@ -294,3 +294,45 @@ class RuntimeSyncTest(TestCase):
         open_rows = list_trade_execution_rows(config, statuses=["OPEN"])
         self.assertEqual(len(open_rows), 1)
         self.assertEqual(result["exchange"]["duplicate_executions_closed"], 1)
+
+    def test_sync_preserves_existing_targets_when_position_snapshot_omits_them(self) -> None:
+        config = self._config()
+        insert_trade_execution_row(
+            config,
+            {
+                "created_at": "2026-07-07T23:50:00+00:00",
+                "updated_at": "2026-07-07T23:50:00+00:00",
+                "symbol": "BTC/USDT:USDT",
+                "side": "LONG",
+                "status": "OPEN",
+                "entry_price": 64532.0,
+                "stop_loss": 64407.0,
+                "take_profit": 65032.0,
+            },
+        )
+
+        sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-07-08T00:00:00+00:00",
+                "positions": [
+                    {
+                        "symbol": "BTC/USDT:USDT",
+                        "side": "long",
+                        "contracts": 1,
+                        "entry_price": 64532.0,
+                        "mark_price": 64600.0,
+                        "stop_loss": None,
+                        "take_profit": None,
+                    },
+                ],
+                "open_orders": [],
+            },
+        )
+
+        row = list_trade_execution_rows(config, statuses=["OPEN"])[0]
+        self.assertEqual(row["stop_loss"], 64407.0)
+        self.assertEqual(row["take_profit"], 65032.0)
+        self.assertEqual(row["initial_stop_loss"], 64407.0)
