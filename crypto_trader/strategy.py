@@ -18,12 +18,12 @@ def _round_price(value: float) -> float:
 def _estimate_win_probability(
     side: str,
     confidence: float,
-    risk_reward: float,
+    _risk_reward: float,
     news_score: float,
     news_count: int,
     warnings: list[str],
 ) -> float:
-    break_even = 100 / (1 + max(risk_reward, 0.01))
+    setup_base_probability = 40.0
     confidence_edge = (confidence - 60) * 0.65
     news_aligned = (side == "long" and news_score > 0) or (side == "short" and news_score < 0)
     if news_count <= 0:
@@ -33,7 +33,7 @@ def _estimate_win_probability(
     else:
         news_edge = -min(abs(news_score), 5.0) * 0.7
     warning_penalty = min(5.0, len(warnings) * 1.5)
-    estimate = break_even + confidence_edge + news_edge - warning_penalty
+    estimate = setup_base_probability + confidence_edge + news_edge - warning_penalty
     return round(max(25.0, min(80.0, estimate)), 2)
 
 
