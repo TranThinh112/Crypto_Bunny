@@ -6,6 +6,7 @@ import os
 import tempfile
 import urllib.error
 from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase
@@ -18,6 +19,7 @@ from crypto_trader.codex_features import (
     call_openai_json,
     detect_market_regime,
     record_ai_call_event,
+    refresh_bunny_health_state,
     select_runtime_config,
 )
 from crypto_trader.config import DEFAULT_CONFIG
@@ -646,3 +648,98 @@ class CodexFeaturesTest(TestCase):
         self.assertEqual(runtime["trading_risk"]["max_concurrent_positions"], 5)
         self.assertEqual(stored_payload["risk"]["max_active_trades"], 5)
         self.assertEqual(stored_payload["risk"]["cooldown_minutes"], 0)
+
+    def test_health_monitor_does_not_evaluate_a_single_loss(self) -> None:
+        config = self._config()
+        config["bunny_health_monitor"] = {
+            "lookback_trades": 20,
+            "min_trades_for_evaluation": 5,
+        }
+        rows = [
+            {
+                "id": 1,
+                "status": "LOSS",
+                "pnl": -3.164076,
+                "closed_at": "2026-07-19T17:03:01+00:00",
+            }
+        ]
+
+        with patch("crypto_trader.codex_features._closed_trade_executions", return_value=rows):
+            health = refresh_bunny_health_state(config)
+
+        self.assertTrue(health["isHealthy"])
+        self.assertFalse(health["isWarning"])
+        self.assertFalse(health["isCritical"])
+        self.assertFalse(health["isPaused"])
+        self.assertEqual(health["totalTrades"], 1)
+        self.assertEqual(health["minimumTradesForEvaluation"], 5)
+        self.assertEqual(health["totalPnl"], -3.164076)
+        self.assertEqual(health["reason"], "Not enough trades (1/5)")
+
+    def test_health_monitor_reuses_pause_deadline_for_same_trade_sample(self) -> None:
+        config = self._config()
+        config["bunny_health_monitor"] = {
+            "lookback_trades": 20,
+            "min_trades_for_evaluation": 5,
+            "critical_pause_hours": 12,
+        }
+        rows = [
+            {
+                "id": index,
+                "status": "LOSS",
+                "pnl": -1.0,
+                "closed_at": f"2026-07-19T17:0{index}:00+00:00",
+            }
+            for index in range(1, 6)
+        ]
+
+        with patch("crypto_trader.codex_features._closed_trade_executions", return_value=rows):
+            first = refresh_bunny_health_state(config)
+            second = refresh_bunny_health_state(config)
+
+        self.assertTrue(first["isCritical"])
+        self.assertTrue(first["isPaused"])
+        self.assertEqual(second["pausedUntil"], first["pausedUntil"])
+        self.assertEqual(second["evaluationKey"], first["evaluationKey"])
+
+    def test_health_monitor_downgrades_same_sample_after_critical_cooldown(self) -> None:
+        config = self._config()
+        config["bunny_health_monitor"] = {
+            "lookback_trades": 20,
+            "min_trades_for_evaluation": 5,
+            "risk_reduction_percent": 40,
+            "score_increase_step": 4,
+            "confidence_increase_step": 4,
+        }
+        rows = [
+            {
+                "id": index,
+                "status": "LOSS",
+                "pnl": -1.0,
+                "closed_at": f"2026-07-19T17:0{index}:00+00:00",
+            }
+            for index in range(1, 6)
+        ]
+        with patch("crypto_trader.codex_features._closed_trade_executions", return_value=rows):
+            initial = refresh_bunny_health_state(config)
+        previous = dict(initial)
+        previous["pausedUntil"] = "2026-07-19T18:00:00+00:00"
+
+        with patch("crypto_trader.codex_features._closed_trade_executions", return_value=rows), patch(
+            "crypto_trader.codex_features.get_trading_health_state_row",
+            return_value={"payload_json": json.dumps(previous)},
+        ), patch(
+            "crypto_trader.codex_features._utcnow",
+            return_value=datetime(2026, 7, 20, 0, 0, tzinfo=timezone.utc),
+        ):
+            health = refresh_bunny_health_state(config)
+
+        self.assertFalse(health["isCritical"])
+        self.assertTrue(health["isWarning"])
+        self.assertFalse(health["isPaused"])
+        self.assertTrue(health["criticalCooldownCompleted"])
+        self.assertEqual(health["riskMultiplier"], 0.6)
+        self.assertEqual(
+            health["reason"],
+            "Critical cooldown completed; waiting for a new closed trade",
+        )

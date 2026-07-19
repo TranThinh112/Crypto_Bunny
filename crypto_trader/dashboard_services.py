@@ -925,6 +925,7 @@ def system_modules_payload(
             "purpose": "Theo dõi win rate, profit factor, drawdown và cảnh báo sức khỏe từ dữ liệu lệnh thực tế.",
             "status": "fail" if health.get("isCritical") else "warn" if health.get("isWarning") else "ok",
             "stats": [
+                _module_row("minimumTradesForEvaluation", health.get("minimumTradesForEvaluation"), "Số lệnh đóng tối thiểu trước khi Health Monitor được phép cảnh báo hoặc pause."),
                 _module_row("totalTrades", health.get("totalTrades"), "Số lệnh đã đóng được dùng để tính health."),
                 _module_row("winCount", health.get("winCount"), "Số lệnh thắng trong cửa sổ health hiện tại."),
                 _module_row("lossCount", health.get("lossCount"), "Số lệnh thua trong cửa sổ health hiện tại.", attention=True),

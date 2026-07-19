@@ -72,6 +72,10 @@ paper_trading:
 trading_risk:
   max_concurrent_positions: 5
 
+bunny_health_monitor:
+  # Tranh khoa he thong vi mot mau thong ke qua nho (vi du chi 1 lenh thua).
+  min_trades_for_evaluation: 5
+
 pending_orders:
   enabled: true
   max_age_days: 3

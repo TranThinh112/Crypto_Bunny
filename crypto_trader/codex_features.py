@@ -28,6 +28,7 @@ from .storage import (
     get_prompt_version,
     get_strategy_version,
     get_trade_execution,
+    get_trading_health_state_row,
     get_trading_system_state_row,
     insert_ai_trade_decision_row,
     insert_market_regime_history,
@@ -2130,97 +2131,125 @@ def get_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
 def refresh_bunny_health_state(config: dict[str, Any]) -> dict[str, Any]:
     settings = deepcopy(config.get("bunny_health_monitor", {}))
     lookback = max(1, _safe_int(settings.get("lookback_trades"), 20))
+    minimum_trades = min(
+        lookback,
+        max(1, _safe_int(settings.get("min_trades_for_evaluation"), 5)),
+    )
     rows = _closed_trade_executions(config, limit=lookback)
-    if not rows:
-        payload = {
-            "isHealthy": True,
-            "isWarning": False,
-            "isCritical": False,
-            "totalTrades": 0,
-            "winCount": 0,
-            "lossCount": 0,
-            "breakevenCount": 0,
-            "winRate": 0.0,
-            "grossProfit": 0.0,
-            "grossLoss": 0.0,
-            "profitFactor": 999.0,
-            "totalPnl": 0.0,
-            "maxDrawdownPercent": 0.0,
-            "riskMultiplier": 1.0,
-            "scoreAdjustment": 0.0,
-            "confidenceAdjustment": 0.0,
-            "isPaused": False,
-            "pausedUntil": None,
-            "reason": "Not enough trades",
-            "updatedAt": _iso_now(),
+    ordered = list(reversed(rows))
+    pnl_values = [float(row.get("pnl") or 0) for row in ordered]
+    win_count = sum(1 for row in rows if str(row.get("status") or "") == "WIN")
+    loss_count = sum(1 for row in rows if str(row.get("status") or "") == "LOSS")
+    breakeven_count = sum(1 for row in rows if str(row.get("status") or "") == "BREAKEVEN")
+    closed_total = win_count + loss_count
+    win_rate = round(win_count / closed_total * 100, 2) if closed_total else 0.0
+    gross_profit = round(sum(pnl for pnl in pnl_values if pnl > 0), 6)
+    gross_loss = round(abs(sum(pnl for pnl in pnl_values if pnl < 0)), 6)
+    profit_factor = 999.0 if gross_loss == 0 else round(gross_profit / gross_loss, 6)
+    equity = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
+    for pnl in pnl_values:
+        equity += pnl
+        peak = max(peak, equity)
+        if peak > 0:
+            max_drawdown = max(max_drawdown, (peak - equity) / peak * 100)
+
+    evaluation_source = [
+        {
+            "id": row.get("id"),
+            "status": row.get("status"),
+            "pnl": row.get("pnl"),
+            "closed_at": row.get("closed_at"),
         }
+        for row in rows
+    ]
+    evaluation_key = hashlib.sha256(
+        json.dumps(evaluation_source, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()[:24]
+    previous_row = get_trading_health_state_row(config) or {}
+    previous_payload = _json_loads(previous_row.get("payload_json"), {})
+    same_evaluation = bool(evaluation_key) and previous_payload.get("evaluationKey") == evaluation_key
+    cooldown_completed = bool(
+        same_evaluation and previous_payload.get("criticalCooldownCompleted", False)
+    )
+
+    reason = "Healthy"
+    risk_multiplier = 1.0
+    score_adjustment = 0.0
+    confidence_adjustment = 0.0
+    is_warning = False
+    is_critical = False
+    paused_until: datetime | None = None
+    if len(rows) < minimum_trades:
+        reason = f"Not enough trades ({len(rows)}/{minimum_trades})"
+        cooldown_completed = False
     else:
-        ordered = list(reversed(rows))
-        pnl_values = [float(row.get("pnl") or 0) for row in ordered]
-        win_count = sum(1 for row in rows if str(row.get("status") or "") == "WIN")
-        loss_count = sum(1 for row in rows if str(row.get("status") or "") == "LOSS")
-        breakeven_count = sum(1 for row in rows if str(row.get("status") or "") == "BREAKEVEN")
-        closed_total = max(1, win_count + loss_count)
-        win_rate = round(win_count / closed_total * 100, 2)
-        gross_profit = round(sum(pnl for pnl in pnl_values if pnl > 0), 6)
-        gross_loss = round(abs(sum(pnl for pnl in pnl_values if pnl < 0)), 6)
-        profit_factor = 999.0 if gross_loss == 0 else round(gross_profit / gross_loss, 6)
-        equity = 0.0
-        peak = 0.0
-        max_drawdown = 0.0
-        for pnl in pnl_values:
-            equity += pnl
-            peak = max(peak, equity)
-            if peak > 0:
-                max_drawdown = max(max_drawdown, (peak - equity) / peak * 100)
-        reason = "Healthy"
-        risk_multiplier = 1.0
-        score_adjustment = 0.0
-        confidence_adjustment = 0.0
-        is_warning = False
-        is_critical = False
-        paused_until = None
-        if (
+        critical_threshold_breached = (
             win_rate < _safe_float(settings.get("critical_win_rate"), 35)
             or profit_factor < _safe_float(settings.get("critical_profit_factor"), 0.8)
             or max_drawdown > _safe_float(settings.get("critical_drawdown_percent"), 15)
-        ):
-            is_critical = True
-            reason = "Critical health threshold breached"
-            paused_until = _utcnow() + timedelta(hours=_safe_int(settings.get("critical_pause_hours"), 12))
-            risk_multiplier = 0.0
-        elif (
+        )
+        warning_threshold_breached = (
             win_rate < _safe_float(settings.get("min_win_rate"), 50)
             or profit_factor < _safe_float(settings.get("min_profit_factor"), 1.2)
             or max_drawdown > _safe_float(settings.get("max_drawdown_percent"), 10)
-        ):
+        )
+        if critical_threshold_breached and not cooldown_completed:
+            previous_pause = _parse_time(previous_payload.get("pausedUntil")) if same_evaluation else None
+            if previous_pause and previous_pause <= _utcnow():
+                cooldown_completed = True
+            else:
+                is_critical = True
+                reason = "Critical health threshold breached"
+                paused_until = previous_pause or (
+                    _utcnow() + timedelta(hours=_safe_int(settings.get("critical_pause_hours"), 12))
+                )
+                risk_multiplier = 0.0
+        if critical_threshold_breached and cooldown_completed:
             is_warning = True
-            reason = "Warning health threshold breached"
-            risk_multiplier = max(0.0, 1.0 - (_safe_float(settings.get("risk_reduction_percent"), 40) / 100.0))
+            reason = "Critical cooldown completed; waiting for a new closed trade"
+            risk_multiplier = max(
+                0.0,
+                1.0 - (_safe_float(settings.get("risk_reduction_percent"), 40) / 100.0),
+            )
             score_adjustment = _safe_float(settings.get("score_increase_step"), 4)
             confidence_adjustment = _safe_float(settings.get("confidence_increase_step"), 4)
-        payload = {
-            "isHealthy": not is_warning and not is_critical,
-            "isWarning": is_warning,
-            "isCritical": is_critical,
-            "totalTrades": len(rows),
-            "winCount": win_count,
-            "lossCount": loss_count,
-            "breakevenCount": breakeven_count,
-            "winRate": win_rate,
-            "grossProfit": gross_profit,
-            "grossLoss": gross_loss,
-            "profitFactor": profit_factor,
-            "totalPnl": round(sum(pnl_values), 6),
-            "maxDrawdownPercent": round(max_drawdown, 4),
-            "riskMultiplier": round(risk_multiplier, 4),
-            "scoreAdjustment": round(score_adjustment, 2),
-            "confidenceAdjustment": round(confidence_adjustment, 2),
-            "isPaused": bool(paused_until),
-            "pausedUntil": paused_until.isoformat() if paused_until else None,
-            "reason": reason,
-            "updatedAt": _iso_now(),
-        }
+        elif warning_threshold_breached and not is_critical:
+            is_warning = True
+            reason = "Warning health threshold breached"
+            risk_multiplier = max(
+                0.0,
+                1.0 - (_safe_float(settings.get("risk_reduction_percent"), 40) / 100.0),
+            )
+            score_adjustment = _safe_float(settings.get("score_increase_step"), 4)
+            confidence_adjustment = _safe_float(settings.get("confidence_increase_step"), 4)
+
+    payload = {
+        "isHealthy": not is_warning and not is_critical,
+        "isWarning": is_warning,
+        "isCritical": is_critical,
+        "totalTrades": len(rows),
+        "minimumTradesForEvaluation": minimum_trades,
+        "winCount": win_count,
+        "lossCount": loss_count,
+        "breakevenCount": breakeven_count,
+        "winRate": win_rate,
+        "grossProfit": gross_profit,
+        "grossLoss": gross_loss,
+        "profitFactor": profit_factor,
+        "totalPnl": round(sum(pnl_values), 6),
+        "maxDrawdownPercent": round(max_drawdown, 4),
+        "riskMultiplier": round(risk_multiplier, 4),
+        "scoreAdjustment": round(score_adjustment, 2),
+        "confidenceAdjustment": round(confidence_adjustment, 2),
+        "isPaused": bool(paused_until),
+        "pausedUntil": paused_until.isoformat() if paused_until else None,
+        "reason": reason,
+        "evaluationKey": evaluation_key,
+        "criticalCooldownCompleted": cooldown_completed,
+        "updatedAt": _iso_now(),
+    }
     upsert_trading_health_state_row(
         config,
         {
@@ -2229,6 +2258,7 @@ def refresh_bunny_health_state(config: dict[str, Any]) -> dict[str, Any]:
             "is_warning": _bool_int(payload["isWarning"]),
             "is_critical": _bool_int(payload["isCritical"]),
             "total_trades": payload["totalTrades"],
+            "minimum_trades_for_evaluation": payload["minimumTradesForEvaluation"],
             "win_count": payload["winCount"],
             "loss_count": payload["lossCount"],
             "breakeven_count": payload["breakevenCount"],
@@ -2244,6 +2274,8 @@ def refresh_bunny_health_state(config: dict[str, Any]) -> dict[str, Any]:
             "is_paused": _bool_int(payload["isPaused"]),
             "paused_until": payload["pausedUntil"],
             "reason": payload["reason"],
+            "evaluation_key": payload["evaluationKey"],
+            "critical_cooldown_completed": _bool_int(payload["criticalCooldownCompleted"]),
             "updated_at": payload["updatedAt"],
             "payload_json": json.dumps(payload, ensure_ascii=False),
         },

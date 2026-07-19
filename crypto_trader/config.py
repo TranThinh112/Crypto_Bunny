@@ -401,6 +401,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "bunny_health_monitor": {
         "enabled": True,
         "lookback_trades": 20,
+        "min_trades_for_evaluation": 5,
         "min_win_rate": 50.0,
         "min_profit_factor": 1.2,
         "max_drawdown_percent": 10.0,

@@ -1210,6 +1210,8 @@ def upsert_trading_system_state_row(config: dict[str, Any], row: dict[str, Any])
     _ensure_mongo_write_allowed(config)
     _mongo_upsert_by_pk(config, "trading_system_state", "id", payload)
     return payload
+def get_trading_health_state_row(config: dict[str, Any]) -> dict[str, Any] | None:
+    return _mongo_find_one(config, "trading_health_state", query={"id": 1})
 def upsert_trading_health_state_row(config: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
     payload = dict(row)
     payload["id"] = 1
