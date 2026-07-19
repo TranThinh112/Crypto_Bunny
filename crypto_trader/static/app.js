@@ -2793,8 +2793,29 @@ function renderMarketRegimeSnapshotChart({
   const pointY = (value) => chartBottom - ((value - axisMin) / axisSpan) * chartHeight;
   const ticks = Array.from({ length: 5 }, (_, index) => axisMin + (axisSpan * index) / 4);
   const xLabelStep = rows.length <= 5 ? 1 : Math.ceil((rows.length - 1) / 4);
-  const chartSeries = availableSeries.map((item) => {
+  const singleBarWidth = Math.min(54, Math.max(22, chartWidth / Math.max(availableSeries.length * 1.7, 1)));
+  const singleBarGap = Math.max(8, singleBarWidth * 0.38);
+  const singleGroupWidth = availableSeries.length * singleBarWidth + Math.max(0, availableSeries.length - 1) * singleBarGap;
+  const singleGroupLeft = chartLeft + (chartWidth - singleGroupWidth) / 2;
+  const chartSeries = availableSeries.map((item, seriesIndex) => {
     const target = `${id}-${item.key}`;
+    if (rows.length === 1) {
+      const point = item.points.find((candidate) => candidate.value !== null);
+      if (!point) return "";
+      const x = singleGroupLeft + seriesIndex * (singleBarWidth + singleBarGap);
+      const y = pointY(point.value);
+      const height = Math.max(3, chartBottom - y);
+      return `
+        <g class="market-regime-series" data-regime-series="${escapeHtml(target)}">
+          <rect x="${x}" y="${y}" width="${singleBarWidth}" height="${height}" rx="4" fill="${item.color}" opacity="0.92">
+            <title>${escapeHtml(timeLabel(point.createdAt))} | ${escapeHtml(item.label)}: ${escapeHtml(formatMarketRegimeNumber(point.value))}</title>
+          </rect>
+          <circle cx="${x + singleBarWidth / 2}" cy="${y}" r="4.5" fill="${item.color}" stroke="var(--panel)" stroke-width="2">
+            <title>${escapeHtml(timeLabel(point.createdAt))} | ${escapeHtml(item.label)}: ${escapeHtml(formatMarketRegimeNumber(point.value))}</title>
+          </circle>
+        </g>
+      `;
+    }
     const segments = [];
     let activeSegment = [];
     item.points.forEach((point) => {
@@ -2836,7 +2857,7 @@ function renderMarketRegimeSnapshotChart({
     `;
   }).join("");
   const snapshotHint = rows.length === 1
-    ? '<p class="market-regime-snapshot-hint">Cần ít nhất 2 snapshot để hiển thị xu hướng.</p>'
+    ? '<p class="market-regime-snapshot-hint">Đang vẽ snapshot hiện tại; line xu hướng sẽ hiện khi có từ 2 snapshot trở lên.</p>'
     : "";
   return `
     <article class="market-regime-chart-card market-regime-snapshot-chart" data-regime-chart="${escapeHtml(id)}" data-snapshot-count="${rows.length}">
