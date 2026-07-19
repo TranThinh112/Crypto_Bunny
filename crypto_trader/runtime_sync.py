@@ -435,7 +435,12 @@ def _correct_recent_exchange_closes_from_history(
             "exchange_close_history_json": json.dumps(to_jsonable(history), ensure_ascii=False) if history else row.get("exchange_close_history_json"),
             "position_slot": None,
         }
-        if current_pnl is None or abs(current_pnl - pnl) > 1e-9:
+        current_pct = _float(row.get("pnl_pct"))
+        pct_changed = (
+            pnl_pct is not None
+            and (current_pct is None or abs(current_pct - pnl_pct) > 1e-9)
+        )
+        if current_pnl is None or abs(current_pnl - pnl) > 1e-9 or pct_changed:
             update_trade_execution(config, int(row["id"]), updates)
             corrected += 1
     return corrected
