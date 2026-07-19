@@ -3,6 +3,8 @@ const state = {
   lcPipelineTimer: null,
   priceTimer: null,
   paperTimer: null,
+  okxPositionsTimer: null,
+  okxPositionsInFlight: null,
   paperIntervalSeconds: 60,
   maxBaseMarginUsdt: 20,
   selectedViewSymbol: null,
@@ -5271,10 +5273,27 @@ async function saveOrderMargin() {
   }
 }
 
-async function loadOkxPositions() {
-  const res = await fetch("/api/okx-positions");
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  renderOkxPositions(await res.json());
+async function loadOkxPositions({ force = false } = {}) {
+  if (state.okxPositionsInFlight && !force) return state.okxPositionsInFlight;
+  state.okxPositionsInFlight = (async () => {
+    const res = await fetch(`/api/okx-positions?_=${Date.now()}`, { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    renderOkxPositions(await res.json());
+  })();
+  try {
+    return await state.okxPositionsInFlight;
+  } finally {
+    state.okxPositionsInFlight = null;
+  }
+}
+
+function startOkxPositionsRefresh() {
+  if (state.okxPositionsTimer) clearInterval(state.okxPositionsTimer);
+  loadOkxPositions({ force: true }).catch((err) => setStatus(`Lỗi vị thế OKX: ${err.message}`));
+  state.okxPositionsTimer = setInterval(
+    () => loadOkxPositions().catch((err) => setStatus(`Lỗi vị thế OKX: ${err.message}`)),
+    3000,
+  );
 }
 
 async function runAnalysis() {
@@ -5313,7 +5332,6 @@ function startPaperAutoScan() {
   const refresh = () => {
     loadDecision().catch((err) => setStatus(`Lỗi: ${err.message}`));
     loadAutomationStatus().catch((err) => setStatus(`Lỗi auto server: ${err.message}`));
-    loadOkxPositions().catch((err) => setStatus(`Lỗi vi the OKX: ${err.message}`));
     loadLcPipeline().catch((err) => setStatus(`Lỗi LC pipeline: ${err.message}`));
     loadSystemChecklist().catch((err) => setStatus(`Lỗi system health: ${err.message}`));
     loadPrices().catch((err) => setStatus(`Lỗi gia: ${err.message}`));
@@ -5334,7 +5352,7 @@ function resetAutoTimer() {
 
 refs.refreshBtn.addEventListener("click", () => {
   loadDecision().catch((err) => setStatus(`Lỗi: ${err.message}`));
-  loadOkxPositions().catch((err) => setStatus(`Lỗi vi the OKX: ${err.message}`));
+  loadOkxPositions({ force: true }).catch((err) => setStatus(`Lỗi vi the OKX: ${err.message}`));
   loadLcPipeline().catch((err) => setStatus(`Lỗi LC pipeline: ${err.message}`));
   loadSystemChecklist().catch((err) => setStatus(`Lỗi system health: ${err.message}`));
 });
@@ -5415,7 +5433,7 @@ loadDecision()
       .catch((err) => setStatus(`Lỗi OKX demo: ${err.message}`))
       .finally(() => {
         loadAutomationStatus().catch((err) => setStatus(`Lỗi auto server: ${err.message}`));
-        loadOkxPositions().catch((err) => setStatus(`Lỗi vi the OKX: ${err.message}`));
+        startOkxPositionsRefresh();
         loadSystemChecklist().catch((err) => setStatus(`Lỗi system health: ${err.message}`));
         startPaperAutoScan();
       });
