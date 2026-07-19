@@ -229,6 +229,55 @@ class SystemChecklistPayloadTests(unittest.TestCase):
         recovery = next(item for item in modules if item["name"] == "Recovery Chain Manager")
         self.assertEqual(recovery["status"], "fail")
 
+    def test_bunny_minimize_losses_dashboard_exposes_threshold_and_slot_rows(self) -> None:
+        risk_state = {
+            "isRecoveryMode": False,
+            "isPaused": False,
+            "globalLossStreak": 1,
+            "globalLossStreakThreshold": 2,
+            "pauseTradingLossStreak": 4,
+            "openPositionsCount": 2,
+            "maxConcurrentPositions": 5,
+            "normalRiskPercent": 1.0,
+            "recoveryModeRiskPercent": 0.5,
+            "currentNormalMinRuleScore": 75,
+            "currentNormalMinGptConfidence": 80,
+            "normalMinRiskReward": 1.5,
+            "recoveryMinRuleScore": 90,
+            "recoveryMinGptConfidence": 92,
+            "recoveryMinRiskReward": 2.5,
+            "strongSetupRuleScore": 85,
+            "strongSetupGptConfidence": 88,
+            "strongSetupMinRiskReward": 2.0,
+            "enableAdaptiveThreshold": True,
+            "weeklyTargetMinTrades": 3,
+            "weeklyTargetMaxTrades": 7,
+            "adaptiveScoreStep": 3,
+            "adaptiveConfidenceStep": 3,
+            "updatedAt": "2026-07-12T09:00:00+00:00",
+        }
+
+        modules = system_modules_payload(
+            {},
+            checked_date="2026-07-12",
+            checked_at_iso="2026-07-12T09:00:00+00:00",
+            ai_history=[],
+            replay={},
+            strategy={},
+            regime={},
+            health={},
+            risk_state=risk_state,
+            row_counts={},
+        )
+
+        module = next(item for item in modules if item["name"] == "Bunny Minimize Losses")
+        values = {row["label"]: row["value"] for row in module["stats"]}
+        self.assertEqual(module["status"], "ok")
+        self.assertEqual(values["maxConcurrentPositions"], 5)
+        self.assertEqual(values["slotUtilizationPercent"], 40.0)
+        self.assertEqual(values["recoveryMinRuleScore"], 90)
+        self.assertEqual(values["strongSetupMinRiskReward"], 2.0)
+
     def test_module_one_uses_local_calendar_day_for_ai_decision_stats(self) -> None:
         with patch("crypto_trader.dashboard_services.ai_trade_decision_stats", return_value={"totalRecords": 389}) as trade_stats, patch(
             "crypto_trader.dashboard_services.ai_call_decision_stats",

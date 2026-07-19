@@ -1365,9 +1365,14 @@ function modulePreviousStatRow(module, row) {
     : [];
   const moduleKey = String(module?.number ?? "").trim();
   const labelKey = viLabel(row?.label || "");
+  const rawKey = String(row?.riskKey || row?.aiDecisionKey || "").trim();
   for (const item of modules) {
     if (String(item?.number ?? "").trim() !== moduleKey) continue;
     const stats = Array.isArray(item?.stats) ? item.stats : [];
+    if (rawKey) {
+      const rawMatch = stats.find((entry) => String(entry?.label || "").trim() === rawKey);
+      if (rawMatch) return rawMatch;
+    }
     const match = stats.find((entry) => viLabel(entry?.label || "") === labelKey);
     if (match) return match;
   }
@@ -2025,6 +2030,305 @@ function renderAiDecisionModuleChart(module, rows) {
   `;
 }
 
+const BUNNY_MINIMIZE_ROW_CONFIG = [
+  ["isRecoveryMode", "Recovery mode", "trạng thái", "Bật khi chuỗi thua toàn hệ thống chạm ngưỡng recovery.", "Recovery vừa bật hoặc đang tác động mạnh hơn.", "Recovery đã tắt hoặc giảm tác động."],
+  ["isPaused", "Tạm dừng giao dịch", "trạng thái", "Bật khi chuỗi thua chạm ngưỡng pause, bot không mở lệnh mới.", "Bot đang bị pause, cần chú ý.", "Bot đã thoát pause hoặc ít bị chặn hơn."],
+  ["globalLossStreak", "Chuỗi thua toàn hệ thống", "lần", "Số lệnh LOSS liên tiếp gần nhất trên toàn hệ thống.", "Chuỗi thua tăng, rủi ro hệ thống cao hơn.", "Chuỗi thua giảm hoặc đã reset."],
+  ["globalLossStreakThreshold", "Ngưỡng bật recovery", "lần", "Số lệnh thua liên tiếp cần đạt để bật recovery mode.", "Ngưỡng recovery nới rộng hơn.", "Ngưỡng recovery siết chặt hơn."],
+  ["pauseTradingLossStreak", "Ngưỡng pause", "lần", "Số lệnh thua liên tiếp cần đạt để tạm dừng giao dịch.", "Ngưỡng pause nới rộng hơn.", "Ngưỡng pause siết chặt hơn."],
+  ["openPositionsCount", "Vị thế đang mở", "slot", "Số vị thế OPEN thực tế đang chiếm slot.", "Số slot đang dùng tăng.", "Số slot đang dùng giảm."],
+  ["maxConcurrentPositions", "Slot tối đa", "slot", "Số vị thế tối đa được phép chạy song song.", "Sức chứa vị thế được nới rộng.", "Sức chứa vị thế bị thu hẹp."],
+  ["slotUtilizationPercent", "Tỷ lệ dùng slot", "%", "Phần trăm slot đang được sử dụng.", "Bot đang dùng nhiều slot hơn.", "Bot đang dùng ít slot hơn."],
+  ["pausedMinutesRemaining", "Thời gian pause còn lại", "phút", "Số phút còn lại trước khi bot tự thoát pause.", "Thời gian bị pause tăng.", "Thời gian pause còn lại giảm."],
+  ["normalRiskPercent", "Rủi ro Normal", "%", "Tỷ lệ rủi ro áp dụng khi hệ thống chạy normal mode.", "Normal mode dùng rủi ro cao hơn.", "Normal mode dùng rủi ro thấp hơn."],
+  ["recoveryModeRiskPercent", "Rủi ro Recovery", "%", "Tỷ lệ rủi ro áp dụng khi hệ thống đang recovery mode.", "Recovery mode dùng rủi ro cao hơn.", "Recovery mode dùng rủi ro thấp hơn."],
+  ["currentNormalMinRuleScore", "Rule score hiện hành", "điểm", "Ngưỡng rule score hiện hành sau adaptive threshold.", "Bot lọc setup chặt hơn theo rule score.", "Bot lọc setup thoáng hơn theo rule score."],
+  ["currentNormalMinGptConfidence", "GPT confidence hiện hành", "điểm", "Ngưỡng GPT confidence hiện hành sau adaptive threshold.", "Bot yêu cầu AI tự tin hơn.", "Bot yêu cầu AI ít chặt hơn."],
+  ["normalMinRiskReward", "RR tối thiểu Normal", "hệ số", "Risk reward tối thiểu khi chạy normal mode.", "Bot yêu cầu RR cao hơn.", "Bot chấp nhận RR thấp hơn."],
+  ["recoveryMinRuleScore", "Rule score Recovery", "điểm", "Ngưỡng rule score tối thiểu khi recovery mode.", "Recovery lọc chặt hơn theo rule score.", "Recovery lọc thoáng hơn theo rule score."],
+  ["recoveryMinGptConfidence", "GPT confidence Recovery", "điểm", "Ngưỡng GPT confidence tối thiểu khi recovery mode.", "Recovery yêu cầu AI tự tin hơn.", "Recovery yêu cầu AI ít chặt hơn."],
+  ["recoveryMinRiskReward", "RR tối thiểu Recovery", "hệ số", "Risk reward tối thiểu khi recovery mode.", "Recovery yêu cầu RR cao hơn.", "Recovery chấp nhận RR thấp hơn."],
+  ["strongSetupRuleScore", "Rule score Strong", "điểm", "Ngưỡng rule score để gắn nhãn STRONG setup.", "Strong setup khó đạt hơn theo rule score.", "Strong setup dễ đạt hơn theo rule score."],
+  ["strongSetupGptConfidence", "GPT confidence Strong", "điểm", "Ngưỡng GPT confidence để gắn nhãn STRONG setup.", "Strong setup khó đạt hơn theo confidence.", "Strong setup dễ đạt hơn theo confidence."],
+  ["strongSetupMinRiskReward", "RR tối thiểu Strong", "hệ số", "Risk reward tối thiểu để gắn nhãn STRONG setup.", "Strong setup yêu cầu RR cao hơn.", "Strong setup chấp nhận RR thấp hơn."],
+  ["enableAdaptiveThreshold", "Adaptive threshold", "trạng thái", "Bật nghĩa là ngưỡng Normal tự điều chỉnh theo số lệnh đóng 7 ngày.", "Adaptive threshold vừa bật hoặc tăng tác động.", "Adaptive threshold vừa tắt hoặc giảm tác động."],
+  ["weeklyTargetMinTrades", "Mục tiêu lệnh tối thiểu", "lệnh", "Số lệnh đóng tối thiểu mục tiêu trong 7 ngày.", "Mục tiêu tối thiểu tăng.", "Mục tiêu tối thiểu giảm."],
+  ["weeklyTargetMaxTrades", "Mục tiêu lệnh tối đa", "lệnh", "Số lệnh đóng tối đa mục tiêu trong 7 ngày.", "Mục tiêu tối đa tăng.", "Mục tiêu tối đa giảm."],
+  ["adaptiveScoreStep", "Bước chỉnh rule score", "điểm", "Mức tăng/giảm rule score khi adaptive threshold điều chỉnh.", "Adaptive chỉnh rule score mạnh hơn.", "Adaptive chỉnh rule score nhẹ hơn."],
+  ["adaptiveConfidenceStep", "Bước chỉnh confidence", "điểm", "Mức tăng/giảm GPT confidence khi adaptive threshold điều chỉnh.", "Adaptive chỉnh confidence mạnh hơn.", "Adaptive chỉnh confidence nhẹ hơn."],
+].map(([key, label, unit, meaning, up, down], index) => ({
+  key,
+  label,
+  unit,
+  meaning,
+  trendUp: up,
+  trendDown: down,
+  order: index,
+}));
+
+const BUNNY_MINIMIZE_ROW_KEYS = new Set(BUNNY_MINIMIZE_ROW_CONFIG.map((item) => item.key));
+
+function bunnyMinimizeRows(rows) {
+  const byKey = new Map();
+  (Array.isArray(rows) ? rows : []).forEach((row) => byKey.set(String(row?.label || "").trim(), row));
+  return BUNNY_MINIMIZE_ROW_CONFIG
+    .map((config) => {
+      const row = byKey.get(config.key);
+      if (!row) return null;
+      return {
+        ...row,
+        label: config.label,
+        unit: config.unit,
+        meaning: config.meaning,
+        trendUp: config.trendUp,
+        trendDown: config.trendDown,
+        riskKey: config.key,
+        riskOrder: config.order,
+      };
+    })
+    .filter(Boolean);
+}
+
+function bunnyRiskRow(rows, key) {
+  return (Array.isArray(rows) ? rows : []).find((row) => row.riskKey === key) || null;
+}
+
+function bunnyRiskValue(row) {
+  const numeric = moduleNumericValue(row?.value);
+  const key = String(row?.riskKey || "");
+  const unit = viLabel(row?.unit || "");
+  if (["isRecoveryMode", "isPaused", "enableAdaptiveThreshold"].includes(key)) {
+    return numeric !== null && numeric >= 50 ? "Bật" : "Tắt";
+  }
+  if (numeric === null) return formatCardValue(row?.label || "", viText(row?.value ?? "-"));
+  if (unit === "%") return `${formatAxisPercentLabel(numeric)}`;
+  if (unit === "lan" || unit === "lenh" || unit === "slot" || unit === "phut") {
+    return Math.round(numeric).toLocaleString("en-US", { maximumFractionDigits: 0 });
+  }
+  if (unit === "he so") return formatAxisFactorLabel(numeric);
+  return formatFixed2(numeric);
+}
+
+function bunnyRiskChartRow(rows, key, chartIndex, colorIndex) {
+  const row = bunnyRiskRow(rows, key);
+  if (!row) return null;
+  const rawValue = moduleNumericValue(row.value);
+  if (rawValue === null) return null;
+  return {
+    ...row,
+    rawNumericValue: rawValue,
+    chartValue: rawValue > 0 ? rawValue : 0,
+    chartIndex,
+    color: MODULE_CHART_COLORS[colorIndex % MODULE_CHART_COLORS.length],
+  };
+}
+
+function niceAutoNumberAxisMax(maxValue) {
+  const raw = Math.max(0, Number(maxValue || 0));
+  if (!Number.isFinite(raw) || raw <= 0) return 4;
+  return Math.max(4, Math.ceil((raw * 1.2) / 4) * 4);
+}
+
+function formatRiskAxisLabel(value, unit) {
+  const normalizedUnit = viLabel(unit || "");
+  if (normalizedUnit === "%") return formatAxisPercentLabel(value);
+  if (normalizedUnit === "he so") return formatAxisFactorLabel(value);
+  if (normalizedUnit === "diem" || normalizedUnit === "lan" || normalizedUnit === "slot" || normalizedUnit === "lenh" || normalizedUnit === "phut") {
+    return Number(value || 0).toLocaleString("en-US", { maximumFractionDigits: 2 });
+  }
+  return formatFixed2(value);
+}
+
+function riskYAxisMax(rows, unit) {
+  const values = (Array.isArray(rows) ? rows : []).map((row) => Math.max(0, Number(row?.rawNumericValue || 0)));
+  const maxValue = Math.max(...values, 0);
+  const normalizedUnit = viLabel(unit || "");
+  if (normalizedUnit === "%") return niceAutoPercentAxisMax(maxValue);
+  if (normalizedUnit === "he so") return niceAutoFactorAxisMax(maxValue);
+  if (normalizedUnit === "diem") return 100;
+  return niceAutoNumberAxisMax(maxValue);
+}
+
+function renderBunnyRiskKpis(module, rows) {
+  const items = [
+    bunnyRiskRow(rows, "isRecoveryMode"),
+    bunnyRiskRow(rows, "isPaused"),
+    bunnyRiskRow(rows, "globalLossStreak"),
+    bunnyRiskRow(rows, "slotUtilizationPercent"),
+  ].filter(Boolean);
+  if (!items.length) return "";
+  return `
+    <div class="module-chart-meta module-ai-kpi-row">
+      ${items.map((row) => {
+        const delta = moduleDeltaInfo(module, row);
+        const label = row.unit ? `${row.label} (${row.unit})` : row.label;
+        return `
+          <div class="module-total-anchor">
+            <span class="module-chart-delta ${delta.state}">${escapeHtml(delta.text)}</span>
+            <span>${escapeHtml(label || "-")}</span>
+            <strong>${escapeHtml(bunnyRiskValue(row))}</strong>
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function renderBunnyRiskBarSvg(rows, title, subtitle, chartId, unit) {
+  const chartRows = rows.filter(Boolean);
+  if (!chartRows.length) {
+    return `<div class="module-chart-empty">Chưa có dữ liệu ${escapeHtml(title)}.</div>`;
+  }
+  const yAxisMax = riskYAxisMax(chartRows, unit);
+  const chartLeft = 62;
+  const chartRight = 398;
+  const chartTop = 34;
+  const chartBaseline = 196;
+  const chartHeight = chartBaseline - chartTop;
+  const barWidth = (chartRight - chartLeft - 10) / chartRows.length;
+  const tickValues = [0, 1, 2, 3, 4].map((step) => yAxisMax * step / 4);
+  const yTicks = tickValues.map((tickValue) => {
+    const y = chartBaseline - (tickValue / yAxisMax) * chartHeight;
+    const gridLine = Math.abs(tickValue) < 1e-9 ? "" : `<line x1="${chartLeft}" y1="${y}" x2="${chartRight}" y2="${y}" class="module-bar-grid"></line>`;
+    return `
+      <g>
+        ${gridLine}
+        <text x="${chartLeft - 8}" y="${y + 4}" text-anchor="end" class="module-axis-label">${escapeHtml(formatRiskAxisLabel(tickValue, unit))}</text>
+      </g>
+    `;
+  }).join("");
+  const bars = chartRows.map((row, index) => {
+    const axisValue = Math.max(0, Number(row.rawNumericValue || 0));
+    const scaledPercent = yAxisMax > 0 ? Math.max(0, Math.min(100, axisValue / yAxisMax * 100)) : 0;
+    const height = axisValue > 0 ? Math.max(8, scaledPercent / 100 * chartHeight) : 0;
+    const x = chartLeft + index * barWidth + barWidth * 0.18;
+    const y = chartBaseline - height;
+    const width = Math.max(24, barWidth * 0.64);
+    return `
+      <g>
+        <rect class="module-chart-segment module-bar-segment" data-chart-index="${row.chartIndex}" x="${x}" y="${y}" width="${width}" height="${height}" rx="4" fill="${row.color}">
+          <title>${escapeHtml(row.label || "-")}: ${escapeHtml(bunnyRiskValue(row))}</title>
+        </rect>
+        ${renderChartAxisLabel(row, x + width / 2, 214)}
+      </g>
+    `;
+  }).join("");
+  const markerId = `module-risk-y-arrow-${chartId}`;
+  return `
+    <div>
+      ${renderChartTitle(title, subtitle)}
+      <div class="module-chart-wrap">
+        <svg class="module-bar-chart" viewBox="0 0 430 264" role="img" aria-label="${escapeHtml(title)}">
+          <defs>
+            <marker id="${markerId}" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto" markerUnits="strokeWidth">
+              <path d="M 0 8 L 4 0 L 8 8 Z" class="module-axis-arrow-head"></path>
+            </marker>
+          </defs>
+          ${yTicks}
+          <line x1="${chartLeft}" y1="${chartBaseline}" x2="${chartRight}" y2="${chartBaseline}" class="module-bar-axis"></line>
+          <line x1="${chartLeft}" y1="${chartBaseline}" x2="${chartLeft}" y2="${chartTop - 12}" class="module-bar-axis module-y-axis" marker-end="url(#${markerId})"></line>
+          <text x="${chartLeft - 12}" y="${chartTop - 16}" text-anchor="middle" class="module-axis-percent">${escapeHtml(unit)}</text>
+          ${bars}
+          <g class="module-chart-callout" hidden>
+            <line class="module-chart-callout-line" x1="0" y1="0" x2="0" y2="0"></line>
+            <rect class="module-chart-callout-box" x="0" y="0" width="0" height="0" rx="6"></rect>
+            <text class="module-chart-callout-text" x="0" y="0"></text>
+          </g>
+        </svg>
+      </div>
+    </div>
+  `;
+}
+
+function renderBunnyRiskVariableRows(module, rows) {
+  const chartMeta = new Map([
+    ["openPositionsCount", { chartIndex: 10, colorIndex: 1 }],
+    ["maxConcurrentPositions", { chartIndex: 11, colorIndex: 2 }],
+    ["slotUtilizationPercent", { chartIndex: 12, colorIndex: 3 }],
+    ["globalLossStreak", { chartIndex: 20, colorIndex: 0 }],
+    ["globalLossStreakThreshold", { chartIndex: 21, colorIndex: 4 }],
+    ["pauseTradingLossStreak", { chartIndex: 22, colorIndex: 6 }],
+    ["currentNormalMinRuleScore", { chartIndex: 30, colorIndex: 0 }],
+    ["currentNormalMinGptConfidence", { chartIndex: 31, colorIndex: 1 }],
+    ["recoveryMinRuleScore", { chartIndex: 32, colorIndex: 4 }],
+    ["recoveryMinGptConfidence", { chartIndex: 33, colorIndex: 5 }],
+    ["strongSetupRuleScore", { chartIndex: 34, colorIndex: 8 }],
+    ["strongSetupGptConfidence", { chartIndex: 35, colorIndex: 9 }],
+    ["normalMinRiskReward", { chartIndex: 40, colorIndex: 0 }],
+    ["recoveryMinRiskReward", { chartIndex: 41, colorIndex: 4 }],
+    ["strongSetupMinRiskReward", { chartIndex: 42, colorIndex: 8 }],
+    ["normalRiskPercent", { chartIndex: 50, colorIndex: 2 }],
+    ["recoveryModeRiskPercent", { chartIndex: 51, colorIndex: 6 }],
+  ]);
+  const chartRows = (Array.isArray(rows) ? rows : []).map((row, index) => ({
+    ...row,
+    rawNumericValue: moduleNumericValue(row.value) ?? 0,
+    chartValue: moduleNumericValue(row.value) || 0,
+    chartIndex: chartMeta.get(String(row?.riskKey || ""))?.chartIndex ?? row.chartIndex ?? index,
+    color: row.color || MODULE_CHART_COLORS[(chartMeta.get(String(row?.riskKey || ""))?.colorIndex ?? index) % MODULE_CHART_COLORS.length],
+  }));
+  return chartRows.map((row) => {
+    const delta = moduleDeltaInfo(module, row);
+    const trend = moduleTrendMeaning(row);
+    const label = row.unit ? `${row.label} (${row.unit})` : row.label;
+    return `
+      <button class="module-chart-legend-item ${row.attention ? "attention" : ""}" type="button" data-chart-index="${row.chartIndex}" title="${escapeHtml(label)}: ${escapeHtml(bunnyRiskValue(row))}">
+        <span class="module-chart-swatch" style="background:${row.color}"></span>
+        <div>
+          <strong>${escapeHtml(label || "-")}</strong>
+          <small class="module-chart-value-line"><span>Giá trị hiện tại: ${escapeHtml(bunnyRiskValue(row))}</span><span class="module-chart-delta ${delta.state}">${escapeHtml(delta.text)}</span></small>
+          <p>${escapeHtml(row.meaning || "Biến dùng để theo dõi trạng thái Bunny Minimize Losses.")}</p>
+          <p><b>Tăng:</b> ${escapeHtml(trend.up)}</p>
+          <p><b>Giảm:</b> ${escapeHtml(trend.down)}</p>
+        </div>
+      </button>
+    `;
+  }).join("");
+}
+
+function renderBunnyMinimizeModuleChart(module, rows) {
+  const slotRows = [
+    bunnyRiskChartRow(rows, "openPositionsCount", 10, 1),
+    bunnyRiskChartRow(rows, "maxConcurrentPositions", 11, 2),
+    bunnyRiskChartRow(rows, "slotUtilizationPercent", 12, 3),
+  ];
+  const lossRows = [
+    bunnyRiskChartRow(rows, "globalLossStreak", 20, 0),
+    bunnyRiskChartRow(rows, "globalLossStreakThreshold", 21, 4),
+    bunnyRiskChartRow(rows, "pauseTradingLossStreak", 22, 6),
+  ];
+  const thresholdRows = [
+    bunnyRiskChartRow(rows, "currentNormalMinRuleScore", 30, 0),
+    bunnyRiskChartRow(rows, "currentNormalMinGptConfidence", 31, 1),
+    bunnyRiskChartRow(rows, "recoveryMinRuleScore", 32, 4),
+    bunnyRiskChartRow(rows, "recoveryMinGptConfidence", 33, 5),
+    bunnyRiskChartRow(rows, "strongSetupRuleScore", 34, 8),
+    bunnyRiskChartRow(rows, "strongSetupGptConfidence", 35, 9),
+  ];
+  const rrRows = [
+    bunnyRiskChartRow(rows, "normalMinRiskReward", 40, 0),
+    bunnyRiskChartRow(rows, "recoveryMinRiskReward", 41, 4),
+    bunnyRiskChartRow(rows, "strongSetupMinRiskReward", 42, 8),
+  ];
+  const riskRows = [
+    bunnyRiskChartRow(rows, "normalRiskPercent", 50, 2),
+    bunnyRiskChartRow(rows, "recoveryModeRiskPercent", 51, 6),
+  ];
+  return `
+    <section class="module-chart-panel module-chart-panel-compact module-risk-panel">
+      <div class="module-chart-legend module-ai-chart-stack module-risk-chart-stack">
+        ${renderBunnyRiskKpis(module, rows)}
+        ${renderBunnyRiskBarSvg(slotRows, "Slot vị thế", "OPEN thực tế so với số slot tối đa", "slot", "slot")}
+        ${renderBunnyRiskBarSvg(lossRows, "Chuỗi thua & ngưỡng bảo vệ", "Recovery và pause dựa trên loss streak toàn hệ thống", "loss-streak", "lần")}
+        ${renderBunnyRiskBarSvg(thresholdRows, "Ngưỡng điểm lọc", "Normal hiện hành, Recovery và Strong setup", "threshold-score", "điểm")}
+        ${renderBunnyRiskBarSvg(rrRows, "Ngưỡng Risk Reward", "RR tối thiểu theo từng chế độ lọc", "threshold-rr", "hệ số")}
+        ${renderBunnyRiskBarSvg(riskRows, "Rủi ro theo chế độ", "Risk percent dùng cho Normal và Recovery", "risk-percent", "%")}
+      </div>
+      <div class="module-chart-legend compact module-ai-variable-list module-risk-variable-list">${renderBunnyRiskVariableRows(module, rows)}</div>
+    </section>
+  `;
+}
+
 function renderModuleBarChart(module, rows) {
   const chartRows = moduleChartRows(rows);
   if (!chartRows.length) {
@@ -2126,6 +2430,7 @@ function renderModuleDonut(module, rows) {
 
 function renderModuleChart(module, rows) {
   if (Number(module?.number) === 1) return renderAiDecisionModuleChart(module, rows);
+  if (Number(module?.number) === 2) return renderBunnyMinimizeModuleChart(module, rows);
   const barChartModules = new Set([1, 2, 3, 4, 5, 8]);
   return barChartModules.has(Number(module?.number)) ? renderModuleBarChart(module, rows) : renderModuleDonut(module, rows);
 }
@@ -4332,6 +4637,11 @@ function moduleDisplayRows(module, rows) {
     const keep = new Set(["winrate", "maxdrawdownpercent", "riskmultiplierpercent", "scoreadjustment", "confidenceadjustment", "ispaused"]);
     return sourceRows.filter((row) => keep.has(viLabel(row?.label || "")));
   }
+  if (moduleNumber === 2) {
+    const riskRows = bunnyMinimizeRows(sourceRows);
+    if (riskRows.length) return riskRows;
+    return sourceRows.filter((row) => viLabel(row?.label || "") !== "updatedat");
+  }
   if (moduleNumber === 5) {
     const keep = new Set(["historysamples", "currentconfidence", "bullpercent", "bearpercent", "sidewaypercent", "highvolatilitypercent", "lowvolatilitypercent"]);
     return sourceRows.filter((row) => keep.has(viLabel(row?.label || "")));
@@ -4354,7 +4664,7 @@ function moduleAuxRows(module, rows) {
   const sourceRows = Array.isArray(rows) ? rows : [];
   if (moduleNumber === 2) {
     const keep = new Set(["updatedat", "updated_at", "createdat", "created_at"]);
-    return sourceRows.filter((row) => keep.has(viLabel(row?.label || "")));
+    return sourceRows.filter((row) => keep.has(viLabel(row?.label || "")) || !BUNNY_MINIMIZE_ROW_KEYS.has(String(row?.label || "").trim()));
   }
   if (moduleNumber === 3) {
     const keep = new Set(["totaltrades", "wincount", "losscount", "breakevencount", "profitfactor", "totalpnl", "updatedat", "reason"]);

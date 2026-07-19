@@ -97,3 +97,7 @@ class RiskTest(TestCase):
         state = get_trading_system_state(self._config())
 
         self.assertEqual(state["maxConcurrentPositions"], 5)
+        self.assertEqual(state["globalLossStreakThreshold"], 2)
+        self.assertEqual(state["normalRiskPercent"], 1.0)
+        self.assertEqual(state["recoveryModeRiskPercent"], 0.5)
+        self.assertEqual(state["recoveryMinRiskReward"], 2.5)
