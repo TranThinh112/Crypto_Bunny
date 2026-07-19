@@ -99,7 +99,7 @@ def _history_symbol(row: dict[str, Any]) -> str:
     symbol = str(row.get("symbol") or "")
     if symbol:
         return symbol
-    inst_id = str(info.get("instId") or "")
+    inst_id = str(row.get("instId") or info.get("instId") or "")
     if inst_id.endswith("-SWAP"):
         parts = inst_id[:-5].split("-")
         if len(parts) >= 2:
@@ -111,7 +111,7 @@ def _history_symbol(row: dict[str, Any]) -> str:
 
 def _history_side(row: dict[str, Any]) -> str:
     info = _payload_info(row)
-    side = str(row.get("side") or info.get("posSide") or "").strip().lower()
+    side = str(row.get("side") or row.get("posSide") or row.get("direction") or info.get("posSide") or info.get("direction") or "").strip().lower()
     return side.upper()
 
 
@@ -144,6 +144,10 @@ def _history_pnl_pct(row: dict[str, Any]) -> float | None:
 def _history_closed_at(row: dict[str, Any]) -> datetime | None:
     info = _payload_info(row)
     for key in ("timestamp", "lastUpdateTimestamp", "updatedAt", "closed_at", "closedAt"):
+        parsed = _parse_time(row.get(key))
+        if parsed is not None:
+            return parsed
+    for key in ("uTime", "cTime", "closeTime"):
         parsed = _parse_time(row.get(key))
         if parsed is not None:
             return parsed
