@@ -99,11 +99,18 @@ def create_exchange(config: dict[str, Any], authenticated: bool = False) -> Any:
     load_dotenv()
     exchange_name = config["exchange"].get("name", "okx")
     exchange_class = getattr(ccxt, exchange_name)
+    account_type = str(config["exchange"].get("account_type", "swap") or "swap").lower()
+    configured_market_types = config["exchange"].get("fetch_market_types")
+    if isinstance(configured_market_types, list) and configured_market_types:
+        fetch_market_types = [str(item).lower() for item in configured_market_types if str(item).strip()]
+    else:
+        fetch_market_types = [account_type]
     params: dict[str, Any] = {
         "enableRateLimit": True,
         "timeout": int(config["exchange"].get("timeout_ms", 10000) or 10000),
         "options": {
-            "defaultType": config["exchange"].get("account_type", "swap"),
+            "defaultType": account_type,
+            "fetchMarkets": {"types": fetch_market_types},
         },
     }
 

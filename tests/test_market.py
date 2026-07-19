@@ -5,10 +5,30 @@ from unittest import TestCase
 
 from types import SimpleNamespace
 
-from crypto_trader.market import apply_news_scores_to_snapshots, select_top_volume_symbols_from_tickers, snapshot_from_ohlcv
+from crypto_trader.market import (
+    apply_news_scores_to_snapshots,
+    create_exchange,
+    select_top_volume_symbols_from_tickers,
+    snapshot_from_ohlcv,
+)
 
 
 class MarketUniverseTest(TestCase):
+    def test_create_exchange_limits_okx_market_loading_to_account_type(self) -> None:
+        exchange = create_exchange(
+            {
+                "mode": "live",
+                "exchange": {
+                    "name": "okx",
+                    "account_type": "swap",
+                    "timeout_ms": 1000,
+                },
+            }
+        )
+
+        self.assertEqual(exchange.options["defaultType"], "swap")
+        self.assertEqual(exchange.options["fetchMarkets"]["types"], ["swap"])
+
     def test_snapshot_from_ohlcv_adds_true_ema200_and_vwap(self) -> None:
         rows = []
         for index in range(200):
