@@ -174,6 +174,7 @@ def _backfill_reconciled_exchange_close_notifications(config: dict[str, Any], no
                 "status": _status_from_realized_pnl(pnl),
                 "pnl": pnl,
                 "close_reason": _close_reason_from_realized_pnl(pnl),
+                "exchange_close_source": "runtime_sync",
                 "updated_at": now.isoformat(),
                 "position_slot": None,
             },
@@ -185,6 +186,27 @@ def _backfill_reconciled_exchange_close_notifications(config: dict[str, Any], no
             if not before and after:
                 notified += 1
     return notified
+
+
+def _retry_unnotified_exchange_closes(config: dict[str, Any], now: datetime) -> int:
+    max_age_hours = float(config.get("runtime_sync", {}).get("exchange_close_notification_retry_hours", 24) or 24)
+    cutoff = now - timedelta(hours=max(0.0, max_age_hours))
+    retried = 0
+    rows = list_trade_execution_rows(config, statuses=["WIN", "LOSS", "BREAKEVEN", "CLOSED"], limit=200, order="closed_desc")
+    for row in rows:
+        reason = str(row.get("close_reason") or "")
+        if reason not in {"stop_loss", "take_profit", "exchange_position_no_longer_open"}:
+            continue
+        closed_at = _parse_time(row.get("closed_at") or row.get("updated_at"))
+        if closed_at is not None and closed_at < cutoff:
+            continue
+        key = _exchange_close_notification_key(row)
+        if get_journal_state(config, key):
+            continue
+        _notify_exchange_closed_execution(config, row)
+        if get_journal_state(config, key):
+            retried += 1
+    return retried
 
 
 def _position_side(position: dict[str, Any]) -> str:
@@ -453,6 +475,7 @@ def sync_exchange_runtime_state(
     created_at = str(snapshot.get("created_at") or datetime.now(timezone.utc).isoformat())
     snapshot_time = _parse_time(created_at) or datetime.now(timezone.utc)
     backfilled_close_notifications = _backfill_reconciled_exchange_close_notifications(config, snapshot_time)
+    retried_close_notifications = _retry_unnotified_exchange_closes(config, snapshot_time)
     position_rows = [item for item in (snapshot.get("positions") or []) if isinstance(item, dict)]
     open_orders = [item for item in (snapshot.get("open_orders") or []) if isinstance(item, dict)]
     position_targets = snapshot.get("position_targets") if isinstance(snapshot.get("position_targets"), dict) else {}
@@ -669,6 +692,7 @@ def sync_exchange_runtime_state(
         "duplicate_executions_closed": duplicate_executions_closed,
         "reclassified_executions": reclassified_executions,
         "backfilled_close_notifications": backfilled_close_notifications,
+        "retried_close_notifications": retried_close_notifications,
     }
 
 

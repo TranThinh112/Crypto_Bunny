@@ -405,3 +405,36 @@ class RuntimeSyncTest(TestCase):
         self.assertEqual(losses[0]["close_reason"], "stop_loss")
         send_message.assert_called_once()
         self.assertIn("ETC/USDT:USDT", send_message.call_args.args[1])
+
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_sync_retries_unnotified_exchange_close(self, send_message) -> None:
+        config = self._config()
+        insert_trade_execution_row(
+            config,
+            {
+                "created_at": "2026-07-08T00:00:00+00:00",
+                "updated_at": "2026-07-08T00:05:00+00:00",
+                "closed_at": "2026-07-08T00:05:00+00:00",
+                "symbol": "ETC/USDT:USDT",
+                "side": "LONG",
+                "status": "LOSS",
+                "pnl": -2.5,
+                "close_reason": "stop_loss",
+                "position_slot": None,
+            },
+        )
+
+        result = sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-07-08T00:06:00+00:00",
+                "positions": [],
+                "open_orders": [],
+            },
+        )
+
+        self.assertEqual(result["exchange"]["retried_close_notifications"], 1)
+        send_message.assert_called_once()
+        self.assertIn("ETC/USDT:USDT", send_message.call_args.args[1])
