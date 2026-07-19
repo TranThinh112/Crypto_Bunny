@@ -3623,7 +3623,7 @@ function groupedSystemModules(modules) {
   const eventScheduleByName = {
     "Bộ nhớ quyết định AI": { event: "Ghi nhớ sau mỗi quyết định", schedule: "Sau mỗi lệnh đóng", interval: "lệnh đóng" },
     "Market Regime": { event: "Theo snapshot data hệ thống", schedule: dataUpdateSchedule, interval: dataUpdateInterval },
-    "Market Structure & Pattern Engine": { event: "Khi scanner hoặc final re-check gửi OHLCV", schedule: "Theo request analyze/recheck", interval: "event-driven" },
+    "Market Structure & Pattern Engine": { event: "Khi scanner hoặc final re-check gửi OHLCV", schedule: "Theo request analyze/recheck", interval: "sự kiện" },
     "Strategy Versioning": { event: "Ghi nhớ sau mỗi quyết định", schedule: "6h sáng", interval: "6h sáng" },
     "Replay Engine": { event: "Ghi nhớ sau mỗi quyết định", schedule: "6h sáng", interval: "6h sáng" },
     "Bunny Minimize Losses": { event: "Ngay khi lệnh đóng", schedule: "5 phút/lần để đối chiếu", interval: "5 phút" },
