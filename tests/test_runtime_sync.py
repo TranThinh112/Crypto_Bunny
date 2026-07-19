@@ -293,11 +293,11 @@ class RuntimeSyncTest(TestCase):
                 "open_orders": [],
                 "positions_history": [
                     {
-                        "symbol": "ETC/USDT:USDT",
                         "side": "long",
                         "pnl": -3.16,
                         "percentage": -64.77,
                         "timestamp": 1784476980000,
+                        "info": {"instId": "ETC-USDT-SWAP", "posSide": "long"},
                     }
                 ],
             },
@@ -511,11 +511,11 @@ class RuntimeSyncTest(TestCase):
                 "open_orders": [],
                 "positions_history": [
                     {
-                        "symbol": "ETC/USDT:USDT",
                         "side": "long",
                         "pnl": -3.16,
                         "percentage": -64.77,
                         "timestamp": 1784476980000,
+                        "info": {"instId": "ETC-USDT-SWAP", "posSide": "long"},
                     }
                 ],
             },

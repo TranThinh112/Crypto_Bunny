@@ -96,7 +96,17 @@ def _payload_info(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _history_symbol(row: dict[str, Any]) -> str:
     info = _payload_info(row)
-    return str(row.get("symbol") or info.get("instId") or "")
+    symbol = str(row.get("symbol") or "")
+    if symbol:
+        return symbol
+    inst_id = str(info.get("instId") or "")
+    if inst_id.endswith("-SWAP"):
+        parts = inst_id[:-5].split("-")
+        if len(parts) >= 2:
+            base = "-".join(parts[:-1])
+            quote = parts[-1]
+            return f"{base}/{quote}:{quote}"
+    return inst_id
 
 
 def _history_side(row: dict[str, Any]) -> str:
