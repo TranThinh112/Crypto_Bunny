@@ -490,6 +490,44 @@ def _pending_algo_targets(exchange: Any) -> dict[tuple[str, str], dict[str, floa
     return targets
 
 
+def _fetch_positions_history(exchange: Any, limit: int = 100) -> list[dict[str, Any]]:
+    history: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add_rows(rows: Any) -> None:
+        if not isinstance(rows, list):
+            return
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            info = _payload_info(row)
+            key = str(row.get("id") or row.get("posId") or info.get("posId") or info.get("uTime") or info.get("cTime") or row)
+            if key in seen:
+                continue
+            seen.add(key)
+            history.append(row)
+
+    fetch_history = getattr(exchange, "fetch_positions_history", None)
+    if callable(fetch_history):
+        try:
+            add_rows(fetch_history(None, None, limit))
+        except Exception:
+            pass
+
+    fetch_raw = getattr(exchange, "privateGetAccountPositionsHistory", None)
+    if not callable(fetch_raw):
+        fetch_raw = getattr(exchange, "private_get_account_positions_history", None)
+    if callable(fetch_raw):
+        try:
+            response = fetch_raw({"instType": "SWAP", "limit": str(limit)})
+            rows = response.get("data") if isinstance(response, dict) else response
+            add_rows(rows)
+        except Exception:
+            pass
+
+    return history
+
+
 def _fallback_take_profit(entry: float, side: str, pct: float) -> float:
     move = entry * max(0.0, pct) / 100.0
     return entry + move if side == "long" else entry - move
@@ -563,13 +601,7 @@ def _fetch_account_snapshot(config: dict[str, Any]) -> dict[str, Any]:
     exchange.load_markets()
     positions = list(exchange.fetch_positions() or [])
     open_orders = list(exchange.fetch_open_orders() or [])
-    positions_history: list[dict[str, Any]] = []
-    try:
-        fetch_history = getattr(exchange, "fetch_positions_history", None)
-        if callable(fetch_history):
-            positions_history = list(fetch_history(None, None, 100) or [])
-    except Exception:
-        positions_history = []
+    positions_history = _fetch_positions_history(exchange, 100)
     return {
         "enabled": True,
         "mode": config.get("mode"),

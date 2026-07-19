@@ -11,7 +11,7 @@ from crypto_trader.codex_features import _slot_state
 from crypto_trader.config import DEFAULT_CONFIG
 from crypto_trader.executor import candidate_client_order_id
 from crypto_trader.models import TradeCandidate
-from crypto_trader.runtime_sync import sync_runtime_state
+from crypto_trader.runtime_sync import _fetch_positions_history, sync_runtime_state
 from crypto_trader.storage import (
     insert_trade_execution_row,
     list_pending_orders,
@@ -525,3 +525,29 @@ class RuntimeSyncTest(TestCase):
         row = list_trade_execution_rows(config, statuses=["LOSS"])[0]
         self.assertEqual(row["pnl"], -3.16)
         self.assertEqual(row["pnl_pct"], -64.77)
+
+    def test_fetch_positions_history_uses_raw_okx_fallback(self) -> None:
+        class RawHistoryExchange:
+            def fetch_positions_history(self, *args, **kwargs) -> list[dict[str, object]]:
+                return []
+
+            def privateGetAccountPositionsHistory(self, params: dict[str, object]) -> dict[str, object]:
+                self.params = params
+                return {
+                    "data": [
+                        {
+                            "instId": "ETC-USDT-SWAP",
+                            "posSide": "long",
+                            "pnl": "-3.16",
+                            "pnlRatio": "-0.6477",
+                            "uTime": "1784476980000",
+                        }
+                    ]
+                }
+
+        exchange = RawHistoryExchange()
+
+        rows = _fetch_positions_history(exchange, 100)
+
+        self.assertEqual(exchange.params["instType"], "SWAP")
+        self.assertEqual(rows[0]["pnl"], "-3.16")
