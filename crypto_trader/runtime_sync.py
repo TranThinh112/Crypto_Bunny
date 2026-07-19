@@ -172,6 +172,17 @@ def _row_payload(row: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _row_payload_by_key(row: dict[str, Any], key: str) -> dict[str, Any]:
+    raw = row.get(key)
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(str(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def _snapshot_position(row: dict[str, Any]) -> dict[str, Any]:
     payload = _row_payload(row)
     position = payload.get("position")
@@ -217,7 +228,17 @@ def _estimated_closed_pnl_from_snapshot(config: dict[str, Any], row: dict[str, A
     fee_rate = _safe_float(config.get("exchange", {}).get("close_fee_rate", config.get("exchange", {}).get("taker_fee_rate", 0.0005)), 0.0005)
     estimated_close_fee = abs(close_price * contracts * contract_size) * max(0.0, fee_rate)
     pnl = gross + carried_realized - estimated_close_fee
-    margin = _float(position.get("initialMargin") or info.get("imr") or info.get("margin"))
+    original_payload = _row_payload_by_key(row, "payload_json")
+    original_position = original_payload.get("position") if isinstance(original_payload.get("position"), dict) else {}
+    original_info = _payload_info(original_position) if original_position else {}
+    margin = _float(
+        original_position.get("initialMargin")
+        or original_info.get("imr")
+        or original_info.get("margin")
+        or position.get("initialMargin")
+        or info.get("imr")
+        or info.get("margin")
+    )
     pnl_pct = pnl / margin * 100 if margin and margin > 0 else None
     return round(pnl, 6), None if pnl_pct is None else round(pnl_pct, 6)
 

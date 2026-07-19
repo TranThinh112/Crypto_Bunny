@@ -547,13 +547,21 @@ class RuntimeSyncTest(TestCase):
                         "position": {
                             "contracts": 1.53,
                             "contractSize": 10,
-                            "initialMargin": 4.88532978,
+                            "initialMargin": 4.765707119454546,
                             "realizedPnl": -0.0671642910642104,
                             "info": {
                                 "avgPx": "7.024",
                                 "posSide": "long",
                                 "closeOrderAlgo": [{"slTriggerPx": "6.825", "tpTriggerPx": "7.295"}],
                             },
+                        }
+                    }
+                ),
+                "payload_json": json.dumps(
+                    {
+                        "position": {
+                            "initialMargin": 4.88532978,
+                            "info": {"margin": "4.9462664"},
                         }
                     }
                 ),
