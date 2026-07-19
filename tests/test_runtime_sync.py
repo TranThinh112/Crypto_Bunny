@@ -4,6 +4,7 @@ import json
 import tempfile
 from copy import deepcopy
 from unittest import TestCase
+from unittest.mock import patch
 
 from crypto_trader.atlas_mirror import atlas_database_for_collection
 from crypto_trader.codex_features import _slot_state
@@ -233,14 +234,15 @@ class RuntimeSyncTest(TestCase):
         self.assertEqual(executions[0]["symbol"], "SOL/USDT:USDT")
         self.assertEqual(executions[0]["side"], "LONG")
 
-    def test_sync_closes_open_execution_when_position_disappears(self) -> None:
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_sync_closes_open_execution_when_position_disappears(self, send_message) -> None:
         config = self._config()
         snapshot = {
             "enabled": True,
             "mode": "demo",
             "created_at": "2026-07-08T00:00:00+00:00",
             "positions": [
-                {"symbol": "SOL/USDT:USDT", "side": "long", "contracts": 1, "entry_price": 80},
+                {"symbol": "SOL/USDT:USDT", "side": "long", "contracts": 1, "entry_price": 80, "unrealized_pnl": -1.25},
             ],
             "open_orders": [],
         }
@@ -259,9 +261,11 @@ class RuntimeSyncTest(TestCase):
 
         self.assertEqual(result["exchange"]["executions_closed"], 1)
         self.assertEqual(list_trade_execution_rows(config, statuses=["OPEN"]), [])
-        reconciled = list_trade_execution_rows(config, statuses=["RECONCILED"])
-        self.assertEqual(reconciled[0]["close_reason"], "exchange_position_no_longer_open")
-        self.assertIsNone(reconciled[0]["position_slot"])
+        losses = list_trade_execution_rows(config, statuses=["LOSS"])
+        self.assertEqual(losses[0]["close_reason"], "stop_loss")
+        self.assertIsNone(losses[0]["position_slot"])
+        send_message.assert_called_once()
+        self.assertIn("SOL/USDT:USDT", send_message.call_args.args[1])
 
     def test_sync_collapses_duplicate_open_executions_for_same_position(self) -> None:
         config = self._config()
@@ -336,3 +340,68 @@ class RuntimeSyncTest(TestCase):
         self.assertEqual(row["stop_loss"], 64407.0)
         self.assertEqual(row["take_profit"], 65032.0)
         self.assertEqual(row["initial_stop_loss"], 64407.0)
+
+    def test_sync_uses_algo_targets_from_snapshot_when_position_snapshot_omits_them(self) -> None:
+        config = self._config()
+        sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-07-08T00:00:00+00:00",
+                "positions": [
+                    {
+                        "symbol": "XAU/USDT:USDT",
+                        "side": "long",
+                        "contracts": 1,
+                        "entry_price": 4000.0,
+                        "stop_loss": None,
+                        "take_profit": None,
+                    },
+                ],
+                "open_orders": [],
+                "position_targets": {
+                    ("XAU/USDT:USDT", "LONG"): {"stop_loss": 3900.0, "take_profit": 4200.0},
+                },
+            },
+        )
+
+        row = list_trade_execution_rows(config, statuses=["OPEN"])[0]
+        self.assertEqual(row["stop_loss"], 3900.0)
+        self.assertEqual(row["take_profit"], 4200.0)
+        self.assertEqual(row["initial_stop_loss"], 3900.0)
+
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_sync_backfills_recent_reconciled_exchange_close_notification(self, send_message) -> None:
+        config = self._config()
+        insert_trade_execution_row(
+            config,
+            {
+                "created_at": "2026-07-08T00:00:00+00:00",
+                "updated_at": "2026-07-08T00:05:00+00:00",
+                "closed_at": "2026-07-08T00:05:00+00:00",
+                "symbol": "ETC/USDT:USDT",
+                "side": "LONG",
+                "status": "RECONCILED",
+                "pnl": -2.5,
+                "close_reason": "exchange_position_no_longer_open",
+                "position_slot": None,
+            },
+        )
+
+        result = sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-07-08T00:06:00+00:00",
+                "positions": [],
+                "open_orders": [],
+            },
+        )
+
+        self.assertEqual(result["exchange"]["backfilled_close_notifications"], 1)
+        losses = list_trade_execution_rows(config, statuses=["LOSS"])
+        self.assertEqual(losses[0]["close_reason"], "stop_loss")
+        send_message.assert_called_once()
+        self.assertIn("ETC/USDT:USDT", send_message.call_args.args[1])

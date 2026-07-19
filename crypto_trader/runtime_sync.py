@@ -16,6 +16,7 @@ from .market import create_exchange
 from .models import TradeCandidate, to_jsonable
 from .storage import (
     ensure_ai_model_version,
+    get_journal_state,
     get_prompt_metric,
     insert_trade_execution_row,
     list_pending_orders,
@@ -24,9 +25,12 @@ from .storage import (
     reclassify_unknown_trade_closures,
     save_pending_order,
     save_prompt_metric_snapshot,
+    set_journal_state,
     set_pending_order_exchange_order,
     update_trade_execution,
 )
+
+EXCHANGE_CLOSE_NOTIFICATION_PREFIX = "runtime_sync_exchange_close_notified"
 
 
 def _float(value: Any) -> float | None:
@@ -59,14 +63,42 @@ def _execution_key(row: dict[str, Any]) -> tuple[str, str]:
     )
 
 
+def _status_from_realized_pnl(pnl: float | None) -> str:
+    if pnl is None:
+        return "CLOSED"
+    if pnl > 0:
+        return "WIN"
+    if pnl < 0:
+        return "LOSS"
+    return "BREAKEVEN"
+
+
+def _close_reason_from_realized_pnl(pnl: float | None) -> str:
+    if pnl is None:
+        return "exchange_position_no_longer_open"
+    if pnl < 0:
+        return "stop_loss"
+    if pnl > 0:
+        return "take_profit"
+    return "exchange_position_no_longer_open"
+
+
+def _exchange_close_notification_key(row: dict[str, Any]) -> str:
+    return (
+        f"{EXCHANGE_CLOSE_NOTIFICATION_PREFIX}:"
+        f"{row.get('id')}:"
+        f"{row.get('closed_at') or row.get('updated_at') or ''}"
+    )
+
+
 def _close_stale_open_execution(
     config: dict[str, Any],
     row: dict[str, Any],
     *,
     closed_at: str,
     reason: str,
-) -> None:
-    update_trade_execution(
+) -> dict[str, Any] | None:
+    return update_trade_execution(
         config,
         int(row["id"]),
         {
@@ -77,6 +109,82 @@ def _close_stale_open_execution(
             "position_slot": None,
         },
     )
+
+
+def _notify_exchange_closed_execution(config: dict[str, Any], row: dict[str, Any]) -> None:
+    key = _exchange_close_notification_key(row)
+    if get_journal_state(config, key):
+        return
+    try:
+        from .notifier import send_telegram_message
+        from .reporting import format_trade_execution_close_message
+
+        sent = send_telegram_message(
+            config,
+            format_trade_execution_close_message(config, row),
+            with_buttons=False,
+            replace_previous=False,
+        )
+        if sent:
+            set_journal_state(config, key, datetime.now(timezone.utc).isoformat())
+    except Exception:
+        pass
+
+
+def _close_missing_exchange_execution(
+    config: dict[str, Any],
+    row: dict[str, Any],
+    *,
+    closed_at: str,
+) -> dict[str, Any] | None:
+    pnl = _float(row.get("pnl"))
+    payload = update_trade_execution(
+        config,
+        int(row["id"]),
+        {
+            "status": _status_from_realized_pnl(pnl),
+            "pnl": pnl,
+            "close_reason": _close_reason_from_realized_pnl(pnl),
+            "closed_at": closed_at,
+            "updated_at": closed_at,
+            "position_slot": None,
+        },
+    )
+    if payload:
+        _notify_exchange_closed_execution(config, payload)
+    return payload
+
+
+def _backfill_reconciled_exchange_close_notifications(config: dict[str, Any], now: datetime) -> int:
+    max_age_hours = float(config.get("runtime_sync", {}).get("reconciled_close_backfill_hours", 24) or 24)
+    cutoff = now - timedelta(hours=max(0.0, max_age_hours))
+    notified = 0
+    rows = list_trade_execution_rows(config, statuses=["RECONCILED"], limit=200, order="closed_desc")
+    for row in rows:
+        if str(row.get("close_reason") or "") != "exchange_position_no_longer_open":
+            continue
+        closed_at = _parse_time(row.get("closed_at") or row.get("updated_at"))
+        if closed_at is not None and closed_at < cutoff:
+            continue
+        pnl = _float(row.get("pnl"))
+        payload = update_trade_execution(
+            config,
+            int(row["id"]),
+            {
+                "status": _status_from_realized_pnl(pnl),
+                "pnl": pnl,
+                "close_reason": _close_reason_from_realized_pnl(pnl),
+                "updated_at": now.isoformat(),
+                "position_slot": None,
+            },
+        )
+        if payload:
+            before = get_journal_state(config, _exchange_close_notification_key(payload))
+            _notify_exchange_closed_execution(config, payload)
+            after = get_journal_state(config, _exchange_close_notification_key(payload))
+            if not before and after:
+                notified += 1
+    return notified
 
 
 def _position_side(position: dict[str, Any]) -> str:
@@ -130,6 +238,75 @@ def _tp_sl_from_order(order: dict[str, Any]) -> tuple[float | None, float | None
             if take_profit is None:
                 take_profit = _float(item.get("tpTriggerPx") or item.get("tpOrdPx"))
     return stop_loss, take_profit
+
+
+def _symbol_from_inst_id(exchange: Any, inst_id: str) -> str:
+    if not inst_id:
+        return ""
+    markets_by_id = getattr(exchange, "markets_by_id", {}) or {}
+    market = markets_by_id.get(inst_id)
+    if isinstance(market, list):
+        market = market[0] if market else None
+    if isinstance(market, dict) and market.get("symbol"):
+        return str(market["symbol"])
+    if inst_id.endswith("-SWAP"):
+        parts = inst_id[:-5].split("-")
+        if len(parts) >= 2:
+            base = "-".join(parts[:-1])
+            quote = parts[-1]
+            return f"{base}/{quote}:{quote}"
+    return inst_id
+
+
+def _side_from_algo(row: dict[str, Any]) -> str:
+    pos_side = str(row.get("posSide") or "").strip().lower()
+    if pos_side in {"long", "short"}:
+        return pos_side
+    raw_side = str(row.get("side") or "").strip().lower()
+    return "long" if raw_side == "sell" else "short" if raw_side == "buy" else raw_side
+
+
+def _target_from_algo_payload(payload: dict[str, Any]) -> dict[str, float | None]:
+    return {
+        "stop_loss": _float(payload.get("slTriggerPx") or payload.get("slOrdPx")),
+        "take_profit": _float(payload.get("tpTriggerPx") or payload.get("tpOrdPx")),
+    }
+
+
+def _pending_algo_targets(exchange: Any) -> dict[tuple[str, str], dict[str, float | None]]:
+    fetch_algos = getattr(exchange, "privateGetTradeOrdersAlgoPending", None)
+    if not callable(fetch_algos):
+        fetch_algos = getattr(exchange, "private_get_trade_orders_algo_pending", None)
+    if not callable(fetch_algos):
+        return {}
+    targets: dict[tuple[str, str], dict[str, float | None]] = {}
+    seen: set[str] = set()
+    for ord_type in ("oco", "conditional", "trigger"):
+        try:
+            response = fetch_algos({"ordType": ord_type})
+        except Exception:
+            continue
+        rows = response.get("data") if isinstance(response, dict) else response
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            key = str(row.get("algoId") or f"{row.get('instId')}:{row.get('ordType')}:{row.get('side')}:{row.get('posSide')}")
+            if key in seen:
+                continue
+            seen.add(key)
+            symbol = _symbol_from_inst_id(exchange, str(row.get("instId") or ""))
+            side = _side_from_algo(row)
+            if not symbol or side not in {"long", "short"}:
+                continue
+            target = _target_from_algo_payload(row)
+            if target.get("stop_loss") is None and target.get("take_profit") is None:
+                continue
+            current = targets.setdefault((symbol, side.upper()), {"stop_loss": None, "take_profit": None})
+            current["stop_loss"] = current.get("stop_loss") or target.get("stop_loss")
+            current["take_profit"] = current.get("take_profit") or target.get("take_profit")
+    return targets
 
 
 def _fallback_take_profit(entry: float, side: str, pct: float) -> float:
@@ -203,12 +380,15 @@ def _mini_pending_placeholder_candidate(row: dict[str, Any]) -> TradeCandidate |
 def _fetch_account_snapshot(config: dict[str, Any]) -> dict[str, Any]:
     exchange = create_exchange(config, authenticated=True)
     exchange.load_markets()
+    positions = list(exchange.fetch_positions() or [])
+    open_orders = list(exchange.fetch_open_orders() or [])
     return {
         "enabled": True,
         "mode": config.get("mode"),
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "positions": list(exchange.fetch_positions() or []),
-        "open_orders": list(exchange.fetch_open_orders() or []),
+        "positions": positions,
+        "open_orders": open_orders,
+        "position_targets": _pending_algo_targets(exchange),
     }
 
 
@@ -271,8 +451,11 @@ def sync_exchange_runtime_state(
     snapshot = account_snapshot or _fetch_account_snapshot(config)
     reclassified_executions = reclassify_unknown_trade_closures(config)
     created_at = str(snapshot.get("created_at") or datetime.now(timezone.utc).isoformat())
+    snapshot_time = _parse_time(created_at) or datetime.now(timezone.utc)
+    backfilled_close_notifications = _backfill_reconciled_exchange_close_notifications(config, snapshot_time)
     position_rows = [item for item in (snapshot.get("positions") or []) if isinstance(item, dict)]
     open_orders = [item for item in (snapshot.get("open_orders") or []) if isinstance(item, dict)]
+    position_targets = snapshot.get("position_targets") if isinstance(snapshot.get("position_targets"), dict) else {}
     active_pending = list_pending_orders(config, status="ACTIVE", limit=1000)
     pending_by_exchange_id = {
         str(row.get("exchange_order_id") or ""): row
@@ -361,6 +544,11 @@ def sync_exchange_runtime_state(
         leverage = _safe_float(position.get("leverage") or info.get("lever"), _safe_float(config.get("exchange", {}).get("leverage"), 1.0))
         stop_loss = _float(position.get("stop_loss"))
         take_profit = _float(position.get("take_profit"))
+        algo_target = position_targets.get(position_key, {}) if isinstance(position_targets, dict) else {}
+        if stop_loss is None and isinstance(algo_target, dict):
+            stop_loss = _float(algo_target.get("stop_loss"))
+        if take_profit is None and isinstance(algo_target, dict):
+            take_profit = _float(algo_target.get("take_profit"))
         payload = {
             "source": "okx_position_sync",
             "position": to_jsonable(position),
@@ -447,7 +635,6 @@ def sync_exchange_runtime_state(
     # no longer have a matching exchange position, and collapse duplicate rows.
     snapshot_authoritative = snapshot.get("enabled", True) is not False
     grace_seconds = max(0, int(config.get("runtime_sync", {}).get("position_close_grace_seconds", 120) or 0))
-    snapshot_time = _parse_time(created_at) or datetime.now(timezone.utc)
     executions_closed = 0
     duplicate_executions_closed = 0
     for row in open_execution_rows:
@@ -464,9 +651,9 @@ def sync_exchange_runtime_state(
         if key in active_position_keys:
             reason = "duplicate_open_execution_reconciled"
             duplicate_executions_closed += 1
+            _close_stale_open_execution(config, row, closed_at=created_at, reason=reason)
         else:
-            reason = "exchange_position_no_longer_open"
-        _close_stale_open_execution(config, row, closed_at=created_at, reason=reason)
+            _close_missing_exchange_execution(config, row, closed_at=created_at)
         executions_closed += 1
 
     refresh_trading_system_state(config)
@@ -481,6 +668,7 @@ def sync_exchange_runtime_state(
         "executions_closed": executions_closed,
         "duplicate_executions_closed": duplicate_executions_closed,
         "reclassified_executions": reclassified_executions,
+        "backfilled_close_notifications": backfilled_close_notifications,
     }
 
 
