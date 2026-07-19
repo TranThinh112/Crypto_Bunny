@@ -676,9 +676,80 @@ def _targets_from_open_orders(exchange: Any) -> dict[tuple[str, str], dict[str, 
     return targets
 
 
+def _symbol_from_inst_id(exchange: Any, inst_id: str) -> str:
+    if not inst_id:
+        return ""
+    markets_by_id = getattr(exchange, "markets_by_id", {}) or {}
+    market = markets_by_id.get(inst_id)
+    if isinstance(market, list):
+        market = market[0] if market else None
+    if isinstance(market, dict) and market.get("symbol"):
+        return str(market["symbol"])
+    if inst_id.endswith("-SWAP"):
+        parts = inst_id[:-5].split("-")
+        if len(parts) >= 2:
+            base = "-".join(parts[:-1])
+            quote = parts[-1]
+            return f"{base}/{quote}:{quote}"
+    return inst_id
+
+
+def _side_from_algo(row: dict[str, Any]) -> str:
+    pos_side = str(row.get("posSide") or "").strip().lower()
+    if pos_side in {"long", "short"}:
+        return pos_side
+    raw_side = str(row.get("side") or "").strip().lower()
+    return "long" if raw_side == "sell" else "short" if raw_side == "buy" else raw_side
+
+
+def _pending_algo_orders(exchange: Any) -> list[dict[str, Any]]:
+    fetch_algos = getattr(exchange, "privateGetTradeOrdersAlgoPending", None)
+    if not callable(fetch_algos):
+        fetch_algos = getattr(exchange, "private_get_trade_orders_algo_pending", None)
+    if not callable(fetch_algos):
+        return []
+
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for ord_type in ("oco", "conditional", "trigger"):
+        try:
+            response = fetch_algos({"ordType": ord_type})
+        except Exception:
+            continue
+        chunk = response.get("data") if isinstance(response, dict) else response
+        if not isinstance(chunk, list):
+            continue
+        for row in chunk:
+            if not isinstance(row, dict):
+                continue
+            key = str(row.get("algoId") or f"{row.get('instId')}:{row.get('ordType')}:{row.get('side')}:{row.get('posSide')}")
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(row)
+    return rows
+
+
+def _targets_from_algo_orders(exchange: Any) -> dict[tuple[str, str], dict[str, float | None]]:
+    targets: dict[tuple[str, str], dict[str, float | None]] = {}
+    for row in _pending_algo_orders(exchange):
+        symbol = _symbol_from_inst_id(exchange, str(row.get("instId") or ""))
+        side = _side_from_algo(row)
+        if not symbol or side not in {"long", "short"}:
+            continue
+        target = _target_from_payload(row)
+        if target.get("stop_loss") is None and target.get("take_profit") is None:
+            continue
+        existing = targets.setdefault((symbol, side), {"stop_loss": None, "take_profit": None})
+        existing["stop_loss"] = existing.get("stop_loss") or target.get("stop_loss")
+        existing["take_profit"] = existing.get("take_profit") or target.get("take_profit")
+    return targets
+
+
 def _position_rows(config: dict[str, Any], exchange: Any) -> list[dict[str, Any]]:
     targets = _latest_targets_by_position(config)
     order_targets = _targets_from_open_orders(exchange)
+    algo_targets = _targets_from_algo_orders(exchange)
     positions: list[dict[str, Any]] = []
     for item in exchange.fetch_positions():
         info = item.get("info", {}) if isinstance(item.get("info"), dict) else {}
@@ -690,9 +761,10 @@ def _position_rows(config: dict[str, Any], exchange: Any) -> list[dict[str, Any]
         pnl_usdt = _float(item.get("unrealizedPnl") or info.get("upl"))
         target = _position_targets(targets, symbol, side)
         order_target = _position_targets(order_targets, symbol, side)
+        algo_target = _position_targets(algo_targets, symbol, side)
         direct_target = _target_from_payload(item)
-        stop_loss = direct_target.get("stop_loss") or order_target.get("stop_loss") or target.get("stop_loss")
-        take_profit = direct_target.get("take_profit") or order_target.get("take_profit") or target.get("take_profit")
+        stop_loss = direct_target.get("stop_loss") or algo_target.get("stop_loss") or order_target.get("stop_loss") or target.get("stop_loss")
+        take_profit = direct_target.get("take_profit") or algo_target.get("take_profit") or order_target.get("take_profit") or target.get("take_profit")
         positions.append(
             {
                 "symbol": symbol,

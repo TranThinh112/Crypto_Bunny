@@ -2581,6 +2581,77 @@ def _okx_targets_from_orders(open_orders: list[dict[str, Any]]) -> dict[tuple[st
     return targets
 
 
+def _okx_symbol_from_inst_id(exchange: Any, inst_id: str) -> str:
+    if not inst_id:
+        return ""
+    markets_by_id = getattr(exchange, "markets_by_id", {}) or {}
+    market = markets_by_id.get(inst_id)
+    if isinstance(market, list):
+        market = market[0] if market else None
+    if isinstance(market, dict) and market.get("symbol"):
+        return str(market["symbol"])
+    if inst_id.endswith("-SWAP"):
+        parts = inst_id[:-5].split("-")
+        if len(parts) >= 2:
+            base = "-".join(parts[:-1])
+            quote = parts[-1]
+            return f"{base}/{quote}:{quote}"
+    return inst_id
+
+
+def _okx_position_side_from_algo(row: dict[str, Any]) -> str:
+    pos_side = str(row.get("posSide") or "").strip().lower()
+    if pos_side in {"long", "short"}:
+        return pos_side
+    raw_side = str(row.get("side") or "").strip().lower()
+    return "long" if raw_side == "sell" else "short" if raw_side == "buy" else raw_side
+
+
+def _okx_pending_algo_orders(exchange: Any) -> list[dict[str, Any]]:
+    fetch_algos = getattr(exchange, "privateGetTradeOrdersAlgoPending", None)
+    if not callable(fetch_algos):
+        fetch_algos = getattr(exchange, "private_get_trade_orders_algo_pending", None)
+    if not callable(fetch_algos):
+        return []
+
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for ord_type in ("oco", "conditional", "trigger"):
+        try:
+            response = fetch_algos({"ordType": ord_type})
+        except Exception as exc:
+            logger.warning("OKX pending algo fetch failed for %s: %s", ord_type, exc)
+            continue
+        chunk = response.get("data") if isinstance(response, dict) else response
+        if not isinstance(chunk, list):
+            continue
+        for row in chunk:
+            if not isinstance(row, dict):
+                continue
+            key = str(row.get("algoId") or f"{row.get('instId')}:{row.get('ordType')}:{row.get('side')}:{row.get('posSide')}")
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(row)
+    return rows
+
+
+def _okx_targets_from_algo_orders(exchange: Any) -> dict[tuple[str, str], dict[str, float | None]]:
+    targets: dict[tuple[str, str], dict[str, float | None]] = {}
+    for row in _okx_pending_algo_orders(exchange):
+        symbol = _okx_symbol_from_inst_id(exchange, str(row.get("instId") or ""))
+        side = _okx_position_side_from_algo(row)
+        if not symbol or side not in {"long", "short"}:
+            continue
+        target = _okx_target_from_payload(row)
+        if target.get("stop_loss") is None and target.get("take_profit") is None:
+            continue
+        current = targets.setdefault((symbol, side), {"stop_loss": None, "take_profit": None})
+        current["stop_loss"] = current.get("stop_loss") or target.get("stop_loss")
+        current["take_profit"] = current.get("take_profit") or target.get("take_profit")
+    return targets
+
+
 def _open_okx_positions(config: dict[str, Any]) -> dict[str, Any]:
     status = _okx_demo_status(config) if config.get("mode") == "demo" else {"ready": config.get("mode") == "live"}
     if config.get("mode") == "dry_run":
@@ -2620,6 +2691,7 @@ def _open_okx_positions(config: dict[str, Any]) -> dict[str, Any]:
             }
         )
     order_targets = _okx_targets_from_orders(open_orders)
+    algo_targets = _okx_targets_from_algo_orders(exchange)
     for order in open_orders:
         order.pop("raw", None)
 
@@ -2632,9 +2704,10 @@ def _open_okx_positions(config: dict[str, Any]) -> dict[str, Any]:
         symbol = item.get("symbol") or info.get("instId")
         side = _position_side(item)
         direct_target = _okx_target_from_payload(item)
+        algo_target = algo_targets.get((str(symbol), side), {"stop_loss": None, "take_profit": None})
         order_target = order_targets.get((str(symbol), side), {"stop_loss": None, "take_profit": None})
-        stop_loss = direct_target.get("stop_loss") or order_target.get("stop_loss")
-        take_profit = direct_target.get("take_profit") or order_target.get("take_profit")
+        stop_loss = direct_target.get("stop_loss") or algo_target.get("stop_loss") or order_target.get("stop_loss")
+        take_profit = direct_target.get("take_profit") or algo_target.get("take_profit") or order_target.get("take_profit")
         positions.append(
             {
                 "symbol": symbol,
@@ -2659,6 +2732,7 @@ def _open_okx_positions(config: dict[str, Any]) -> dict[str, Any]:
         "created_at": datetime.now(timezone.utc).isoformat(),
         "positions": positions,
         "open_orders": open_orders,
+        "algo_target_count": len(algo_targets),
         "message": f"{len(positions)} open position(s), {len(open_orders)} open order(s)",
     }
 

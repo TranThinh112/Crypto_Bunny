@@ -5,7 +5,12 @@ from copy import deepcopy
 from unittest import TestCase
 
 from crypto_trader.config import DEFAULT_CONFIG
-from crypto_trader.reporting import format_pending_event_messages, format_scan_message, format_trade_execution_close_message
+from crypto_trader.reporting import (
+    _position_rows,
+    format_pending_event_messages,
+    format_scan_message,
+    format_trade_execution_close_message,
+)
 
 
 class ReportingTest(TestCase):
@@ -135,6 +140,49 @@ class ReportingTest(TestCase):
         self.assertIn("Cặp: OP/USDT:USDT LONG", messages[0])
         self.assertNotIn("da duoc chuyen thanh", messages[0])
         self.assertNotIn("Cap:", messages[0])
+
+    def test_position_rows_use_pending_algo_targets_when_open_orders_are_empty(self) -> None:
+        config = self._config()
+
+        class AlgoExchange:
+            markets_by_id = {"TAO-USDT-SWAP": {"symbol": "TAO/USDT:USDT"}}
+
+            def fetch_open_orders(self) -> list[dict[str, object]]:
+                return []
+
+            def fetch_positions(self) -> list[dict[str, object]]:
+                return [
+                    {
+                        "symbol": "TAO/USDT:USDT",
+                        "side": "long",
+                        "contracts": 2,
+                        "entryPrice": 320,
+                        "info": {"pos": "2", "posSide": "long", "instId": "TAO-USDT-SWAP"},
+                    }
+                ]
+
+            def privateGetTradeOrdersAlgoPending(self, params: dict[str, object]) -> dict[str, object]:
+                if params.get("ordType") != "conditional":
+                    return {"data": []}
+                return {
+                    "data": [
+                        {
+                            "algoId": "algo-2",
+                            "instId": "TAO-USDT-SWAP",
+                            "posSide": "long",
+                            "side": "sell",
+                            "ordType": "conditional",
+                            "slTriggerPx": "300",
+                            "tpTriggerPx": "360",
+                        }
+                    ]
+                }
+
+        rows = _position_rows(config, AlgoExchange())
+
+        self.assertEqual(rows[0]["stop_loss"], 300)
+        self.assertEqual(rows[0]["take_profit"], 360)
+        self.assertEqual(rows[0]["tp_sl_status"], "ok")
 
     def test_trade_execution_close_message_formats_take_profit_with_pnl(self) -> None:
         config = self._config()

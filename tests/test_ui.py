@@ -22,6 +22,7 @@ from crypto_trader.ui import (
     _format_ai_call_history_view,
     _handle_telegram_update,
     _market_guard_notification_status,
+    _open_okx_positions,
     _notify_system_error,
     _periodic_scan_notification_due,
     _remember_periodic_scan_notification,
@@ -409,6 +410,52 @@ class UiTest(TestCase):
         payload = response.json()
         self.assertTrue(payload["cached"])
         self.assertEqual(payload["prices"][0]["last"], 100000)
+
+    def test_okx_positions_uses_pending_algo_targets_when_open_orders_are_empty(self) -> None:
+        class AlgoExchange:
+            markets_by_id = {"ETC-USDT-SWAP": {"symbol": "ETC/USDT:USDT"}}
+
+            def load_markets(self) -> None:
+                return None
+
+            def fetch_open_orders(self) -> list[dict[str, object]]:
+                return []
+
+            def fetch_positions(self) -> list[dict[str, object]]:
+                return [
+                    {
+                        "symbol": "ETC/USDT:USDT",
+                        "side": "long",
+                        "contracts": 1,
+                        "entryPrice": 20,
+                        "info": {"pos": "1", "posSide": "long", "instId": "ETC-USDT-SWAP"},
+                    }
+                ]
+
+            def privateGetTradeOrdersAlgoPending(self, params: dict[str, object]) -> dict[str, object]:
+                if params.get("ordType") != "oco":
+                    return {"data": []}
+                return {
+                    "data": [
+                        {
+                            "algoId": "algo-1",
+                            "instId": "ETC-USDT-SWAP",
+                            "posSide": "long",
+                            "side": "sell",
+                            "ordType": "oco",
+                            "slTriggerPx": "18.5",
+                            "tpTriggerPx": "23.0",
+                        }
+                    ]
+                }
+
+        with patch("crypto_trader.ui.create_exchange", return_value=AlgoExchange()):
+            payload = _open_okx_positions({"mode": "live"})
+
+        self.assertEqual(payload["positions"][0]["stop_loss"], 18.5)
+        self.assertEqual(payload["positions"][0]["take_profit"], 23.0)
+        self.assertEqual(payload["positions"][0]["tp_sl_status"], "ok")
+        self.assertEqual(payload["algo_target_count"], 1)
 
     def test_leverage_endpoint_limits_values_to_5_25x(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
