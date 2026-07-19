@@ -50,6 +50,13 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 def _parse_time(value: Any) -> datetime | None:
     if not value:
         return None
+    number = _float(value)
+    if number is not None and number > 10_000:
+        try:
+            seconds = number / 1000 if number > 10_000_000_000 else number
+            return datetime.fromtimestamp(seconds, tz=timezone.utc)
+        except (OSError, ValueError):
+            return None
     try:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
     except ValueError:
@@ -81,6 +88,84 @@ def _close_reason_from_realized_pnl(pnl: float | None) -> str:
     if pnl > 0:
         return "take_profit"
     return "exchange_position_no_longer_open"
+
+
+def _payload_info(payload: dict[str, Any]) -> dict[str, Any]:
+    return payload.get("info", {}) if isinstance(payload.get("info"), dict) else {}
+
+
+def _history_symbol(row: dict[str, Any]) -> str:
+    info = _payload_info(row)
+    return str(row.get("symbol") or info.get("instId") or "")
+
+
+def _history_side(row: dict[str, Any]) -> str:
+    info = _payload_info(row)
+    side = str(row.get("side") or info.get("posSide") or "").strip().lower()
+    return side.upper()
+
+
+def _history_pnl(row: dict[str, Any]) -> float | None:
+    info = _payload_info(row)
+    for key in ("pnl", "realizedPnl", "realisedPnl"):
+        value = _float(row.get(key))
+        if value is not None:
+            return value
+    for key in ("pnl", "realizedPnl", "realisedPnl"):
+        value = _float(info.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _history_pnl_pct(row: dict[str, Any]) -> float | None:
+    info = _payload_info(row)
+    for key in ("percentage", "pnlRatio"):
+        value = _float(row.get(key))
+        if value is not None:
+            return value * 100 if abs(value) <= 5 else value
+    for key in ("pnlRatio", "uplRatio"):
+        value = _float(info.get(key))
+        if value is not None:
+            return value * 100 if abs(value) <= 5 else value
+    return None
+
+
+def _history_closed_at(row: dict[str, Any]) -> datetime | None:
+    info = _payload_info(row)
+    for key in ("timestamp", "lastUpdateTimestamp", "updatedAt", "closed_at", "closedAt"):
+        parsed = _parse_time(row.get(key))
+        if parsed is not None:
+            return parsed
+    for key in ("uTime", "cTime", "closeTime"):
+        parsed = _parse_time(info.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _matching_position_history(
+    row: dict[str, Any],
+    positions_history: list[dict[str, Any]],
+    snapshot_time: datetime,
+) -> dict[str, Any] | None:
+    key = _execution_key(row)
+    created_at = _parse_time(row.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc)
+    best: tuple[float, dict[str, Any]] | None = None
+    for history in positions_history:
+        if not isinstance(history, dict):
+            continue
+        if (_history_symbol(history), _history_side(history)) != key:
+            continue
+        closed_at = _history_closed_at(history)
+        if closed_at is None:
+            continue
+        if closed_at < created_at - timedelta(minutes=5):
+            continue
+        distance = abs((snapshot_time - closed_at).total_seconds())
+        if best is None or distance < best[0]:
+            best = (distance, history)
+    return best[1] if best else None
 
 
 def _exchange_close_notification_key(row: dict[str, Any]) -> str:
@@ -137,18 +222,26 @@ def _close_missing_exchange_execution(
     row: dict[str, Any],
     *,
     closed_at: str,
+    history: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    pnl = _float(row.get("pnl"))
+    pnl = _history_pnl(history or {}) if history else None
+    pnl = pnl if pnl is not None else _float(row.get("pnl"))
+    pnl_pct = _history_pnl_pct(history or {}) if history else None
+    history_closed_at = _history_closed_at(history or {}) if history else None
+    actual_closed_at = history_closed_at.isoformat() if history_closed_at else closed_at
     payload = update_trade_execution(
         config,
         int(row["id"]),
         {
             "status": _status_from_realized_pnl(pnl),
             "pnl": pnl,
+            "pnl_pct": pnl_pct,
             "close_reason": _close_reason_from_realized_pnl(pnl),
-            "closed_at": closed_at,
+            "closed_at": actual_closed_at,
             "updated_at": closed_at,
             "position_slot": None,
+            "exchange_close_source": "okx_positions_history" if history else "runtime_sync_snapshot",
+            "exchange_close_history_json": json.dumps(to_jsonable(history), ensure_ascii=False) if history else None,
         },
     )
     if payload:
@@ -156,7 +249,11 @@ def _close_missing_exchange_execution(
     return payload
 
 
-def _backfill_reconciled_exchange_close_notifications(config: dict[str, Any], now: datetime) -> int:
+def _backfill_reconciled_exchange_close_notifications(
+    config: dict[str, Any],
+    now: datetime,
+    positions_history: list[dict[str, Any]] | None = None,
+) -> int:
     max_age_hours = float(config.get("runtime_sync", {}).get("reconciled_close_backfill_hours", 24) or 24)
     cutoff = now - timedelta(hours=max(0.0, max_age_hours))
     notified = 0
@@ -167,15 +264,22 @@ def _backfill_reconciled_exchange_close_notifications(config: dict[str, Any], no
         closed_at = _parse_time(row.get("closed_at") or row.get("updated_at"))
         if closed_at is not None and closed_at < cutoff:
             continue
-        pnl = _float(row.get("pnl"))
+        history = _matching_position_history(row, positions_history or [], now)
+        pnl = _history_pnl(history or {}) if history else None
+        pnl = pnl if pnl is not None else _float(row.get("pnl"))
+        pnl_pct = _history_pnl_pct(history or {}) if history else None
+        history_closed_at = _history_closed_at(history or {}) if history else None
         payload = update_trade_execution(
             config,
             int(row["id"]),
             {
                 "status": _status_from_realized_pnl(pnl),
                 "pnl": pnl,
+                "pnl_pct": pnl_pct,
                 "close_reason": _close_reason_from_realized_pnl(pnl),
-                "exchange_close_source": "runtime_sync",
+                "closed_at": history_closed_at.isoformat() if history_closed_at else row.get("closed_at"),
+                "exchange_close_source": "okx_positions_history" if history else "runtime_sync",
+                "exchange_close_history_json": json.dumps(to_jsonable(history), ensure_ascii=False) if history else row.get("exchange_close_history_json"),
                 "updated_at": now.isoformat(),
                 "position_slot": None,
             },
@@ -187,6 +291,50 @@ def _backfill_reconciled_exchange_close_notifications(config: dict[str, Any], no
             if not before and after:
                 notified += 1
     return notified
+
+
+def _correct_recent_exchange_closes_from_history(
+    config: dict[str, Any],
+    now: datetime,
+    positions_history: list[dict[str, Any]] | None,
+) -> int:
+    if not positions_history:
+        return 0
+    max_age_hours = float(config.get("runtime_sync", {}).get("exchange_close_pnl_correction_hours", 24) or 24)
+    cutoff = now - timedelta(hours=max(0.0, max_age_hours))
+    corrected = 0
+    rows = list_trade_execution_rows(config, statuses=["WIN", "LOSS", "BREAKEVEN", "CLOSED"], limit=200, order="closed_desc")
+    for row in rows:
+        reason = str(row.get("close_reason") or "")
+        if reason not in {"stop_loss", "take_profit", "exchange_position_no_longer_open"}:
+            continue
+        closed_at = _parse_time(row.get("closed_at") or row.get("updated_at"))
+        if closed_at is not None and closed_at < cutoff:
+            continue
+        history = _matching_position_history(row, positions_history, now)
+        if history is None:
+            continue
+        pnl = _history_pnl(history)
+        if pnl is None:
+            continue
+        current_pnl = _float(row.get("pnl"))
+        pnl_pct = _history_pnl_pct(history)
+        history_closed_at = _history_closed_at(history)
+        updates: dict[str, Any] = {
+            "status": _status_from_realized_pnl(pnl),
+            "pnl": pnl,
+            "pnl_pct": pnl_pct,
+            "close_reason": _close_reason_from_realized_pnl(pnl),
+            "closed_at": history_closed_at.isoformat() if history_closed_at else row.get("closed_at"),
+            "updated_at": now.isoformat(),
+            "exchange_close_source": "okx_positions_history",
+            "exchange_close_history_json": json.dumps(to_jsonable(history), ensure_ascii=False),
+            "position_slot": None,
+        }
+        if current_pnl is None or abs(current_pnl - pnl) > 1e-9:
+            update_trade_execution(config, int(row["id"]), updates)
+            corrected += 1
+    return corrected
 
 
 def _retry_unnotified_exchange_closes(config: dict[str, Any], now: datetime) -> int:
@@ -405,6 +553,13 @@ def _fetch_account_snapshot(config: dict[str, Any]) -> dict[str, Any]:
     exchange.load_markets()
     positions = list(exchange.fetch_positions() or [])
     open_orders = list(exchange.fetch_open_orders() or [])
+    positions_history: list[dict[str, Any]] = []
+    try:
+        fetch_history = getattr(exchange, "fetch_positions_history", None)
+        if callable(fetch_history):
+            positions_history = list(fetch_history(None, None, 100) or [])
+    except Exception:
+        positions_history = []
     return {
         "enabled": True,
         "mode": config.get("mode"),
@@ -412,6 +567,7 @@ def _fetch_account_snapshot(config: dict[str, Any]) -> dict[str, Any]:
         "positions": positions,
         "open_orders": open_orders,
         "position_targets": _pending_algo_targets(exchange),
+        "positions_history": positions_history,
     }
 
 
@@ -475,7 +631,9 @@ def sync_exchange_runtime_state(
     reclassified_executions = reclassify_unknown_trade_closures(config)
     created_at = str(snapshot.get("created_at") or datetime.now(timezone.utc).isoformat())
     snapshot_time = _parse_time(created_at) or datetime.now(timezone.utc)
-    backfilled_close_notifications = _backfill_reconciled_exchange_close_notifications(config, snapshot_time)
+    positions_history = [item for item in (snapshot.get("positions_history") or []) if isinstance(item, dict)]
+    corrected_close_pnls = _correct_recent_exchange_closes_from_history(config, snapshot_time, positions_history)
+    backfilled_close_notifications = _backfill_reconciled_exchange_close_notifications(config, snapshot_time, positions_history)
     retried_close_notifications = _retry_unnotified_exchange_closes(config, snapshot_time)
     position_rows = [item for item in (snapshot.get("positions") or []) if isinstance(item, dict)]
     open_orders = [item for item in (snapshot.get("open_orders") or []) if isinstance(item, dict)]
@@ -677,7 +835,8 @@ def sync_exchange_runtime_state(
             duplicate_executions_closed += 1
             _close_stale_open_execution(config, row, closed_at=created_at, reason=reason)
         else:
-            _close_missing_exchange_execution(config, row, closed_at=created_at)
+            history = _matching_position_history(row, positions_history, snapshot_time)
+            _close_missing_exchange_execution(config, row, closed_at=created_at, history=history)
         executions_closed += 1
 
     refresh_trading_system_state(config)
@@ -692,6 +851,7 @@ def sync_exchange_runtime_state(
         "executions_closed": executions_closed,
         "duplicate_executions_closed": duplicate_executions_closed,
         "reclassified_executions": reclassified_executions,
+        "corrected_close_pnls": corrected_close_pnls,
         "backfilled_close_notifications": backfilled_close_notifications,
         "retried_close_notifications": retried_close_notifications,
     }

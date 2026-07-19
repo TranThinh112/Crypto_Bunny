@@ -267,6 +267,50 @@ class RuntimeSyncTest(TestCase):
         send_message.assert_called_once()
         self.assertIn("SOL/USDT:USDT", send_message.call_args.args[1])
 
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_sync_uses_okx_position_history_pnl_when_position_disappears(self, send_message) -> None:
+        config = self._config()
+        sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-07-08T00:00:00+00:00",
+                "positions": [
+                    {"symbol": "ETC/USDT:USDT", "side": "long", "contracts": 1.53, "entry_price": 7.024, "unrealized_pnl": -2.54},
+                ],
+                "open_orders": [],
+            },
+        )
+
+        result = sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-07-08T00:03:00+00:00",
+                "positions": [],
+                "open_orders": [],
+                "positions_history": [
+                    {
+                        "symbol": "ETC/USDT:USDT",
+                        "side": "long",
+                        "pnl": -3.16,
+                        "percentage": -64.77,
+                        "timestamp": 1784476980000,
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(result["exchange"]["executions_closed"], 1)
+        row = list_trade_execution_rows(config, statuses=["LOSS"])[0]
+        self.assertEqual(row["pnl"], -3.16)
+        self.assertEqual(row["pnl_pct"], -64.77)
+        self.assertEqual(row["exchange_close_source"], "okx_positions_history")
+        send_message.assert_called_once()
+        self.assertIn("-3.16", send_message.call_args.args[1])
+
     def test_sync_collapses_duplicate_open_executions_for_same_position(self) -> None:
         config = self._config()
         for row_id in range(2):
@@ -438,3 +482,46 @@ class RuntimeSyncTest(TestCase):
         self.assertEqual(result["exchange"]["retried_close_notifications"], 1)
         send_message.assert_called_once()
         self.assertIn("ETC/USDT:USDT", send_message.call_args.args[1])
+
+    def test_sync_corrects_recent_exchange_close_pnl_from_history(self) -> None:
+        config = self._config()
+        insert_trade_execution_row(
+            config,
+            {
+                "created_at": "2026-07-08T00:00:00+00:00",
+                "updated_at": "2026-07-08T00:05:00+00:00",
+                "closed_at": "2026-07-08T00:05:00+00:00",
+                "symbol": "ETC/USDT:USDT",
+                "side": "LONG",
+                "status": "LOSS",
+                "pnl": -2.54,
+                "pnl_pct": -51.99,
+                "close_reason": "stop_loss",
+                "position_slot": None,
+            },
+        )
+
+        result = sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-07-08T00:06:00+00:00",
+                "positions": [],
+                "open_orders": [],
+                "positions_history": [
+                    {
+                        "symbol": "ETC/USDT:USDT",
+                        "side": "long",
+                        "pnl": -3.16,
+                        "percentage": -64.77,
+                        "timestamp": 1784476980000,
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(result["exchange"]["corrected_close_pnls"], 1)
+        row = list_trade_execution_rows(config, statuses=["LOSS"])[0]
+        self.assertEqual(row["pnl"], -3.16)
+        self.assertEqual(row["pnl_pct"], -64.77)
