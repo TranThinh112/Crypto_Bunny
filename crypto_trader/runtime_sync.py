@@ -124,6 +124,7 @@ def _notify_exchange_closed_execution(config: dict[str, Any], row: dict[str, Any
             format_trade_execution_close_message(config, row),
             with_buttons=False,
             replace_previous=False,
+            allow_during_startup_quiet=True,
         )
         if sent:
             set_journal_state(config, key, datetime.now(timezone.utc).isoformat())
