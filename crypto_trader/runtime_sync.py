@@ -158,6 +158,70 @@ def _history_closed_at(row: dict[str, Any]) -> datetime | None:
     return None
 
 
+def _row_payload(row: dict[str, Any]) -> dict[str, Any]:
+    for key in ("snapshot_json", "payload_json"):
+        raw = row.get(key)
+        if not raw:
+            continue
+        try:
+            payload = json.loads(str(raw))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return {}
+
+
+def _snapshot_position(row: dict[str, Any]) -> dict[str, Any]:
+    payload = _row_payload(row)
+    position = payload.get("position")
+    return position if isinstance(position, dict) else {}
+
+
+def _target_price_from_snapshot(position: dict[str, Any], close_reason: str) -> float | None:
+    info = _payload_info(position)
+    orders = info.get("closeOrderAlgo")
+    if isinstance(orders, str):
+        try:
+            orders = json.loads(orders)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            orders = []
+    key = "tpTriggerPx" if close_reason == "take_profit" else "slTriggerPx"
+    fallback_key = "tpOrdPx" if close_reason == "take_profit" else "slOrdPx"
+    if isinstance(orders, list):
+        for order in orders:
+            if not isinstance(order, dict):
+                continue
+            value = _float(order.get(key) or order.get(fallback_key))
+            if value is not None:
+                return value
+    return None
+
+
+def _estimated_closed_pnl_from_snapshot(config: dict[str, Any], row: dict[str, Any], close_reason: str) -> tuple[float | None, float | None]:
+    position = _snapshot_position(row)
+    if not position:
+        return None, None
+    info = _payload_info(position)
+    entry = _float(row.get("entry_price") or position.get("entryPrice") or info.get("avgPx"))
+    close_price = _target_price_from_snapshot(position, close_reason)
+    contracts = abs(_safe_float(position.get("contracts") or info.get("pos"), 0.0))
+    contract_size = _safe_float(position.get("contractSize") or info.get("ctVal"), 1.0)
+    if entry is None or close_price is None or contracts <= 0 or contract_size <= 0:
+        return None, None
+    side = str(row.get("side") or position.get("side") or info.get("posSide") or "").lower()
+    gross = (close_price - entry) * contracts * contract_size
+    if side == "short":
+        gross = -gross
+    carried_realized = _safe_float(position.get("realizedPnl") or info.get("realizedPnl"), 0.0)
+    fee_rate = _safe_float(config.get("exchange", {}).get("close_fee_rate", config.get("exchange", {}).get("taker_fee_rate", 0.0005)), 0.0005)
+    estimated_close_fee = abs(close_price * contracts * contract_size) * max(0.0, fee_rate)
+    pnl = gross + carried_realized - estimated_close_fee
+    margin = _float(position.get("initialMargin") or info.get("imr") or info.get("margin"))
+    pnl_pct = pnl / margin * 100 if margin and margin > 0 else None
+    return round(pnl, 6), None if pnl_pct is None else round(pnl_pct, 6)
+
+
 def _matching_position_history(
     row: dict[str, Any],
     positions_history: list[dict[str, Any]],
@@ -241,6 +305,12 @@ def _close_missing_exchange_execution(
     pnl = _history_pnl(history or {}) if history else None
     pnl = pnl if pnl is not None else _float(row.get("pnl"))
     pnl_pct = _history_pnl_pct(history or {}) if history else None
+    close_reason = _close_reason_from_realized_pnl(pnl)
+    if history is None:
+        estimated_pnl, estimated_pct = _estimated_closed_pnl_from_snapshot(config, row, close_reason)
+        if estimated_pnl is not None:
+            pnl = estimated_pnl
+            pnl_pct = estimated_pct
     history_closed_at = _history_closed_at(history or {}) if history else None
     actual_closed_at = history_closed_at.isoformat() if history_closed_at else closed_at
     payload = update_trade_execution(
@@ -254,7 +324,7 @@ def _close_missing_exchange_execution(
             "closed_at": actual_closed_at,
             "updated_at": closed_at,
             "position_slot": None,
-            "exchange_close_source": "okx_positions_history" if history else "runtime_sync_snapshot",
+            "exchange_close_source": "okx_positions_history" if history else "estimated_from_position_snapshot",
             "exchange_close_history_json": json.dumps(to_jsonable(history), ensure_ascii=False) if history else None,
         },
     )
@@ -312,8 +382,6 @@ def _correct_recent_exchange_closes_from_history(
     now: datetime,
     positions_history: list[dict[str, Any]] | None,
 ) -> int:
-    if not positions_history:
-        return 0
     max_age_hours = float(config.get("runtime_sync", {}).get("exchange_close_pnl_correction_hours", 24) or 24)
     cutoff = now - timedelta(hours=max(0.0, max_age_hours))
     corrected = 0
@@ -326,14 +394,15 @@ def _correct_recent_exchange_closes_from_history(
         if closed_at is not None and closed_at < cutoff:
             continue
         history = _matching_position_history(row, positions_history, now)
-        if history is None:
-            continue
-        pnl = _history_pnl(history)
+        pnl = _history_pnl(history) if history else None
+        pnl_pct = _history_pnl_pct(history) if history else None
+        source = "okx_positions_history" if history else "estimated_from_position_snapshot"
+        if pnl is None:
+            pnl, pnl_pct = _estimated_closed_pnl_from_snapshot(config, row, reason)
         if pnl is None:
             continue
         current_pnl = _float(row.get("pnl"))
-        pnl_pct = _history_pnl_pct(history)
-        history_closed_at = _history_closed_at(history)
+        history_closed_at = _history_closed_at(history) if history else None
         updates: dict[str, Any] = {
             "status": _status_from_realized_pnl(pnl),
             "pnl": pnl,
@@ -341,8 +410,8 @@ def _correct_recent_exchange_closes_from_history(
             "close_reason": _close_reason_from_realized_pnl(pnl),
             "closed_at": history_closed_at.isoformat() if history_closed_at else row.get("closed_at"),
             "updated_at": now.isoformat(),
-            "exchange_close_source": "okx_positions_history",
-            "exchange_close_history_json": json.dumps(to_jsonable(history), ensure_ascii=False),
+            "exchange_close_source": source,
+            "exchange_close_history_json": json.dumps(to_jsonable(history), ensure_ascii=False) if history else row.get("exchange_close_history_json"),
             "position_slot": None,
         }
         if current_pnl is None or abs(current_pnl - pnl) > 1e-9:

@@ -526,6 +526,58 @@ class RuntimeSyncTest(TestCase):
         self.assertEqual(row["pnl"], -3.16)
         self.assertEqual(row["pnl_pct"], -64.77)
 
+    def test_sync_estimates_closed_pnl_from_snapshot_when_history_is_missing(self) -> None:
+        config = self._config()
+        insert_trade_execution_row(
+            config,
+            {
+                "created_at": "2026-07-08T00:00:00+00:00",
+                "updated_at": "2026-07-08T00:05:00+00:00",
+                "closed_at": "2026-07-08T00:05:00+00:00",
+                "symbol": "ETC/USDT:USDT",
+                "side": "LONG",
+                "status": "LOSS",
+                "entry_price": 7.024,
+                "pnl": -2.5398,
+                "pnl_pct": -51.99,
+                "close_reason": "stop_loss",
+                "position_slot": None,
+                "snapshot_json": json.dumps(
+                    {
+                        "position": {
+                            "contracts": 1.53,
+                            "contractSize": 10,
+                            "initialMargin": 4.88532978,
+                            "realizedPnl": -0.0671642910642104,
+                            "info": {
+                                "avgPx": "7.024",
+                                "posSide": "long",
+                                "closeOrderAlgo": [{"slTriggerPx": "6.825", "tpTriggerPx": "7.295"}],
+                            },
+                        }
+                    }
+                ),
+            },
+        )
+
+        result = sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-07-08T00:06:00+00:00",
+                "positions": [],
+                "open_orders": [],
+                "positions_history": [],
+            },
+        )
+
+        self.assertEqual(result["exchange"]["corrected_close_pnls"], 1)
+        row = list_trade_execution_rows(config, statuses=["LOSS"])[0]
+        self.assertAlmostEqual(row["pnl"], -3.164075, places=5)
+        self.assertAlmostEqual(row["pnl_pct"], -64.7668, places=3)
+        self.assertEqual(row["exchange_close_source"], "estimated_from_position_snapshot")
+
     def test_fetch_positions_history_uses_raw_okx_fallback(self) -> None:
         class RawHistoryExchange:
             def fetch_positions_history(self, *args, **kwargs) -> list[dict[str, object]]:
