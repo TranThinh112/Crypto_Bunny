@@ -1866,6 +1866,21 @@ tr:last-child td {
   display: block;
 }
 
+.module-risk-panel .module-chart-wrap {
+  place-items: center start;
+  padding-bottom: 10px;
+}
+
+.module-risk-bar-chart {
+  width: auto;
+  min-width: 680px;
+  max-width: none;
+}
+
+.module-risk-bar-chart .module-bar-index {
+  font-size: 11px;
+}
+
 .module-bar-axis {
   stroke: var(--line);
   stroke-width: 1.5;

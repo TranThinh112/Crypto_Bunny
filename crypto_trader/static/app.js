@@ -2181,11 +2181,14 @@ function renderBunnyRiskBarSvg(rows, title, subtitle, chartId, unit) {
   }
   const yAxisMax = riskYAxisMax(chartRows, unit);
   const chartLeft = 62;
-  const chartRight = 398;
+  const slotWidth = 150;
+  const chartRight = chartLeft + Math.max(360, chartRows.length * slotWidth);
   const chartTop = 34;
-  const chartBaseline = 196;
+  const chartBaseline = 214;
   const chartHeight = chartBaseline - chartTop;
   const barWidth = (chartRight - chartLeft - 10) / chartRows.length;
+  const chartWidth = chartRight + 44;
+  const chartHeightTotal = 310;
   const tickValues = [0, 1, 2, 3, 4].map((step) => yAxisMax * step / 4);
   const yTicks = tickValues.map((tickValue) => {
     const y = chartBaseline - (tickValue / yAxisMax) * chartHeight;
@@ -2209,7 +2212,7 @@ function renderBunnyRiskBarSvg(rows, title, subtitle, chartId, unit) {
         <rect class="module-chart-segment module-bar-segment" data-chart-index="${row.chartIndex}" x="${x}" y="${y}" width="${width}" height="${height}" rx="4" fill="${row.color}">
           <title>${escapeHtml(row.label || "-")}: ${escapeHtml(bunnyRiskValue(row))}</title>
         </rect>
-        ${renderChartAxisLabel(row, x + width / 2, 214)}
+        ${renderBunnyRiskAxisLabel(row, x + width / 2, 236)}
       </g>
     `;
   }).join("");
@@ -2218,7 +2221,7 @@ function renderBunnyRiskBarSvg(rows, title, subtitle, chartId, unit) {
     <div>
       ${renderChartTitle(title, subtitle)}
       <div class="module-chart-wrap">
-        <svg class="module-bar-chart" viewBox="0 0 430 264" role="img" aria-label="${escapeHtml(title)}">
+        <svg class="module-bar-chart module-risk-bar-chart" viewBox="0 0 ${chartWidth} ${chartHeightTotal}" style="width:${chartWidth}px;max-width:none" role="img" aria-label="${escapeHtml(title)}">
           <defs>
             <marker id="${markerId}" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto" markerUnits="strokeWidth">
               <path d="M 0 8 L 4 0 L 8 8 Z" class="module-axis-arrow-head"></path>
@@ -2237,6 +2240,39 @@ function renderBunnyRiskBarSvg(rows, title, subtitle, chartId, unit) {
         </svg>
       </div>
     </div>
+  `;
+}
+
+function bunnyRiskAxisLabelLines(row) {
+  const key = String(row?.riskKey || "");
+  const labels = {
+    openPositionsCount: ["Vị thế", "đang mở", "(slot)"],
+    maxConcurrentPositions: ["Slot", "tối đa", "(slot)"],
+    slotUtilizationPercent: ["Tỷ lệ", "dùng slot", "(%)"],
+    globalLossStreak: ["Chuỗi thua", "hệ thống", "(lần)"],
+    globalLossStreakThreshold: ["Ngưỡng", "recovery", "(lần)"],
+    pauseTradingLossStreak: ["Ngưỡng", "pause", "(lần)"],
+    currentNormalMinRuleScore: ["Rule score", "hiện hành", "(điểm)"],
+    currentNormalMinGptConfidence: ["GPT conf.", "hiện hành", "(điểm)"],
+    recoveryMinRuleScore: ["Rule score", "Recovery", "(điểm)"],
+    recoveryMinGptConfidence: ["GPT conf.", "Recovery", "(điểm)"],
+    strongSetupRuleScore: ["Rule score", "Strong", "(điểm)"],
+    strongSetupGptConfidence: ["GPT conf.", "Strong", "(điểm)"],
+    normalMinRiskReward: ["RR tối thiểu", "Normal", "(hệ số)"],
+    recoveryMinRiskReward: ["RR tối thiểu", "Recovery", "(hệ số)"],
+    strongSetupMinRiskReward: ["RR tối thiểu", "Strong", "(hệ số)"],
+    normalRiskPercent: ["Rủi ro", "Normal", "(%)"],
+    recoveryModeRiskPercent: ["Rủi ro", "Recovery", "(%)"],
+  };
+  return labels[key] || chartAxisLabelLines(row).slice(0, 3);
+}
+
+function renderBunnyRiskAxisLabel(row, x, y) {
+  const lines = bunnyRiskAxisLabelLines(row).slice(0, 3);
+  return `
+    <text x="${x}" y="${y}" text-anchor="middle" class="module-bar-index module-risk-axis-index">
+      ${lines.map((line, index) => `<tspan x="${x}" dy="${index ? 15 : 0}">${escapeHtml(line)}</tspan>`).join("")}
+    </text>
   `;
 }
 
