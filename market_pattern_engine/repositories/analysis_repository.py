@@ -21,6 +21,7 @@ class AnalysisRepository:
     def save_snapshot(self, result: MarketAnalysisResult) -> str:
         now = datetime.now(timezone.utc)
         doc = result.model_dump(mode="json")
+        created_at = doc.pop("created_at", result.created_at.isoformat())
         doc.update(
             {
                 "analysis_mode": result.analysis_mode.value,
@@ -38,7 +39,7 @@ class AnalysisRepository:
         try:
             saved = self.db["market_analysis_snapshots"].find_one_and_update(
                 key,
-                {"$set": doc, "$setOnInsert": {"created_at": result.created_at.isoformat()}},
+                {"$set": doc, "$setOnInsert": {"created_at": created_at}},
                 upsert=True,
                 return_document=ReturnDocument.AFTER,
             )
