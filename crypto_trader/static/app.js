@@ -2223,7 +2223,7 @@ function renderBunnyRiskBarSvg(rows, title, subtitle, chartId, unit) {
     <div>
       ${renderChartTitle(title, subtitle)}
       <div class="module-chart-wrap">
-        <svg class="module-bar-chart module-risk-bar-chart" viewBox="0 0 ${chartWidth} ${chartHeightTotal}" style="width:${chartWidth}px;max-width:none" role="img" aria-label="${escapeHtml(title)}">
+        <svg class="module-bar-chart module-risk-bar-chart" viewBox="0 0 ${chartWidth} ${chartHeightTotal}" role="img" aria-label="${escapeHtml(title)}">
           <defs>
             <marker id="${markerId}" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto" markerUnits="strokeWidth">
               <path d="M 0 8 L 4 0 L 8 8 Z" class="module-axis-arrow-head"></path>

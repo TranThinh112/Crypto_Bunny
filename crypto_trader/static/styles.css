@@ -1596,7 +1596,7 @@ tr:last-child td {
   flex: 1 1 auto;
   min-height: 260px;
   min-width: 0;
-  overflow-x: hidden;
+  overflow-x: auto;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding-right: 8px;
@@ -1799,7 +1799,7 @@ tr:last-child td {
 
 .module-ai-chart-stack {
   align-content: start;
-  overflow-x: hidden;
+  overflow-x: auto;
 }
 
 .module-ai-variable-list {
@@ -1872,9 +1872,9 @@ tr:last-child td {
 }
 
 .module-risk-bar-chart {
-  width: auto;
-  min-width: 680px;
-  max-width: none;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .module-risk-bar-chart .module-bar-index {
