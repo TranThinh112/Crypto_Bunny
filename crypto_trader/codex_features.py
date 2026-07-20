@@ -77,6 +77,7 @@ CLOSED_EXECUTION_STATUSES = {"WIN", "LOSS", "BREAKEVEN", "CLOSED"}
 STATE_VERSION = "python-codex-v1"
 AI_CALL_HISTORY_STATE_KEY = "ai_call_history"
 AI_CALL_STATUS_STATS_STATE_KEY = "ai_call_status_stats"
+VIETNAM_TZ = timezone(timedelta(hours=7))
 
 
 def _utcnow() -> datetime:
@@ -85,6 +86,13 @@ def _utcnow() -> datetime:
 
 def _iso_now() -> str:
     return _utcnow().isoformat()
+
+
+def _vietnam_time_label(value: datetime | None = None) -> str:
+    source = value or _utcnow()
+    if source.tzinfo is None:
+        source = source.replace(tzinfo=timezone.utc)
+    return source.astimezone(VIETNAM_TZ).strftime("%H:%M:%S %d/%m/%y")
 
 
 def _parse_time(value: Any) -> datetime | None:
@@ -2071,12 +2079,73 @@ def _paused_until_from_row(row: dict[str, Any] | None) -> datetime | None:
     return _parse_time(row.get("paused_until"))
 
 
+def _stored_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def _notify_recovery_mode_transition(
+    config: dict[str, Any],
+    *,
+    previous_mode: bool | None,
+    payload: dict[str, Any],
+    settings: dict[str, Any],
+) -> None:
+    current_mode = bool(payload.get("isRecoveryMode"))
+    if previous_mode is None or previous_mode == current_mode:
+        return
+    status = "BẬT" if current_mode else "TẮT"
+    icon = "🟠" if current_mode else "🟢"
+    time_label = _vietnam_time_label(_parse_time(payload.get("updatedAt")) or _utcnow())
+    lines = [
+        f"{icon} Bunny Recovery Mode đã {status}",
+        f"🕒 Thời gian: {time_label}",
+        f"🔁 Chuỗi thua hệ thống: {payload.get('globalLossStreak', 0)}",
+    ]
+    if current_mode:
+        lines.extend(
+            [
+                f"🛡 Rule mới: score ≥ {_safe_float(settings.get('recovery_min_rule_score'), 90):.0f}, "
+                f"GPT ≥ {_safe_float(settings.get('recovery_min_gpt_confidence'), 92):.0f}, "
+                f"R:R ≥ {_safe_float(settings.get('recovery_min_risk_reward'), 2.5):g}",
+                f"💰 Risk/lệnh: {_safe_float(settings.get('recovery_mode_risk_percent'), 0.5):g}%",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "✅ Chuỗi thua đã được reset.",
+                f"🛡 Quay về rule thường: score ≥ {payload.get('currentNormalMinRuleScore')}, "
+                f"GPT ≥ {payload.get('currentNormalMinGptConfidence')}, "
+                f"R:R ≥ {_safe_float(settings.get('normal_min_risk_reward'), 1.5):g}",
+                f"💰 Risk/lệnh: {_safe_float(settings.get('normal_risk_percent'), 1.0):g}%",
+            ]
+        )
+    try:
+        from .notifier import send_telegram_message
+
+        send_telegram_message(config, "\n".join(lines), with_buttons=False, replace_previous=False)
+    except Exception:
+        return
+
+
 def refresh_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
     settings = _trading_risk_settings(config)
     global_loss_streak = get_global_loss_streak(config)
     current_rule_score, current_confidence = _adaptive_thresholds(config)
     paused_until: datetime | None = None
     existing = get_trading_system_state_row(config)
+    previous_recovery_mode = _stored_bool(existing.get("is_recovery_mode")) if existing else None
     if existing:
         paused_until = _parse_time(existing.get("paused_until"))
     if paused_until and paused_until <= _utcnow():
@@ -2108,6 +2177,12 @@ def refresh_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
             "updated_at": payload["updatedAt"],
             "payload_json": json.dumps(payload, ensure_ascii=False),
         },
+    )
+    _notify_recovery_mode_transition(
+        config,
+        previous_mode=previous_recovery_mode,
+        payload=payload,
+        settings=settings,
     )
     return payload
 

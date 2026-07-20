@@ -22,6 +22,7 @@ from crypto_trader.codex_features import (
     okx_review_explanation_vi,
     record_ai_call_event,
     refresh_bunny_health_state,
+    refresh_trading_system_state,
     select_runtime_config,
 )
 from crypto_trader.config import DEFAULT_CONFIG
@@ -709,6 +710,81 @@ class CodexFeaturesTest(TestCase):
         self.assertEqual(health["minimumTradesForEvaluation"], 5)
         self.assertEqual(health["totalPnl"], -3.164076)
         self.assertEqual(health["reason"], "Not enough trades (1/5)")
+
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_recovery_mode_sends_telegram_when_enabled(self, send_telegram_message) -> None:
+        config = self._config()
+        config["trading_risk"] = {
+            "global_loss_streak_threshold": 2,
+            "recovery_min_rule_score": 90,
+            "recovery_min_gpt_confidence": 92,
+            "recovery_min_risk_reward": 2.5,
+            "recovery_mode_risk_percent": 0.5,
+        }
+        rows = [
+            {"id": 2, "status": "LOSS", "pnl": -1.0, "closed_at": "2026-07-20T12:00:00+00:00"},
+            {"id": 1, "status": "LOSS", "pnl": -1.0, "closed_at": "2026-07-20T11:00:00+00:00"},
+        ]
+
+        with patch("crypto_trader.codex_features._closed_trade_executions", return_value=rows), patch(
+            "crypto_trader.codex_features.get_trading_system_state_row",
+            return_value={"is_recovery_mode": 0},
+        ), patch("crypto_trader.codex_features.upsert_trading_system_state_row"), patch(
+            "crypto_trader.codex_features._utcnow",
+            return_value=datetime(2026, 7, 20, 12, 30, tzinfo=timezone.utc),
+        ):
+            state = refresh_trading_system_state(config)
+
+        self.assertTrue(state["isRecoveryMode"])
+        send_telegram_message.assert_called_once()
+        message = send_telegram_message.call_args.args[1]
+        self.assertIn("Bunny Recovery Mode đã BẬT", message)
+        self.assertIn("19:30:00 20/07/26", message)
+        self.assertIn("Chuỗi thua hệ thống: 2", message)
+
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_recovery_mode_sends_telegram_when_disabled(self, send_telegram_message) -> None:
+        config = self._config()
+        config["trading_risk"] = {"global_loss_streak_threshold": 2, "normal_min_risk_reward": 1.5}
+        rows = [
+            {"id": 3, "status": "WIN", "pnl": 0.77, "closed_at": "2026-07-20T12:00:00+00:00"},
+            {"id": 2, "status": "LOSS", "pnl": -1.0, "closed_at": "2026-07-20T11:00:00+00:00"},
+            {"id": 1, "status": "LOSS", "pnl": -1.0, "closed_at": "2026-07-20T10:00:00+00:00"},
+        ]
+
+        with patch("crypto_trader.codex_features._closed_trade_executions", return_value=rows), patch(
+            "crypto_trader.codex_features.get_trading_system_state_row",
+            return_value={"is_recovery_mode": 1},
+        ), patch("crypto_trader.codex_features.upsert_trading_system_state_row"), patch(
+            "crypto_trader.codex_features._utcnow",
+            return_value=datetime(2026, 7, 20, 12, 45, tzinfo=timezone.utc),
+        ):
+            state = refresh_trading_system_state(config)
+
+        self.assertFalse(state["isRecoveryMode"])
+        send_telegram_message.assert_called_once()
+        message = send_telegram_message.call_args.args[1]
+        self.assertIn("Bunny Recovery Mode đã TẮT", message)
+        self.assertIn("19:45:00 20/07/26", message)
+        self.assertIn("Chuỗi thua hệ thống: 0", message)
+
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_recovery_mode_does_not_send_telegram_without_transition(self, send_telegram_message) -> None:
+        config = self._config()
+        config["trading_risk"] = {"global_loss_streak_threshold": 2}
+        rows = [
+            {"id": 2, "status": "LOSS", "pnl": -1.0, "closed_at": "2026-07-20T12:00:00+00:00"},
+            {"id": 1, "status": "LOSS", "pnl": -1.0, "closed_at": "2026-07-20T11:00:00+00:00"},
+        ]
+
+        with patch("crypto_trader.codex_features._closed_trade_executions", return_value=rows), patch(
+            "crypto_trader.codex_features.get_trading_system_state_row",
+            return_value={"is_recovery_mode": 1},
+        ), patch("crypto_trader.codex_features.upsert_trading_system_state_row"):
+            state = refresh_trading_system_state(config)
+
+        self.assertTrue(state["isRecoveryMode"])
+        send_telegram_message.assert_not_called()
 
     def test_health_monitor_reuses_pause_deadline_for_same_trade_sample(self) -> None:
         config = self._config()
