@@ -56,6 +56,63 @@ def _candidate(
     )
 
 
+def _hot_long_indicator() -> dict:
+    return {
+        "last": 1.0,
+        "ema_slow": 0.985,
+        "rsi": 74.0,
+        "support": 0.8,
+        "resistance": 1.002,
+        "volume_ratio": 2.2,
+        "higher_timeframes": {
+            "1h": {"rsi": 72.0, "range_position": 0.88},
+        },
+    }
+
+
+def _cold_short_indicator() -> dict:
+    return {
+        "last": 1.0,
+        "ema_slow": 1.018,
+        "rsi": 26.0,
+        "support": 0.998,
+        "resistance": 1.2,
+        "volume_ratio": 2.3,
+        "higher_timeframes": {
+            "1h": {"rsi": 28.0, "range_position": 0.12},
+        },
+    }
+
+
+def _healthy_indicator(volume: float = 1.0) -> dict:
+    return {
+        "last": 1.0,
+        "ema_slow": 0.998,
+        "rsi": 55.0,
+        "support": 0.9,
+        "resistance": 1.18,
+        "volume_ratio": volume,
+    }
+
+
+def _hot_long_candidate(symbol: str, win: float = 90.0) -> TradeCandidate:
+    candidate = _candidate(symbol, win, volume=2.2, side="long")
+    candidate.indicator_summary = _hot_long_indicator()
+    return candidate
+
+
+def _cold_short_candidate(symbol: str, win: float = 90.0) -> TradeCandidate:
+    candidate = _candidate(symbol, win, volume=2.3, side="short")
+    candidate.indicator_summary = _cold_short_indicator()
+    return candidate
+
+
+def _healthy_candidate(symbol: str, win: float, *, side: str = "long") -> TradeCandidate:
+    candidate = _candidate(symbol, win, volume=1.0, side=side)
+    candidate.indicator_summary = _healthy_indicator()
+    return candidate
+
+
 def _saved_row(
     symbol: str,
     win: float,
@@ -80,6 +137,26 @@ def _saved_row(
         "volume_ratio": volume,
         "payload": {"symbol": symbol, "side": side, "win_probability_pct": win},
     }
+
+
+def _hot_long_saved_row(symbol: str, win: float = 90.0, *, state: str = "HOUR_1") -> dict:
+    row = _saved_row(symbol, win, state=state, volume=2.2)
+    row["payload"] = {
+        **row["payload"],
+        "indicator_summary": _hot_long_indicator(),
+        "higher_timeframes": _hot_long_indicator()["higher_timeframes"],
+    }
+    return row
+
+
+def _cold_short_saved_row(symbol: str, win: float = 90.0, *, state: str = "HOUR_1") -> dict:
+    row = _saved_row(symbol, win, side="short", state=state, volume=2.3)
+    row["payload"] = {
+        **row["payload"],
+        "indicator_summary": _cold_short_indicator(),
+        "higher_timeframes": _cold_short_indicator()["higher_timeframes"],
+    }
+    return row
 
 
 class LcPipelineTest(TestCase):
@@ -117,6 +194,176 @@ class LcPipelineTest(TestCase):
         self.assertEqual(result["two_hour_sources"]["aligned_input_count"], 0)
         self.assertIn("slot_closed", result["skip_reasons"]["four_hour"])
         self.assertIn("waiting_for_aligned_2h_input", result["skip_reasons"]["four_hour"])
+
+    def test_long_exhaustion_guard_requires_multiple_long_signals(self) -> None:
+        config = self._config()
+        settings = lc_pipeline_module._pipeline_config(config)
+
+        hot_long = _hot_long_candidate("HOT/USDT:USDT")
+        healthy_long = _healthy_candidate("OK/USDT:USDT", 80)
+        hot_short = _hot_long_candidate("SHORT/USDT:USDT")
+        hot_short.side = "short"
+
+        self.assertTrue(lc_pipeline_module._long_exhaustion_guard_reasons(hot_long, settings, phase="1h"))
+        self.assertFalse(lc_pipeline_module._long_exhaustion_guard_reasons(healthy_long, settings, phase="1h"))
+        self.assertFalse(lc_pipeline_module._long_exhaustion_guard_reasons(hot_short, settings, phase="1h"))
+
+    def test_short_exhaustion_guard_blocks_sell_bottom_only_for_short(self) -> None:
+        config = self._config()
+        settings = lc_pipeline_module._pipeline_config(config)
+
+        cold_short = _cold_short_candidate("COLD/USDT:USDT")
+        healthy_short = _healthy_candidate("OK/USDT:USDT", 80, side="short")
+        cold_long = _cold_short_candidate("LONG/USDT:USDT")
+        cold_long.side = "long"
+
+        guard_side, reasons = lc_pipeline_module._exhaustion_guard_reasons(cold_short, settings, phase="1h")
+
+        self.assertEqual(guard_side, "short")
+        self.assertTrue(reasons)
+        self.assertFalse(lc_pipeline_module._exhaustion_guard_reasons(healthy_short, settings, phase="1h")[1])
+        self.assertFalse(lc_pipeline_module._exhaustion_guard_reasons(cold_long, settings, phase="1h")[1])
+
+    def test_one_hour_pool_rejects_long_exhaustion_and_fills_next_candidate(self) -> None:
+        config = self._config()
+        now = datetime(2026, 7, 7, 0, 5, tzinfo=timezone.utc)
+
+        result = update_lc_internal_pipeline(
+            config,
+            [
+                _hot_long_candidate("HOT/USDT:USDT", 95),
+                _healthy_candidate("AAA/USDT:USDT", 70),
+                _healthy_candidate("BBB/USDT:USDT", 69),
+                _healthy_candidate("CCC/USDT:USDT", 68),
+            ],
+            now=now,
+        )
+
+        self.assertTrue(result["created_hourly"])
+        self.assertEqual(
+            [row["symbol"] for row in result["one_hour_event"]["approved"]],
+            ["AAA/USDT:USDT", "BBB/USDT:USDT", "CCC/USDT:USDT"],
+        )
+        rejected = result["one_hour_event"]["rejected"]
+        self.assertEqual([row["symbol"] for row in rejected], ["HOT/USDT:USDT"])
+        self.assertEqual(rejected[0]["undecided_status"], "exhaustion_guard")
+        self.assertIn("Long exhaustion guard", rejected[0]["undecided_reason"])
+
+    def test_one_hour_pool_rejects_short_exhaustion_and_fills_next_candidate(self) -> None:
+        config = self._config()
+        now = datetime(2026, 7, 7, 0, 5, tzinfo=timezone.utc)
+
+        result = update_lc_internal_pipeline(
+            config,
+            [
+                _cold_short_candidate("COLD/USDT:USDT", 95),
+                _healthy_candidate("AAA/USDT:USDT", 70, side="short"),
+                _healthy_candidate("BBB/USDT:USDT", 69, side="short"),
+                _healthy_candidate("CCC/USDT:USDT", 68, side="short"),
+            ],
+            now=now,
+        )
+
+        self.assertTrue(result["created_hourly"])
+        self.assertEqual(
+            [row["symbol"] for row in result["one_hour_event"]["approved"]],
+            ["AAA/USDT:USDT", "BBB/USDT:USDT", "CCC/USDT:USDT"],
+        )
+        rejected = result["one_hour_event"]["rejected"]
+        self.assertEqual([row["symbol"] for row in rejected], ["COLD/USDT:USDT"])
+        self.assertEqual(rejected[0]["undecided_status"], "exhaustion_guard")
+        self.assertIn("Short exhaustion guard", rejected[0]["undecided_reason"])
+
+    @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
+    def test_two_hour_pool_rejects_long_exhaustion_after_recheck(self, recheck_rows) -> None:
+        config = self._config()
+        start = datetime(2026, 7, 7, 0, 5, tzinfo=timezone.utc)
+        recheck_rows.return_value = (
+            [
+                _hot_long_saved_row("HOT/USDT:USDT", 95),
+                _saved_row("AAA/USDT:USDT", 70),
+                _saved_row("BBB/USDT:USDT", 69),
+            ],
+            {"input_count": 3, "refreshed_count": 3, "dropped": [], "warnings": [], "sync_complete": True, "synchronized_count": 3},
+        )
+
+        update_lc_internal_pipeline(config, [_healthy_candidate("AAA/USDT:USDT", 70)], now=start)
+        result = update_lc_internal_pipeline(config, [_healthy_candidate("BBB/USDT:USDT", 69)], now=start + timedelta(hours=1))
+
+        self.assertTrue(result["created_two_hour"])
+        approved = [row["symbol"] for row in result["two_hour_event"]["approved"]]
+        rejected_by_symbol = {row["symbol"]: row for row in result["two_hour_event"]["rejected"]}
+        self.assertNotIn("HOT/USDT:USDT", approved)
+        self.assertIn("HOT/USDT:USDT", rejected_by_symbol)
+        self.assertEqual(rejected_by_symbol["HOT/USDT:USDT"]["undecided_status"], "exhaustion_guard")
+
+    def test_mini_pool_filters_long_exhaustion_from_latest_four_hour_rows(self) -> None:
+        config = self._config()
+        set_journal_state(
+            config,
+            "lc_internal_pipeline_state",
+            json.dumps(
+                {
+                    "state_version": 3,
+                    "day_key": "2026-07-07",
+                    "four_hour_history": [
+                        {
+                            "frame": "4h",
+                            "slot": "2026-07-07T08:00:00+07:00",
+                            "created_at": "2026-07-07T01:05:00+00:00",
+                            "approved": [
+                                _hot_long_saved_row("HOT/USDT:USDT", 95, state="LC_NOI_BO"),
+                                _saved_row("AAA/USDT:USDT", 70, state="LC_NOI_BO"),
+                            ],
+                            "rejected": [],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+        pool = lc_pipeline_mini_pool(
+            config,
+            [_hot_long_candidate("HOT/USDT:USDT", 95), _healthy_candidate("AAA/USDT:USDT", 70)],
+            limit=2,
+        )
+
+        self.assertEqual([candidate.symbol for candidate in pool], ["AAA/USDT:USDT"])
+
+    def test_mini_pool_filters_short_exhaustion_from_latest_four_hour_rows(self) -> None:
+        config = self._config()
+        set_journal_state(
+            config,
+            "lc_internal_pipeline_state",
+            json.dumps(
+                {
+                    "state_version": 3,
+                    "day_key": "2026-07-07",
+                    "four_hour_history": [
+                        {
+                            "frame": "4h",
+                            "slot": "2026-07-07T08:00:00+07:00",
+                            "created_at": "2026-07-07T01:05:00+00:00",
+                            "approved": [
+                                _cold_short_saved_row("COLD/USDT:USDT", 95, state="LC_NOI_BO"),
+                                _saved_row("AAA/USDT:USDT", 70, side="short", state="LC_NOI_BO"),
+                            ],
+                            "rejected": [],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+        pool = lc_pipeline_mini_pool(
+            config,
+            [_cold_short_candidate("COLD/USDT:USDT", 95), _healthy_candidate("AAA/USDT:USDT", 70, side="short")],
+            limit=2,
+        )
+
+        self.assertEqual([candidate.symbol for candidate in pool], ["AAA/USDT:USDT"])
 
     def test_pipeline_result_explains_already_created_hourly_slot(self) -> None:
         config = self._config()

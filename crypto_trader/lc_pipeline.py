@@ -269,6 +269,56 @@ def _pipeline_config(config: dict[str, Any]) -> dict[str, Any]:
         "promote_survivors": bool(
             internal.get("lc_pipeline_promote_survivors", internal.get("lc_pipeline_promote_to_pending", True))
         ),
+        "exhaustion_guard_enabled": bool(internal.get("lc_pipeline_exhaustion_guard_enabled", True)),
+        "exhaustion_guard_1h_min_signals": max(
+            1,
+            int(internal.get("lc_pipeline_exhaustion_guard_1h_min_signals", 3) or 3),
+        ),
+        "exhaustion_guard_2h_min_signals": max(
+            1,
+            int(internal.get("lc_pipeline_exhaustion_guard_2h_min_signals", 3) or 3),
+        ),
+        "exhaustion_guard_4h_min_signals": max(
+            1,
+            int(internal.get("lc_pipeline_exhaustion_guard_4h_min_signals", 2) or 2),
+        ),
+        "exhaustion_guard_mini_min_signals": max(
+            1,
+            int(internal.get("lc_pipeline_exhaustion_guard_mini_min_signals", 2) or 2),
+        ),
+        "exhaustion_guard_rsi_hot": float(internal.get("lc_pipeline_exhaustion_guard_rsi_hot", 70) or 70),
+        "exhaustion_guard_rsi_extreme": float(internal.get("lc_pipeline_exhaustion_guard_rsi_extreme", 76) or 76),
+        "exhaustion_guard_rsi_cold": float(internal.get("lc_pipeline_exhaustion_guard_rsi_cold", 30) or 30),
+        "exhaustion_guard_rsi_oversold": float(internal.get("lc_pipeline_exhaustion_guard_rsi_oversold", 24) or 24),
+        "exhaustion_guard_range_position_hot": float(
+            internal.get("lc_pipeline_exhaustion_guard_range_position_hot", 0.82) or 0.82
+        ),
+        "exhaustion_guard_range_position_cold": float(
+            internal.get("lc_pipeline_exhaustion_guard_range_position_cold", 0.18) or 0.18
+        ),
+        "exhaustion_guard_price_above_ema_slow_pct": float(
+            internal.get("lc_pipeline_exhaustion_guard_price_above_ema_slow_pct", 0.8) or 0.8
+        ),
+        "exhaustion_guard_price_below_ema_slow_pct": float(
+            internal.get("lc_pipeline_exhaustion_guard_price_below_ema_slow_pct", 0.8) or 0.8
+        ),
+        "exhaustion_guard_near_resistance_pct": float(
+            internal.get("lc_pipeline_exhaustion_guard_near_resistance_pct", 0.3) or 0.3
+        ),
+        "exhaustion_guard_near_support_pct": float(
+            internal.get("lc_pipeline_exhaustion_guard_near_support_pct", 0.3) or 0.3
+        ),
+        "exhaustion_guard_volume_ratio": float(
+            internal.get("lc_pipeline_exhaustion_guard_volume_ratio", 2.0) or 2.0
+        ),
+        "exhaustion_guard_htf_rsi_hot": float(internal.get("lc_pipeline_exhaustion_guard_htf_rsi_hot", 70) or 70),
+        "exhaustion_guard_htf_rsi_cold": float(internal.get("lc_pipeline_exhaustion_guard_htf_rsi_cold", 30) or 30),
+        "exhaustion_guard_htf_range_position_hot": float(
+            internal.get("lc_pipeline_exhaustion_guard_htf_range_position_hot", 0.82) or 0.82
+        ),
+        "exhaustion_guard_htf_range_position_cold": float(
+            internal.get("lc_pipeline_exhaustion_guard_htf_range_position_cold", 0.18) or 0.18
+        ),
     }
 
 
@@ -629,6 +679,451 @@ def _candidate_passes_lc_threshold(
         return float(raw) >= _phase_min_win_probability(settings, phase)
     except (TypeError, ValueError):
         return True
+
+
+def _item_payload(item: TradeCandidate | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(item, TradeCandidate):
+        return {
+            "side": item.side,
+            "entry": item.entry,
+            "price": item.entry,
+            "indicator_summary": item.indicator_summary or {},
+            "higher_timeframes": item.higher_timeframes or {},
+            "candlestick_patterns": item.candlestick_patterns or {},
+            "reasons": list(item.reasons or []),
+            "warnings": list(item.warnings or []),
+        }
+    payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _item_value(item: TradeCandidate | dict[str, Any], key: str, default: Any = None) -> Any:
+    if isinstance(item, TradeCandidate):
+        if key == "price":
+            return item.entry
+        return getattr(item, key, default)
+    if key in item:
+        return item.get(key, default)
+    payload = _item_payload(item)
+    return payload.get(key, default)
+
+
+def _item_indicator_summary(item: TradeCandidate | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(item, TradeCandidate):
+        return item.indicator_summary or {}
+    direct = item.get("indicator_summary")
+    if isinstance(direct, dict):
+        return direct
+    payload_indicator = _item_payload(item).get("indicator_summary")
+    return payload_indicator if isinstance(payload_indicator, dict) else {}
+
+
+def _item_higher_timeframes(item: TradeCandidate | dict[str, Any]) -> dict[str, Any]:
+    frames: dict[str, Any] = {}
+    indicator = _item_indicator_summary(item)
+    indicator_frames = indicator.get("higher_timeframes")
+    if isinstance(indicator_frames, dict):
+        frames.update(indicator_frames)
+    payload_frames = _item_payload(item).get("higher_timeframes")
+    if isinstance(payload_frames, dict):
+        frames.update(payload_frames)
+    if isinstance(item, TradeCandidate):
+        frames.update(item.higher_timeframes or {})
+    elif isinstance(item.get("higher_timeframes"), dict):
+        frames.update(item.get("higher_timeframes") or {})
+    return frames
+
+
+def _item_candlestick_patterns(item: TradeCandidate | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(item, TradeCandidate):
+        return item.candlestick_patterns or {}
+    direct = item.get("candlestick_patterns")
+    if isinstance(direct, dict):
+        return direct
+    payload_patterns = _item_payload(item).get("candlestick_patterns")
+    return payload_patterns if isinstance(payload_patterns, dict) else {}
+
+
+def _item_text_values(item: TradeCandidate | dict[str, Any], key: str) -> list[str]:
+    if isinstance(item, TradeCandidate):
+        values = getattr(item, key, []) or []
+    else:
+        values = item.get(key)
+        if values is None:
+            values = _item_payload(item).get(key)
+    if not isinstance(values, list):
+        return []
+    return [str(value) for value in values if str(value).strip()]
+
+
+def _indicator_price(indicator: dict[str, Any], item: TradeCandidate | dict[str, Any]) -> float:
+    for value in (
+        indicator.get("last"),
+        indicator.get("price"),
+        _item_value(item, "price"),
+        _item_value(item, "entry"),
+    ):
+        parsed = _safe_float(value, float("nan"))
+        if parsed == parsed and parsed > 0:
+            return parsed
+    return 0.0
+
+
+def _indicator_range_position(indicator: dict[str, Any], price: float) -> float | None:
+    raw = indicator.get("range_position")
+    if raw not in (None, ""):
+        return _safe_float(raw)
+    support = _safe_float(indicator.get("support"), float("nan"))
+    resistance = _safe_float(indicator.get("resistance"), float("nan"))
+    if support == support and resistance == resistance and resistance > support and price > 0:
+        return max(0.0, min(1.2, (price - support) / max(resistance - support, 1e-12)))
+    return None
+
+
+def _indicator_price_vs_ema_slow_pct(indicator: dict[str, Any], price: float) -> float | None:
+    raw = indicator.get("price_vs_ema_slow_pct")
+    if raw not in (None, ""):
+        return _safe_float(raw)
+    ema_slow = _safe_float(indicator.get("ema_slow"), float("nan"))
+    if ema_slow == ema_slow and ema_slow > 0 and price > 0:
+        return ((price - ema_slow) / ema_slow) * 100.0
+    return None
+
+
+def _pattern_is_bearish(pattern_data: dict[str, Any]) -> bool:
+    if not isinstance(pattern_data, dict):
+        return False
+    direction = str(pattern_data.get("direction") or "").lower()
+    if direction == "bearish":
+        return True
+    bullish = _safe_float(pattern_data.get("bullish_score"))
+    bearish = _safe_float(pattern_data.get("bearish_score"))
+    if bearish > 0 and bearish >= bullish + 1.0:
+        return True
+    names = [
+        str(value).lower().replace(" ", "_")
+        for value in list(pattern_data.get("patterns") or []) + [pattern_data.get("strongest_pattern")]
+        if str(value).strip()
+    ]
+    bearish_names = (
+        "bearish",
+        "shooting_star",
+        "hanging_man",
+        "evening_star",
+        "dark_cloud",
+        "three_black_crows",
+    )
+    return any(any(token in name for token in bearish_names) for name in names)
+
+
+def _pattern_is_bullish(pattern_data: dict[str, Any]) -> bool:
+    if not isinstance(pattern_data, dict):
+        return False
+    direction = str(pattern_data.get("direction") or "").lower()
+    if direction == "bullish":
+        return True
+    bullish = _safe_float(pattern_data.get("bullish_score"))
+    bearish = _safe_float(pattern_data.get("bearish_score"))
+    if bullish > 0 and bullish >= bearish + 1.0:
+        return True
+    names = [
+        str(value).lower().replace(" ", "_")
+        for value in list(pattern_data.get("patterns") or []) + [pattern_data.get("strongest_pattern")]
+        if str(value).strip()
+    ]
+    bullish_names = (
+        "bullish",
+        "hammer",
+        "morning_star",
+        "piercing",
+        "three_white_soldiers",
+        "inverted_hammer",
+    )
+    return any(any(token in name for token in bullish_names) for name in names)
+
+
+def _bearish_candlestick_frames(item: TradeCandidate | dict[str, Any]) -> list[str]:
+    frames: dict[str, Any] = {}
+    for frame, data in _item_candlestick_patterns(item).items():
+        if isinstance(data, dict):
+            frames[str(frame)] = data
+    for frame, data in _item_higher_timeframes(item).items():
+        if not isinstance(data, dict):
+            continue
+        patterns = data.get("candlestick_patterns")
+        if isinstance(patterns, dict):
+            frames[str(frame)] = patterns
+    return [frame for frame, data in frames.items() if _pattern_is_bearish(data)]
+
+
+def _bullish_candlestick_frames(item: TradeCandidate | dict[str, Any]) -> list[str]:
+    frames: dict[str, Any] = {}
+    for frame, data in _item_candlestick_patterns(item).items():
+        if isinstance(data, dict):
+            frames[str(frame)] = data
+    for frame, data in _item_higher_timeframes(item).items():
+        if not isinstance(data, dict):
+            continue
+        patterns = data.get("candlestick_patterns")
+        if isinstance(patterns, dict):
+            frames[str(frame)] = patterns
+    return [frame for frame, data in frames.items() if _pattern_is_bullish(data)]
+
+
+def _long_exhaustion_required_signals(settings: dict[str, Any], phase: str) -> int:
+    phase_key = str(phase or "2h").lower()
+    if phase_key in {"1h", "one_hour"}:
+        return int(settings.get("exhaustion_guard_1h_min_signals", 3) or 3)
+    if phase_key in {"2h", "two_hour"}:
+        return int(settings.get("exhaustion_guard_2h_min_signals", 3) or 3)
+    if phase_key in {"4h", "four_hour"}:
+        return int(settings.get("exhaustion_guard_4h_min_signals", 2) or 2)
+    return int(settings.get("exhaustion_guard_mini_min_signals", 2) or 2)
+
+
+def _long_exhaustion_signal_reasons(
+    item: TradeCandidate | dict[str, Any],
+    settings: dict[str, Any],
+) -> list[str]:
+    if str(_item_value(item, "side", "") or "").lower() != "long":
+        return []
+    indicator = _item_indicator_summary(item)
+    price = _indicator_price(indicator, item)
+    reasons: list[str] = []
+    rsi = _safe_float(indicator.get("rsi"), float("nan"))
+    rsi_hot = float(settings.get("exhaustion_guard_rsi_hot", 70) or 70)
+    rsi_extreme = float(settings.get("exhaustion_guard_rsi_extreme", 76) or 76)
+    if rsi == rsi and rsi >= rsi_hot:
+        label = "RSI quá nóng" if rsi < rsi_extreme else "RSI cực nóng"
+        reasons.append(f"{label} {rsi:.1f}")
+
+    range_position = _indicator_range_position(indicator, price)
+    range_hot = float(settings.get("exhaustion_guard_range_position_hot", 0.82) or 0.82)
+    if range_position is not None and range_position >= range_hot:
+        reasons.append(f"giá ở vùng cao của range ({range_position * 100:.0f}%)")
+
+    price_vs_ema = _indicator_price_vs_ema_slow_pct(indicator, price)
+    ema_hot = float(settings.get("exhaustion_guard_price_above_ema_slow_pct", 0.8) or 0.8)
+    if price_vs_ema is not None and price_vs_ema >= ema_hot:
+        reasons.append(f"giá đã cách EMA chậm {price_vs_ema:+.2f}%")
+
+    resistance = _safe_float(indicator.get("resistance"), float("nan"))
+    near_resistance_pct = float(settings.get("exhaustion_guard_near_resistance_pct", 0.3) or 0.3)
+    if resistance == resistance and resistance > 0 and price > 0:
+        distance_pct = ((resistance - price) / resistance) * 100.0
+        if distance_pct <= near_resistance_pct:
+            reasons.append(f"áp sát kháng cự ({distance_pct:+.2f}%)")
+
+    volume_ratio = _safe_float(
+        indicator.get("volume_ratio", _item_value(item, "volume_ratio")),
+        float("nan"),
+    )
+    volume_hot = float(settings.get("exhaustion_guard_volume_ratio", 2.0) or 2.0)
+    if volume_ratio == volume_ratio and volume_ratio >= volume_hot:
+        reasons.append(f"volume spike {volume_ratio:.2f}x")
+
+    htf_hot_frames: list[str] = []
+    htf_rsi_hot = float(settings.get("exhaustion_guard_htf_rsi_hot", 70) or 70)
+    htf_range_hot = float(settings.get("exhaustion_guard_htf_range_position_hot", 0.82) or 0.82)
+    for frame, data in _item_higher_timeframes(item).items():
+        if not isinstance(data, dict):
+            continue
+        frame_rsi = _safe_float(data.get("rsi"), float("nan"))
+        frame_range = _safe_float(data.get("range_position"), float("nan"))
+        if frame_rsi == frame_rsi and frame_range == frame_range and frame_rsi >= htf_rsi_hot and frame_range >= htf_range_hot:
+            htf_hot_frames.append(str(frame))
+    if htf_hot_frames:
+        reasons.append("HTF cũng nóng: " + ", ".join(htf_hot_frames[:3]))
+
+    bearish_frames = _bearish_candlestick_frames(item)
+    if bearish_frames:
+        reasons.append("nến đảo chiều/áp lực bán: " + ", ".join(bearish_frames[:3]))
+
+    guard_text = " ".join(_item_text_values(item, "warnings") + _item_text_values(item, "reasons")).lower()
+    if "market guard" in guard_text and "action=avoid_new_entry" in guard_text:
+        reasons.append("Market Guard đang tránh mở lệnh mới")
+    return reasons
+
+
+def _short_exhaustion_signal_reasons(
+    item: TradeCandidate | dict[str, Any],
+    settings: dict[str, Any],
+) -> list[str]:
+    if str(_item_value(item, "side", "") or "").lower() != "short":
+        return []
+    indicator = _item_indicator_summary(item)
+    price = _indicator_price(indicator, item)
+    reasons: list[str] = []
+    rsi = _safe_float(indicator.get("rsi"), float("nan"))
+    rsi_cold = float(settings.get("exhaustion_guard_rsi_cold", 30) or 30)
+    rsi_oversold = float(settings.get("exhaustion_guard_rsi_oversold", 24) or 24)
+    if rsi == rsi and rsi <= rsi_cold:
+        label = "RSI quá bán" if rsi > rsi_oversold else "RSI cực quá bán"
+        reasons.append(f"{label} {rsi:.1f}")
+
+    range_position = _indicator_range_position(indicator, price)
+    range_cold = float(settings.get("exhaustion_guard_range_position_cold", 0.18) or 0.18)
+    if range_position is not None and range_position <= range_cold:
+        reasons.append(f"giá ở vùng thấp của range ({range_position * 100:.0f}%)")
+
+    price_vs_ema = _indicator_price_vs_ema_slow_pct(indicator, price)
+    ema_cold = float(settings.get("exhaustion_guard_price_below_ema_slow_pct", 0.8) or 0.8)
+    if price_vs_ema is not None and price_vs_ema <= -ema_cold:
+        reasons.append(f"giá đã thấp hơn EMA chậm {price_vs_ema:+.2f}%")
+
+    support = _safe_float(indicator.get("support"), float("nan"))
+    near_support_pct = float(settings.get("exhaustion_guard_near_support_pct", 0.3) or 0.3)
+    if support == support and support > 0 and price > 0:
+        distance_pct = ((price - support) / support) * 100.0
+        if distance_pct <= near_support_pct:
+            reasons.append(f"áp sát hỗ trợ ({distance_pct:+.2f}%)")
+
+    volume_ratio = _safe_float(
+        indicator.get("volume_ratio", _item_value(item, "volume_ratio")),
+        float("nan"),
+    )
+    volume_hot = float(settings.get("exhaustion_guard_volume_ratio", 2.0) or 2.0)
+    if volume_ratio == volume_ratio and volume_ratio >= volume_hot:
+        reasons.append(f"volume spike {volume_ratio:.2f}x")
+
+    htf_cold_frames: list[str] = []
+    htf_rsi_cold = float(settings.get("exhaustion_guard_htf_rsi_cold", 30) or 30)
+    htf_range_cold = float(settings.get("exhaustion_guard_htf_range_position_cold", 0.18) or 0.18)
+    for frame, data in _item_higher_timeframes(item).items():
+        if not isinstance(data, dict):
+            continue
+        frame_rsi = _safe_float(data.get("rsi"), float("nan"))
+        frame_range = _safe_float(data.get("range_position"), float("nan"))
+        if (
+            frame_rsi == frame_rsi
+            and frame_range == frame_range
+            and frame_rsi <= htf_rsi_cold
+            and frame_range <= htf_range_cold
+        ):
+            htf_cold_frames.append(str(frame))
+    if htf_cold_frames:
+        reasons.append("HTF cũng quá bán: " + ", ".join(htf_cold_frames[:3]))
+
+    bullish_frames = _bullish_candlestick_frames(item)
+    if bullish_frames:
+        reasons.append("nến hồi/áp lực mua: " + ", ".join(bullish_frames[:3]))
+
+    guard_text = " ".join(_item_text_values(item, "warnings") + _item_text_values(item, "reasons")).lower()
+    if "market guard" in guard_text and "action=avoid_new_entry" in guard_text:
+        reasons.append("Market Guard đang tránh mở lệnh mới")
+    return reasons
+
+
+def _long_exhaustion_guard_reasons(
+    item: TradeCandidate | dict[str, Any],
+    settings: dict[str, Any],
+    *,
+    phase: str,
+) -> list[str]:
+    if not settings.get("exhaustion_guard_enabled", True):
+        return []
+    reasons = _long_exhaustion_signal_reasons(item, settings)
+    required = _long_exhaustion_required_signals(settings, phase)
+    if len(reasons) < required:
+        return []
+    return reasons
+
+
+def _exhaustion_guard_reasons(
+    item: TradeCandidate | dict[str, Any],
+    settings: dict[str, Any],
+    *,
+    phase: str,
+) -> tuple[str, list[str]]:
+    if not settings.get("exhaustion_guard_enabled", True):
+        return "", []
+    side = str(_item_value(item, "side", "") or "").lower()
+    if side == "long":
+        return "long", _long_exhaustion_guard_reasons(item, settings, phase=phase)
+    if side == "short":
+        reasons = _short_exhaustion_signal_reasons(item, settings)
+        required = _long_exhaustion_required_signals(settings, phase)
+        if len(reasons) >= required:
+            return "short", reasons
+    return side, []
+
+
+def _annotate_exhaustion_guard_row(
+    row: dict[str, Any],
+    reasons: list[str],
+    *,
+    phase: str,
+    settings: dict[str, Any],
+    side: str | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    required = _long_exhaustion_required_signals(settings, phase)
+    side_key = str(side or row.get("side") or _item_payload(row).get("side") or "long").lower()
+    label = "Short exhaustion guard" if side_key == "short" else "Long exhaustion guard"
+    reason_text = label + ": " + "; ".join(reasons[:4])
+    payload = dict(row.get("payload") or {}) if isinstance(row.get("payload"), dict) else {}
+    payload["exhaustion_guard_blocked"] = True
+    payload["exhaustion_guard_phase"] = phase
+    payload["exhaustion_guard_reasons"] = list(reasons[:8])
+    payload_warnings = [str(value) for value in payload.get("warnings") or [] if str(value).strip()]
+    if reason_text not in payload_warnings:
+        payload_warnings.append(reason_text)
+    payload["warnings"] = payload_warnings[:8]
+    record = {
+        **row,
+        "payload": payload,
+        "state": "CHUA_DUYET",
+        "undecided_status": "exhaustion_guard",
+        "undecided_reason": reason_text,
+        "exhaustion_guard_blocked": True,
+        "exhaustion_guard_phase": phase,
+        "exhaustion_guard_signals": len(reasons),
+        "exhaustion_guard_required_signals": required,
+        "exhaustion_guard_reasons": list(reasons[:8]),
+    }
+    if now is not None:
+        record["last_seen_at"] = now.isoformat()
+    return record
+
+
+def _split_exhaustion_guard_rows(
+    rows: list[dict[str, Any]],
+    settings: dict[str, Any],
+    *,
+    phase: str,
+    source_slot: str,
+    source_index: int | None,
+    now: datetime,
+    local_now: datetime,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    approved: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        guard_side, reasons = _exhaustion_guard_reasons(row, settings, phase=phase)
+        if reasons:
+            rejected_row = _row_with_source_metadata(
+                row,
+                state_label="CHUA_DUYET",
+                source_slot=source_slot,
+                source_index=source_index,
+                now=now,
+                local_now=local_now,
+            )
+            rejected.append(
+                _annotate_exhaustion_guard_row(
+                    rejected_row,
+                    reasons,
+                    phase=phase,
+                    settings=settings,
+                    side=guard_side,
+                    now=now,
+                )
+            )
+            continue
+        approved.append(row)
+    return approved, rejected
 
 
 def _sort_saved_rows(rows: list[dict[str, Any]], settings: dict[str, Any], *, reverse: bool = True) -> list[dict[str, Any]]:
@@ -1224,6 +1719,9 @@ def _compact_payload_dict(payload: dict[str, Any]) -> dict[str, Any]:
         "risk_percent": payload.get("risk_percent"),
         "market_regime": payload.get("market_regime"),
         "regime_confidence": payload.get("regime_confidence"),
+        "exhaustion_guard_blocked": payload.get("exhaustion_guard_blocked"),
+        "exhaustion_guard_phase": payload.get("exhaustion_guard_phase"),
+        "exhaustion_guard_reasons": list(payload.get("exhaustion_guard_reasons") or [])[:8],
     }
 
 
@@ -1394,6 +1892,11 @@ def _compact_saved_row(row: dict[str, Any]) -> dict[str, Any]:
         "recheck_slot",
         "recheck_time",
         "recheck_label",
+        "exhaustion_guard_blocked",
+        "exhaustion_guard_phase",
+        "exhaustion_guard_signals",
+        "exhaustion_guard_required_signals",
+        "exhaustion_guard_reasons",
     }
     compact = {key: row.get(key) for key in keep if key in row}
     payload = row.get("payload")
@@ -3327,6 +3830,24 @@ def _promote_survivors(
             undecided.append(row)
             continue
         age_hours = (now - first_seen).total_seconds() / 3600
+        guard_side, guard_reasons = _exhaustion_guard_reasons(candidate, settings, phase="mini")
+        if (
+            age_hours >= float(settings["promote_after_hours"])
+            and symbol not in active_symbols
+            and symbol not in blocked_symbols
+            and guard_reasons
+        ):
+            undecided.append(
+                _annotate_exhaustion_guard_row(
+                    row,
+                    guard_reasons,
+                    phase="promote",
+                    settings=settings,
+                    side=guard_side,
+                    now=now,
+                )
+            )
+            continue
         if (
             age_hours >= float(settings["promote_after_hours"])
             and symbol not in active_symbols
@@ -3476,8 +3997,17 @@ def _update_lc_internal_pipeline_impl(
     if candidates and hourly_slot_open and state.get("last_hourly_slot") != hourly_slot:
         local_now = _local_time(config, now)
         next_hourly_index = int(state.get("daily_one_hour_counter") or 0) + 1
-        top = [
-            _row_with_source_metadata(
+        top: list[dict[str, Any]] = []
+        rejected: list[dict[str, Any]] = []
+        ranked_candidates = _rank_candidates(
+            candidates,
+            len(candidates),
+            blocked_symbols=blocked_symbols,
+            settings=settings,
+            phase="1h",
+        )
+        for candidate in ranked_candidates:
+            base_row = _row_with_source_metadata(
                 _candidate_record(candidate, state="HOUR_1", now=now),
                 state_label="HOUR_1",
                 source_slot="1h",
@@ -3485,14 +4015,21 @@ def _update_lc_internal_pipeline_impl(
                 now=now,
                 local_now=local_now,
             )
-            for candidate in _rank_candidates(
-                candidates,
-                top_limit,
-                blocked_symbols=blocked_symbols,
-                settings=settings,
-                phase="1h",
-            )
-        ]
+            guard_side, guard_reasons = _exhaustion_guard_reasons(candidate, settings, phase="1h")
+            if guard_reasons:
+                rejected.append(
+                    _annotate_exhaustion_guard_row(
+                        base_row,
+                        guard_reasons,
+                        phase="1h",
+                        settings=settings,
+                        side=guard_side,
+                        now=now,
+                    )
+                )
+                continue
+            if len(top) < top_limit:
+                top.append(base_row)
         one_hour_event = {
             "frame": "1h",
             "slot": hourly_slot,
@@ -3502,7 +4039,7 @@ def _update_lc_internal_pipeline_impl(
             "date": local_now.strftime("%d/%m/%y"),
             "time": local_now.strftime("%H:%M:%S"),
             "approved": top[:top_limit],
-            "rejected": [],
+            "rejected": rejected,
             "source_windows": [],
         }
         state["one_hour_history"].append(one_hour_event)
@@ -3581,9 +4118,18 @@ def _update_lc_internal_pipeline_impl(
         eligible_two_hour = [
             row for row in refreshed_combined if _candidate_passes_lc_threshold(row, settings, phase="2h")
         ]
-        ranked = _sort_saved_rows(eligible_two_hour, settings, reverse=True)
         next_daily_index = int(state.get("daily_two_hour_counter") or 0) + 1
         local_now = _local_time(config, now)
+        eligible_two_hour, guard_rejected_two_hour = _split_exhaustion_guard_rows(
+            eligible_two_hour,
+            settings,
+            phase="2h",
+            source_slot="2h",
+            source_index=next_daily_index,
+            now=now,
+            local_now=local_now,
+        )
+        ranked = _sort_saved_rows(eligible_two_hour, settings, reverse=True)
         approved: list[dict[str, Any]] = []
         seen: set[str] = set()
         approved_keys: set[tuple[str, str]] = set()
@@ -3603,16 +4149,18 @@ def _update_lc_internal_pipeline_impl(
             seen.add(symbol)
             if len(approved) >= top_limit:
                 break
+        guard_rejected_keys = {_setup_key(row) for row in guard_rejected_two_hour}
         rejected = _soft_undecided_rows(
             refreshed_combined,
             settings=settings,
-            approved_keys=approved_keys,
+            approved_keys=approved_keys | guard_rejected_keys,
             blocked_symbols=blocked_symbols,
             source_slot="2h",
             source_index=next_daily_index,
             now=now,
             local_now=local_now,
         )
+        rejected = guard_rejected_two_hour + rejected
         existing = list(state.get("undecided") or [])
         existing = _merge_undecided_rows(existing, rejected, now=now)
         state["undecided"] = _sort_saved_rows(existing, settings, reverse=True)
@@ -3714,9 +4262,18 @@ def _update_lc_internal_pipeline_impl(
         eligible_four_hour = [
             row for row in refreshed_two_hour if _candidate_passes_lc_threshold(row, settings, phase="4h")
         ]
-        ranked_two_hour = _sort_saved_rows(eligible_four_hour, settings, reverse=True)
         next_four_hour_index = int(state.get("four_hour_counter") or 0) + 1
         local_now = _local_time(config, now)
+        eligible_four_hour, guard_rejected_four_hour = _split_exhaustion_guard_rows(
+            eligible_four_hour,
+            settings,
+            phase="4h",
+            source_slot="4h",
+            source_index=next_four_hour_index,
+            now=now,
+            local_now=local_now,
+        )
+        ranked_two_hour = _sort_saved_rows(eligible_four_hour, settings, reverse=True)
         approved_four_hour: list[dict[str, Any]] = []
         approved_four_hour_keys: set[tuple[str, str]] = set()
         seen_four_hour: set[str] = set()
@@ -3736,16 +4293,18 @@ def _update_lc_internal_pipeline_impl(
             seen_four_hour.add(symbol)
             if len(approved_four_hour) >= top_limit:
                 break
+        guard_rejected_four_hour_keys = {_setup_key(row) for row in guard_rejected_four_hour}
         rejected_four_hour = _soft_undecided_rows(
             refreshed_two_hour,
             settings=settings,
-            approved_keys=approved_four_hour_keys,
+            approved_keys=approved_four_hour_keys | guard_rejected_four_hour_keys,
             blocked_symbols=blocked_symbols,
             source_slot="4h",
             source_index=next_four_hour_index,
             now=now,
             local_now=local_now,
         )
+        rejected_four_hour = guard_rejected_four_hour + rejected_four_hour
         existing = list(state.get("undecided") or [])
         existing = _merge_undecided_rows(existing, rejected_four_hour, now=now)
         state["undecided"] = _sort_saved_rows(existing, settings, reverse=True)
@@ -3859,7 +4418,21 @@ def lc_pipeline_mini_pool(config: dict[str, Any], candidates: list[TradeCandidat
         if symbol in candidates_by_symbol
         and (candidates_by_symbol[symbol].symbol, str(candidates_by_symbol[symbol].side or "").lower()) not in rejected_keys
     ]
-    return _rank_candidates(pool, limit, blocked_symbols=blocked_symbols, settings=_phase_settings(settings, "4h"), phase="4h")
+    ranked_pool = _rank_candidates(
+        pool,
+        len(pool),
+        blocked_symbols=blocked_symbols,
+        settings=_phase_settings(settings, "4h"),
+        phase="4h",
+    )
+    clean: list[TradeCandidate] = []
+    for candidate in ranked_pool:
+        if _exhaustion_guard_reasons(candidate, settings, phase="mini")[1]:
+            continue
+        clean.append(candidate)
+        if len(clean) >= limit:
+            break
+    return clean
 
 
 def lc_pipeline_pool_rows(config: dict[str, Any], symbols: list[str]) -> list[dict[str, Any]]:
