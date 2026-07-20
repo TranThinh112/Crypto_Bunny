@@ -231,7 +231,8 @@ class SystemChecklistPayloadTests(unittest.TestCase):
 
     def test_bunny_minimize_losses_dashboard_exposes_threshold_and_slot_rows(self) -> None:
         risk_state = {
-            "isRecoveryMode": False,
+            "recoveryMode": "SOFT_RECOVERY",
+            "isRecoveryMode": True,
             "isPaused": False,
             "globalLossStreak": 1,
             "globalLossStreakThreshold": 2,
@@ -239,10 +240,14 @@ class SystemChecklistPayloadTests(unittest.TestCase):
             "openPositionsCount": 2,
             "maxConcurrentPositions": 5,
             "normalRiskPercent": 1.0,
+            "softRecoveryRiskPercent": 0.75,
             "recoveryModeRiskPercent": 0.5,
             "currentNormalMinRuleScore": 75,
             "currentNormalMinGptConfidence": 80,
             "normalMinRiskReward": 1.5,
+            "softRecoveryMinRuleScore": 87,
+            "softRecoveryMinGptConfidence": 89,
+            "softRecoveryMinRiskReward": 2.0,
             "recoveryMinRuleScore": 90,
             "recoveryMinGptConfidence": 92,
             "recoveryMinRiskReward": 2.5,
@@ -272,9 +277,11 @@ class SystemChecklistPayloadTests(unittest.TestCase):
 
         module = next(item for item in modules if item["name"] == "Bunny Minimize Losses")
         values = {row["label"]: row["value"] for row in module["stats"]}
-        self.assertEqual(module["status"], "ok")
+        self.assertEqual(module["status"], "warn")
+        self.assertEqual(values["recoveryMode"], "SOFT_RECOVERY")
         self.assertEqual(values["maxConcurrentPositions"], 5)
         self.assertEqual(values["slotUtilizationPercent"], 40.0)
+        self.assertEqual(values["softRecoveryMinRuleScore"], 87)
         self.assertEqual(values["recoveryMinRuleScore"], 90)
         self.assertEqual(values["strongSetupMinRiskReward"], 2.0)
 

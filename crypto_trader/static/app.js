@@ -2033,6 +2033,7 @@ function renderAiDecisionModuleChart(module, rows) {
 }
 
 const BUNNY_MINIMIZE_ROW_CONFIG = [
+  ["recoveryMode", "Recovery mode hiện tại", "trạng thái", "Mode vận hành hiện tại của Bunny Minimize Losses.", "Mode đang siết hơn bình thường.", "Mode đang nới hoặc về normal."],
   ["isRecoveryMode", "Recovery mode", "trạng thái", "Bật khi chuỗi thua toàn hệ thống chạm ngưỡng recovery.", "Recovery vừa bật hoặc đang tác động mạnh hơn.", "Recovery đã tắt hoặc giảm tác động."],
   ["isPaused", "Tạm dừng giao dịch", "trạng thái", "Bật khi chuỗi thua chạm ngưỡng pause, bot không mở lệnh mới.", "Bot đang bị pause, cần chú ý.", "Bot đã thoát pause hoặc ít bị chặn hơn."],
   ["globalLossStreak", "Chuỗi thua toàn hệ thống", "lần", "Số lệnh LOSS liên tiếp gần nhất trên toàn hệ thống.", "Chuỗi thua tăng, rủi ro hệ thống cao hơn.", "Chuỗi thua giảm hoặc đã reset."],
@@ -2043,10 +2044,14 @@ const BUNNY_MINIMIZE_ROW_CONFIG = [
   ["slotUtilizationPercent", "Tỷ lệ dùng slot", "%", "Phần trăm slot đang được sử dụng.", "Bot đang dùng nhiều slot hơn.", "Bot đang dùng ít slot hơn."],
   ["pausedMinutesRemaining", "Thời gian pause còn lại", "phút", "Số phút còn lại trước khi bot tự thoát pause.", "Thời gian bị pause tăng.", "Thời gian pause còn lại giảm."],
   ["normalRiskPercent", "Rủi ro Normal", "%", "Tỷ lệ rủi ro áp dụng khi hệ thống chạy normal mode.", "Normal mode dùng rủi ro cao hơn.", "Normal mode dùng rủi ro thấp hơn."],
+  ["softRecoveryRiskPercent", "Rủi ro Soft Recovery", "%", "Tỷ lệ rủi ro áp dụng khi hệ thống ở soft recovery.", "Soft recovery dùng rủi ro cao hơn.", "Soft recovery dùng rủi ro thấp hơn."],
   ["recoveryModeRiskPercent", "Rủi ro Recovery", "%", "Tỷ lệ rủi ro áp dụng khi hệ thống đang recovery mode.", "Recovery mode dùng rủi ro cao hơn.", "Recovery mode dùng rủi ro thấp hơn."],
   ["currentNormalMinRuleScore", "Rule score hiện hành", "điểm", "Ngưỡng rule score hiện hành sau adaptive threshold.", "Bot lọc setup chặt hơn theo rule score.", "Bot lọc setup thoáng hơn theo rule score."],
   ["currentNormalMinGptConfidence", "GPT confidence hiện hành", "điểm", "Ngưỡng GPT confidence hiện hành sau adaptive threshold.", "Bot yêu cầu AI tự tin hơn.", "Bot yêu cầu AI ít chặt hơn."],
   ["normalMinRiskReward", "RR tối thiểu Normal", "hệ số", "Risk reward tối thiểu khi chạy normal mode.", "Bot yêu cầu RR cao hơn.", "Bot chấp nhận RR thấp hơn."],
+  ["softRecoveryMinRuleScore", "Rule score Soft", "điểm", "Ngưỡng rule score tối thiểu khi soft recovery.", "Soft recovery lọc chặt hơn.", "Soft recovery lọc thoáng hơn."],
+  ["softRecoveryMinGptConfidence", "GPT confidence Soft", "điểm", "Ngưỡng GPT confidence tối thiểu khi soft recovery.", "Soft recovery yêu cầu AI tự tin hơn.", "Soft recovery yêu cầu AI ít chặt hơn."],
+  ["softRecoveryMinRiskReward", "RR tối thiểu Soft", "hệ số", "Risk reward tối thiểu khi soft recovery.", "Soft recovery yêu cầu RR cao hơn.", "Soft recovery chấp nhận RR thấp hơn."],
   ["recoveryMinRuleScore", "Rule score Recovery", "điểm", "Ngưỡng rule score tối thiểu khi recovery mode.", "Recovery lọc chặt hơn theo rule score.", "Recovery lọc thoáng hơn theo rule score."],
   ["recoveryMinGptConfidence", "GPT confidence Recovery", "điểm", "Ngưỡng GPT confidence tối thiểu khi recovery mode.", "Recovery yêu cầu AI tự tin hơn.", "Recovery yêu cầu AI ít chặt hơn."],
   ["recoveryMinRiskReward", "RR tối thiểu Recovery", "hệ số", "Risk reward tối thiểu khi recovery mode.", "Recovery yêu cầu RR cao hơn.", "Recovery chấp nhận RR thấp hơn."],
@@ -2099,6 +2104,12 @@ function bunnyRiskValue(row) {
   const numeric = moduleNumericValue(row?.value);
   const key = String(row?.riskKey || "");
   const unit = viLabel(row?.unit || "");
+  if (key === "recoveryMode") {
+    const mode = String(row?.value || "").toUpperCase();
+    if (mode === "HARD_RECOVERY") return "Hard Recovery";
+    if (mode === "SOFT_RECOVERY") return "Soft Recovery";
+    return "Normal";
+  }
   if (["isRecoveryMode", "isPaused", "enableAdaptiveThreshold"].includes(key)) {
     return numeric !== null && numeric >= 50 ? "Bật" : "Tắt";
   }
@@ -2123,6 +2134,30 @@ function bunnyRiskChartRow(rows, key, chartIndex, colorIndex) {
     chartIndex,
     color: MODULE_CHART_COLORS[colorIndex % MODULE_CHART_COLORS.length],
   };
+}
+
+function bunnyRecoveryModeChartRows(rows) {
+  const current = bunnyRiskRow(rows, "recoveryMode");
+  const currentMode = String(current?.value || "NORMAL").toUpperCase();
+  const modes = [
+    { key: "NORMAL", label: "Normal", chartIndex: 5, colorIndex: 2, value: 1, meaning: "Chế độ thường.", trendUp: "Rộng hơn", trendDown: "Siết lại" },
+    { key: "SOFT_RECOVERY", label: "Soft Recovery", chartIndex: 6, colorIndex: 4, value: 2, meaning: "Chế độ thận trọng vừa phải.", trendUp: "Gần Hard hơn", trendDown: "Gần Normal hơn" },
+    { key: "HARD_RECOVERY", label: "Hard Recovery", chartIndex: 7, colorIndex: 6, value: 3, meaning: "Chế độ siết chặt nhất.", trendUp: "Siết mạnh hơn", trendDown: "Nới lại" },
+  ];
+  return modes.map((mode) => ({
+    riskKey: "recoveryMode",
+    label: mode.label,
+    unit: "trạng thái",
+    meaning: mode.meaning,
+    trendUp: mode.trendUp,
+    trendDown: mode.trendDown,
+    chartIndex: mode.chartIndex,
+    color: MODULE_CHART_COLORS[mode.colorIndex % MODULE_CHART_COLORS.length],
+    rawNumericValue: mode.value,
+    chartValue: mode.value,
+    value: mode.key,
+    attention: currentMode === mode.key,
+  }));
 }
 
 function niceAutoNumberAxisMax(maxValue) {
@@ -2325,6 +2360,7 @@ function renderBunnyRiskVariableRows(module, rows) {
 }
 
 function renderBunnyMinimizeModuleChart(module, rows) {
+  const modeRows = bunnyRecoveryModeChartRows(rows);
   const slotRows = [
     bunnyRiskChartRow(rows, "openPositionsCount", 10, 1),
     bunnyRiskChartRow(rows, "maxConcurrentPositions", 11, 2),
@@ -2338,29 +2374,34 @@ function renderBunnyMinimizeModuleChart(module, rows) {
   const thresholdRows = [
     bunnyRiskChartRow(rows, "currentNormalMinRuleScore", 30, 0),
     bunnyRiskChartRow(rows, "currentNormalMinGptConfidence", 31, 1),
-    bunnyRiskChartRow(rows, "recoveryMinRuleScore", 32, 4),
-    bunnyRiskChartRow(rows, "recoveryMinGptConfidence", 33, 5),
-    bunnyRiskChartRow(rows, "strongSetupRuleScore", 34, 8),
-    bunnyRiskChartRow(rows, "strongSetupGptConfidence", 35, 9),
+    bunnyRiskChartRow(rows, "softRecoveryMinRuleScore", 32, 4),
+    bunnyRiskChartRow(rows, "softRecoveryMinGptConfidence", 33, 5),
+    bunnyRiskChartRow(rows, "recoveryMinRuleScore", 34, 8),
+    bunnyRiskChartRow(rows, "recoveryMinGptConfidence", 35, 9),
+    bunnyRiskChartRow(rows, "strongSetupRuleScore", 36, 8),
+    bunnyRiskChartRow(rows, "strongSetupGptConfidence", 37, 9),
   ];
   const rrRows = [
     bunnyRiskChartRow(rows, "normalMinRiskReward", 40, 0),
-    bunnyRiskChartRow(rows, "recoveryMinRiskReward", 41, 4),
-    bunnyRiskChartRow(rows, "strongSetupMinRiskReward", 42, 8),
+    bunnyRiskChartRow(rows, "softRecoveryMinRiskReward", 41, 4),
+    bunnyRiskChartRow(rows, "recoveryMinRiskReward", 42, 4),
+    bunnyRiskChartRow(rows, "strongSetupMinRiskReward", 43, 8),
   ];
   const riskRows = [
     bunnyRiskChartRow(rows, "normalRiskPercent", 50, 2),
-    bunnyRiskChartRow(rows, "recoveryModeRiskPercent", 51, 6),
+    bunnyRiskChartRow(rows, "softRecoveryRiskPercent", 51, 4),
+    bunnyRiskChartRow(rows, "recoveryModeRiskPercent", 52, 6),
   ];
   return `
     <section class="module-chart-panel module-chart-panel-compact module-risk-panel">
       <div class="module-chart-legend module-ai-chart-stack module-risk-chart-stack">
         ${renderBunnyRiskKpis(module, rows)}
+        ${renderBunnyRiskBarSvg(modeRows, "Mode hiện tại", "Bot đang ở Normal / Soft Recovery / Hard Recovery nào", "recovery-mode", "trạng thái")}
         ${renderBunnyRiskBarSvg(slotRows, "Slot vị thế", "OPEN thực tế so với số slot tối đa", "slot", "slot")}
         ${renderBunnyRiskBarSvg(lossRows, "Chuỗi thua & ngưỡng bảo vệ", "Recovery và pause dựa trên loss streak toàn hệ thống", "loss-streak", "lần")}
-        ${renderBunnyRiskBarSvg(thresholdRows, "Ngưỡng điểm lọc", "Normal hiện hành, Recovery và Strong setup", "threshold-score", "điểm")}
+        ${renderBunnyRiskBarSvg(thresholdRows, "Ngưỡng điểm lọc", "Normal, Soft Recovery và Hard Recovery", "threshold-score", "điểm")}
         ${renderBunnyRiskBarSvg(rrRows, "Ngưỡng Risk Reward", "RR tối thiểu theo từng chế độ lọc", "threshold-rr", "hệ số")}
-        ${renderBunnyRiskBarSvg(riskRows, "Rủi ro theo chế độ", "Risk percent dùng cho Normal và Recovery", "risk-percent", "%")}
+        ${renderBunnyRiskBarSvg(riskRows, "Rủi ro theo chế độ", "Risk percent dùng cho Normal, Soft và Hard Recovery", "risk-percent", "%")}
       </div>
       <div class="module-chart-legend compact module-ai-variable-list module-risk-variable-list">${renderBunnyRiskVariableRows(module, rows)}</div>
     </section>

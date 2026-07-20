@@ -78,6 +78,7 @@ STATE_VERSION = "python-codex-v1"
 AI_CALL_HISTORY_STATE_KEY = "ai_call_history"
 AI_CALL_STATUS_STATS_STATE_KEY = "ai_call_status_stats"
 VIETNAM_TZ = timezone(timedelta(hours=7))
+POSITION_SIZING_STATE_KEY = "position_sizing:recovery_cycle"
 
 
 def _utcnow() -> datetime:
@@ -2094,43 +2095,102 @@ def _stored_bool(value: Any) -> bool | None:
     return None
 
 
+def _recovery_cycle_pnl(config: dict[str, Any]) -> float:
+    raw = get_journal_state(config, POSITION_SIZING_STATE_KEY)
+    if not raw:
+        return 0.0
+    try:
+        state = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return 0.0
+    return _safe_float(state.get("cycle_pnl_usdt"), 0.0)
+
+
+def _previous_recovery_mode(existing: dict[str, Any] | None) -> str | None:
+    if not existing:
+        return None
+    payload: dict[str, Any] = {}
+    try:
+        payload = json.loads(existing.get("payload_json") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        payload = {}
+    mode = str(payload.get("recoveryMode") or payload.get("riskMode") or "").strip().upper()
+    if mode in {"NORMAL", "SOFT_RECOVERY", "HARD_RECOVERY"}:
+        return mode
+    previous_bool = _stored_bool(existing.get("is_recovery_mode"))
+    if previous_bool is None:
+        return None
+    return "HARD_RECOVERY" if previous_bool else "NORMAL"
+
+
+def _recovery_mode_label(mode: str) -> str:
+    labels = {
+        "NORMAL": "NORMAL",
+        "SOFT_RECOVERY": "SOFT RECOVERY",
+        "HARD_RECOVERY": "HARD RECOVERY",
+    }
+    return labels.get(str(mode or "").upper(), str(mode or "-"))
+
+
+def _mode_thresholds(
+    mode: str,
+    payload: dict[str, Any],
+    settings: dict[str, Any],
+) -> tuple[float, float, float, float]:
+    normalized = str(mode or "").upper()
+    if normalized == "HARD_RECOVERY":
+        return (
+            _safe_float(settings.get("recovery_min_rule_score"), 90),
+            _safe_float(settings.get("recovery_min_gpt_confidence"), 92),
+            _safe_float(settings.get("recovery_min_risk_reward"), 2.5),
+            _safe_float(settings.get("recovery_mode_risk_percent"), 0.5),
+        )
+    if normalized == "SOFT_RECOVERY":
+        return (
+            _safe_float(settings.get("soft_recovery_min_rule_score"), 87),
+            _safe_float(settings.get("soft_recovery_min_gpt_confidence"), 89),
+            _safe_float(settings.get("soft_recovery_min_risk_reward"), 2.0),
+            _safe_float(settings.get("soft_recovery_risk_percent"), 0.75),
+        )
+    return (
+        _safe_float(payload.get("currentNormalMinRuleScore"), _safe_float(settings.get("normal_min_rule_score"), 75)),
+        _safe_float(
+            payload.get("currentNormalMinGptConfidence"),
+            max(_safe_float(settings.get("normal_min_gpt_confidence"), 75), 80),
+        ),
+        _safe_float(settings.get("normal_min_risk_reward"), 1.5),
+        _safe_float(settings.get("normal_risk_percent"), 1.0),
+    )
+
+
 def _notify_recovery_mode_transition(
     config: dict[str, Any],
     *,
-    previous_mode: bool | None,
+    previous_mode: str | None,
     payload: dict[str, Any],
     settings: dict[str, Any],
 ) -> None:
-    current_mode = bool(payload.get("isRecoveryMode"))
+    current_mode = str(payload.get("recoveryMode") or "NORMAL").upper()
     if previous_mode is None or previous_mode == current_mode:
         return
-    status = "BẬT" if current_mode else "TẮT"
-    icon = "🟠" if current_mode else "🟢"
+    icon = "🔴" if current_mode == "HARD_RECOVERY" else "🟡" if current_mode == "SOFT_RECOVERY" else "🟢"
+    score, confidence, risk_reward, risk_percent = _mode_thresholds(current_mode, payload, settings)
     time_label = _vietnam_time_label(_parse_time(payload.get("updatedAt")) or _utcnow())
     lines = [
-        f"{icon} Bunny Recovery Mode đã {status}",
+        f"{icon} Bunny Risk Mode: {_recovery_mode_label(current_mode)}",
         f"🕒 Thời gian: {time_label}",
+        f"↔️ Chuyển từ: {_recovery_mode_label(previous_mode)} → {_recovery_mode_label(current_mode)}",
         f"🔁 Chuỗi thua hệ thống: {payload.get('globalLossStreak', 0)}",
+        f"📉 Cycle PnL: {_safe_float(payload.get('recoveryCyclePnlUsdt'), 0.0):+.4f} USDT",
+        f"🛡 Rule áp dụng: score ≥ {score:g}, GPT ≥ {confidence:g}, R:R ≥ {risk_reward:g}",
+        f"💰 Risk/lệnh: {risk_percent:g}%",
     ]
-    if current_mode:
-        lines.extend(
-            [
-                f"🛡 Rule mới: score ≥ {_safe_float(settings.get('recovery_min_rule_score'), 90):.0f}, "
-                f"GPT ≥ {_safe_float(settings.get('recovery_min_gpt_confidence'), 92):.0f}, "
-                f"R:R ≥ {_safe_float(settings.get('recovery_min_risk_reward'), 2.5):g}",
-                f"💰 Risk/lệnh: {_safe_float(settings.get('recovery_mode_risk_percent'), 0.5):g}%",
-            ]
-        )
+    if current_mode == "HARD_RECOVERY":
+        lines.append("Lý do: chuỗi thua chạm ngưỡng Hard Recovery.")
+    elif current_mode == "SOFT_RECOVERY":
+        lines.append("Lý do: chuỗi thua đã reset nhưng cycle PnL vẫn âm.")
     else:
-        lines.extend(
-            [
-                "✅ Chuỗi thua đã được reset.",
-                f"🛡 Quay về rule thường: score ≥ {payload.get('currentNormalMinRuleScore')}, "
-                f"GPT ≥ {payload.get('currentNormalMinGptConfidence')}, "
-                f"R:R ≥ {_safe_float(settings.get('normal_min_risk_reward'), 1.5):g}",
-                f"💰 Risk/lệnh: {_safe_float(settings.get('normal_risk_percent'), 1.0):g}%",
-            ]
-        )
+        lines.append("Lý do: cycle PnL đã ổn, bot quay về Normal.")
     try:
         from .notifier import send_telegram_message
 
@@ -2143,21 +2203,34 @@ def refresh_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
     settings = _trading_risk_settings(config)
     global_loss_streak = get_global_loss_streak(config)
     current_rule_score, current_confidence = _adaptive_thresholds(config)
+    cycle_pnl = _recovery_cycle_pnl(config)
     paused_until: datetime | None = None
     existing = get_trading_system_state_row(config)
-    previous_recovery_mode = _stored_bool(existing.get("is_recovery_mode")) if existing else None
+    previous_recovery_mode = _previous_recovery_mode(existing)
     if existing:
         paused_until = _parse_time(existing.get("paused_until"))
     if paused_until and paused_until <= _utcnow():
         paused_until = None
     if global_loss_streak >= _safe_int(settings.get("pause_trading_loss_streak"), 4):
         paused_until = _utcnow() + timedelta(hours=_safe_int(settings.get("pause_trading_hours"), 24))
-    is_recovery_mode = global_loss_streak >= _safe_int(settings.get("global_loss_streak_threshold"), 2)
+    hard_recovery = global_loss_streak >= _safe_int(settings.get("global_loss_streak_threshold"), 2)
+    soft_recovery = (
+        not hard_recovery
+        and bool(settings.get("enable_soft_recovery_mode", True))
+        and global_loss_streak <= 0
+        and cycle_pnl < -1e-9
+    )
+    recovery_mode = "HARD_RECOVERY" if hard_recovery else "SOFT_RECOVERY" if soft_recovery else "NORMAL"
+    is_recovery_mode = recovery_mode != "NORMAL"
     payload = {
         "id": 1,
         "mechanismName": str(settings.get("mechanism_name", "Bunny minimize losses")),
         "isRecoveryMode": is_recovery_mode,
+        "recoveryMode": recovery_mode,
+        "isSoftRecoveryMode": soft_recovery,
+        "isHardRecoveryMode": hard_recovery,
         "globalLossStreak": global_loss_streak,
+        "recoveryCyclePnlUsdt": round(cycle_pnl, 6),
         "isPaused": bool(paused_until and paused_until > _utcnow()),
         "pausedUntil": paused_until.isoformat() if paused_until else None,
         "currentNormalMinRuleScore": current_rule_score,
@@ -2199,10 +2272,14 @@ def get_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
             "globalLossStreakThreshold": _safe_int(settings.get("global_loss_streak_threshold"), 2),
             "symbolLossStreakThreshold": _safe_int(settings.get("symbol_loss_streak_threshold"), 2),
             "normalRiskPercent": _safe_float(settings.get("normal_risk_percent"), 1.0),
+            "softRecoveryRiskPercent": _safe_float(settings.get("soft_recovery_risk_percent"), 0.75),
             "recoveryModeRiskPercent": _safe_float(settings.get("recovery_mode_risk_percent"), 0.5),
             "normalMinRuleScore": _safe_float(settings.get("normal_min_rule_score"), 78),
             "normalMinGptConfidence": _safe_float(settings.get("normal_min_gpt_confidence"), 82),
             "normalMinRiskReward": _safe_float(settings.get("normal_min_risk_reward"), 1.8),
+            "softRecoveryMinRuleScore": _safe_float(settings.get("soft_recovery_min_rule_score"), 87),
+            "softRecoveryMinGptConfidence": _safe_float(settings.get("soft_recovery_min_gpt_confidence"), 89),
+            "softRecoveryMinRiskReward": _safe_float(settings.get("soft_recovery_min_risk_reward"), 2.0),
             "strongSetupRuleScore": _safe_float(settings.get("strong_setup_rule_score"), 85),
             "strongSetupGptConfidence": _safe_float(settings.get("strong_setup_gpt_confidence"), 88),
             "strongSetupMinRiskReward": _safe_float(settings.get("strong_setup_min_risk_reward"), 2.0),
@@ -2424,12 +2501,22 @@ def validate_entry(config: dict[str, Any], payload: dict[str, Any]) -> dict[str,
         current_rule_threshold += _safe_float(health["scoreAdjustment"], 0.0)
         current_conf_threshold += _safe_float(health["confidenceAdjustment"], 0.0)
     is_recovery = bool(state["isRecoveryMode"])
-    if is_recovery:
+    recovery_mode = str(state.get("recoveryMode") or ("HARD_RECOVERY" if is_recovery else "NORMAL")).upper()
+    if recovery_mode == "HARD_RECOVERY":
         current_rule_threshold = max(current_rule_threshold, _safe_float(settings.get("recovery_min_rule_score"), 90))
         current_conf_threshold = max(
             current_conf_threshold, _safe_float(settings.get("recovery_min_gpt_confidence"), 92)
         )
         normal_rr = max(normal_rr, _safe_float(settings.get("recovery_min_risk_reward"), 2.5))
+    elif recovery_mode == "SOFT_RECOVERY":
+        current_rule_threshold = max(
+            current_rule_threshold, _safe_float(settings.get("soft_recovery_min_rule_score"), 87)
+        )
+        current_conf_threshold = max(
+            current_conf_threshold, _safe_float(settings.get("soft_recovery_min_gpt_confidence"), 89)
+        )
+        normal_rr = max(normal_rr, _safe_float(settings.get("soft_recovery_min_risk_reward"), 2.0))
+    if is_recovery:
         if abs(funding_rate) > _safe_float(settings.get("max_safe_funding_rate_abs"), 0.03):
             reasons.append(f"Funding rate {funding_rate:.4f} vuot nguong an toan")
         if spread > _safe_float(config.get("risk", {}).get("max_spread_pct"), 0.15):
@@ -2455,14 +2542,15 @@ def validate_entry(config: dict[str, Any], payload: dict[str, Any]) -> dict[str,
         ):
             setup_quality = "STRONG"
         elif is_recovery:
-            setup_quality = "RECOVERY"
+            setup_quality = recovery_mode
         else:
             setup_quality = "NORMAL"
-    risk_percent = (
-        _safe_float(settings.get("recovery_mode_risk_percent"), 0.5)
-        if is_recovery
-        else _safe_float(settings.get("normal_risk_percent"), 1.0)
-    )
+    if recovery_mode == "HARD_RECOVERY":
+        risk_percent = _safe_float(settings.get("recovery_mode_risk_percent"), 0.5)
+    elif recovery_mode == "SOFT_RECOVERY":
+        risk_percent = _safe_float(settings.get("soft_recovery_risk_percent"), 0.75)
+    else:
+        risk_percent = _safe_float(settings.get("normal_risk_percent"), 1.0)
     if health["isWarning"] or health["isCritical"]:
         risk_percent *= _safe_float(health["riskMultiplier"], 1.0)
     assigned_slot = preferred_slot if preferred_slot in free_slots else free_slots[0] if free_slots else None
@@ -2472,6 +2560,7 @@ def validate_entry(config: dict[str, Any], payload: dict[str, Any]) -> dict[str,
         "assignedPositionSlot": assigned_slot,
         "riskPercent": round(risk_percent, 4),
         "isRecoveryMode": is_recovery,
+        "recoveryMode": recovery_mode,
         "setupQuality": setup_quality,
         "currentRuleThreshold": round(current_rule_threshold, 2),
         "currentConfidenceThreshold": round(current_conf_threshold, 2),

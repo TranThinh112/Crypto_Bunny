@@ -71,6 +71,10 @@ paper_trading:
 
 trading_risk:
   max_concurrent_positions: 5
+  soft_recovery_risk_percent: 0.75
+  soft_recovery_min_rule_score: 87
+  soft_recovery_min_gpt_confidence: 89
+  soft_recovery_min_risk_reward: 2.0
 
 bunny_health_monitor:
   # Tranh khoa he thong vi mot mau thong ke qua nho (vi du chi 1 lenh thua).
