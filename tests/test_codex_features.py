@@ -13,11 +13,13 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from crypto_trader.codex_features import (
+    _ai_call_message,
     _compact_candidate_storage_payload,
     ai_call_decision_stats,
     ai_trade_decision_stats,
     call_openai_json,
     detect_market_regime,
+    okx_review_explanation_vi,
     record_ai_call_event,
     refresh_bunny_health_state,
     select_runtime_config,
@@ -331,6 +333,38 @@ class CodexFeaturesTest(TestCase):
 
         self.assertTrue(result["parsed"]["approved"])
         urlopen.assert_called_once()
+
+    def test_okx_review_explanation_treats_vao_market_as_market_entry(self) -> None:
+        item = {
+            "status": "VÀO MARKET",
+            "market_reason": "risk sạch và setup đủ điều kiện",
+            "keep_reason": "setup cần chờ xác nhận thêm",
+        }
+
+        message = okx_review_explanation_vi(item)
+
+        self.assertIn("đồng ý mở Market", message)
+        self.assertNotIn("giữ setup", message)
+
+    def test_lc_okx_review_message_labels_market_entry(self) -> None:
+        message = _ai_call_message(
+            {
+                "created_at": "2026-07-20T05:02:11+00:00",
+                "role": "okx",
+                "review_kind": "lc_okx_review",
+                "model": "gpt-5.5",
+                "status": "VÀO MARKET",
+                "symbol": "BILL/USDT:USDT",
+                "side": "short",
+                "lc_okx_id": 6,
+                "market_reason": "risk sạch và setup đủ điều kiện",
+                "keep_reason": "setup cần chờ xác nhận thêm",
+            }
+        )
+
+        self.assertIn("5.5 DUYỆT VÀO MARKET #6", message)
+        self.assertIn("5.5 đồng ý mở Market", message)
+        self.assertNotIn("5.5 chưa mở Market", message)
 
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_lc_okx_review_message_is_single_vietnamese_explanation(self, send_telegram_message) -> None:

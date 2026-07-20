@@ -561,14 +561,30 @@ def _okx_reason_vi(reason: Any) -> str:
     return "; ".join(translated_parts) or "-"
 
 
+def _okx_review_status_kind(item: dict[str, Any]) -> str:
+    status = str(
+        item.get("status")
+        or item.get("review_state")
+        or item.get("setup_action")
+        or item.get("decision")
+        or ""
+    )
+    folded = _ascii_fold(status).replace("_", " ")
+    if any(token in folded for token in ("xoa setup", "delete setup", "delete", "reject", "tu choi")):
+        return "delete"
+    if any(token in folded for token in ("vao market", "mo market", "enter market", "market entry")):
+        return "market"
+    return "keep"
+
+
 def okx_review_explanation_vi(item: dict[str, Any]) -> str:
-    status = str(item.get("status") or "").upper()
+    status_kind = _okx_review_status_kind(item)
     market_reason = _okx_reason_vi(item.get("market_reason"))
     keep_reason = _okx_reason_vi(item.get("keep_reason"))
     delete_reason = _okx_reason_vi(item.get("delete_reason"))
-    if "XÓA SETUP" in status:
+    if status_kind == "delete":
         return f"5.5 từ chối vì {delete_reason if delete_reason != '-' else 'setup chưa đạt duyệt cuối'}."
-    if "MỞ MARKET" in status:
+    if status_kind == "market":
         return f"5.5 đồng ý mở Market vì {market_reason if market_reason != '-' else 'setup đã đủ điều kiện vào lệnh'}."
     return f"5.5 chưa mở Market và giữ setup vì {keep_reason if keep_reason != '-' else 'setup cần chờ xác nhận thêm'}."
 
@@ -734,8 +750,13 @@ def _lc_okx_review_call_message(item: dict[str, Any]) -> str:
     symbol = str(item.get("symbol") or ((item.get("symbols") or ["-"])[0]))
     side = str(item.get("side") or "-").upper()
     status = str(item.get("status") or "GIỮ SETUP")
+    title = "🤖 5.5 DUYỆT LC_OKX"
+    if _okx_review_status_kind(item) == "market":
+        title = "🤖 5.5 DUYỆT VÀO MARKET"
+    elif _okx_review_status_kind(item) == "delete":
+        title = "🤖 5.5 XÓA SETUP"
     lines = [
-        f"🤖 5.5 DUYỆT LC_OKX #{lc_id if lc_id not in (None, '') else '-'}",
+        f"{title} #{lc_id if lc_id not in (None, '') else '-'}",
         f"Cặp: {symbol} | {side}",
         f"Duyệt lúc: {_local_time_label(created_at).split()[-1]}",
         f"Kết quả: {status}",
