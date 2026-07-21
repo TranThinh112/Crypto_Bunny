@@ -2848,8 +2848,74 @@ tr:last-child td {
 
 .market-pattern-detail-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
   gap: 12px;
+  align-items: start;
+}
+
+.market-pattern-list-card {
+  min-width: 0;
+}
+
+.market-pattern-list-card .market-regime-empty {
+  min-height: 96px;
+}
+
+.market-pattern-list {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.market-pattern-list-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px minmax(44px, auto);
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: 7px 9px;
+}
+
+.market-pattern-list-name {
+  min-width: 0;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.28;
+  overflow-wrap: anywhere;
+}
+
+.market-pattern-list-state {
+  display: grid;
+  place-items: center;
+  min-width: 0;
+}
+
+.market-pattern-list-score {
+  color: var(--ink);
+  font-size: 12px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.market-pattern-status-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  display: inline-block;
+  box-shadow: 0 0 0 2px rgba(10, 31, 68, 0.06);
+}
+
+.market-pattern-status-dot.active {
+  background: #1f8a5b;
+}
+
+.market-pattern-status-dot.inactive {
+  background: #bd3f32;
 }
 
 .market-regime-legend-btn {

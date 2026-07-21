@@ -2243,7 +2243,7 @@ function renderBunnyRiskBarSvg(rows, title, subtitle, chartId, unit) {
     const width = Math.max(24, barWidth * 0.64);
     return `
       <g>
-        <rect class="module-chart-segment module-bar-segment" data-chart-index="${row.chartIndex}" x="${x}" y="${y}" width="${width}" height="${height}" rx="4" fill="${row.color}">
+        <rect class="module-chart-segment module-bar-segment" data-chart-index="${row.chartIndex}" data-risk-key="${escapeHtml(row.riskKey || "")}" x="${x}" y="${y}" width="${width}" height="${height}" rx="4" fill="${row.color}">
           <title>${escapeHtml(row.label || "-")}: ${escapeHtml(bunnyRiskValue(row))}</title>
         </rect>
         ${renderBunnyRiskAxisLabel(row, x + width / 2, 236)}
@@ -2335,15 +2335,19 @@ function renderBunnyRiskVariableRows(module, rows) {
     ["pauseTradingLossStreak", { chartIndex: 22, colorIndex: 6 }],
     ["currentNormalMinRuleScore", { chartIndex: 30, colorIndex: 0 }],
     ["currentNormalMinGptConfidence", { chartIndex: 31, colorIndex: 1 }],
-    ["recoveryMinRuleScore", { chartIndex: 32, colorIndex: 4 }],
-    ["recoveryMinGptConfidence", { chartIndex: 33, colorIndex: 5 }],
-    ["strongSetupRuleScore", { chartIndex: 34, colorIndex: 8 }],
-    ["strongSetupGptConfidence", { chartIndex: 35, colorIndex: 9 }],
+    ["softRecoveryMinRuleScore", { chartIndex: 32, colorIndex: 4 }],
+    ["softRecoveryMinGptConfidence", { chartIndex: 33, colorIndex: 5 }],
+    ["recoveryMinRuleScore", { chartIndex: 34, colorIndex: 8 }],
+    ["recoveryMinGptConfidence", { chartIndex: 35, colorIndex: 9 }],
+    ["strongSetupRuleScore", { chartIndex: 36, colorIndex: 8 }],
+    ["strongSetupGptConfidence", { chartIndex: 37, colorIndex: 9 }],
     ["normalMinRiskReward", { chartIndex: 40, colorIndex: 0 }],
-    ["recoveryMinRiskReward", { chartIndex: 41, colorIndex: 4 }],
-    ["strongSetupMinRiskReward", { chartIndex: 42, colorIndex: 8 }],
+    ["softRecoveryMinRiskReward", { chartIndex: 41, colorIndex: 4 }],
+    ["recoveryMinRiskReward", { chartIndex: 42, colorIndex: 4 }],
+    ["strongSetupMinRiskReward", { chartIndex: 43, colorIndex: 8 }],
     ["normalRiskPercent", { chartIndex: 50, colorIndex: 2 }],
-    ["recoveryModeRiskPercent", { chartIndex: 51, colorIndex: 6 }],
+    ["softRecoveryRiskPercent", { chartIndex: 51, colorIndex: 4 }],
+    ["recoveryModeRiskPercent", { chartIndex: 52, colorIndex: 6 }],
   ]);
   const hiddenKeys = Number(module?.number || 0) === 2
     ? new Set(["recoveryMode", "isRecoveryMode", "isPaused", "globalLossStreak"])
@@ -2363,7 +2367,7 @@ function renderBunnyRiskVariableRows(module, rows) {
     const label = row.unit ? `${row.label} (${row.unit})` : row.label;
     const deltaHtml = Number(module?.number || 0) === 2 ? "" : `<span class="module-chart-delta ${delta.state}">${escapeHtml(delta.text)}</span>`;
     return `
-      <button class="module-chart-legend-item ${row.attention ? "attention" : ""}" type="button" data-chart-index="${row.chartIndex}" title="${escapeHtml(label)}: ${escapeHtml(bunnyRiskValue(row))}">
+      <button class="module-chart-legend-item ${row.attention ? "attention" : ""}" type="button" data-chart-index="${row.chartIndex}" data-risk-key="${escapeHtml(row.riskKey || "")}" title="${escapeHtml(label)}: ${escapeHtml(bunnyRiskValue(row))}">
         <span class="module-chart-swatch" style="background:${row.color}"></span>
         <div>
           <strong>${escapeHtml(label || "-")}</strong>
@@ -2646,13 +2650,17 @@ function bindModuleChartInteractions() {
   detail.querySelectorAll(".module-chart-legend-item").forEach((item) => {
     item.addEventListener("click", () => {
       const index = item.getAttribute("data-chart-index");
+      const riskKey = item.getAttribute("data-risk-key");
       if (index === null) return;
       const alreadyActive = item.classList.contains("active");
       clearActive();
       if (alreadyActive) return;
       item.classList.add("active");
       if (showTotalCallout(item)) return;
-      detail.querySelectorAll(`.module-chart-segment[data-chart-index="${index}"]`).forEach((segment) => {
+      const segmentSelector = riskKey
+        ? `.module-chart-segment[data-risk-key="${CSS.escape(riskKey)}"]`
+        : `.module-chart-segment[data-chart-index="${CSS.escape(index)}"]`;
+      detail.querySelectorAll(segmentSelector).forEach((segment) => {
         segment.classList.add("active");
         const label = item.getAttribute("title") || "";
         showCallout(segment, label);
@@ -2662,7 +2670,10 @@ function bindModuleChartInteractions() {
   detail.querySelectorAll(".module-chart-segment").forEach((segment) => {
     segment.addEventListener("click", () => {
       const index = segment.getAttribute("data-chart-index");
-      const item = detail.querySelector(`.module-chart-legend-item[data-chart-index="${index}"]`);
+      const riskKey = segment.getAttribute("data-risk-key");
+      const item = riskKey
+        ? detail.querySelector(`.module-chart-legend-item[data-risk-key="${CSS.escape(riskKey)}"]`)
+        : detail.querySelector(`.module-chart-legend-item[data-chart-index="${CSS.escape(index || "")}"]`);
       if (item) item.click();
     });
   });
@@ -3580,19 +3591,36 @@ function renderMarketPatternMetric(label, value, unit = "") {
   `;
 }
 
+function marketPatternStatusState(item) {
+  if (!item || typeof item !== "object") return null;
+  const rawStatus = item.status ?? item.active ?? item.is_active ?? item.enabled;
+  if (rawStatus === undefined || rawStatus === null || rawStatus === "") return null;
+  if (typeof rawStatus === "boolean") return rawStatus ? "active" : "inactive";
+  const normalized = String(rawStatus).trim().toLowerCase();
+  if (["active", "enabled", "true", "1", "open", "valid"].includes(normalized)) return "active";
+  return "inactive";
+}
+
+function renderMarketPatternStatusDot(item) {
+  const state = marketPatternStatusState(item);
+  if (!state) return escapeHtml(item?.direction || "-");
+  const label = state === "active" ? "Active" : "Inactive";
+  return `<span class="market-pattern-status-dot ${state}" title="${label}" aria-label="${label}" role="img"></span>`;
+}
+
 function renderMarketPatternList(title, rows, emptyText) {
   const items = Array.isArray(rows) ? rows : [];
   return `
-    <section class="market-regime-section">
+    <section class="market-regime-section market-pattern-list-card">
       <div class="market-regime-section-head"><div><strong>${escapeHtml(title)}</strong></div></div>
       ${items.length
-        ? `<div class="module-table-wrap"><table><tbody>${items.map((item) => `
-            <tr>
-              <td>${escapeHtml(item.pattern_type || item.pattern || item.type || "-")}</td>
-              <td>${escapeHtml(item.direction || item.status || "-")}</td>
-              <td>${escapeHtml(formatMarketRegimeNumber(item.confidence ?? item.strength_score ?? item.confluence_score))}</td>
-            </tr>
-          `).join("")}</tbody></table></div>`
+        ? `<div class="market-pattern-list">${items.map((item) => `
+            <div class="market-pattern-list-row">
+              <span class="market-pattern-list-name">${escapeHtml(item.pattern_type || item.pattern || item.type || "-")}</span>
+              <span class="market-pattern-list-state">${renderMarketPatternStatusDot(item)}</span>
+              <strong class="market-pattern-list-score">${escapeHtml(formatMarketRegimeNumber(item.confidence ?? item.strength_score ?? item.confluence_score))}</strong>
+            </div>
+          `).join("")}</div>`
         : `<div class="market-regime-empty">${escapeHtml(emptyText)}</div>`}
     </section>
   `;
