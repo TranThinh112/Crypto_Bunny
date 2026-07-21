@@ -1752,6 +1752,11 @@ function aiDecisionLegendRows(rows) {
     "no_trade_count",
     "bias_warning",
   ]);
+  const hiddenLabelPrefixes = [
+    "mini chon long",
+    "mini chon short",
+    "mini khong chon lenh",
+  ];
   return (Array.isArray(rows) ? rows : []).map((row, index) => {
     const numeric = moduleNumericValue(row.value);
     const chartMeta = AI_DECISION_CHART_META.get(String(row?.aiDecisionKey || ""));
@@ -1764,7 +1769,11 @@ function aiDecisionLegendRows(rows) {
       chartIndex,
       color: MODULE_CHART_COLORS[colorIndex % MODULE_CHART_COLORS.length],
     };
-  }).filter((row) => !hiddenKeys.has(String(row?.aiDecisionKey || "")));
+  }).filter((row) => {
+    const key = String(row?.aiDecisionKey || "");
+    const label = viLabel(moduleDisplayLabel(row));
+    return !hiddenKeys.has(key) && !hiddenLabelPrefixes.some((prefix) => label.startsWith(prefix));
+  });
 }
 
 function renderAiDecisionBiasCard(module, row) {
@@ -2027,7 +2036,8 @@ function renderAiDecisionModuleChart(module, rows) {
   return `
     <section class="module-chart-panel module-chart-panel-compact module-ai-decision-panel">
       <div class="module-chart-legend module-ai-chart-stack">
-        ${renderAiDecisionKpiGroup(module, [totalKpiRow, noTradeRow, miniNoTradeRow])}
+        ${renderAiDecisionKpiGroup(module, [totalKpiRow, noTradeRow])}
+        ${renderAiDecisionKpi(module, miniNoTradeRow)}
         ${renderAiDecisionBiasCard(module, biasWarningRow)}
         ${renderAiDecisionDonut(entryDirectionRows, "Hướng vào lệnh", "Phân bổ lệnh LONG và SHORT", entryTotal ? String(entryTotal) : "0", "lệnh")}
         ${renderAiDecisionBarSvg(directionPercentRows, "Hướng vào lệnh · Tỷ lệ", "Tỷ lệ LONG/SHORT trên tổng quyết định", "ai-entry-percent")}
