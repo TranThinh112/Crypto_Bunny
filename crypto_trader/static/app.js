@@ -2325,30 +2325,32 @@ function bunnyRiskKpiTone(row) {
   return "";
 }
 
+const BUNNY_RISK_CHART_ORDER = [
+  ["openPositionsCount", { chartIndex: 10, colorIndex: 1 }],
+  ["maxConcurrentPositions", { chartIndex: 11, colorIndex: 2 }],
+  ["slotUtilizationPercent", { chartIndex: 12, colorIndex: 3 }],
+  ["globalLossStreakThreshold", { chartIndex: 21, colorIndex: 4 }],
+  ["pauseTradingLossStreak", { chartIndex: 22, colorIndex: 6 }],
+  ["currentNormalMinRuleScore", { chartIndex: 30, colorIndex: 0 }],
+  ["currentNormalMinGptConfidence", { chartIndex: 31, colorIndex: 1 }],
+  ["softRecoveryMinRuleScore", { chartIndex: 32, colorIndex: 4 }],
+  ["softRecoveryMinGptConfidence", { chartIndex: 33, colorIndex: 5 }],
+  ["recoveryMinRuleScore", { chartIndex: 34, colorIndex: 8 }],
+  ["recoveryMinGptConfidence", { chartIndex: 35, colorIndex: 9 }],
+  ["strongSetupRuleScore", { chartIndex: 36, colorIndex: 8 }],
+  ["strongSetupGptConfidence", { chartIndex: 37, colorIndex: 9 }],
+  ["normalMinRiskReward", { chartIndex: 40, colorIndex: 0 }],
+  ["softRecoveryMinRiskReward", { chartIndex: 41, colorIndex: 4 }],
+  ["recoveryMinRiskReward", { chartIndex: 42, colorIndex: 4 }],
+  ["strongSetupMinRiskReward", { chartIndex: 43, colorIndex: 8 }],
+  ["normalRiskPercent", { chartIndex: 50, colorIndex: 2 }],
+  ["softRecoveryRiskPercent", { chartIndex: 51, colorIndex: 4 }],
+  ["recoveryModeRiskPercent", { chartIndex: 52, colorIndex: 6 }],
+];
+
 function renderBunnyRiskVariableRows(module, rows) {
-  const chartMeta = new Map([
-    ["openPositionsCount", { chartIndex: 10, colorIndex: 1 }],
-    ["maxConcurrentPositions", { chartIndex: 11, colorIndex: 2 }],
-    ["slotUtilizationPercent", { chartIndex: 12, colorIndex: 3 }],
-    ["globalLossStreak", { chartIndex: 20, colorIndex: 0 }],
-    ["globalLossStreakThreshold", { chartIndex: 21, colorIndex: 4 }],
-    ["pauseTradingLossStreak", { chartIndex: 22, colorIndex: 6 }],
-    ["currentNormalMinRuleScore", { chartIndex: 30, colorIndex: 0 }],
-    ["currentNormalMinGptConfidence", { chartIndex: 31, colorIndex: 1 }],
-    ["softRecoveryMinRuleScore", { chartIndex: 32, colorIndex: 4 }],
-    ["softRecoveryMinGptConfidence", { chartIndex: 33, colorIndex: 5 }],
-    ["recoveryMinRuleScore", { chartIndex: 34, colorIndex: 8 }],
-    ["recoveryMinGptConfidence", { chartIndex: 35, colorIndex: 9 }],
-    ["strongSetupRuleScore", { chartIndex: 36, colorIndex: 8 }],
-    ["strongSetupGptConfidence", { chartIndex: 37, colorIndex: 9 }],
-    ["normalMinRiskReward", { chartIndex: 40, colorIndex: 0 }],
-    ["softRecoveryMinRiskReward", { chartIndex: 41, colorIndex: 4 }],
-    ["recoveryMinRiskReward", { chartIndex: 42, colorIndex: 4 }],
-    ["strongSetupMinRiskReward", { chartIndex: 43, colorIndex: 8 }],
-    ["normalRiskPercent", { chartIndex: 50, colorIndex: 2 }],
-    ["softRecoveryRiskPercent", { chartIndex: 51, colorIndex: 4 }],
-    ["recoveryModeRiskPercent", { chartIndex: 52, colorIndex: 6 }],
-  ]);
+  const chartMeta = new Map(BUNNY_RISK_CHART_ORDER);
+  const chartOrder = new Map(BUNNY_RISK_CHART_ORDER.map(([key], index) => [key, index]));
   const hiddenKeys = Number(module?.number || 0) === 2
     ? new Set(["recoveryMode", "isRecoveryMode", "isPaused", "globalLossStreak"])
     : null;
@@ -2360,7 +2362,12 @@ function renderBunnyRiskVariableRows(module, rows) {
       chartValue: moduleNumericValue(row.value) || 0,
       chartIndex: chartMeta.get(String(row?.riskKey || ""))?.chartIndex ?? row.chartIndex ?? index,
       color: row.color || MODULE_CHART_COLORS[(chartMeta.get(String(row?.riskKey || ""))?.colorIndex ?? index) % MODULE_CHART_COLORS.length],
-    }));
+    }))
+    .sort((left, right) => {
+      const leftOrder = chartOrder.get(String(left?.riskKey || "")) ?? Number.MAX_SAFE_INTEGER;
+      const rightOrder = chartOrder.get(String(right?.riskKey || "")) ?? Number.MAX_SAFE_INTEGER;
+      return leftOrder - rightOrder || (left.riskOrder ?? 0) - (right.riskOrder ?? 0);
+    });
   return chartRows.map((row) => {
     const delta = moduleDeltaInfo(module, row);
     const trend = moduleTrendMeaning(row);
