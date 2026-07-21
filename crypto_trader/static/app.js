@@ -2074,18 +2074,11 @@ const BUNNY_MINIMIZE_ROW_CONFIG = [
 }));
 
 const BUNNY_MINIMIZE_ROW_KEYS = new Set(BUNNY_MINIMIZE_ROW_CONFIG.map((item) => item.key));
-const BUNNY_MINIMIZE_ROW_HIDDEN_KEYS = new Set([
-  "recoveryMode",
-  "isRecoveryMode",
-  "isPaused",
-  "globalLossStreak",
-]);
 
 function bunnyMinimizeRows(rows) {
   const byKey = new Map();
   (Array.isArray(rows) ? rows : []).forEach((row) => byKey.set(String(row?.label || "").trim(), row));
   return BUNNY_MINIMIZE_ROW_CONFIG
-    .filter((config) => !BUNNY_MINIMIZE_ROW_HIDDEN_KEYS.has(config.key))
     .map((config) => {
       const row = byKey.get(config.key);
       if (!row) return null;
@@ -2201,7 +2194,6 @@ function renderBunnyRiskKpis(module, rows) {
     bunnyRiskRow(rows, "slotUtilizationPercent"),
   ].filter(Boolean);
   if (!items.length) return "";
-  const hideDeltaBadge = Number(module?.number || 0) === 2;
   return `
     <div class="module-chart-meta module-ai-kpi-row">
       ${items.map((row) => {
@@ -2209,7 +2201,7 @@ function renderBunnyRiskKpis(module, rows) {
         const label = row.unit ? `${row.label} (${row.unit})` : row.label;
         return `
           <div class="module-total-anchor">
-            ${hideDeltaBadge ? "" : `<span class="module-chart-delta ${delta.state}">${escapeHtml(delta.text)}</span>`}
+            <span class="module-chart-delta ${delta.state}">${escapeHtml(delta.text)}</span>
             <span>${escapeHtml(label || "-")}</span>
             <strong>${escapeHtml(bunnyRiskValue(row))}</strong>
           </div>
@@ -2341,32 +2333,37 @@ function renderBunnyRiskVariableRows(module, rows) {
     ["normalRiskPercent", { chartIndex: 50, colorIndex: 2 }],
     ["recoveryModeRiskPercent", { chartIndex: 51, colorIndex: 6 }],
   ]);
-  const chartRows = (Array.isArray(rows) ? rows : []).map((row, index) => ({
-    ...row,
-    rawNumericValue: moduleNumericValue(row.value) ?? 0,
-    chartValue: moduleNumericValue(row.value) || 0,
-    chartIndex: chartMeta.get(String(row?.riskKey || ""))?.chartIndex ?? row.chartIndex ?? index,
-    color: row.color || MODULE_CHART_COLORS[(chartMeta.get(String(row?.riskKey || ""))?.colorIndex ?? index) % MODULE_CHART_COLORS.length],
-  }));
+  const hiddenKeys = Number(module?.number || 0) === 2
+    ? new Set(["recoveryMode", "isRecoveryMode", "isPaused", "globalLossStreak"])
+    : null;
+  const chartRows = (Array.isArray(rows) ? rows : [])
+    .filter((row) => !hiddenKeys || !hiddenKeys.has(String(row?.riskKey || "")))
+    .map((row, index) => ({
+      ...row,
+      rawNumericValue: moduleNumericValue(row.value) ?? 0,
+      chartValue: moduleNumericValue(row.value) || 0,
+      chartIndex: chartMeta.get(String(row?.riskKey || ""))?.chartIndex ?? row.chartIndex ?? index,
+      color: row.color || MODULE_CHART_COLORS[(chartMeta.get(String(row?.riskKey || ""))?.colorIndex ?? index) % MODULE_CHART_COLORS.length],
+    }));
   return chartRows.map((row) => {
     const delta = moduleDeltaInfo(module, row);
     const trend = moduleTrendMeaning(row);
     const label = row.unit ? `${row.label} (${row.unit})` : row.label;
+    const deltaHtml = Number(module?.number || 0) === 2 ? "" : `<span class="module-chart-delta ${delta.state}">${escapeHtml(delta.text)}</span>`;
     return `
       <button class="module-chart-legend-item ${row.attention ? "attention" : ""}" type="button" data-chart-index="${row.chartIndex}" title="${escapeHtml(label)}: ${escapeHtml(bunnyRiskValue(row))}">
         <span class="module-chart-swatch" style="background:${row.color}"></span>
         <div>
           <strong>${escapeHtml(label || "-")}</strong>
-          <small class="module-chart-value-line"><span>Giá trị hiện tại: ${escapeHtml(bunnyRiskValue(row))}</span><span class="module-chart-delta ${delta.state}">${escapeHtml(delta.text)}</span></small>
-          <p>${escapeHtml(row.meaning || "Biến dùng để theo dõi trạng thái Bunny Minimize Losses.")}</p>
-          <p><b>Tăng:</b> ${escapeHtml(trend.up)}</p>
-          <p><b>Giảm:</b> ${escapeHtml(trend.down)}</p>
+          <small class="module-chart-value-line"><span>Gi� tr? hi?n t?i: ${escapeHtml(bunnyRiskValue(row))}</span>${deltaHtml}</small>
+          <p>${escapeHtml(row.meaning || "Bi?n d�ng d? theo d�i tr?ng th�i Bunny Minimize Losses.")}</p>
+          <p><b>Tang:</b> ${escapeHtml(trend.up)}</p>
+          <p><b>Gi?m:</b> ${escapeHtml(trend.down)}</p>
         </div>
       </button>
     `;
   }).join("");
 }
-
 function renderBunnyMinimizeModuleChart(module, rows) {
   const modeRows = bunnyRecoveryModeChartRows(rows);
   const slotRows = [
@@ -5489,4 +5486,5 @@ loadDecision()
   })
   .catch((err) => setStatus(`Lỗi: ${err.message}`));
 startPricePulse();
+
 
