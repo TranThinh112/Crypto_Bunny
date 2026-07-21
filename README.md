@@ -38,7 +38,7 @@ python -m crypto_trader trade --config config.yaml
 
 ## Ket noi OKX demo
 
-Tao API key trong OKX Demo Trading, cap quyen `Read` + `Trade`, khong cap quyen rut tien. Dien key vao `.env`:
+Tạo API key trong OKX Demo Trading, cấp quyền `Read` + `Trade`, khong cap quyen rut tien. Dien key vao `.env`:
 
 ```dotenv
 OKX_API_KEY=
