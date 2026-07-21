@@ -1313,8 +1313,9 @@ function moduleChartRows(rows) {
 function moduleLegendCurrentValue(row) {
   const numeric = moduleNumericValue(row?.value);
   if (numeric !== null) {
+    const key = String(row?.aiDecisionKey || "");
     const unitKey = viLabel(aiDecisionUnit(row));
-    if (unitKey === "lan" || unitKey === "lenh" || unitKey === "quyet dinh") {
+    if (["total_decisions", "no_trade_count", "mini_no_trade_count", "long_count", "short_count"].includes(key) || unitKey === "lan" || unitKey === "lenh" || unitKey === "quyet dinh") {
       return Math.round(numeric).toLocaleString("en-US", { maximumFractionDigits: 0 });
     }
     return formatFixed2(numeric);
@@ -1324,6 +1325,7 @@ function moduleLegendCurrentValue(row) {
 
 function aiDecisionUnit(row) {
   const key = String(row?.aiDecisionKey || "");
+  if (key === "total_decisions") return "Mini + 5.5";
   if (key === "total_decisions") return "lần";
   if (key === "long_count" || key === "short_count") return "lệnh";
   if (key === "no_trade_count" || key === "mini_no_trade_count") return "lần";
@@ -2154,30 +2156,6 @@ function bunnyRiskChartRow(rows, key, chartIndex, colorIndex) {
   };
 }
 
-function bunnyRecoveryModeChartRows(rows) {
-  const current = bunnyRiskRow(rows, "recoveryMode");
-  const currentMode = String(current?.value || "NORMAL").toUpperCase();
-  const modes = [
-    { key: "NORMAL", label: "Normal", chartIndex: 5, colorIndex: 2, value: 1, meaning: "Chế độ thường.", trendUp: "Rộng hơn", trendDown: "Siết lại" },
-    { key: "SOFT_RECOVERY", label: "Soft Recovery", chartIndex: 6, colorIndex: 4, value: 2, meaning: "Chế độ thận trọng vừa phải.", trendUp: "Gần Hard hơn", trendDown: "Gần Normal hơn" },
-    { key: "HARD_RECOVERY", label: "Hard Recovery", chartIndex: 7, colorIndex: 6, value: 3, meaning: "Chế độ siết chặt nhất.", trendUp: "Siết mạnh hơn", trendDown: "Nới lại" },
-  ];
-  return modes.map((mode) => ({
-    riskKey: "recoveryMode",
-    label: mode.label,
-    unit: "trạng thái",
-    meaning: mode.meaning,
-    trendUp: mode.trendUp,
-    trendDown: mode.trendDown,
-    chartIndex: mode.chartIndex,
-    color: MODULE_CHART_COLORS[mode.colorIndex % MODULE_CHART_COLORS.length],
-    rawNumericValue: mode.value,
-    chartValue: mode.value,
-    value: mode.key,
-    attention: currentMode === mode.key,
-  }));
-}
-
 function niceAutoNumberAxisMax(maxValue) {
   const raw = Math.max(0, Number(maxValue || 0));
   if (!Number.isFinite(raw) || raw <= 0) return 4;
@@ -2399,7 +2377,6 @@ function renderBunnyRiskVariableRows(module, rows) {
   }).join("");
 }
 function renderBunnyMinimizeModuleChart(module, rows) {
-  const modeRows = bunnyRecoveryModeChartRows(rows);
   const slotRows = [
     bunnyRiskChartRow(rows, "openPositionsCount", 10, 1),
     bunnyRiskChartRow(rows, "maxConcurrentPositions", 11, 2),
@@ -2435,7 +2412,6 @@ function renderBunnyMinimizeModuleChart(module, rows) {
     <section class="module-chart-panel module-chart-panel-compact module-risk-panel">
       <div class="module-chart-legend module-ai-chart-stack module-risk-chart-stack">
         ${renderBunnyRiskKpis(module, rows)}
-        ${renderBunnyRiskBarSvg(modeRows, "Mode hiện tại", "Bot đang ở Normal / Soft Recovery / Hard Recovery nào", "recovery-mode", "trạng thái")}
         ${renderBunnyRiskBarSvg(slotRows, "Slot vị thế", "OPEN thực tế so với số slot tối đa", "slot", "slot")}
         ${renderBunnyRiskBarSvg(lossRows, "Chuỗi thua & ngưỡng bảo vệ", "Recovery và pause dựa trên loss streak toàn hệ thống", "loss-streak", "lần")}
         ${renderBunnyRiskBarSvg(thresholdRows, "Ngưỡng điểm lọc", "Normal, Soft Recovery và Hard Recovery", "threshold-score", "điểm")}
