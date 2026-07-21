@@ -1744,7 +1744,14 @@ const AI_DECISION_CHART_META = new Map([
 ]);
 
 function aiDecisionLegendRows(rows) {
-  const hiddenKeys = new Set(["total_decisions", "no_trade_count", "bias_warning"]);
+  const hiddenKeys = new Set([
+    "total_decisions",
+    "long_count",
+    "short_count",
+    "mini_no_trade_count",
+    "no_trade_count",
+    "bias_warning",
+  ]);
   return (Array.isArray(rows) ? rows : []).map((row, index) => {
     const numeric = moduleNumericValue(row.value);
     const chartMeta = AI_DECISION_CHART_META.get(String(row?.aiDecisionKey || ""));
@@ -1988,6 +1995,7 @@ function renderAiDecisionBarSvg(rows, title, subtitle, chartId) {
 
 function renderAiDecisionModuleChart(module, rows) {
   const totalDecisionRow = aiDecisionRow(rows, "total_decisions");
+  const miniNoTradeRow = aiDecisionRow(rows, "mini_no_trade_count");
   const noTradeRow = aiDecisionRow(rows, "no_trade_count");
   const biasWarningRow = aiDecisionRow(rows, "bias_warning");
   const longPercent = aiDecisionRow(rows, "long_percent");
@@ -2019,7 +2027,7 @@ function renderAiDecisionModuleChart(module, rows) {
   return `
     <section class="module-chart-panel module-chart-panel-compact module-ai-decision-panel">
       <div class="module-chart-legend module-ai-chart-stack">
-        ${renderAiDecisionKpiGroup(module, [totalKpiRow, noTradeRow])}
+        ${renderAiDecisionKpiGroup(module, [totalKpiRow, noTradeRow, miniNoTradeRow])}
         ${renderAiDecisionBiasCard(module, biasWarningRow)}
         ${renderAiDecisionDonut(entryDirectionRows, "Hướng vào lệnh", "Phân bổ lệnh LONG và SHORT", entryTotal ? String(entryTotal) : "0", "lệnh")}
         ${renderAiDecisionBarSvg(directionPercentRows, "Hướng vào lệnh · Tỷ lệ", "Tỷ lệ LONG/SHORT trên tổng quyết định", "ai-entry-percent")}
@@ -2188,7 +2196,7 @@ function riskYAxisMax(rows, unit) {
 
 function renderBunnyRiskKpis(module, rows) {
   const items = [
-    bunnyRiskRow(rows, "isRecoveryMode"),
+    bunnyRiskRow(rows, "recoveryMode"),
     bunnyRiskRow(rows, "isPaused"),
     bunnyRiskRow(rows, "globalLossStreak"),
     bunnyRiskRow(rows, "slotUtilizationPercent"),
@@ -2197,11 +2205,12 @@ function renderBunnyRiskKpis(module, rows) {
   return `
     <div class="module-chart-meta module-ai-kpi-row">
       ${items.map((row) => {
-        const delta = moduleDeltaInfo(module, row);
         const label = row.unit ? `${row.label} (${row.unit})` : row.label;
+        const tone = bunnyRiskKpiTone(row);
+        const hideDelta = Number(module?.number || 0) === 2 && (String(row?.riskKey || "") === "recoveryMode" || String(row?.riskKey || "") === "isPaused");
         return `
-          <div class="module-total-anchor">
-            <span class="module-chart-delta ${delta.state}">${escapeHtml(delta.text)}</span>
+          <div class="module-total-anchor ${tone ? `state-${tone}` : ""}">
+            ${hideDelta ? "" : `<span class="module-chart-delta flat">${escapeHtml(bunnyRiskValue(row))}</span>`}
             <span>${escapeHtml(label || "-")}</span>
             <strong>${escapeHtml(bunnyRiskValue(row))}</strong>
           </div>
@@ -2313,6 +2322,21 @@ function renderBunnyRiskAxisLabel(row, x, y) {
   `;
 }
 
+function bunnyRiskKpiTone(row) {
+  const key = String(row?.riskKey || "");
+  const value = String(row?.value || "").toUpperCase();
+  if (key === "recoveryMode") {
+    if (value === "HARD_RECOVERY") return "red";
+    if (value === "SOFT_RECOVERY") return "orange";
+    return "green";
+  }
+  if (key === "isPaused") {
+    if (value === "BẬT" || value === "BAT") return "red";
+    return "green";
+  }
+  return "";
+}
+
 function renderBunnyRiskVariableRows(module, rows) {
   const chartMeta = new Map([
     ["openPositionsCount", { chartIndex: 10, colorIndex: 1 }],
@@ -2355,10 +2379,10 @@ function renderBunnyRiskVariableRows(module, rows) {
         <span class="module-chart-swatch" style="background:${row.color}"></span>
         <div>
           <strong>${escapeHtml(label || "-")}</strong>
-          <small class="module-chart-value-line"><span>Gi� tr? hi?n t?i: ${escapeHtml(bunnyRiskValue(row))}</span>${deltaHtml}</small>
-          <p>${escapeHtml(row.meaning || "Bi?n d�ng d? theo d�i tr?ng th�i Bunny Minimize Losses.")}</p>
-          <p><b>Tang:</b> ${escapeHtml(trend.up)}</p>
-          <p><b>Gi?m:</b> ${escapeHtml(trend.down)}</p>
+          <small class="module-chart-value-line"><span>Giá trị hiện tại: ${escapeHtml(bunnyRiskValue(row))}</span>${deltaHtml}</small>
+          <p>${escapeHtml(row.meaning || "Biến dùng để theo dõi trạng thái Bunny Minimize Losses.")}</p>
+          <p><b>Tăng:</b> ${escapeHtml(trend.up)}</p>
+          <p><b>Giảm:</b> ${escapeHtml(trend.down)}</p>
         </div>
       </button>
     `;
