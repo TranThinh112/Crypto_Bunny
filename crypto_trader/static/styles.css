@@ -1721,6 +1721,10 @@ tr:last-child td {
   text-transform: uppercase;
 }
 
+.module-meta-inline-label {
+  white-space: nowrap;
+}
+
 .module-meta strong {
   display: block;
   margin-top: 5px;

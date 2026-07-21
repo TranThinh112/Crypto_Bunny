@@ -1170,7 +1170,7 @@ function renderHealthCriterionDetail(item) {
     <div class="module-meta">
       <div><span>Mục tiêu</span><strong>${escapeHtml(item.target || "✓")}</strong></div>
       <div><span>Bắt buộc</span><strong>${item.required ? "Có" : "Không"}</strong></div>
-      <div><span>Trạng thái</span><strong>${statusLabel(item.status)}</strong></div>
+      <div><span class="module-meta-inline-label">Trạng thái</span><strong>${statusLabel(item.status)}</strong></div>
     </div>
     <div class="module-stat-table health-stat-table">
       <div class="module-stat-head">Biến / bằng chứng</div>
