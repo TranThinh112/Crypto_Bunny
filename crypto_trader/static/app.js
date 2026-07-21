@@ -2074,11 +2074,18 @@ const BUNNY_MINIMIZE_ROW_CONFIG = [
 }));
 
 const BUNNY_MINIMIZE_ROW_KEYS = new Set(BUNNY_MINIMIZE_ROW_CONFIG.map((item) => item.key));
+const BUNNY_MINIMIZE_ROW_HIDDEN_KEYS = new Set([
+  "recoveryMode",
+  "isRecoveryMode",
+  "isPaused",
+  "globalLossStreak",
+]);
 
 function bunnyMinimizeRows(rows) {
   const byKey = new Map();
   (Array.isArray(rows) ? rows : []).forEach((row) => byKey.set(String(row?.label || "").trim(), row));
   return BUNNY_MINIMIZE_ROW_CONFIG
+    .filter((config) => !BUNNY_MINIMIZE_ROW_HIDDEN_KEYS.has(config.key))
     .map((config) => {
       const row = byKey.get(config.key);
       if (!row) return null;
@@ -2194,6 +2201,7 @@ function renderBunnyRiskKpis(module, rows) {
     bunnyRiskRow(rows, "slotUtilizationPercent"),
   ].filter(Boolean);
   if (!items.length) return "";
+  const hideDeltaBadge = Number(module?.number || 0) === 2;
   return `
     <div class="module-chart-meta module-ai-kpi-row">
       ${items.map((row) => {
@@ -2201,7 +2209,7 @@ function renderBunnyRiskKpis(module, rows) {
         const label = row.unit ? `${row.label} (${row.unit})` : row.label;
         return `
           <div class="module-total-anchor">
-            <span class="module-chart-delta ${delta.state}">${escapeHtml(delta.text)}</span>
+            ${hideDeltaBadge ? "" : `<span class="module-chart-delta ${delta.state}">${escapeHtml(delta.text)}</span>`}
             <span>${escapeHtml(label || "-")}</span>
             <strong>${escapeHtml(bunnyRiskValue(row))}</strong>
           </div>
