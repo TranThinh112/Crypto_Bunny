@@ -2383,7 +2383,6 @@ function renderBunnyMinimizeModuleChart(module, rows) {
     bunnyRiskChartRow(rows, "slotUtilizationPercent", 12, 3),
   ];
   const lossRows = [
-    bunnyRiskChartRow(rows, "globalLossStreak", 20, 0),
     bunnyRiskChartRow(rows, "globalLossStreakThreshold", 21, 4),
     bunnyRiskChartRow(rows, "pauseTradingLossStreak", 22, 6),
   ];
