@@ -2051,7 +2051,7 @@ function renderAiDecisionModuleChart(module, rows) {
 }
 
 const BUNNY_MINIMIZE_ROW_CONFIG = [
-  ["recoveryMode", "Recovery mode hiện tại", "trạng thái", "Mode vận hành hiện tại của Bunny Minimize Losses.", "Mode đang siết hơn bình thường.", "Mode đang nới hoặc về normal."],
+  ["recoveryMode", "Recovery mode", "trạng thái", "Mode vận hành hiện tại của Bunny Minimize Losses.", "Mode đang siết hơn bình thường.", "Mode đang nới hoặc về normal."],
   ["isRecoveryMode", "Recovery mode", "trạng thái", "Bật khi chuỗi thua toàn hệ thống chạm ngưỡng recovery.", "Recovery vừa bật hoặc đang tác động mạnh hơn.", "Recovery đã tắt hoặc giảm tác động."],
   ["isPaused", "Tạm dừng giao dịch", "trạng thái", "Bật khi chuỗi thua chạm ngưỡng pause, bot không mở lệnh mới.", "Bot đang bị pause, cần chú ý.", "Bot đã thoát pause hoặc ít bị chặn hơn."],
   ["globalLossStreak", "Chuỗi thua toàn hệ thống", "lần", "Số lệnh LOSS liên tiếp gần nhất trên toàn hệ thống.", "Chuỗi thua tăng, rủi ro hệ thống cao hơn.", "Chuỗi thua giảm hoặc đã reset."],
