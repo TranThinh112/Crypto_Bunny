@@ -444,12 +444,12 @@ class SystemChecklistPayloadTests(unittest.TestCase):
 
         history_payload = payload["market_regime_history"]
         self.assertEqual(history_payload["items"], [aggregate_history])
-        self.assertEqual(history_payload["top_symbols"], ["BTC/USDT:USDT", "SOL/USDT:USDT", "ETH/USDT:USDT"])
-        self.assertEqual(history_payload["detail_symbols"], ["BTC/USDT:USDT", "SOL/USDT:USDT", "ETH/USDT:USDT"])
+        self.assertEqual(history_payload["top_symbols"], ["BTC/USDT:USDT", "XAU/USDT:USDT", "ETH/USDT:USDT"])
+        self.assertEqual(history_payload["detail_symbols"], ["BTC/USDT:USDT", "XAU/USDT:USDT", "ETH/USDT:USDT"])
         self.assertEqual(history_payload["aggregate_limit"], 40)
         self.assertEqual(history_payload["market_symbols"], aggregate_history["indicators"]["market_symbols"])
         self.assertEqual(history_payload["by_symbol"]["BTC/USDT:USDT"]["items"], btc_history)
-        self.assertEqual(history_payload["by_symbol"]["SOL/USDT:USDT"]["items"], [])
+        self.assertEqual(history_payload["by_symbol"]["XAU/USDT:USDT"]["items"], [])
         self.assertEqual(history_payload["by_symbol"]["ETH/USDT:USDT"]["items"], [regime_history[-1]])
         self.assertEqual(history_payload["coverage"]["coverage_count"], 5)
         self.assertEqual(history_payload["coverage"]["target_count"], 40)

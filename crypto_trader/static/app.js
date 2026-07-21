@@ -2925,7 +2925,7 @@ function marketRegimeChartSnapshots(currentSnapshot, history) {
 }
 
 const MARKET_REGIME_VIEW_MARKET = "MARKET";
-const MARKET_REGIME_DEFAULT_TOP_SYMBOLS = ["BTC/USDT:USDT", "SOL/USDT:USDT", "ETH/USDT:USDT"];
+const MARKET_REGIME_DEFAULT_TOP_SYMBOLS = ["BTC/USDT:USDT", "XAU/USDT:USDT", "ETH/USDT:USDT"];
 
 function marketRegimeSnapshotScope(snapshot) {
   const indicators = snapshot?.indicators && typeof snapshot.indicators === "object" ? snapshot.indicators : {};
@@ -2939,6 +2939,7 @@ function marketRegimeSnapshotSymbol(snapshot) {
 
 function marketRegimeSymbolLabel(symbol) {
   if (symbol === MARKET_REGIME_VIEW_MARKET) return "Market";
+  if (String(symbol || "").startsWith("XAU/USDT")) return "XAU/USDT";
   return String(symbol || "").split("/", 1)[0] || String(symbol || "-");
 }
 
