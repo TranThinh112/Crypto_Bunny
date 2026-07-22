@@ -2130,12 +2130,12 @@ function bunnyMinimizeRows(rows) {
 }
 
 function bunnyRiskRow(rows, key) {
-  return (Array.isArray(rows) ? rows : []).find((row) => row.riskKey === key) || null;
+  return (Array.isArray(rows) ? rows : []).find((row) => (row.riskKey || row.label) === key) || null;
 }
 
 function bunnyRiskValue(row) {
   const numeric = moduleNumericValue(row?.value);
-  const key = String(row?.riskKey || "");
+  const key = String(row?.riskKey || row?.label || "");
   const unit = viLabel(row?.unit || "");
   if (key === "recoveryMode") {
     const mode = String(row?.value || "").toUpperCase();
@@ -2216,8 +2216,9 @@ function renderBunnyRiskKpis(module, rows) {
       ${items.map((row) => {
         const label = row.unit ? `${row.label} (${row.unit})` : row.label;
         const tone = bunnyRiskKpiTone(row);
-        const hideDelta = Number(module?.number || 0) === 2 && (String(row?.riskKey || "") === "recoveryMode" || String(row?.riskKey || "") === "isPaused");
-        const isRecoveryMode = String(row?.riskKey || "") === "recoveryMode";
+        const rowKey = String(row?.riskKey || row?.label || "");
+        const hideDelta = Number(module?.number || 0) === 2 && (rowKey === "recoveryMode" || rowKey === "isPaused");
+        const isRecoveryMode = rowKey === "recoveryMode";
         const cyclePnlValue = moduleSignedNumericValue(cyclePnlRow?.value);
         const valueHtml = isRecoveryMode && cyclePnlRow
           ? `<strong class="bunny-recovery-kpi-value"><span>${escapeHtml(bunnyRiskValue(row))}</span><em class="${cyclePnlValue < 0 ? "negative" : "positive"}">${escapeHtml(formatBunnyCyclePnl(cyclePnlRow.value))}</em></strong>`
