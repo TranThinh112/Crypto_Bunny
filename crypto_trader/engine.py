@@ -882,6 +882,19 @@ def _internal_scan_allows_pending(config: dict[str, Any], scan: dict[str, Any] |
     return True, "Mini scan can create pending setups"
 
 
+def _should_notify_initial_mini_block(config: dict[str, Any], scan: dict[str, Any] | None) -> bool:
+    if not _internal_scan_to_pending_enabled(config) or not scan:
+        return False
+    selected_symbols = [str(symbol) for symbol in scan.get("selected_symbols") or [] if str(symbol)]
+    if not selected_symbols:
+        return False
+    if scan.get("fallback") or scan.get("ai_review_error"):
+        return False
+    if str(scan.get("provider") or "") == "openai" and not scan.get("ai_review"):
+        return False
+    return True
+
+
 def _mini_pending_risk_config(config: dict[str, Any]) -> dict[str, Any]:
     return mini_pending_risk_config(config)
 
@@ -1119,6 +1132,8 @@ def _create_pending_from_internal_scan(
     if internal_scan and internal_scan.get("suppress_pending_notification"):
         return result
     if not result["enabled"] or not allowed:
+        if not _should_notify_initial_mini_block(config, internal_scan):
+            return result
         notification = _notify_mini_system_block(
             config,
             stage="Mini -> LC_OKX",

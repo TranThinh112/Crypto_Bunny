@@ -2098,6 +2098,38 @@ tr:last-child td {
   font-size: 12px;
 }
 
+.bunny-recovery-kpi-value {
+  display: flex !important;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.bunny-recovery-kpi-value span {
+  min-width: 0;
+  color: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  text-transform: none;
+  overflow-wrap: anywhere;
+}
+
+.bunny-recovery-kpi-value em {
+  flex: 0 0 auto;
+  color: #32414b;
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+}
+
+.bunny-recovery-kpi-value em.positive {
+  color: var(--green);
+}
+
+.bunny-recovery-kpi-value em.negative {
+  color: var(--red);
+}
+
 .module-chart-swatch {
   width: 12px;
   height: 12px;
@@ -2916,6 +2948,79 @@ tr:last-child td {
 
 .market-pattern-status-dot.inactive {
   background: #bd3f32;
+}
+
+.trade-execution-position-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 12px;
+}
+
+.trade-execution-position {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 14px;
+}
+
+.trade-execution-position header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.trade-execution-position header > div {
+  min-width: 0;
+}
+
+.trade-execution-position header span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.trade-execution-position header strong {
+  display: block;
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+  font-size: 16px;
+}
+
+.trade-execution-closed-list {
+  display: grid;
+  gap: 8px;
+}
+
+.trade-execution-closed-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) 76px minmax(0, 1fr) 90px;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.trade-execution-closed-row span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.trade-execution-closed-row strong,
+.trade-execution-closed-row b {
+  white-space: nowrap;
+}
+
+.trade-execution-closed-row b {
+  text-align: right;
 }
 
 .market-regime-legend-btn {

@@ -311,6 +311,59 @@ class RuntimeSyncTest(TestCase):
         send_message.assert_called_once()
         self.assertIn("-3.16", send_message.call_args.args[1])
 
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_sync_uses_okx_net_pnl_from_history_fees_and_funding(self, send_message) -> None:
+        config = self._config()
+        sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-07-22T00:20:00+00:00",
+                "positions": [
+                    {
+                        "symbol": "XAU/USDT:USDT",
+                        "side": "long",
+                        "contracts": 0.038,
+                        "entry_price": 3999.9,
+                        "unrealized_pnl": 3.77,
+                    },
+                ],
+                "open_orders": [],
+            },
+        )
+
+        result = sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-07-22T00:24:07+00:00",
+                "positions": [],
+                "open_orders": [],
+                "positions_history": [
+                    {
+                        "instId": "XAU-USDT-SWAP",
+                        "direction": "long",
+                        "pnl": "3.77",
+                        "fundingFee": "-0.32452",
+                        "fee": "-0.15387955",
+                        "pnlRatio": "0.5418",
+                        "uTime": "1784679842000",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(result["exchange"]["executions_closed"], 1)
+        row = list_trade_execution_rows(config, statuses=["WIN"])[0]
+        self.assertAlmostEqual(row["pnl"], 3.2916, places=4)
+        self.assertEqual(row["pnl_pct"], 54.18)
+        self.assertEqual(row["exchange_close_source"], "okx_positions_history")
+        send_message.assert_called_once()
+        self.assertIn("+3.29", send_message.call_args.args[1])
+        self.assertNotIn("+3.77", send_message.call_args.args[1])
+
     def test_sync_collapses_duplicate_open_executions_for_same_position(self) -> None:
         config = self._config()
         for row_id in range(2):

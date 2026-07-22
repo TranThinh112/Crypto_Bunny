@@ -117,15 +117,29 @@ def _history_side(row: dict[str, Any]) -> str:
 
 def _history_pnl(row: dict[str, Any]) -> float | None:
     info = _payload_info(row)
-    for key in ("pnl", "realizedPnl", "realisedPnl"):
+    for key in ("realizedPnl", "realisedPnl", "netPnl", "netProfit"):
         value = _float(row.get(key))
         if value is not None:
             return value
-    for key in ("pnl", "realizedPnl", "realisedPnl"):
+    for key in ("realizedPnl", "realisedPnl", "netPnl", "netProfit"):
         value = _float(info.get(key))
         if value is not None:
             return value
-    return None
+    pnl = _float(row.get("pnl"))
+    if pnl is None:
+        pnl = _float(info.get("pnl"))
+    if pnl is None:
+        return None
+    adjustments = 0.0
+    adjusted = False
+    for payload in (row, info):
+        for key in ("fee", "fundingFee", "funding", "settledPnl"):
+            value = _float(payload.get(key))
+            if value is None:
+                continue
+            adjustments += value
+            adjusted = True
+    return round(pnl + adjustments, 6) if adjusted else pnl
 
 
 def _history_pnl_pct(row: dict[str, Any]) -> float | None:
@@ -133,11 +147,13 @@ def _history_pnl_pct(row: dict[str, Any]) -> float | None:
     for key in ("percentage", "pnlRatio"):
         value = _float(row.get(key))
         if value is not None:
-            return value * 100 if abs(value) <= 5 else value
+            pct = value * 100 if abs(value) <= 5 else value
+            return round(pct, 6)
     for key in ("pnlRatio", "uplRatio"):
         value = _float(info.get(key))
         if value is not None:
-            return value * 100 if abs(value) <= 5 else value
+            pct = value * 100 if abs(value) <= 5 else value
+            return round(pct, 6)
     return None
 
 

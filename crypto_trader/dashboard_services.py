@@ -45,6 +45,7 @@ from .storage import (
     list_market_guard_observations,
     list_paper_trades,
     list_replay_history_rows,
+    list_trade_execution_rows,
     list_trade_memory,
     recent_market_scan_memory,
     set_journal_state,
@@ -561,6 +562,153 @@ def _load_sizing_runtime_state(config: dict[str, Any]) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _trade_execution_price(row: dict[str, Any], key: str) -> float | None:
+    value = row.get(key)
+    if value is None and key == "entry_price":
+        value = row.get("entry")
+    number = _safe_float(value, float("nan"))
+    return None if number != number else number
+
+
+def _trade_execution_mark_price(row: dict[str, Any]) -> float | None:
+    direct = _trade_execution_price(row, "last_price") or _trade_execution_price(row, "mark_price")
+    if direct is not None:
+        return direct
+    for key in ("snapshot_json", "payload_json"):
+        raw = row.get(key)
+        if not raw:
+            continue
+        try:
+            payload = json.loads(str(raw))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        position = payload.get("position") if isinstance(payload, dict) else None
+        if not isinstance(position, dict):
+            continue
+        info = position.get("info") if isinstance(position.get("info"), dict) else {}
+        for price_key in ("markPrice", "lastPrice", "last"):
+            number = _safe_float(position.get(price_key), float("nan"))
+            if number == number:
+                return number
+        for price_key in ("markPx", "last"):
+            number = _safe_float(info.get(price_key), float("nan"))
+            if number == number:
+                return number
+    return None
+
+
+def _trade_execution_progress(row: dict[str, Any]) -> float | None:
+    side = str(row.get("side") or "").lower()
+    entry = _trade_execution_price(row, "initial_entry_price") or _trade_execution_price(row, "entry_price")
+    take_profit = _trade_execution_price(row, "take_profit")
+    mark = _trade_execution_mark_price(row)
+    if entry is None or take_profit is None or mark != mark:
+        return None
+    reward = take_profit - entry if side == "long" else entry - take_profit
+    if reward <= 0:
+        return None
+    gained = mark - entry if side == "long" else entry - mark
+    return round(gained / reward * 100, 2)
+
+
+def _trade_execution_r_multiple(row: dict[str, Any]) -> float | None:
+    side = str(row.get("side") or "").lower()
+    entry = _trade_execution_price(row, "initial_entry_price") or _trade_execution_price(row, "entry_price")
+    initial_sl = _trade_execution_price(row, "initial_stop_loss") or _trade_execution_price(row, "stop_loss")
+    mark = _trade_execution_mark_price(row)
+    if entry is None or initial_sl is None or mark != mark:
+        return None
+    risk = entry - initial_sl if side == "long" else initial_sl - entry
+    if risk <= 0:
+        return None
+    gained = mark - entry if side == "long" else entry - mark
+    return round(gained / risk, 4)
+
+
+def _trade_execution_summary(config: dict[str, Any]) -> dict[str, Any]:
+    try:
+        open_rows = list_trade_execution_rows(config, statuses=["OPEN"], limit=20, order="created_asc")
+        closed_rows = list_trade_execution_rows(config, statuses=["WIN", "LOSS", "BREAKEVEN", "CLOSED", "RECONCILED"], limit=20, order="closed_desc")
+        error = None
+    except Exception as exc:
+        open_rows = []
+        closed_rows = []
+        error = str(exc)
+    trailing = config.get("trailing_stop", {}) if isinstance(config.get("trailing_stop"), dict) else {}
+    partial = trailing.get("partial_take_profit", {}) if isinstance(trailing.get("partial_take_profit"), dict) else {}
+    open_items: list[dict[str, Any]] = []
+    for row in open_rows:
+        open_items.append(
+            {
+                "id": row.get("id"),
+                "symbol": row.get("symbol"),
+                "side": row.get("side"),
+                "created_at": row.get("created_at"),
+                "updated_at": row.get("updated_at"),
+                "entry_price": row.get("entry_price"),
+                "initial_entry_price": row.get("initial_entry_price"),
+                "initial_stop_loss": row.get("initial_stop_loss"),
+                "stop_loss": row.get("stop_loss"),
+                "take_profit": row.get("take_profit"),
+                "mark_price": _trade_execution_mark_price(row),
+                "pnl": row.get("pnl"),
+                "pnl_pct": row.get("pnl_pct"),
+                "partial_take_profit_done": bool(row.get("partial_take_profit_done")),
+                "partial_take_profit_at": row.get("partial_take_profit_at"),
+                "partial_take_profit_price": row.get("partial_take_profit_price"),
+                "partial_take_profit_fraction": row.get("partial_take_profit_fraction"),
+                "partial_take_profit_amount": row.get("partial_take_profit_amount"),
+                "partial_take_profit_original_tp": row.get("partial_take_profit_original_tp"),
+                "partial_take_profit_extended_tp": row.get("partial_take_profit_extended_tp"),
+                "trailing_stop_updated_at": row.get("trailing_stop_updated_at"),
+                "trailing_stop_r_multiple": row.get("trailing_stop_r_multiple"),
+                "trailing_stop_atr": row.get("trailing_stop_atr"),
+                "tp_progress_pct": _trade_execution_progress(row),
+                "r_multiple": _trade_execution_r_multiple(row),
+            }
+        )
+    closed_items = [
+        {
+            "id": row.get("id"),
+            "symbol": row.get("symbol"),
+            "side": row.get("side"),
+            "status": row.get("status"),
+            "close_reason": row.get("close_reason"),
+            "closed_at": row.get("closed_at"),
+            "entry_price": row.get("entry_price"),
+            "stop_loss": row.get("stop_loss"),
+            "take_profit": row.get("take_profit"),
+            "pnl": row.get("pnl"),
+            "pnl_pct": row.get("pnl_pct"),
+            "exchange_close_source": row.get("exchange_close_source"),
+            "partial_take_profit_done": bool(row.get("partial_take_profit_done")),
+        }
+        for row in closed_rows
+    ]
+    return {
+        "ok": error is None,
+        "error": error,
+        "open_count": len(open_items),
+        "closed_count": len(closed_items),
+        "partial_done_count": sum(1 for row in open_items if row.get("partial_take_profit_done")),
+        "waiting_partial_count": sum(1 for row in open_items if not row.get("partial_take_profit_done")),
+        "open_items": open_items,
+        "recent_closed": closed_items,
+        "trailing_config": {
+            "enabled": bool(trailing.get("enabled")),
+            "atr_timeframe": trailing.get("atr_timeframe"),
+            "atr_period": trailing.get("atr_period"),
+            "atr_multiplier": trailing.get("atr_multiplier"),
+            "activation_r_multiple": trailing.get("activation_r_multiple"),
+            "partial_enabled": bool(partial.get("enabled")),
+            "partial_trigger_tp_progress": partial.get("trigger_tp_progress"),
+            "partial_close_fraction": partial.get("close_fraction"),
+            "remaining_sl_buffer_r": partial.get("remaining_sl_buffer_r"),
+            "tp_extension_fraction": partial.get("tp_extension_fraction"),
+        },
+    }
+
+
 def _default_automation_status(config: dict[str, Any]) -> dict[str, Any]:
     automation = config.get("automation", {})
     fallback = config.get("paper_trading", {}).get("scan_interval_seconds", 60)
@@ -852,6 +1000,8 @@ def system_modules_payload(
     market_pattern_structure = market_pattern_latest.get("market_structure") if isinstance(market_pattern_latest, dict) else {}
     market_pattern_confluence = market_pattern_latest.get("confluence") if isinstance(market_pattern_latest, dict) else {}
     market_pattern_feature = market_pattern_latest.get("feature_vector") if isinstance(market_pattern_latest, dict) else {}
+    trade_execution = _trade_execution_summary(config)
+    trade_config = trade_execution.get("trailing_config") or {}
 
     definitions = [
         {
@@ -1124,6 +1274,30 @@ def system_modules_payload(
                 _module_row("data_quality_score", market_pattern_feature.get("data_quality_score") if isinstance(market_pattern_feature, dict) else None, "Chất lượng dữ liệu của snapshot mới nhất."),
                 _module_row("updated_at", market_pattern_latest.get("updated_at") or market_pattern_latest.get("created_at"), "Thời điểm snapshot mới nhất."),
                 _module_row("error", market_pattern.get("error") or "-", "Lỗi engine nếu chưa kết nối được Mongo/API.", attention=not market_pattern.get("ok")),
+            ],
+        },
+        {
+            "number": 15,
+            "name": "Trade Execution & Position Management",
+            "purpose": "Thuc thi giao dich, dong bo OKX/Atlas, partial take-profit, trailing SL va gong lai cho vi the dang mo.",
+            "status": "warn" if trade_execution.get("error") else "ok",
+            "update_event": "Sau khi mo lenh, partial close, amend SL/TP hoac runtime sync OKX",
+            "update_schedule": "Theo chu ky runtime/trailing stop",
+            "update_interval": "1 phut",
+            "trade_execution": trade_execution,
+            "stats": [
+                _module_row("open_positions", trade_execution.get("open_count"), "So vi the live dang mo trong trade_executions.", attention=True),
+                _module_row("partial_done", trade_execution.get("partial_done_count"), "So vi the da chot partial take-profit 30%.", attention=True),
+                _module_row("waiting_partial", trade_execution.get("waiting_partial_count"), "So vi the dang cho dat moc partial TP."),
+                _module_row("recent_closed", trade_execution.get("closed_count"), "So lenh dong gan nhat duoc nap vao module."),
+                _module_row("partial_enabled", _module_bool_percent(trade_config.get("partial_enabled")), "100 nghia la co che chot 30% + gong lai dang bat.", attention=True),
+                _module_row("partial_trigger_tp_progress", trade_config.get("partial_trigger_tp_progress"), "Tien do toi TP de chot partial, vi du 0.7 = 70%."),
+                _module_row("partial_close_fraction", trade_config.get("partial_close_fraction"), "Ty le dong lan dau, vi du 0.3 = 30%."),
+                _module_row("remaining_sl_buffer_r", trade_config.get("remaining_sl_buffer_r"), "Sau partial, SL phan con lai duoc keo len entry + buffer R."),
+                _module_row("tp_extension_fraction", trade_config.get("tp_extension_fraction"), "TP moi duoc nay xa them theo reward ban dau de gong lai."),
+                _module_row("atr_timeframe", trade_config.get("atr_timeframe"), "Khung ATR dung cho trailing SL sau partial."),
+                _module_row("atr_multiplier", trade_config.get("atr_multiplier"), "He so ATR de dat khoang cach trailing SL."),
+                _module_row("error", trade_execution.get("error") or "-", "Loi doc trade execution neu co.", attention=bool(trade_execution.get("error"))),
             ],
         },
         {

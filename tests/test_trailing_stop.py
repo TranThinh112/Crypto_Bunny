@@ -15,6 +15,7 @@ class FakeTrailingExchange:
         self.mark = mark
         self.current_sl = current_sl
         self.amend_requests: list[dict] = []
+        self.orders: list[dict] = []
 
     def load_markets(self) -> dict:
         return {}
@@ -59,6 +60,22 @@ class FakeTrailingExchange:
 
     def price_to_precision(self, symbol: str, price: float) -> str:
         return f"{price:.1f}"
+
+    def amount_to_precision(self, symbol: str, amount: float) -> str:
+        return f"{float(amount):.3f}".rstrip("0").rstrip(".")
+
+    def create_order(self, symbol: str, order_type: str, side: str, amount: str, price: float | None, params: dict) -> dict:
+        order = {
+            "symbol": symbol,
+            "type": order_type,
+            "side": side,
+            "amount": amount,
+            "price": price,
+            "params": dict(params),
+            "id": f"order-{len(self.orders) + 1}",
+        }
+        self.orders.append(order)
+        return order
 
 
 class TrailingStopTest(TestCase):
@@ -166,3 +183,48 @@ class TrailingStopTest(TestCase):
         row = list_trade_execution_rows(config, statuses=["OPEN"])[0]
         self.assertEqual(row["initial_stop_loss"], 64407.0)
         self.assertAlmostEqual(row["stop_loss"], 64634.5)
+
+    def test_partial_take_profit_closes_once_protects_sl_and_extends_tp(self) -> None:
+        config = self._config()
+        config["trailing_stop"]["partial_take_profit"] = {
+            "enabled": True,
+            "trigger_tp_progress": 0.7,
+            "close_fraction": 0.3,
+            "remaining_sl_buffer_r": 0.1,
+            "tp_extension_fraction": 0.3,
+        }
+        self._insert_open_execution(config)
+        exchange = FakeTrailingExchange(mark=64882.0, current_sl=64407.0)
+
+        with (
+            patch("crypto_trader.trailing_stop.create_exchange", return_value=exchange),
+            patch("crypto_trader.notifier.send_telegram_message", return_value=True) as send_message,
+        ):
+            result = run_trailing_stop_cycle(config)
+
+        self.assertEqual(result["partial_closed"], 1)
+        send_message.assert_called_once()
+        message = send_message.call_args.args[1]
+        self.assertIn("PARTIAL TP + GỒNG LÃI", message)
+        self.assertIn("BTC/USDT:USDT LONG", message)
+        self.assertIn("Đã chốt 30% vị thế", message)
+        self.assertIn("64407.000000 → 64544.500000", message)
+        self.assertIn("65032.000000 → 65182.000000", message)
+        self.assertFalse(send_message.call_args.kwargs["with_buttons"])
+        self.assertFalse(send_message.call_args.kwargs["replace_previous"])
+        self.assertEqual(exchange.orders[0]["side"], "sell")
+        self.assertEqual(exchange.orders[0]["amount"], "0.3")
+        self.assertTrue(exchange.orders[0]["params"]["reduceOnly"])
+        self.assertEqual(exchange.amend_requests[0]["newSlTriggerPx"], "64544.5")
+        self.assertEqual(exchange.amend_requests[0]["newTpTriggerPx"], "65182.0")
+        row = list_trade_execution_rows(config, statuses=["OPEN"])[0]
+        self.assertTrue(row["partial_take_profit_done"])
+        self.assertAlmostEqual(row["stop_loss"], 64544.5)
+        self.assertAlmostEqual(row["take_profit"], 65182.0)
+
+        exchange_again = FakeTrailingExchange(mark=64920.0, current_sl=64544.5)
+        with patch("crypto_trader.trailing_stop.create_exchange", return_value=exchange_again):
+            second = run_trailing_stop_cycle(config)
+
+        self.assertEqual(second["partial_closed"], 0)
+        self.assertEqual(exchange_again.orders, [])

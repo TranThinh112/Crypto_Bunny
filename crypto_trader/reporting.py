@@ -462,6 +462,37 @@ def format_trade_execution_close_message(config: dict[str, Any], row: dict[str, 
     return "\n".join(lines)
 
 
+def format_partial_take_profit_message(config: dict[str, Any], event: dict[str, Any]) -> str:
+    def fmt(value: Any, digits: int = 6) -> str:
+        number = _float(value)
+        if number is None:
+            return "-"
+        return f"{number:.{digits}f}"
+
+    side = str(event.get("side") or "-").upper()
+    symbol = str(event.get("symbol") or "-")
+    close_pct = (_float(event.get("close_fraction")) or 0.0) * 100
+    lines = [
+        "\U0001f7e2 PARTIAL TP + G\u1ed2NG L\u00c3I",
+        "",
+        f"{symbol} {side}",
+        f"Entry: {fmt(event.get('entry'))}",
+        f"Gi\u00e1 k\u00edch ho\u1ea1t: {fmt(event.get('trigger_price'))}",
+        "",
+        f"\u2705 \u0110\u00e3 ch\u1ed1t {fmt(close_pct, 0)}% v\u1ecb th\u1ebf",
+        f"Kh\u1ed1i l\u01b0\u1ee3ng: {fmt(event.get('partial_amount'))}",
+        "",
+        "\U0001f6e1\ufe0f SL \u0111\u00e3 k\u00e9o d\u01b0\u01a1ng",
+        f"{fmt(event.get('old_stop_loss'))} \u2192 {fmt(event.get('new_stop_loss'))}",
+        "",
+        "\U0001f3af TP \u0111\u00e3 n\u00e2ng",
+        f"{fmt(event.get('old_take_profit'))} \u2192 {fmt(event.get('new_take_profit'))}",
+        "",
+        "Ph\u1ea7n c\u00f2n l\u1ea1i s\u1ebd \u0111\u01b0\u1ee3c g\u1ed3ng t\u1edbi TP m\u1edbi.",
+        "C\u00e1c l\u1ea7n sau bot ch\u1ec9 n\u00e2ng SL, kh\u00f4ng ch\u1ed1t th\u00eam partial.",
+    ]
+    return "\n".join(lines)
+
 def format_pending_event_messages(payload: dict[str, Any] | None) -> list[str]:
     pending = ((payload or {}).get("scan_comparison") or {}).get("pending_orders") or {}
     messages: list[str] = []

@@ -146,6 +146,26 @@ class SizingTest(TestCase):
         self.assertEqual(result["recovery_step"], 0)
         self.assertEqual(result["margin_usdt"], 2.0)
 
+    def test_recovery_cycle_uses_okx_net_pnl_with_fees_and_funding(self) -> None:
+        config = self._config()
+        config["position_sizing"]["target_profit_usdt"] = 10.0
+        row = {
+            "symbol": "XAU/USDT:USDT",
+            "id": "xau-win-1",
+            "side": "long",
+            "pnl": "3.77",
+            "fundingFee": "-0.32452",
+            "fee": "-0.15387955",
+            "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
+        }
+        candidates = [_candidate("ETH/USDT:USDT", "long")]
+
+        with patch("crypto_trader.sizing.create_exchange", return_value=FakeExchange([row])):
+            result = apply_position_sizing(config, candidates)
+
+        self.assertAlmostEqual(result["cycle_pnl_usdt"], 3.2916, places=4)
+        self.assertAlmostEqual(result["last_realized_net_pnl"], 3.2916, places=4)
+
     def test_recovery_cycle_ignores_cycle_loss_and_max_margin_caps(self) -> None:
         config = self._config()
         row = {

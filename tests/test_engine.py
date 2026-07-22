@@ -1119,8 +1119,8 @@ class EngineMiniQueueTest(TestCase):
         self.assertFalse(result["allowed"])
         self.assertEqual(result["reason"], "Mini AI returned NO_TRADE; no setup may continue to LC_OKX")
         self.assertEqual(result["created"], 0)
-        self.assertEqual(len(result["system_notifications"]), 1)
-        self.assertIn("Mini -> LC_OKX", send_telegram_message.call_args.args[1])
+        self.assertEqual(result["system_notifications"], [])
+        send_telegram_message.assert_not_called()
 
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_empty_four_hour_pool_skip_does_not_send_mini_notification(self, send_telegram_message) -> None:

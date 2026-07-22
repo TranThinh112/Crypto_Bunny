@@ -2142,6 +2142,13 @@ function bunnyRiskValue(row) {
   return formatFixed2(numeric);
 }
 
+function formatBunnyCyclePnl(value) {
+  const numeric = moduleNumericValue(value);
+  if (numeric === null) return "-";
+  const fixed = numeric.toFixed(1);
+  return `${Number(fixed) > 0 ? "+" : ""}${Number(fixed).toLocaleString("en-US", { minimumFractionDigits: fixed.includes(".") ? fixed.split(".")[1].length : 0 })}u`;
+}
+
 function bunnyRiskChartRow(rows, key, chartIndex, colorIndex) {
   const row = bunnyRiskRow(rows, key);
   if (!row) return null;
@@ -2183,6 +2190,7 @@ function riskYAxisMax(rows, unit) {
 }
 
 function renderBunnyRiskKpis(module, rows) {
+  const cyclePnlRow = bunnyRiskRow(rows, "recoveryCyclePnlUsdt");
   const items = [
     bunnyRiskRow(rows, "recoveryMode"),
     bunnyRiskRow(rows, "isPaused"),
@@ -2196,11 +2204,15 @@ function renderBunnyRiskKpis(module, rows) {
         const label = row.unit ? `${row.label} (${row.unit})` : row.label;
         const tone = bunnyRiskKpiTone(row);
         const hideDelta = Number(module?.number || 0) === 2 && (String(row?.riskKey || "") === "recoveryMode" || String(row?.riskKey || "") === "isPaused");
+        const isRecoveryMode = String(row?.riskKey || "") === "recoveryMode";
+        const valueHtml = isRecoveryMode && cyclePnlRow
+          ? `<strong class="bunny-recovery-kpi-value"><span>${escapeHtml(bunnyRiskValue(row))}</span><em class="${moduleNumericValue(cyclePnlRow.value) < 0 ? "negative" : "positive"}">${escapeHtml(formatBunnyCyclePnl(cyclePnlRow.value))}</em></strong>`
+          : `<strong>${escapeHtml(bunnyRiskValue(row))}</strong>`;
         return `
           <div class="module-total-anchor ${tone ? `state-${tone}` : ""}">
             ${hideDelta ? "" : `<span class="module-chart-delta flat">${escapeHtml(bunnyRiskValue(row))}</span>`}
             <span>${escapeHtml(label || "-")}</span>
-            <strong>${escapeHtml(bunnyRiskValue(row))}</strong>
+            ${valueHtml}
           </div>
         `;
       }).join("")}
@@ -2702,6 +2714,11 @@ function isMarketRegimeModule(module) {
 function isMarketPatternEngineModule(module) {
   const name = viLabel(module?.name || "");
   return Number(module?.number || 0) === 14 || name.includes("market structure") || name.includes("pattern engine");
+}
+
+function isTradeExecutionModule(module) {
+  const name = viLabel(module?.name || "");
+  return Number(module?.number || 0) === 15 || name.includes("trade execution") || name.includes("position management");
 }
 
 function marketRegimeModuleName(module) {
@@ -3956,8 +3973,143 @@ function renderMarketPatternDetailV2(module, options = {}) {
   }
 }
 
+function tradeExecutionItems(module) {
+  const payload = module?.trade_execution && typeof module.trade_execution === "object" ? module.trade_execution : {};
+  return Array.isArray(payload.open_items) ? payload.open_items : [];
+}
+
+function tradeExecutionConfig(module) {
+  const payload = module?.trade_execution && typeof module.trade_execution === "object" ? module.trade_execution : {};
+  return payload.trailing_config && typeof payload.trailing_config === "object" ? payload.trailing_config : {};
+}
+
+function tradeExecutionClosedItems(module) {
+  const payload = module?.trade_execution && typeof module.trade_execution === "object" ? module.trade_execution : {};
+  return Array.isArray(payload.recent_closed) ? payload.recent_closed : [];
+}
+
+function renderTradeExecutionPositionCard(item) {
+  const symbol = item.symbol || "-";
+  const side = String(item.side || "-").toUpperCase();
+  const partialDone = Boolean(item.partial_take_profit_done);
+  return `
+    <article class="trade-execution-position">
+      <header>
+        <div>
+          <span>${escapeHtml(side)}</span>
+          <strong>${escapeHtml(symbol)}</strong>
+        </div>
+        <span class="market-regime-badge ${partialDone ? "bull" : "unknown"}">${partialDone ? "Partial done" : "Waiting partial"}</span>
+      </header>
+      <div class="market-regime-status-meta">
+        ${renderMarketPatternMetric("Entry", formatMarketRegimeNumber(item.initial_entry_price ?? item.entry_price))}
+        ${renderMarketPatternMetric("SL hiện tại", formatMarketRegimeNumber(item.stop_loss))}
+        ${renderMarketPatternMetric("TP hiện tại", formatMarketRegimeNumber(item.take_profit))}
+        ${renderMarketPatternMetric("Tiến độ TP", item.tp_progress_pct === null || item.tp_progress_pct === undefined ? "-" : `${formatMarketRegimeNumber(item.tp_progress_pct)}%`)}
+        ${renderMarketPatternMetric("R hiện tại", formatMarketRegimeNumber(item.r_multiple))}
+        ${renderMarketPatternMetric("PnL", formatMarketRegimeNumber(item.pnl))}
+      </div>
+    </article>
+  `;
+}
+
+function renderTradeExecutionClosedList(items) {
+  const rows = Array.isArray(items) ? items.slice(0, 8) : [];
+  if (!rows.length) return `<div class="market-regime-empty compact">Chưa có lệnh đóng gần đây.</div>`;
+  return `
+    <div class="trade-execution-closed-list">
+      ${rows.map((item) => `
+        <div class="trade-execution-closed-row">
+          <span>${escapeHtml(item.symbol || "-")}</span>
+          <strong>${escapeHtml(item.status || "-")}</strong>
+          <span>${escapeHtml(item.close_reason || "-")}</span>
+          <b>${escapeHtml(formatMarketRegimeNumber(item.pnl))}</b>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderTradeExecutionDetail(module, options = {}) {
+  if (!refs.systemModuleDetail || !refs.systemModuleOverlay || !module) return;
+  const payload = module.trade_execution && typeof module.trade_execution === "object" ? module.trade_execution : {};
+  const items = tradeExecutionItems(module);
+  const closedItems = tradeExecutionClosedItems(module);
+  const config = tradeExecutionConfig(module);
+  const progressRows = items.map((item, index) => ({
+    label: item.symbol || `#${index + 1}`,
+    shortLabel: String(item.symbol || `#${index + 1}`).split("/", 1)[0],
+    value: Math.max(0, Math.min(100, Number(item.tp_progress_pct) || 0)),
+    unit: "%",
+    color: item.partial_take_profit_done ? MODULE_CHART_COLORS[2] : MODULE_CHART_COLORS[index % MODULE_CHART_COLORS.length],
+  }));
+  const targetRows = items.flatMap((item, index) => ([
+    { label: `${item.symbol || index + 1} Entry`, shortLabel: `${String(item.symbol || index + 1).split("/", 1)[0]} Entry`, value: item.initial_entry_price ?? item.entry_price, unit: "giá", color: MODULE_CHART_COLORS[0] },
+    { label: `${item.symbol || index + 1} SL`, shortLabel: "SL", value: item.stop_loss, unit: "giá", color: MODULE_CHART_COLORS[3] },
+    { label: `${item.symbol || index + 1} TP`, shortLabel: "TP", value: item.take_profit, unit: "giá", color: MODULE_CHART_COLORS[2] },
+  ]));
+  state.selectedSystemModuleKey = systemModuleKey(module);
+  refs.systemModuleOverlay.hidden = false;
+  refs.systemModuleDetail.classList.add("module-detail-chart-scroll", "market-regime-detail");
+  refs.systemModuleDetail.innerHTML = `
+    <button class="module-close" type="button" aria-label="Đóng">×</button>
+    <div class="module-detail-head market-regime-head">
+      <div>
+        <span class="module-number">Module ${escapeHtml(module.number || "15")}</span>
+        <h3 id="systemModuleTitle">Trade Execution & Position Management</h3>
+        <p>Thực thi giao dịch, partial take-profit, trailing SL và gồng lãi cho vị thế đang mở.</p>
+      </div>
+      <div class="module-head-actions">
+        <span class="status-pill ${module.status === "ok" ? "ok" : "warn"}">${moduleStatusLabel(module.status)}</span>
+      </div>
+    </div>
+    <div class="module-chart-scroll market-regime-scroll">
+      ${payload.error ? `<div class="market-regime-load-error" role="alert"><strong>Trade Execution đang lỗi.</strong><span>${escapeHtml(payload.error)}</span></div>` : ""}
+      <section class="market-regime-section">
+        <div class="market-regime-section-head"><div><strong>Tổng quan thực thi</strong><small>Vị thế live, partial TP và trailing SL</small></div></div>
+        <div class="market-pattern-summary-grid">
+          <article class="market-pattern-summary-card"><span>Vị thế mở</span><strong>${escapeHtml(payload.open_count ?? 0)}</strong><small>trade_executions OPEN</small></article>
+          <article class="market-pattern-summary-card"><span>Đã chốt 30%</span><strong>${escapeHtml(payload.partial_done_count ?? 0)}</strong><small>partial_take_profit_done</small></article>
+          <article class="market-pattern-summary-card"><span>Đang chờ partial</span><strong>${escapeHtml(payload.waiting_partial_count ?? 0)}</strong><small>${escapeHtml(formatMarketRegimeNumber((Number(config.partial_trigger_tp_progress) || 0) * 100))}% tới TP</small></article>
+          <article class="market-pattern-summary-card"><span>Trailing</span><strong>${config.enabled ? "Bật" : "Tắt"}</strong><small>ATR ${escapeHtml(config.atr_timeframe || "-")} × ${escapeHtml(config.atr_multiplier ?? "-")}</small></article>
+        </div>
+      </section>
+      <section class="market-regime-section">
+        <div class="market-regime-section-head"><div><strong>Biểu đồ vị thế</strong><small>Tiến độ tới TP và các mốc giá đang quản lý</small></div></div>
+        <div class="market-regime-chart-grid market-pattern-chart-grid">
+          ${renderMarketPatternBarChart({ id: "trade-execution-progress", title: "Tiến độ tới TP", subtitle: "Mốc partial mặc định 70%", axisLabel: "%", rows: progressRows, fixedMax: 100, emptyText: "Chưa có vị thế mở." })}
+          ${renderMarketPatternBarChart({ id: "trade-execution-targets", title: "Entry / SL / TP hiện tại", subtitle: "So sánh các mốc giá đang được OKX/Atlas theo dõi", axisLabel: "Giá", rows: targetRows, emptyText: "Chưa có mốc giá để vẽ." })}
+        </div>
+      </section>
+      ${items.length ? `
+        <section class="market-regime-section">
+          <div class="market-regime-section-head"><div><strong>Vị thế đang mở</strong><small>Partial chỉ chạy một lần, sau đó chỉ trailing SL</small></div></div>
+          <div class="trade-execution-position-grid">
+            ${items.map(renderTradeExecutionPositionCard).join("")}
+          </div>
+        </section>
+      ` : `<div class="market-regime-empty">Chưa có vị thế live đang mở.</div>`}
+      <section class="market-regime-section">
+        <div class="market-regime-section-head"><div><strong>Lệnh đóng gần nhất</strong><small>TP, SL, trailing stop hoặc reconciled close</small></div></div>
+        ${renderTradeExecutionClosedList(closedItems)}
+      </section>
+    </div>
+  `;
+  refs.systemModuleDetail.querySelector(".module-close")?.addEventListener("click", closeSystemModuleDetail);
+  if (Number.isFinite(Number(options.scrollTop))) {
+    const scrollNode = refs.systemModuleDetail.querySelector(".module-chart-scroll");
+    if (scrollNode) requestAnimationFrame(() => {
+      scrollNode.scrollTop = Number(options.scrollTop);
+    });
+  }
+}
+
 function renderModuleDetail(module, options = {}) {
   if (!refs.systemModuleDetail || !refs.systemModuleOverlay || !module) return;
+  if (isTradeExecutionModule(module)) {
+    renderTradeExecutionDetail(module, options);
+    return;
+  }
   if (isMarketPatternEngineModule(module)) {
     renderMarketPatternDetailV2(module, options);
     return;
@@ -4061,6 +4213,7 @@ function groupedSystemModules(modules) {
     "Strategy Versioning": { event: "Ghi nhớ sau mỗi quyết định", schedule: "6h sáng", interval: "6h sáng" },
     "Replay Engine": { event: "Ghi nhớ sau mỗi quyết định", schedule: "6h sáng", interval: "6h sáng" },
     "Bunny Minimize Losses": { event: "Ngay khi lệnh đóng", schedule: "5 phút/lần để đối chiếu", interval: "5 phút" },
+    "Trade Execution & Position Management": { event: "Sau khi mở lệnh, partial close hoặc amend SL/TP", schedule: "Theo runtime/trailing stop", interval: "1 phút" },
     "Bunny Health Monitor": { event: "Ngay khi lệnh đóng", schedule: "5 phút/lần để đối chiếu", interval: "5 phút" },
     "Recovery Chain Manager": { event: "Ngay khi lệnh đóng", schedule: "5 phút/lần để đối chiếu", interval: "5 phút" },
     "Prompt Caching": { event: "Ghi token mỗi request", schedule: "Tổng hợp 6h sáng", interval: "6h sáng" },
@@ -4121,6 +4274,7 @@ function groupedSystemModules(modules) {
       schedule_text: "5 phút/lần để đối chiếu",
       items: [
         realModules.get("Bunny Minimize Losses"),
+        realModules.get("Trade Execution & Position Management"),
         realModules.get("Bunny Health Monitor"),
         realModules.get("Recovery Chain Manager"),
       ].filter(Boolean),

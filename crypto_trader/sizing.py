@@ -74,15 +74,29 @@ def _position_side(row: dict[str, Any]) -> str:
 
 def _position_pnl(row: dict[str, Any]) -> float | None:
     info = row.get("info", {}) if isinstance(row.get("info"), dict) else {}
-    for key in ("pnl", "realizedPnl", "realisedPnl", "upl"):
+    for key in ("realizedPnl", "realisedPnl", "netPnl", "netProfit"):
         value = _float(row.get(key))
         if value is not None:
             return value
-    for key in ("pnl", "realizedPnl", "realisedPnl"):
+    for key in ("realizedPnl", "realisedPnl", "netPnl", "netProfit"):
         value = _float(info.get(key))
         if value is not None:
             return value
-    return None
+    pnl = _float(row.get("pnl"))
+    if pnl is None:
+        pnl = _float(info.get("pnl") or row.get("upl"))
+    if pnl is None:
+        return None
+    adjustments = 0.0
+    adjusted = False
+    for payload in (row, info):
+        for key in ("fee", "fundingFee", "funding", "settledPnl"):
+            value = _float(payload.get(key))
+            if value is None:
+                continue
+            adjustments += value
+            adjusted = True
+    return round(pnl + adjustments, 6) if adjusted else pnl
 
 
 def _position_time(row: dict[str, Any]) -> datetime | None:
@@ -487,6 +501,7 @@ def apply_position_sizing(config: dict[str, Any], candidates: list[TradeCandidat
         "recovery_guard_active": guard_active,
         "blocked_candidates": blocked_candidates,
         "cycle_pnl_usdt": round(float(state.get("cycle_pnl_usdt") or 0), 6),
+        "last_realized_net_pnl": state.get("last_realized_net_pnl"),
         "target_profit_usdt": round(float(settings["target_profit_usdt"]), 4),
         "recovery_step": int(state.get("recovery_step") or 0),
         "max_recovery_step": int(settings["max_recovery_step"]),

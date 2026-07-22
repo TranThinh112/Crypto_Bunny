@@ -9,6 +9,7 @@ from .storage import get_journal_state, list_trade_execution_rows, set_journal_s
 
 
 STATE_KEY = "trailing_stop:last_status"
+PARTIAL_TP_NOTIFICATION_PREFIX = "trailing_stop:partial_tp_notified"
 
 
 def _float(value: Any) -> float | None:
@@ -22,6 +23,7 @@ def _float(value: Any) -> float | None:
 
 def _settings(config: dict[str, Any]) -> dict[str, Any]:
     raw = config.get("trailing_stop", {})
+    partial = raw.get("partial_take_profit", {}) if isinstance(raw.get("partial_take_profit"), dict) else {}
     return {
         "enabled": bool(raw.get("enabled", False)),
         "activation_r_multiple": float(raw.get("activation_r_multiple", 1.0) or 1.0),
@@ -32,6 +34,13 @@ def _settings(config: dict[str, Any]) -> dict[str, Any]:
         "trigger_price_type": str(raw.get("trigger_price_type", "last") or "last"),
         "algo_order_types": list(raw.get("algo_order_types") or ["oco", "conditional", "trigger"]),
         "symbol_overrides": raw.get("symbol_overrides", {}) if isinstance(raw.get("symbol_overrides"), dict) else {},
+        "partial_take_profit": {
+            "enabled": bool(partial.get("enabled", False)),
+            "trigger_tp_progress": min(0.95, max(0.05, float(partial.get("trigger_tp_progress", 0.7) or 0.7))),
+            "close_fraction": min(0.9, max(0.01, float(partial.get("close_fraction", 0.3) or 0.3))),
+            "remaining_sl_buffer_r": max(0.0, float(partial.get("remaining_sl_buffer_r", 0.1) or 0.1)),
+            "tp_extension_fraction": max(0.0, float(partial.get("tp_extension_fraction", partial.get("close_fraction", 0.3)) or 0.0)),
+        },
     }
 
 
@@ -199,7 +208,22 @@ def _price_to_precision(exchange: Any, symbol: str, price: float) -> str:
     return f"{price:.8f}".rstrip("0").rstrip(".")
 
 
-def _amend_stop_loss(exchange: Any, symbol: str, algo: dict[str, Any], new_sl: float, settings: dict[str, Any]) -> dict[str, Any]:
+def _amount_to_precision(exchange: Any, symbol: str, amount: float) -> str:
+    method = getattr(exchange, "amount_to_precision", None)
+    if callable(method):
+        return str(method(symbol, amount))
+    return f"{amount:.8f}".rstrip("0").rstrip(".")
+
+
+def _amend_stop_loss(
+    exchange: Any,
+    symbol: str,
+    algo: dict[str, Any],
+    new_sl: float,
+    settings: dict[str, Any],
+    *,
+    new_tp: float | None = None,
+) -> dict[str, Any]:
     market = exchange.market(symbol) if hasattr(exchange, "market") else {"id": symbol}
     inst_id = str(market.get("id") or symbol)
     algo_id = str(algo.get("algoId") or algo.get("id") or "").strip()
@@ -212,6 +236,14 @@ def _amend_stop_loss(exchange: Any, symbol: str, algo: dict[str, Any], new_sl: f
         "newSlOrdPx": "-1",
         "newSlTriggerPxType": str(settings.get("trigger_price_type") or "last"),
     }
+    if new_tp is not None:
+        payload.update(
+            {
+                "newTpTriggerPx": _price_to_precision(exchange, symbol, new_tp),
+                "newTpOrdPx": "-1",
+                "newTpTriggerPxType": str(settings.get("trigger_price_type") or "last"),
+            }
+        )
     amend = getattr(exchange, "privatePostTradeAmendAlgos", None)
     if not callable(amend):
         amend = getattr(exchange, "private_post_trade_amend_algos", None)
@@ -219,6 +251,31 @@ def _amend_stop_loss(exchange: Any, symbol: str, algo: dict[str, Any], new_sl: f
         raise RuntimeError("OKX amend algo endpoint is unavailable")
     response = amend(payload)
     return {"request": payload, "response": response}
+
+
+def _close_partial_position(
+    exchange: Any,
+    config: dict[str, Any],
+    *,
+    symbol: str,
+    side: str,
+    amount: float,
+) -> dict[str, Any]:
+    close_side = "sell" if side == "long" else "buy"
+    params: dict[str, Any] = {
+        "tdMode": config.get("exchange", {}).get("td_mode", "isolated"),
+        "reduceOnly": True,
+    }
+    if config.get("exchange", {}).get("position_side_mode") == "long_short":
+        params["posSide"] = side
+    return exchange.create_order(
+        symbol,
+        "market",
+        close_side,
+        _amount_to_precision(exchange, symbol, amount),
+        None,
+        params,
+    )
 
 
 def _evaluate_new_stop(
@@ -232,6 +289,52 @@ def _evaluate_new_stop(
     distance = atr * float(settings["atr_multiplier"])
     return mark - distance if side == "long" else mark + distance
 
+
+def _tp_progress(side: str, entry: float, take_profit: float | None, mark: float) -> float | None:
+    if take_profit is None:
+        return None
+    reward = take_profit - entry if side == "long" else entry - take_profit
+    if reward <= 0:
+        return None
+    gained = mark - entry if side == "long" else entry - mark
+    return gained / reward
+
+
+def _positive_stop_from_entry(side: str, entry: float, initial_r: float, buffer_r: float) -> float:
+    buffer = max(0.0, initial_r * buffer_r)
+    return entry + buffer if side == "long" else entry - buffer
+
+
+def _extended_take_profit(side: str, entry: float, take_profit: float | None, extension_fraction: float) -> float | None:
+    if take_profit is None:
+        return None
+    reward = take_profit - entry if side == "long" else entry - take_profit
+    if reward <= 0:
+        return None
+    extension = reward * max(0.0, extension_fraction)
+    return take_profit + extension if side == "long" else take_profit - extension
+
+
+def _partial_tp_notification_key(execution_id: Any, partial_at: str) -> str:
+    return f"{PARTIAL_TP_NOTIFICATION_PREFIX}:{execution_id}:{partial_at}"
+
+def _notify_partial_take_profit(config: dict[str, Any], event: dict[str, Any]) -> bool:
+    key = _partial_tp_notification_key(event.get("trade_execution_id"), str(event.get("partial_at") or ""))
+    if get_journal_state(config, key):
+        return False
+    from .notifier import send_telegram_message
+    from .reporting import format_partial_take_profit_message
+
+    sent = send_telegram_message(
+        config,
+        format_partial_take_profit_message(config, event),
+        with_buttons=False,
+        replace_previous=False,
+        allow_during_startup_quiet=True,
+    )
+    if sent:
+        set_journal_state(config, key, json.dumps({"sent_at": datetime.now(timezone.utc).isoformat()}, ensure_ascii=False))
+    return bool(sent)
 
 def _status_row(symbol: str, side: str, status: str, reason: str, **extra: Any) -> dict[str, Any]:
     return {
@@ -261,6 +364,7 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
     executions = list_trade_execution_rows(config, statuses=["OPEN"], limit=1000)
     rows: list[dict[str, Any]] = []
     amended = 0
+    partial_closed = 0
     skipped = 0
     for position in positions:
         if _position_contracts(position) <= 0:
@@ -299,7 +403,112 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
             skipped += 1
             rows.append(_status_row(symbol, side, "skipped", "invalid initial R", entry=initial_entry, initial_stop_loss=initial_sl))
             continue
-        if r_multiple < float(settings["activation_r_multiple"]):
+        take_profit = _float(execution.get("take_profit"))
+        partial_settings = settings.get("partial_take_profit", {}) if isinstance(settings.get("partial_take_profit"), dict) else {}
+        partial_enabled = bool(partial_settings.get("enabled"))
+        partial_done = bool(execution.get("partial_take_profit_done"))
+        if partial_enabled and not partial_done:
+            progress = _tp_progress(side, initial_entry, take_profit, mark)
+            trigger_progress = float(partial_settings.get("trigger_tp_progress", 0.7) or 0.7)
+            if progress is None:
+                skipped += 1
+                rows.append(_status_row(symbol, side, "skipped", "TP progress unavailable", take_profit=take_profit))
+                continue
+            if progress < trigger_progress:
+                skipped += 1
+                rows.append(
+                    _status_row(
+                        symbol,
+                        side,
+                        "waiting",
+                        "partial TP trigger not reached",
+                        tp_progress=round(progress, 4),
+                        trigger_tp_progress=trigger_progress,
+                    )
+                )
+                continue
+            if algo is None:
+                skipped += 1
+                rows.append(_status_row(symbol, side, "skipped", "OKX SL/TP algo order not found"))
+                continue
+            contracts = _position_contracts(position)
+            partial_amount = contracts * float(partial_settings.get("close_fraction", 0.3) or 0.3)
+            if partial_amount <= 0 or partial_amount >= contracts:
+                skipped += 1
+                rows.append(_status_row(symbol, side, "skipped", "invalid partial close amount", contracts=contracts, partial_amount=partial_amount))
+                continue
+            positive_sl = _positive_stop_from_entry(
+                side,
+                initial_entry,
+                initial_r,
+                float(partial_settings.get("remaining_sl_buffer_r", 0.1) or 0.1),
+            )
+            new_sl = max(current_sl, positive_sl) if side == "long" else min(current_sl, positive_sl)
+            new_tp = _extended_take_profit(
+                side,
+                initial_entry,
+                take_profit,
+                float(partial_settings.get("tp_extension_fraction", partial_settings.get("close_fraction", 0.3)) or 0.0),
+            )
+            partial_order = _close_partial_position(exchange, config, symbol=symbol, side=side, amount=partial_amount)
+            amend_result = _amend_stop_loss(exchange, symbol, algo, new_sl, settings, new_tp=new_tp)
+            updated_at = datetime.now(timezone.utc).isoformat()
+            update_trade_execution(
+                config,
+                int(execution["id"]),
+                {
+                    "updated_at": updated_at,
+                    "stop_loss": new_sl,
+                    "take_profit": new_tp if new_tp is not None else take_profit,
+                    "initial_entry_price": initial_entry,
+                    "initial_stop_loss": initial_sl,
+                    "partial_take_profit_done": True,
+                    "partial_take_profit_at": updated_at,
+                    "partial_take_profit_fraction": float(partial_settings.get("close_fraction", 0.3) or 0.3),
+                    "partial_take_profit_amount": partial_amount,
+                    "partial_take_profit_price": mark,
+                    "partial_take_profit_order_json": json.dumps(partial_order, ensure_ascii=False),
+                    "partial_take_profit_original_tp": take_profit,
+                    "partial_take_profit_extended_tp": new_tp,
+                    "trailing_stop_updated_at": updated_at,
+                    "trailing_stop_r_multiple": round(r_multiple, 6),
+                },
+            )
+            notification_sent = _notify_partial_take_profit(
+                config,
+                {
+                    "trade_execution_id": execution.get("id"),
+                    "symbol": symbol,
+                    "side": side,
+                    "entry": initial_entry,
+                    "trigger_price": mark,
+                    "close_fraction": float(partial_settings.get("close_fraction", 0.3) or 0.3),
+                    "partial_amount": partial_amount,
+                    "old_stop_loss": current_sl,
+                    "new_stop_loss": new_sl,
+                    "old_take_profit": take_profit,
+                    "new_take_profit": new_tp,
+                    "partial_at": updated_at,
+                },
+            )
+            partial_closed += 1
+            amended += 1
+            rows.append(
+                _status_row(
+                    symbol,
+                    side,
+                    "partial_closed",
+                    "partial TP closed; SL protected and TP extended",
+                    tp_progress=round(progress, 4),
+                    partial_amount=round(partial_amount, 8),
+                    new_stop_loss=round(new_sl, 8),
+                    new_take_profit=None if new_tp is None else round(new_tp, 8),
+                    notification_sent=notification_sent,
+                    amend_request=amend_result.get("request"),
+                )
+            )
+            continue
+        if not partial_done and r_multiple < float(settings["activation_r_multiple"]):
             skipped += 1
             rows.append(
                 _status_row(
@@ -381,6 +590,7 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
         "created_at": now,
         "positions_seen": len(positions),
         "amended": amended,
+        "partial_closed": partial_closed,
         "skipped": skipped,
         "items": rows[-20:],
         "previous_status": get_journal_state(config, STATE_KEY),

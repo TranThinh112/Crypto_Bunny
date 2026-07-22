@@ -32,12 +32,19 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "trailing_stop": {
         "enabled": True,
         "activation_r_multiple": 1.0,
-        "atr_timeframe": "1m",
+        "atr_timeframe": "5m",
         "atr_period": 14,
-        "atr_multiplier": 1.5,
+        "atr_multiplier": 3.0,
         "min_improvement_price": 0.0,
         "trigger_price_type": "last",
         "algo_order_types": ["oco", "conditional", "trigger"],
+        "partial_take_profit": {
+            "enabled": True,
+            "trigger_tp_progress": 0.7,
+            "close_fraction": 0.3,
+            "remaining_sl_buffer_r": 0.1,
+            "tp_extension_fraction": 0.3,
+        },
         "symbol_overrides": {
             "BTC": {
                 "min_improvement_points": 2000,
