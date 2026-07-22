@@ -266,6 +266,11 @@ def _matching_position_history(
 ) -> dict[str, Any] | None:
     key = _execution_key(row)
     created_at = _parse_time(row.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc)
+    target_time = (
+        _parse_time(row.get("closed_at"))
+        or _parse_time(row.get("updated_at"))
+        or snapshot_time
+    )
     best: tuple[float, dict[str, Any]] | None = None
     for history in positions_history:
         if not isinstance(history, dict):
@@ -277,7 +282,7 @@ def _matching_position_history(
             continue
         if closed_at < created_at - timedelta(minutes=5):
             continue
-        distance = abs((snapshot_time - closed_at).total_seconds())
+        distance = abs((target_time - closed_at).total_seconds())
         if best is None or distance < best[0]:
             best = (distance, history)
     return best[1] if best else None

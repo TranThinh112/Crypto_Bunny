@@ -2956,6 +2956,35 @@ tr:last-child td {
   gap: 12px;
 }
 
+.trade-execution-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.trade-execution-tab {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--muted);
+  padding: 7px 12px;
+  font-size: 12px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.trade-execution-tab.active {
+  border-color: rgba(31, 138, 91, 0.5);
+  background: rgba(31, 138, 91, 0.1);
+  color: var(--ink);
+}
+
+.trade-execution-tab-panel[hidden] {
+  display: none;
+}
+
 .trade-execution-position {
   display: grid;
   gap: 12px;

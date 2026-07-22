@@ -364,6 +364,59 @@ class RuntimeSyncTest(TestCase):
         self.assertIn("+3.29", send_message.call_args.args[1])
         self.assertNotIn("+3.77", send_message.call_args.args[1])
 
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_sync_matches_position_history_near_trade_closed_at_not_sync_time(self, send_message) -> None:
+        config = self._config()
+        insert_trade_execution_row(
+            config,
+            {
+                "created_at": "2026-07-22T00:20:00+00:00",
+                "updated_at": "2026-07-22T00:24:07+00:00",
+                "closed_at": "2026-07-22T00:24:07+00:00",
+                "symbol": "XAU/USDT:USDT",
+                "side": "LONG",
+                "status": "WIN",
+                "pnl": 5.6071,
+                "close_reason": "take_profit",
+            },
+        )
+
+        result = sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-07-22T01:05:00+00:00",
+                "positions": [],
+                "open_orders": [],
+                "positions_history": [
+                    {
+                        "instId": "XAU-USDT-SWAP",
+                        "direction": "long",
+                        "pnl": "6.00",
+                        "fundingFee": "-0.20",
+                        "fee": "-0.1929",
+                        "pnlRatio": "0.9",
+                        "uTime": "1784682240000",
+                    },
+                    {
+                        "instId": "XAU-USDT-SWAP",
+                        "direction": "long",
+                        "pnl": "3.77",
+                        "fundingFee": "-0.32452",
+                        "fee": "-0.15387955",
+                        "pnlRatio": "0.5418",
+                        "uTime": "1784679842000",
+                    },
+                ],
+            },
+        )
+
+        self.assertEqual(result["exchange"]["corrected_close_pnls"], 1)
+        row = list_trade_execution_rows(config, statuses=["WIN"])[0]
+        self.assertAlmostEqual(row["pnl"], 3.2916, places=4)
+        self.assertEqual(row["pnl_pct"], 54.18)
+
     def test_sync_collapses_duplicate_open_executions_for_same_position(self) -> None:
         config = self._config()
         for row_id in range(2):

@@ -1034,8 +1034,8 @@ function positionSideClass(side) {
 }
 
 function renderPaperState(paperState, paperResult = null) {
-  const stateĐạta = paperState || {};
-  state.paperIntervalSeconds = Number(stateĐạta.scan_interval_seconds || state.paperIntervalSeconds || 600);
+  const stateData = paperState || {};
+  state.paperIntervalSeconds = Number(stateData.scan_interval_seconds || state.paperIntervalSeconds || 600);
   if (refs.paperNextScan) {
     refs.paperNextScan.textContent = `Server auto: ${intervalLabel(state.paperIntervalSeconds)}`;
   }
@@ -1291,6 +1291,19 @@ function moduleNumericValue(value) {
   if (!/^-?\d+(\.\d+)?(%|x)?$/i.test(normalized)) return null;
   const parsed = Number(normalized.replace(/(%|x)$/i, ""));
   return Number.isFinite(parsed) ? Math.abs(parsed) : null;
+}
+
+function moduleSignedNumericValue(value) {
+  if (typeof value === "boolean") return value ? 1 : 0;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const text = String(value ?? "").trim();
+  if (!text || text === "-") return null;
+  const normalized = text.replace(/,/g, "");
+  if (normalized.toLowerCase() === "true") return 1;
+  if (normalized.toLowerCase() === "false") return 0;
+  if (!/^-?\d+(\.\d+)?(%|x)?$/i.test(normalized)) return null;
+  const parsed = Number(normalized.replace(/(%|x)$/i, ""));
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function moduleChartRows(rows) {
@@ -2143,7 +2156,7 @@ function bunnyRiskValue(row) {
 }
 
 function formatBunnyCyclePnl(value) {
-  const numeric = moduleNumericValue(value);
+  const numeric = moduleSignedNumericValue(value);
   if (numeric === null) return "-";
   const fixed = numeric.toFixed(1);
   return `${Number(fixed) > 0 ? "+" : ""}${Number(fixed).toLocaleString("en-US", { minimumFractionDigits: fixed.includes(".") ? fixed.split(".")[1].length : 0 })}u`;
@@ -2205,8 +2218,9 @@ function renderBunnyRiskKpis(module, rows) {
         const tone = bunnyRiskKpiTone(row);
         const hideDelta = Number(module?.number || 0) === 2 && (String(row?.riskKey || "") === "recoveryMode" || String(row?.riskKey || "") === "isPaused");
         const isRecoveryMode = String(row?.riskKey || "") === "recoveryMode";
+        const cyclePnlValue = moduleSignedNumericValue(cyclePnlRow?.value);
         const valueHtml = isRecoveryMode && cyclePnlRow
-          ? `<strong class="bunny-recovery-kpi-value"><span>${escapeHtml(bunnyRiskValue(row))}</span><em class="${moduleNumericValue(cyclePnlRow.value) < 0 ? "negative" : "positive"}">${escapeHtml(formatBunnyCyclePnl(cyclePnlRow.value))}</em></strong>`
+          ? `<strong class="bunny-recovery-kpi-value"><span>${escapeHtml(bunnyRiskValue(row))}</span><em class="${cyclePnlValue < 0 ? "negative" : "positive"}">${escapeHtml(formatBunnyCyclePnl(cyclePnlRow.value))}</em></strong>`
           : `<strong>${escapeHtml(bunnyRiskValue(row))}</strong>`;
         return `
           <div class="module-total-anchor ${tone ? `state-${tone}` : ""}">
@@ -4030,24 +4044,80 @@ function renderTradeExecutionClosedList(items) {
   `;
 }
 
+
+function tradeExecutionPositionTabLabel(item, index) {
+  const symbol = String(item?.symbol || `#${index + 1}`);
+  const side = String(item?.side || "").toUpperCase();
+  return side ? `${symbol} ${side}` : symbol;
+}
+
+function tradeExecutionChartRowsForItem(item) {
+  const progress = Math.max(0, Math.min(100, Number(item?.tp_progress_pct) || 0));
+  return {
+    progressRows: [
+      { label: item?.symbol || "Vi the", shortLabel: "TP", value: progress, unit: "%", color: item?.partial_take_profit_done ? MODULE_CHART_COLORS[2] : MODULE_CHART_COLORS[0] },
+      { label: "Moc partial", shortLabel: "70%", value: 70, unit: "%", color: MODULE_CHART_COLORS[4] },
+    ],
+    targetRows: [
+      { label: "Entry", shortLabel: "Entry", value: item?.initial_entry_price ?? item?.entry_price, unit: "gia", color: MODULE_CHART_COLORS[0] },
+      { label: "SL", shortLabel: "SL", value: item?.stop_loss, unit: "gia", color: MODULE_CHART_COLORS[3] },
+      { label: "TP", shortLabel: "TP", value: item?.take_profit, unit: "gia", color: MODULE_CHART_COLORS[2] },
+      { label: "Mark", shortLabel: "Mark", value: item?.current_price ?? item?.mark_price, unit: "gia", color: MODULE_CHART_COLORS[1] },
+    ],
+  };
+}
+
+function renderTradeExecutionPositionTabs(items) {
+  const rows = Array.isArray(items) ? items : [];
+  if (!rows.length) return `<div class="market-regime-empty compact">Chua co vi the mo de ve chart.</div>`;
+  return `
+    <div class="trade-execution-tabs" role="tablist">
+      ${rows.map((item, index) => `
+        <button class="trade-execution-tab ${index === 0 ? "active" : ""}" type="button" role="tab" aria-selected="${index === 0 ? "true" : "false"}" data-trade-tab="${index}">
+          ${escapeHtml(tradeExecutionPositionTabLabel(item, index))}
+        </button>
+      `).join("")}
+    </div>
+    ${rows.map((item, index) => {
+      const chartRows = tradeExecutionChartRowsForItem(item);
+      return `
+        <div class="trade-execution-tab-panel" role="tabpanel" data-trade-panel="${index}" ${index === 0 ? "" : "hidden"}>
+          <div class="market-regime-chart-grid market-pattern-chart-grid">
+            ${renderMarketPatternBarChart({ id: `trade-execution-progress-${index}`, title: "Tien do toi TP", subtitle: "Moc partial mac dinh 70%", axisLabel: "%", rows: chartRows.progressRows, fixedMax: 100, emptyText: "Chua co vi the mo." })}
+            ${renderMarketPatternBarChart({ id: `trade-execution-targets-${index}`, title: "Entry / SL / TP / Mark", subtitle: "Cac moc gia dang duoc OKX/Atlas theo doi", axisLabel: "Gia", rows: chartRows.targetRows, emptyText: "Chua co moc gia de ve." })}
+          </div>
+        </div>
+      `;
+    }).join("")}
+  `;
+}
+
+function bindTradeExecutionTabs() {
+  const root = refs.systemModuleDetail;
+  if (!root) return;
+  const tabs = Array.from(root.querySelectorAll("[data-trade-tab]"));
+  const panels = Array.from(root.querySelectorAll("[data-trade-panel]"));
+  tabs.forEach((tab) => {
+    tab.addEventListener("click", () => {
+      const selected = tab.getAttribute("data-trade-tab");
+      tabs.forEach((node) => {
+        const active = node.getAttribute("data-trade-tab") === selected;
+        node.classList.toggle("active", active);
+        node.setAttribute("aria-selected", active ? "true" : "false");
+      });
+      panels.forEach((panel) => {
+        panel.hidden = panel.getAttribute("data-trade-panel") !== selected;
+      });
+    });
+  });
+}
+
 function renderTradeExecutionDetail(module, options = {}) {
   if (!refs.systemModuleDetail || !refs.systemModuleOverlay || !module) return;
   const payload = module.trade_execution && typeof module.trade_execution === "object" ? module.trade_execution : {};
   const items = tradeExecutionItems(module);
   const closedItems = tradeExecutionClosedItems(module);
   const config = tradeExecutionConfig(module);
-  const progressRows = items.map((item, index) => ({
-    label: item.symbol || `#${index + 1}`,
-    shortLabel: String(item.symbol || `#${index + 1}`).split("/", 1)[0],
-    value: Math.max(0, Math.min(100, Number(item.tp_progress_pct) || 0)),
-    unit: "%",
-    color: item.partial_take_profit_done ? MODULE_CHART_COLORS[2] : MODULE_CHART_COLORS[index % MODULE_CHART_COLORS.length],
-  }));
-  const targetRows = items.flatMap((item, index) => ([
-    { label: `${item.symbol || index + 1} Entry`, shortLabel: `${String(item.symbol || index + 1).split("/", 1)[0]} Entry`, value: item.initial_entry_price ?? item.entry_price, unit: "giá", color: MODULE_CHART_COLORS[0] },
-    { label: `${item.symbol || index + 1} SL`, shortLabel: "SL", value: item.stop_loss, unit: "giá", color: MODULE_CHART_COLORS[3] },
-    { label: `${item.symbol || index + 1} TP`, shortLabel: "TP", value: item.take_profit, unit: "giá", color: MODULE_CHART_COLORS[2] },
-  ]));
   state.selectedSystemModuleKey = systemModuleKey(module);
   refs.systemModuleOverlay.hidden = false;
   refs.systemModuleDetail.classList.add("module-detail-chart-scroll", "market-regime-detail");
@@ -4076,10 +4146,7 @@ function renderTradeExecutionDetail(module, options = {}) {
       </section>
       <section class="market-regime-section">
         <div class="market-regime-section-head"><div><strong>Biểu đồ vị thế</strong><small>Tiến độ tới TP và các mốc giá đang quản lý</small></div></div>
-        <div class="market-regime-chart-grid market-pattern-chart-grid">
-          ${renderMarketPatternBarChart({ id: "trade-execution-progress", title: "Tiến độ tới TP", subtitle: "Mốc partial mặc định 70%", axisLabel: "%", rows: progressRows, fixedMax: 100, emptyText: "Chưa có vị thế mở." })}
-          ${renderMarketPatternBarChart({ id: "trade-execution-targets", title: "Entry / SL / TP hiện tại", subtitle: "So sánh các mốc giá đang được OKX/Atlas theo dõi", axisLabel: "Giá", rows: targetRows, emptyText: "Chưa có mốc giá để vẽ." })}
-        </div>
+        ${renderTradeExecutionPositionTabs(items)}
       </section>
       ${items.length ? `
         <section class="market-regime-section">
@@ -4096,6 +4163,7 @@ function renderTradeExecutionDetail(module, options = {}) {
     </div>
   `;
   refs.systemModuleDetail.querySelector(".module-close")?.addEventListener("click", closeSystemModuleDetail);
+  bindTradeExecutionTabs();
   if (Number.isFinite(Number(options.scrollTop))) {
     const scrollNode = refs.systemModuleDetail.querySelector(".module-chart-scroll");
     if (scrollNode) requestAnimationFrame(() => {
