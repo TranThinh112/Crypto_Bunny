@@ -1278,8 +1278,8 @@ def system_modules_payload(
         },
         {
             "number": 15,
-            "name": "Trade Execution & Position Management",
-            "purpose": "Thuc thi giao dich, dong bo OKX/Atlas, partial take-profit, trailing SL va gong lai cho vi the dang mo.",
+            "name": "Thực thi giao dịch & Quản lý vị thế",
+            "purpose": "Thực thi giao dịch, đồng bộ OKX/Atlas, partial take-profit, trailing SL và gồng lãi cho vị thế đang mở.",
             "status": "warn" if trade_execution.get("error") else "ok",
             "update_event": "Sau khi mo lenh, partial close, amend SL/TP hoac runtime sync OKX",
             "update_schedule": "Theo chu ky runtime/trailing stop",

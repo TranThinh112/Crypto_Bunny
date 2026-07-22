@@ -4056,7 +4056,7 @@ function renderTradeExecutionDetail(module, options = {}) {
     <div class="module-detail-head market-regime-head">
       <div>
         <span class="module-number">Module ${escapeHtml(module.number || "15")}</span>
-        <h3 id="systemModuleTitle">Trade Execution & Position Management</h3>
+      <h3 id="systemModuleTitle">Thực thi giao dịch & Quản lý vị thế</h3>
         <p>Thực thi giao dịch, partial take-profit, trailing SL và gồng lãi cho vị thế đang mở.</p>
       </div>
       <div class="module-head-actions">
@@ -4214,6 +4214,7 @@ function groupedSystemModules(modules) {
     "Replay Engine": { event: "Ghi nhớ sau mỗi quyết định", schedule: "6h sáng", interval: "6h sáng" },
     "Bunny Minimize Losses": { event: "Ngay khi lệnh đóng", schedule: "5 phút/lần để đối chiếu", interval: "5 phút" },
     "Trade Execution & Position Management": { event: "Sau khi mở lệnh, partial close hoặc amend SL/TP", schedule: "Theo runtime/trailing stop", interval: "1 phút" },
+    "Thực thi giao dịch & Quản lý vị thế": { event: "Sau khi mở lệnh, partial close hoặc amend SL/TP", schedule: "Theo runtime/trailing stop", interval: "1 phút" },
     "Bunny Health Monitor": { event: "Ngay khi lệnh đóng", schedule: "5 phút/lần để đối chiếu", interval: "5 phút" },
     "Recovery Chain Manager": { event: "Ngay khi lệnh đóng", schedule: "5 phút/lần để đối chiếu", interval: "5 phút" },
     "Prompt Caching": { event: "Ghi token mỗi request", schedule: "Tổng hợp 6h sáng", interval: "6h sáng" },
@@ -4274,7 +4275,7 @@ function groupedSystemModules(modules) {
       schedule_text: "5 phút/lần để đối chiếu",
       items: [
         realModules.get("Bunny Minimize Losses"),
-        realModules.get("Trade Execution & Position Management"),
+        realModules.get("Thực thi giao dịch & Quản lý vị thế") || realModules.get("Trade Execution & Position Management"),
         realModules.get("Bunny Health Monitor"),
         realModules.get("Recovery Chain Manager"),
       ].filter(Boolean),
