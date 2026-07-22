@@ -566,8 +566,8 @@ function positionAsCandidate(position, fallback = null) {
   const stopLossPct = nullableNumber(fallback?.stop_loss_pct) ?? 50;
   const priceTakeProfitPct = nullableNumber(fallback?.price_take_profit_pct) ?? takeProfitPct / Math.max(leverage, 1);
   const priceStopLossPct = nullableNumber(fallback?.price_stop_loss_pct) ?? stopLossPct / Math.max(leverage, 1);
-  let takeProfit = nullableNumber(fallback?.take_profit);
-  let stopLoss = nullableNumber(fallback?.stop_loss);
+  let takeProfit = nullableNumber(position.take_profit) ?? nullableNumber(fallback?.take_profit);
+  let stopLoss = nullableNumber(position.stop_loss) ?? nullableNumber(fallback?.stop_loss);
 
   if (entry !== null) {
     if (takeProfit === null) {
@@ -602,7 +602,7 @@ function positionAsCandidate(position, fallback = null) {
     leverage,
     margin_usdt: margin,
     order_usdt: notional,
-    unrealized_pnl: nullableNumber(position.unrealized_pnl),
+    unrealized_pnl: nullableNumber(position.unrealized_pnl) ?? nullableNumber(position.pnl_usdt),
     margin_mode: position.margin_mode,
     is_open_position: true,
     reasons: fallback?.reasons || [],
