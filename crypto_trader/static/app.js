@@ -4645,7 +4645,7 @@ function groupedSystemModules(modules) {
     realModules.get("Position Sizing"),
     realModules.get("Configuration Impact"),
   ].filter(Boolean);
-  const tradeExecutionModule = realModules.get("Thá»±c thi giao dá»‹ch & Quáº£n lÃ½ vá»‹ tháº¿") || realModules.get("Trade Execution & Position Management");
+  const tradeExecutionModule = realModules.get("Thá»±c thi giao dá»‹ch & Quáº£n lÃ½ vá»‹ tháº¿") || realModules.get("Trade Execution & Position Management") || positionManagementBaseModule(sourceRows);
   const positionManagementModules = positionManagementSections(tradeExecutionModule);
   return [
     {
