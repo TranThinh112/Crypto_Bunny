@@ -61,9 +61,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "database": {
         "backend": "atlas",
         "atlas": {
-            "uri": "mongodb+srv://ttthinh2005_db_user:abc123456789@cluster0.58iwirh.mongodb.net/Bunny_Runtime?appName=Cluster0",
-            "database": "Bunny_Runtime",
-            "ai_database": "AI_Bunny",
+            "uri": "mongodb+srv://ttthinh2005_db_user:abc123456789@cluster0.58iwirh.mongodb.net/Bunny_Runtime_Live?appName=Cluster0",
+            "database": "Bunny_Runtime_Live",
+            "ai_database": "AI_Bunny_Live",
             "uri_env": "MONGODB_URI",
             "database_env": "MONGODB_DATABASE",
             "ai_database_env": "MONGODB_AI_DATABASE",
@@ -373,7 +373,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "pending_orders_keep_days": 5,
         "internal_pending_orders_keep_days": 5,
         "trade_candidates_keep_days": 2,
-        "ai_trade_decisions_keep_days": 180,
+        "ai_trade_decisions_keep_days": 365,
         "trade_executions_keep_days": 365,
         "prompt_versions_keep_days": 365,
         "strategy_versions_keep_days": 365,

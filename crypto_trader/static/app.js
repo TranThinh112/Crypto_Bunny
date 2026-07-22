@@ -2096,6 +2096,7 @@ const BUNNY_MINIMIZE_ROW_CONFIG = [
   ["weeklyTargetMaxTrades", "Mục tiêu lệnh tối đa", "lệnh", "Số lệnh đóng tối đa mục tiêu trong 7 ngày.", "Mục tiêu tối đa tăng.", "Mục tiêu tối đa giảm."],
   ["adaptiveScoreStep", "Bước chỉnh rule score", "điểm", "Mức tăng/giảm rule score khi adaptive threshold điều chỉnh.", "Adaptive chỉnh rule score mạnh hơn.", "Adaptive chỉnh rule score nhẹ hơn."],
   ["adaptiveConfidenceStep", "Bước chỉnh confidence", "điểm", "Mức tăng/giảm GPT confidence khi adaptive threshold điều chỉnh.", "Adaptive chỉnh confidence mạnh hơn.", "Adaptive chỉnh confidence nhẹ hơn."],
+  ["recoveryCyclePnlUsdt", "Cycle PnL", "u", "Cycle PnL dung de phan biet Soft Recovery va Normal.", "Cycle PnL tang.", "Cycle PnL giam."],
 ].map(([key, label, unit, meaning, up, down], index) => ({
   key,
   label,
@@ -2379,7 +2380,7 @@ function renderBunnyRiskVariableRows(module, rows) {
   const chartMeta = new Map(BUNNY_RISK_CHART_ORDER);
   const chartOrder = new Map(BUNNY_RISK_CHART_ORDER.map(([key], index) => [key, index]));
   const hiddenKeys = Number(module?.number || 0) === 2
-    ? new Set(["recoveryMode", "isRecoveryMode", "isPaused", "globalLossStreak"])
+    ? new Set(["recoveryMode", "isRecoveryMode", "isPaused", "globalLossStreak", "recoveryCyclePnlUsdt"])
     : null;
   const chartRows = (Array.isArray(rows) ? rows : [])
     .filter((row) => !hiddenKeys || !hiddenKeys.has(String(row?.riskKey || "")))
@@ -4113,6 +4114,68 @@ function bindTradeExecutionTabs() {
   });
 }
 
+function renderTradeExecutionClosedList(items) {
+  const rows = Array.isArray(items) ? items.slice(0, 8) : [];
+  if (!rows.length) return `<div class="market-regime-empty compact">Chưa có lệnh đóng gần đây.</div>`;
+  return `
+    <div class="trade-execution-closed-list">
+      ${rows.map((item) => {
+        const reason = String(item.close_reason || "-");
+        const reasonTone = reason === "take_profit" ? "take-profit" : reason === "stop_loss" ? "stop-loss" : "neutral";
+        return `
+          <div class="trade-execution-closed-row ${reasonTone}">
+            <span>${escapeHtml(item.symbol || "-")}</span>
+            <strong>${escapeHtml(item.status || "-")}</strong>
+            <span class="trade-execution-close-reason ${reasonTone}">${escapeHtml(reason)}</span>
+            <b>${escapeHtml(formatMarketRegimeNumber(item.pnl))}</b>
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function tradeExecutionChartRowsForItem(item) {
+  const progress = Math.max(0, Math.min(100, Number(item?.tp_progress_pct) || 0));
+  return {
+    progressRows: [
+      { label: item?.symbol || "Vị thế", shortLabel: "TP", value: progress, unit: "%", color: item?.partial_take_profit_done ? MODULE_CHART_COLORS[2] : MODULE_CHART_COLORS[0] },
+      { label: "Mốc partial", shortLabel: "70%", value: 70, unit: "%", color: MODULE_CHART_COLORS[4] },
+    ],
+    targetRows: [
+      { label: "Entry", shortLabel: "Entry", value: item?.initial_entry_price ?? item?.entry_price, unit: "giá", color: MODULE_CHART_COLORS[0] },
+      { label: "SL", shortLabel: "SL", value: item?.stop_loss, unit: "giá", color: MODULE_CHART_COLORS[3] },
+      { label: "TP", shortLabel: "TP", value: item?.take_profit, unit: "giá", color: MODULE_CHART_COLORS[2] },
+      { label: "Mark", shortLabel: "Mark", value: item?.current_price ?? item?.mark_price, unit: "giá", color: MODULE_CHART_COLORS[1] },
+    ],
+  };
+}
+
+function renderTradeExecutionPositionTabs(items) {
+  const rows = Array.isArray(items) ? items : [];
+  if (!rows.length) return `<div class="market-regime-empty compact">Chưa có vị thế mở để vẽ chart.</div>`;
+  return `
+    <div class="trade-execution-tabs" role="tablist">
+      ${rows.map((item, index) => `
+        <button class="trade-execution-tab ${index === 0 ? "active" : ""}" type="button" role="tab" aria-selected="${index === 0 ? "true" : "false"}" data-trade-tab="${index}">
+          ${escapeHtml(tradeExecutionPositionTabLabel(item, index))}
+        </button>
+      `).join("")}
+    </div>
+    ${rows.map((item, index) => {
+      const chartRows = tradeExecutionChartRowsForItem(item);
+      return `
+        <div class="trade-execution-tab-panel" role="tabpanel" data-trade-panel="${index}" ${index === 0 ? "" : "hidden"}>
+          <div class="market-regime-chart-grid market-pattern-chart-grid">
+            ${renderMarketPatternBarChart({ id: `trade-execution-progress-${index}`, title: "Tiến độ tới TP", subtitle: "Mốc partial mặc định 70%", axisLabel: "%", rows: chartRows.progressRows, fixedMax: 100, emptyText: "Chưa có vị thế mở." })}
+            ${renderMarketPatternBarChart({ id: `trade-execution-targets-${index}`, title: "Entry / SL / TP / Mark", subtitle: "Các mốc giá đang được OKX/Atlas theo dõi", axisLabel: "Giá", rows: chartRows.targetRows, emptyText: "Chưa có mốc giá để vẽ." })}
+          </div>
+        </div>
+      `;
+    }).join("")}
+  `;
+}
+
 function renderTradeExecutionDetail(module, options = {}) {
   if (!refs.systemModuleDetail || !refs.systemModuleOverlay || !module) return;
   const payload = module.trade_execution && typeof module.trade_execution === "object" ? module.trade_execution : {};
@@ -4253,7 +4316,7 @@ function renderModuleDetail(module, options = {}) {
         if (cachedModule) renderModuleDetail(cachedModule, { scrollTop, activeChartIndex });
         updateSystemModuleAiRangeUi(nextRange, { loading: true });
       }
-      loadSystemChecklist("", { aiRange: nextRange, forceRefresh: true })
+      loadSystemChecklist("", { aiRange: nextRange })
         .catch((err) => setStatus(`Lỗi tải phạm vi AI: ${err.message}`))
         .finally(() => updateSystemModuleAiRangeUi(state.systemModuleAiRange, { loading: false }));
     });

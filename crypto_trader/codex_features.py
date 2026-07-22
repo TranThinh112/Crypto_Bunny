@@ -1832,7 +1832,7 @@ def ai_call_decision_stats(
     items = (
         _ai_call_history_in_period(config, created_from=created_from, created_to=created_to)
         if created_from and created_to
-        else recent_ai_call_history(config, limit=5000)
+        else recent_ai_call_history(config, limit=500)
     )
     mini_calls = [item for item in items if _is_mini_review_call(item)]
     okx_calls = [item for item in items if _is_gpt55_review_call(item)]
@@ -1884,7 +1884,7 @@ def ai_trade_decision_stats(
             limit=5000,
         )
     else:
-        rows = list_ai_trade_decision_stat_rows(config, limit=5000)
+        rows = list_ai_trade_decision_stat_rows(config, limit=500)
     raw_total = len(rows)
     long_rows = [row for row in rows if row.get("decision") == "ENTER_LONG"]
     short_rows = [row for row in rows if row.get("decision") == "ENTER_SHORT"]

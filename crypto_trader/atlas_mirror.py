@@ -147,7 +147,20 @@ def _atlas_identity(config: dict[str, Any], *, database_name: str | None = None)
         raise RuntimeError(f"Missing MongoDB Atlas connection string env: {uri_env}")
     if not resolved_database_name:
         raise RuntimeError(f"Missing MongoDB Atlas database name env: {database_env}")
+    _validate_live_database_name(config, resolved_database_name)
     return uri, resolved_database_name
+
+def _validate_live_database_name(config: dict[str, Any], database_name: str) -> None:
+    if _test_mode_enabled(config):
+        return
+    if str(config.get("mode") or "").strip().lower() != "live":
+        return
+    if str(database_name or "").strip().endswith("_Live"):
+        return
+    raise RuntimeError(
+        "Refusing to use non-live MongoDB database in live mode: "
+        f"{database_name}. Set MONGODB_DATABASE/MONGODB_AI_DATABASE or config database names to *_Live."
+    )
 
 
 def atlas_database_name(config: dict[str, Any], *, role: str = "runtime") -> str:

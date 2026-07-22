@@ -957,14 +957,14 @@ def insert_ai_trade_decision_row(config: dict[str, Any], row: dict[str, Any]) ->
     _ensure_mongo_write_allowed(config)
     payload = dict(row)
     payload["id"] = _mongo_next_id(config, "ai_trade_decisions")
-    payload.setdefault("expires_at", _retention_expiry_days(_retention_days(config, "ai_trade_decisions_keep_days", 180)))
+    payload.setdefault("expires_at", _retention_expiry_days(_retention_days(config, "ai_trade_decisions_keep_days", 365)))
     _mongo_upsert_by_pk(config, "ai_trade_decisions", "id", payload)
     _best_effort_retryable_storage_side_effect(config, lambda: prune_ai_trade_decisions(config))
     return int(payload["id"])
 
 
 def prune_ai_trade_decisions(config: dict[str, Any], *, keep_days: float | None = None) -> dict[str, int]:
-    keep_days = float(keep_days or _retention_days(config, "ai_trade_decisions_keep_days", 180))
+    keep_days = float(keep_days or _retention_days(config, "ai_trade_decisions_keep_days", 365))
     return _prune_by_created_at(config, "ai_trade_decisions", keep_days=keep_days)
 def list_ai_trade_decision_rows(
     config: dict[str, Any],

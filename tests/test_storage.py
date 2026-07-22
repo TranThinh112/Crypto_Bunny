@@ -25,6 +25,8 @@ from crypto_trader.storage import (
     save_market_scan_observations,
     save_pending_order,
     storage_stats,
+    insert_ai_trade_decision_row,
+    prune_ai_trade_decisions,
 )
 
 
@@ -55,6 +57,30 @@ class StorageTest(TestCase):
                 "paper_trades_keep_days": 365,
             },
         }
+
+    def test_ai_trade_decision_retention_defaults_to_365_days(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._config(tmpdir)
+            config["storage_retention"].pop("ai_trade_decisions_keep_days", None)
+
+            with patch("crypto_trader.storage._mongo_next_id", return_value=1), \
+                patch("crypto_trader.storage._mongo_upsert_by_pk") as upsert, \
+                patch("crypto_trader.storage.prune_ai_trade_decisions"), \
+                patch("crypto_trader.storage._ensure_mongo_write_allowed"):
+                insert_ai_trade_decision_row(config, {"created_at": datetime.now(timezone.utc).isoformat()})
+
+            payload = upsert.call_args.args[3]
+            expires_at = payload["expires_at"]
+            if isinstance(expires_at, str):
+                expires_at = datetime.fromisoformat(expires_at)
+            ttl_days = (expires_at - datetime.now(timezone.utc)).days
+            self.assertGreaterEqual(ttl_days, 364)
+            self.assertLessEqual(ttl_days, 365)
+
+            with patch("crypto_trader.storage._prune_by_created_at", return_value={"deleted": 0}) as prune, \
+                patch("crypto_trader.storage._ensure_mongo_write_allowed"):
+                prune_ai_trade_decisions(config)
+            self.assertEqual(prune.call_args.kwargs["keep_days"], 365.0)
 
     def _candidate(self) -> TradeCandidate:
         huge_patterns = [{"name": f"pattern-{index}", "raw": "x" * 1000} for index in range(50)]

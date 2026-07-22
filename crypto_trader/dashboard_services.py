@@ -80,6 +80,18 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _json_payload(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _safe_int(value: Any, default: int = 0) -> int:
     try:
         return int(value)
@@ -625,6 +637,35 @@ def _trade_execution_r_multiple(row: dict[str, Any]) -> float | None:
     return round(gained / risk, 4)
 
 
+def _trade_execution_closed_pnl(row: dict[str, Any]) -> float | None:
+    history = _json_payload(row.get("exchange_close_history_json"))
+    info = history.get("info") if isinstance(history.get("info"), dict) else {}
+    for key in ("realizedPnl", "realisedPnl", "netPnl", "netProfit"):
+        value = _safe_float(history.get(key), float("nan"))
+        if value == value:
+            return round(value, 6)
+    for key in ("realizedPnl", "realisedPnl", "netPnl", "netProfit"):
+        value = _safe_float(info.get(key), float("nan"))
+        if value == value:
+            return round(value, 6)
+    pnl = _safe_float(history.get("pnl"), float("nan"))
+    if pnl != pnl:
+        pnl = _safe_float(info.get("pnl"), float("nan"))
+    if pnl != pnl:
+        value = _safe_float(row.get("pnl"), float("nan"))
+        return None if value != value else value
+    adjustments = 0.0
+    adjusted = False
+    for payload in (history, info):
+        for key in ("fee", "fundingFee", "funding", "settledPnl"):
+            value = _safe_float(payload.get(key), float("nan"))
+            if value != value:
+                continue
+            adjustments += value
+            adjusted = True
+    return round(pnl + adjustments, 6) if adjusted else pnl
+
+
 def _trade_execution_summary(config: dict[str, Any]) -> dict[str, Any]:
     try:
         open_rows = list_trade_execution_rows(config, statuses=["OPEN"], limit=20, order="created_asc")
@@ -678,7 +719,7 @@ def _trade_execution_summary(config: dict[str, Any]) -> dict[str, Any]:
             "entry_price": row.get("entry_price"),
             "stop_loss": row.get("stop_loss"),
             "take_profit": row.get("take_profit"),
-            "pnl": row.get("pnl"),
+            "pnl": _trade_execution_closed_pnl(row),
             "pnl_pct": row.get("pnl_pct"),
             "exchange_close_source": row.get("exchange_close_source"),
             "partial_take_profit_done": bool(row.get("partial_take_profit_done")),

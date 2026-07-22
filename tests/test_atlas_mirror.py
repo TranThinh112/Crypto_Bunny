@@ -53,6 +53,19 @@ class AtlasMirrorTest(TestCase):
         self.assertEqual(atlas_mirror.atlas_env_requirements(config), ("MONGODB_URI", "MONGODB_DATABASE"))
         self.assertEqual(atlas_mirror.atlas_ai_database_env(config), "MONGODB_AI_DATABASE")
 
+    def test_default_database_names_are_live(self) -> None:
+        config = deepcopy(DEFAULT_CONFIG)
+
+        self.assertEqual(config["database"]["atlas"]["database"], "Bunny_Runtime_Live")
+        self.assertEqual(config["database"]["atlas"]["ai_database"], "AI_Bunny_Live")
+
+    def test_live_mode_rejects_non_live_database_name(self) -> None:
+        config = deepcopy(DEFAULT_CONFIG)
+        config["mode"] = "live"
+
+        with self.assertRaisesRegex(RuntimeError, "non-live MongoDB database"):
+            atlas_mirror._validate_live_database_name(config, "Bunny_Runtime")
+
     def test_collection_database_routing_separates_ai_from_runtime(self) -> None:
         config = self._config()
 
