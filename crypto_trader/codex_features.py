@@ -1893,7 +1893,7 @@ def ai_trade_decision_stats(
             _ai_call_history_in_period(config, created_from=created_from, created_to=created_to)
         )
     else:
-        ai_call_stats = _load_ai_call_status_stats(config)
+        ai_call_stats = _ai_call_status_stats_from_history(recent_ai_call_history(config, limit=500))
     no_trade_count = max(0, int(ai_call_stats.get("no_trade_count") or 0))
     total = len(long_rows) + len(short_rows) + no_trade_count
 
