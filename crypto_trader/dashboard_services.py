@@ -677,6 +677,10 @@ def _trade_execution_summary(config: dict[str, Any]) -> dict[str, Any]:
         error = str(exc)
     trailing = config.get("trailing_stop", {}) if isinstance(config.get("trailing_stop"), dict) else {}
     partial = trailing.get("partial_take_profit", {}) if isinstance(trailing.get("partial_take_profit"), dict) else {}
+    try:
+        pending_total = count_pending_orders(config)
+    except Exception:
+        pending_total = None
     open_items: list[dict[str, Any]] = []
     for row in open_rows:
         open_items.append(
@@ -731,6 +735,7 @@ def _trade_execution_summary(config: dict[str, Any]) -> dict[str, Any]:
         "error": error,
         "open_count": len(open_items),
         "closed_count": len(closed_items),
+        "pending_total": pending_total,
         "partial_done_count": sum(1 for row in open_items if row.get("partial_take_profit_done")),
         "waiting_partial_count": sum(1 for row in open_items if not row.get("partial_take_profit_done")),
         "open_items": open_items,
@@ -912,6 +917,14 @@ def system_modules_payload(
             **ai_call_stats,
             "tradeSignalRecords": trade_decision_stats.get("totalRecords"),
         }
+        decision_stats["aiOtherCount"] = max(
+            0,
+            _safe_int(decision_stats.get("totalDecisions"))
+            - _safe_int(decision_stats.get("miniNoTradeCount"))
+            - _safe_int(decision_stats.get("longCount"))
+            - _safe_int(decision_stats.get("shortCount"))
+            - _safe_int(decision_stats.get("noTradeCount")),
+        )
         decision_stats["periodStart"] = decision_created_from
         decision_stats["periodEnd"] = decision_created_to
         decision_stats["range"] = ai_range_key
@@ -1063,6 +1076,7 @@ def system_modules_payload(
                 _module_row("long_count", decision_stats.get("longCount"), "Số quyết định vào lệnh LONG đã được ghi nhận."),
                 _module_row("short_count", decision_stats.get("shortCount"), "Số quyết định vào lệnh SHORT đã được ghi nhận."),
                 _module_row("no_trade_count", decision_stats.get("noTradeCount"), "Số lần GPT-5.5 từ chối vào lệnh hoặc xóa setup; không tính các lần giữ setup."),
+                _module_row("ai_other_count", decision_stats.get("aiOtherCount"), "Số lần AI đã gọi nhưng không thuộc Mini không chọn, Mini chọn LONG/SHORT hoặc 5.5 từ chối/xóa setup."),
                 _module_row("long_percent", decision_stats.get("longPercent"), "Tỷ trọng LONG trên tổng quyết định AI thực.", attention=True),
                 _module_row("short_percent", decision_stats.get("shortPercent"), "Tỷ trọng SHORT trên tổng quyết định AI thực.", attention=True),
                 _module_row("winrate_long", decision_stats.get("winrateLong"), "Tỷ lệ thắng của nhóm quyết định LONG đã đóng lệnh.", attention=True),
@@ -1678,6 +1692,14 @@ def _system_checklist_with_ai_range(
             "range": ai_range_key,
             "rangeLabel": ai_range_label,
         }
+        decision_stats["aiOtherCount"] = max(
+            0,
+            _safe_int(decision_stats.get("totalDecisions"))
+            - _safe_int(decision_stats.get("miniNoTradeCount"))
+            - _safe_int(decision_stats.get("longCount"))
+            - _safe_int(decision_stats.get("shortCount"))
+            - _safe_int(decision_stats.get("noTradeCount")),
+        )
     except Exception as exc:
         decision_stats = {"error": str(exc), "range": ai_range_key, "rangeLabel": ai_range_label}
 
@@ -1699,6 +1721,7 @@ def _system_checklist_with_ai_range(
         _module_row("long_count", decision_stats.get("longCount"), "Số quyết định vào lệnh LONG đã được ghi nhận."),
         _module_row("short_count", decision_stats.get("shortCount"), "Số quyết định vào lệnh SHORT đã được ghi nhận."),
         _module_row("no_trade_count", decision_stats.get("noTradeCount"), "Số lần GPT-5.5 từ chối vào lệnh hoặc xóa setup; không tính các lần giữ setup."),
+        _module_row("ai_other_count", decision_stats.get("aiOtherCount"), "Số lần AI đã gọi nhưng không thuộc Mini không chọn, Mini chọn LONG/SHORT hoặc 5.5 từ chối/xóa setup."),
         _module_row("long_percent", decision_stats.get("longPercent"), "Tỷ trọng LONG trên tổng quyết định AI thực.", attention=True),
         _module_row("short_percent", decision_stats.get("shortPercent"), "Tỷ trọng SHORT trên tổng quyết định AI thực.", attention=True),
         _module_row("winrate_long", decision_stats.get("winrateLong"), "Tỷ lệ thắng của nhóm quyết định LONG đã đóng lệnh.", attention=True),

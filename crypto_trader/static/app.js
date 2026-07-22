@@ -1205,6 +1205,12 @@ function healthEvidenceMeaning(label, criterionName) {
 }
 
 const MODULE_CHART_COLORS = ["#147a7e", "#315f9f", "#1f8a5b", "#bd3f32", "#b7791f", "#6f4fb3", "#c0568a", "#4a7c59", "#8a5a44", "#4d6b7c"];
+const AI_DECISION_COLOR_BY_KEY = new Map([
+  ["long_count", "#16c784"],
+  ["short_count", "#ea3943"],
+  ["long_percent", "#16c784"],
+  ["short_percent", "#ea3943"],
+]);
 
 function viText(value) {
   const original = String(value ?? "");
@@ -1328,7 +1334,7 @@ function moduleLegendCurrentValue(row) {
   if (numeric !== null) {
     const key = String(row?.aiDecisionKey || "");
     const unitKey = viLabel(aiDecisionUnit(row));
-    if (["total_decisions", "no_trade_count", "mini_no_trade_count", "long_count", "short_count"].includes(key) || unitKey === "lan" || unitKey === "lenh" || unitKey === "quyet dinh") {
+    if (["total_decisions", "no_trade_count", "mini_no_trade_count", "ai_other_count", "long_count", "short_count"].includes(key) || unitKey === "lan" || unitKey === "lenh" || unitKey === "quyet dinh") {
       return Math.round(numeric).toLocaleString("en-US", { maximumFractionDigits: 0 });
     }
     return formatFixed2(numeric);
@@ -1447,6 +1453,16 @@ const AI_DECISION_ROW_CONFIG = [
   isBiasWarning: Boolean(isBiasWarning),
   order: index,
 }));
+
+AI_DECISION_ROW_CONFIG.splice(5, 0, {
+  key: "ai_other_count",
+  label: "AI khác / Chưa phân loại",
+  meaning: "Số lần AI đã gọi nhưng không thuộc Mini không chọn, Mini chọn LONG/SHORT hoặc 5.5 từ chối/xóa setup.",
+  up: "AI khác / Chưa phân loại tăng.",
+  down: "AI khác / Chưa phân loại giảm.",
+  isBiasWarning: false,
+  order: 5,
+});
 
 const AI_DECISION_ROW_KEYS = new Set(AI_DECISION_ROW_CONFIG.map((item) => item.key));
 
@@ -1642,6 +1658,9 @@ function moduleHelpText(row) {
   if (key === "profit_factor_long" || key === "profit_factor_short") {
     return PROFIT_FACTOR_HELP_TEXT;
   }
+  if (key === "ai_other_count") {
+    return "AI khác / Chưa phân loại là số lần AI đã được gọi nhưng không thuộc 4 nhóm chính: Mini không chọn lệnh, Mini chọn LONG, Mini chọn SHORT, hoặc 5.5 từ chối/xóa setup. Thường là các lượt giữ setup, trạng thái trung gian, lỗi review, hoặc log không đủ dữ liệu để phân loại.";
+  }
   return "";
 }
 
@@ -1730,6 +1749,13 @@ function aiDecisionRow(rows, key) {
   return (Array.isArray(rows) ? rows : []).find((row) => row.aiDecisionKey === key) || null;
 }
 
+function aiDecisionDirectionLabel(row) {
+  const key = String(row?.aiDecisionKey || "");
+  if (key === "long_count" || key === "long_percent") return "LONG";
+  if (key === "short_count" || key === "short_percent") return "SHORT";
+  return moduleDisplayLabel(row);
+}
+
 function aiDecisionChartRow(rows, key, chartIndex, colorIndex, tooltipValue = null) {
   const row = aiDecisionRow(rows, key);
   if (!row) return null;
@@ -1740,7 +1766,7 @@ function aiDecisionChartRow(rows, key, chartIndex, colorIndex, tooltipValue = nu
     rawNumericValue: rawValue,
     chartValue: rawValue > 0 ? rawValue : 0.2,
     chartIndex,
-    color: MODULE_CHART_COLORS[colorIndex % MODULE_CHART_COLORS.length],
+    color: AI_DECISION_COLOR_BY_KEY.get(key) || MODULE_CHART_COLORS[colorIndex % MODULE_CHART_COLORS.length],
     tooltipValue,
   };
 }
@@ -1765,6 +1791,7 @@ function aiDecisionLegendRows(rows) {
     "short_count",
     "mini_no_trade_count",
     "no_trade_count",
+    "ai_other_count",
     "bias_warning",
   ]);
   const hiddenLabelPrefixes = [
@@ -1774,7 +1801,8 @@ function aiDecisionLegendRows(rows) {
   ];
   return (Array.isArray(rows) ? rows : []).map((row, index) => {
     const numeric = moduleNumericValue(row.value);
-    const chartMeta = AI_DECISION_CHART_META.get(String(row?.aiDecisionKey || ""));
+    const key = String(row?.aiDecisionKey || "");
+    const chartMeta = AI_DECISION_CHART_META.get(key);
     const chartIndex = chartMeta?.chartIndex ?? index;
     const colorIndex = chartMeta?.colorIndex ?? index;
     return {
@@ -1782,7 +1810,7 @@ function aiDecisionLegendRows(rows) {
       rawNumericValue: numeric === null ? 0 : numeric,
       chartValue: numeric && numeric > 0 ? numeric : 0.2,
       chartIndex,
-      color: MODULE_CHART_COLORS[colorIndex % MODULE_CHART_COLORS.length],
+      color: AI_DECISION_COLOR_BY_KEY.get(key) || MODULE_CHART_COLORS[colorIndex % MODULE_CHART_COLORS.length],
     };
   }).filter((row) => {
     const key = String(row?.aiDecisionKey || "");
@@ -1836,10 +1864,15 @@ function renderAiDecisionKpiGroup(module, rows) {
     <div class="module-chart-meta module-ai-kpi-row">
       ${items.map((row) => {
         const delta = moduleDeltaInfo(module, row);
+        const label = moduleDisplayLabel(row);
+        const helpText = moduleHelpText(row);
+        const labelHtml = helpText
+          ? `<span class="module-label-with-help">${escapeHtml(label)}${renderHelpBadge(helpText)}</span>`
+          : escapeHtml(label);
         return `
           <div class="module-total-anchor">
             <span class="module-chart-delta ${delta.state}">${escapeHtml(delta.text)}</span>
-            <span>${escapeHtml(moduleDisplayLabel(row))}</span>
+            <span>${labelHtml}</span>
             <strong>${escapeHtml(moduleLegendCurrentValue(row))}</strong>
           </div>
         `;
@@ -1882,7 +1915,7 @@ function renderAiDecisionDonut(rows, title, subtitle, centerLabel, caption) {
     return '<div class="module-chart-empty">Chưa có dữ liệu Decision Distribution.</div>';
   }
   const total = chartRows.reduce((sum, row) => sum + row.chartValue, 0) || 1;
-  let cursor = 0;
+  let cursor = 180;
   const segments = chartRows.map((row) => {
     const angle = row.chartValue / total * 360;
     const startAngle = cursor;
@@ -1910,7 +1943,7 @@ function renderAiDecisionDonut(rows, title, subtitle, centerLabel, caption) {
         </svg>
       </div>
       <div class="module-donut-keys">
-        ${chartRows.map((row) => `<span><i style="background:${row.color}"></i>${escapeHtml(moduleDisplayLabel(row))}: ${escapeHtml(moduleLegendCurrentValue(row))}</span>`).join("")}
+        ${chartRows.map((row) => `<span><i style="background:${row.color}"></i>${escapeHtml(aiDecisionDirectionLabel(row))}: ${escapeHtml(moduleLegendCurrentValue(row))}</span>`).join("")}
       </div>
     </div>
   `;
@@ -2021,6 +2054,7 @@ function renderAiDecisionModuleChart(module, rows) {
   const totalDecisionRow = aiDecisionRow(rows, "total_decisions");
   const miniNoTradeRow = aiDecisionRow(rows, "mini_no_trade_count");
   const noTradeRow = aiDecisionRow(rows, "no_trade_count");
+  const otherAiRow = aiDecisionRow(rows, "ai_other_count");
   const biasWarningRow = aiDecisionRow(rows, "bias_warning");
   const longPercent = aiDecisionRow(rows, "long_percent");
   const shortPercent = aiDecisionRow(rows, "short_percent");
@@ -2051,10 +2085,9 @@ function renderAiDecisionModuleChart(module, rows) {
   return `
     <section class="module-chart-panel module-chart-panel-compact module-ai-decision-panel">
       <div class="module-chart-legend module-ai-chart-stack">
-        ${renderAiDecisionKpiGroup(module, [totalKpiRow, noTradeRow])}
-        ${renderAiDecisionKpi(module, miniNoTradeRow)}
+        ${renderAiDecisionKpiGroup(module, [totalKpiRow, noTradeRow, miniNoTradeRow, otherAiRow])}
         ${renderAiDecisionBiasCard(module, biasWarningRow)}
-        ${renderAiDecisionDonut(entryDirectionRows, "Hướng vào lệnh", "Phân bổ lệnh LONG và SHORT", entryTotal ? String(entryTotal) : "0", "lệnh")}
+        ${renderAiDecisionDonut(entryDirectionRows, "Mini chọn hướng vào lệnh", "", entryTotal ? String(entryTotal) : "0", "lệnh")}
         ${renderAiDecisionBarSvg(directionPercentRows, "Hướng vào lệnh · Tỷ lệ", "Tỷ lệ LONG/SHORT trên tổng quyết định", "ai-entry-percent")}
         ${renderAiDecisionBarSvg(winrateRows, "Tỷ lệ thắng", "Hiệu suất quyết định LONG/SHORT", "ai-winrate")}
         ${renderAiDecisionBarSvg(profitRows, "Hệ số lợi nhuận", "Hiệu suất sinh lời LONG/SHORT", "ai-profit")}
@@ -4063,26 +4096,31 @@ function positionManagementStats(baseModule, sectionKey) {
       { label: "Vị thế mở", value: common.openCount },
       { label: "Lệnh đóng gần đây", value: common.closedCount },
       { label: "Đang chờ partial", value: common.waitingPartial },
+      { label: "Trailing Stop", value: trailingEnabled ? "Bật" : "Tắt" },
     ],
     pending_orders: [
       { label: "Pending hiện có", value: common.pendingTotal },
       { label: "Vị thế mở", value: common.openCount },
       { label: "Lệnh đóng gần đây", value: common.closedCount },
+      { label: "Lỗi module", value: common.hasError ? 1 : 0 },
     ],
     protection: [
       { label: "Trailing Stop", value: trailingEnabled ? "Bật" : "Tắt" },
       { label: "Đang được bảo vệ", value: common.openCount },
       { label: "Đóng do SL", value: slClosed },
+      { label: "Lỗi module", value: common.hasError ? 1 : 0 },
     ],
     profit: [
       { label: "Partial TP", value: partialEnabled ? "Bật" : "Tắt" },
       { label: "Đã partial", value: common.partialDone },
       { label: "Closed PnL", value: formatMarketRegimeNumber(closedPnl) },
+      { label: "Đóng do TP", value: tpClosed },
     ],
     sync_journal: [
       { label: "Lệch đồng bộ", value: mismatchCount },
       { label: "Nguồn close OKX", value: closedItems.filter((item) => item.exchange_close_source).length },
       { label: "Lỗi module", value: common.hasError ? 1 : 0 },
+      { label: "Lệnh đóng gần đây", value: common.closedCount },
     ],
   };
   return { ...common, stats: statsBySection[sectionKey] || statsBySection.overview };

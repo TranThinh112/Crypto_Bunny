@@ -9,6 +9,7 @@ from crypto_trader.dashboard_services import (
     _build_system_checklist_payload,
     _persist_cached_payload,
     _persist_system_checklist_snapshot,
+    _trade_execution_summary,
     attach_previous_system_checklist_snapshot,
     system_modules_payload,
     system_checklist_payload,
@@ -284,6 +285,14 @@ class SystemChecklistPayloadTests(unittest.TestCase):
         self.assertEqual(values["softRecoveryMinRuleScore"], 87)
         self.assertEqual(values["recoveryMinRuleScore"], 90)
         self.assertEqual(values["strongSetupMinRiskReward"], 2.0)
+
+    def test_trade_execution_summary_exposes_pending_total(self) -> None:
+        with patch("crypto_trader.dashboard_services.list_trade_execution_rows", return_value=[]), patch(
+            "crypto_trader.dashboard_services.count_pending_orders", return_value=4
+        ):
+            payload = _trade_execution_summary({})
+
+        self.assertEqual(payload["pending_total"], 4)
 
     def test_module_one_uses_local_calendar_day_for_ai_decision_stats(self) -> None:
         with patch("crypto_trader.dashboard_services.ai_trade_decision_stats", return_value={"totalRecords": 389}) as trade_stats, patch(
