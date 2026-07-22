@@ -458,32 +458,31 @@ class SystemChecklistPayloadTests(unittest.TestCase):
         self.assertEqual(modules_payload.call_args.kwargs["regime_history_items"], [aggregate_history])
         self.assertEqual(modules_payload.call_args.kwargs["regime_history_payload"], history_payload)
 
-    def test_system_checklist_all_range_builds_fresh_without_daily_snapshot_cache(self) -> None:
-        rebuilt = {
+    def test_system_checklist_all_range_reuses_snapshot_and_updates_ai_module(self) -> None:
+        snapshot = {
             "date": "2026-07-10",
             "created_at": "2026-07-10T13:10:00+00:00",
-            "ai_range": "all",
-            "modules": [],
+            "ai_range": "current",
+            "modules": [{"number": 1, "ai_range": "current", "stats": []}, {"number": 2, "stats": []}],
         }
-        enriched = {**rebuilt, "previous_snapshot": None}
+        enriched = {**snapshot, "ai_range": "all", "previous_snapshot": None}
 
-        with patch("crypto_trader.dashboard_services._preferred_system_checklist_snapshot") as preferred_snapshot, patch(
-            "crypto_trader.dashboard_services._latest_system_checklist_snapshot"
-        ) as latest_snapshot, patch(
+        with patch("crypto_trader.dashboard_services._current_system_checklist_snapshot", return_value=snapshot) as current_snapshot, patch(
             "crypto_trader.dashboard_services.refresh_system_checklist_snapshot"
         ) as refresh_snapshot, patch(
-            "crypto_trader.dashboard_services._build_system_checklist_payload", return_value=rebuilt
+            "crypto_trader.dashboard_services._build_system_checklist_payload"
         ) as build_payload, patch(
             "crypto_trader.dashboard_services.attach_previous_system_checklist_snapshot", return_value=enriched
         ) as attach_previous:
             payload = system_checklist_payload({}, ai_range="all")
 
         self.assertEqual(payload, enriched)
-        preferred_snapshot.assert_not_called()
-        latest_snapshot.assert_not_called()
+        current_snapshot.assert_called_once()
         refresh_snapshot.assert_not_called()
-        build_payload.assert_called_once_with({}, automation=None, ai_range="all")
-        attach_previous.assert_called_once_with({}, rebuilt)
+        build_payload.assert_not_called()
+        updated_payload = attach_previous.call_args.args[1]
+        self.assertEqual(updated_payload["ai_range"], "all")
+        self.assertEqual(updated_payload["modules"][0]["ai_range"], "all")
 
 
 if __name__ == "__main__":

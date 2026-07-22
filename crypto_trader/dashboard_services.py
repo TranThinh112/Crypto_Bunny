@@ -1652,6 +1652,77 @@ def refresh_system_checklist_snapshot(
     return attach_previous_system_checklist_snapshot(config, payload)
 
 
+def _system_checklist_with_ai_range(
+    config: dict[str, Any],
+    payload: dict[str, Any],
+    *,
+    ai_range: str,
+) -> dict[str, Any]:
+    ai_range_key = _normalize_ai_decision_range(ai_range)
+    if ai_range_key == "current":
+        return payload
+    next_payload = dict(payload)
+    modules = [dict(module) for module in next_payload.get("modules") or [] if isinstance(module, dict)]
+    checked_at_iso = str(next_payload.get("created_at") or datetime.now(timezone.utc).isoformat())
+    checked_date = str(next_payload.get("date") or _system_report_date(config))
+    ai_range_label = "Toàn bộ dữ liệu đang lưu"
+    try:
+        trade_decision_stats = ai_trade_decision_stats(config)
+        ai_call_stats = ai_call_decision_stats(config)
+        decision_stats = {
+            **trade_decision_stats,
+            **ai_call_stats,
+            "tradeSignalRecords": trade_decision_stats.get("totalRecords"),
+            "periodStart": None,
+            "periodEnd": checked_at_iso,
+            "range": ai_range_key,
+            "rangeLabel": ai_range_label,
+        }
+    except Exception as exc:
+        decision_stats = {"error": str(exc), "range": ai_range_key, "rangeLabel": ai_range_label}
+
+    try:
+        ai_history = recent_ai_call_history(config, limit=20)
+    except Exception:
+        ai_history = []
+    latest_ai = ai_history[-1] if ai_history else {}
+    latest_ai_status = latest_ai.get("status") or latest_ai.get("result")
+    latest_ai_time = latest_ai.get("created_at") or latest_ai.get("updated_at")
+    ai_rows = [
+        _module_row("Ngày kiểm tra", checked_date, "Ngày local của lần tổng hợp dữ liệu module."),
+        _module_row("Cập nhật lúc", checked_at_iso, "Dấu thời gian UTC của payload hiện tại."),
+        _module_row("Số lần gọi AI gần nhất", len(ai_history), "Số lần gọi AI đã được nhật ký lưu gần nhất."),
+        _module_row("Phạm vi dữ liệu AI", ai_range_label, "Phạm vi đang được dùng để tính các biến AI trong module."),
+        _module_row("total_decisions", decision_stats.get("totalDecisions"), "Tổng lần gọi AI thật theo phạm vi đang chọn: Mini + 5.5; không tính các record scan nội bộ.", attention=True),
+        _module_row("Tổng log gọi AI trong phạm vi", decision_stats.get("totalRecords"), "Tổng số log gọi AI thật theo phạm vi đang kiểm tra."),
+        _module_row("mini_no_trade_count", decision_stats.get("miniNoTradeCount"), "Số lần Mini được gọi nhưng trả NO_TRADE hoặc không chọn cặp nào."),
+        _module_row("long_count", decision_stats.get("longCount"), "Số quyết định vào lệnh LONG đã được ghi nhận."),
+        _module_row("short_count", decision_stats.get("shortCount"), "Số quyết định vào lệnh SHORT đã được ghi nhận."),
+        _module_row("no_trade_count", decision_stats.get("noTradeCount"), "Số lần GPT-5.5 từ chối vào lệnh hoặc xóa setup; không tính các lần giữ setup."),
+        _module_row("long_percent", decision_stats.get("longPercent"), "Tỷ trọng LONG trên tổng quyết định AI thực.", attention=True),
+        _module_row("short_percent", decision_stats.get("shortPercent"), "Tỷ trọng SHORT trên tổng quyết định AI thực.", attention=True),
+        _module_row("winrate_long", decision_stats.get("winrateLong"), "Tỷ lệ thắng của nhóm quyết định LONG đã đóng lệnh.", attention=True),
+        _module_row("winrate_short", decision_stats.get("winrateShort"), "Tỷ lệ thắng của nhóm quyết định SHORT đã đóng lệnh.", attention=True),
+        _module_row("avg_confidence_long", decision_stats.get("avgConfidenceLong"), "Độ tự tin trung bình của các quyết định LONG."),
+        _module_row("avg_confidence_short", decision_stats.get("avgConfidenceShort"), "Độ tự tin trung bình của các quyết định SHORT."),
+        _module_row("profit_factor_long", decision_stats.get("profitFactorLong"), "Hệ số lợi nhuận của các quyết định LONG đã chốt."),
+        _module_row("profit_factor_short", decision_stats.get("profitFactorShort"), "Hệ số lợi nhuận của các quyết định SHORT đã chốt."),
+        _module_row("Trạng thái AI gần nhất", latest_ai_status, "Trạng thái của lần gọi AI gần nhất được nhật ký lưu.", attention=True),
+        _module_row("Ghi nhận AI lúc", latest_ai_time, "Thời điểm lần gọi AI gần nhất được ghi nhận."),
+        _module_row("bias_warning", decision_stats.get("biasWarning"), "Cảnh báo lệch hướng LONG/SHORT nếu có."),
+    ]
+    for module in modules:
+        if int(module.get("number") or 0) == 1:
+            module["ai_range"] = ai_range_key
+            module["ai_range_label"] = ai_range_label
+            module["stats"] = ai_rows
+            module["status"] = "fail" if "error" in str(latest_ai_status or "").lower() else "ok" if _safe_int(decision_stats.get("totalDecisions")) > 0 else "warn"
+            break
+    next_payload["modules"] = modules
+    next_payload["ai_range"] = ai_range_key
+    return next_payload
+
+
 def system_checklist_payload(
     config: dict[str, Any],
     *,
@@ -1663,7 +1734,11 @@ def system_checklist_payload(
     _ = max_age_seconds
     ai_range_key = _normalize_ai_decision_range(ai_range)
     if ai_range_key == "all":
-        payload = _build_system_checklist_payload(config, automation=automation, ai_range=ai_range_key)
+        snapshot = _current_system_checklist_snapshot(config) or _latest_system_checklist_snapshot(config)
+        if isinstance(snapshot, dict):
+            payload = _system_checklist_with_ai_range(config, snapshot, ai_range=ai_range_key)
+        else:
+            payload = _build_system_checklist_payload(config, automation=automation, ai_range=ai_range_key)
         return attach_previous_system_checklist_snapshot(config, payload)
     date_key = _system_report_date(config)
     if not force_refresh:

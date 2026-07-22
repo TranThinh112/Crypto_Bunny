@@ -1759,6 +1759,27 @@ tr:last-child td {
   border-bottom: 0;
 }
 
+.position-management-flow {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.position-management-flow span {
+  min-height: 40px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 900;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
 .module-stat-head {
   color: var(--muted);
   background: #f1f5f6 !important;

@@ -2737,11 +2737,17 @@ function isTradeExecutionModule(module) {
   return Number(module?.number || 0) === 15 || name.includes("trade execution") || name.includes("position management");
 }
 
+function isPositionManagementSection(module) {
+  return Boolean(module?.position_management_section);
+}
+
 function marketRegimeModuleName(module) {
+  if (isPositionManagementSection(module)) return String(module.display_name || module.name || "-");
   return isMarketRegimeModule(module) ? "Market Regime Detector" : String(module?.name || "-");
 }
 
 function marketRegimeModuleSubtitle(module) {
+  if (isPositionManagementSection(module)) return String(module.display_subtitle || "");
   return isMarketRegimeModule(module) ? "Bộ nhận diện trạng thái thị trường" : "";
 }
 
@@ -4004,6 +4010,143 @@ function tradeExecutionClosedItems(module) {
   return Array.isArray(payload.recent_closed) ? payload.recent_closed : [];
 }
 
+function tradeExecutionPayload(module) {
+  return module?.trade_execution && typeof module.trade_execution === "object" ? module.trade_execution : {};
+}
+
+function positionManagementBaseModule(modules) {
+  const rows = Array.isArray(modules) ? modules : [];
+  return rows.find((module) => isTradeExecutionModule(module)) || null;
+}
+
+function countTradeExecutionClosedByReason(items, reason) {
+  return (Array.isArray(items) ? items : []).filter((item) => String(item?.close_reason || "").toLowerCase() === reason).length;
+}
+
+function sumTradeExecutionPnl(items) {
+  return (Array.isArray(items) ? items : []).reduce((sum, item) => {
+    const value = Number(item?.pnl);
+    return Number.isFinite(value) ? sum + value : sum;
+  }, 0);
+}
+
+function positionManagementStats(baseModule, sectionKey) {
+  const payload = tradeExecutionPayload(baseModule);
+  const openItems = tradeExecutionItems(baseModule);
+  const closedItems = tradeExecutionClosedItems(baseModule);
+  const config = tradeExecutionConfig(baseModule);
+  const pendingTotal = Number(payload.pending_total ?? payload.pending_count ?? 0) || 0;
+  const closedPnl = sumTradeExecutionPnl(closedItems);
+  const tpClosed = countTradeExecutionClosedByReason(closedItems, "take_profit");
+  const slClosed = countTradeExecutionClosedByReason(closedItems, "stop_loss");
+  const trailingEnabled = Boolean(config.enabled);
+  const partialEnabled = Boolean(config.partial_enabled);
+  const mismatchCount = Number(payload.reconciliation_issue_count ?? payload.mismatch_count ?? 0) || 0;
+  const common = {
+    openItems,
+    closedItems,
+    openCount: Number(payload.open_count ?? openItems.length) || 0,
+    closedCount: Number(payload.closed_count ?? closedItems.length) || 0,
+    pendingTotal,
+    partialDone: Number(payload.partial_done_count ?? 0) || 0,
+    waitingPartial: Number(payload.waiting_partial_count ?? 0) || 0,
+    tpClosed,
+    slClosed,
+    closedPnl,
+    trailingEnabled,
+    partialEnabled,
+    mismatchCount,
+    hasError: Boolean(payload.error),
+  };
+  const statsBySection = {
+    overview: [
+      { label: "Vị thế mở", value: common.openCount },
+      { label: "Lệnh đóng gần đây", value: common.closedCount },
+      { label: "Đang chờ partial", value: common.waitingPartial },
+    ],
+    pending_orders: [
+      { label: "Pending hiện có", value: common.pendingTotal },
+      { label: "Vị thế mở", value: common.openCount },
+      { label: "Lệnh đóng gần đây", value: common.closedCount },
+    ],
+    protection: [
+      { label: "Trailing Stop", value: trailingEnabled ? "Bật" : "Tắt" },
+      { label: "Đang được bảo vệ", value: common.openCount },
+      { label: "Đóng do SL", value: slClosed },
+    ],
+    profit: [
+      { label: "Partial TP", value: partialEnabled ? "Bật" : "Tắt" },
+      { label: "Đã partial", value: common.partialDone },
+      { label: "Closed PnL", value: formatMarketRegimeNumber(closedPnl) },
+    ],
+    sync_journal: [
+      { label: "Lệch đồng bộ", value: mismatchCount },
+      { label: "Nguồn close OKX", value: closedItems.filter((item) => item.exchange_close_source).length },
+      { label: "Lỗi module", value: common.hasError ? 1 : 0 },
+    ],
+  };
+  return { ...common, stats: statsBySection[sectionKey] || statsBySection.overview };
+}
+
+function positionManagementSections(baseModule) {
+  if (!baseModule) return [];
+  const payload = tradeExecutionPayload(baseModule);
+  const status = payload.error ? "warn" : (baseModule.status || "ok");
+  const sections = [
+    {
+      key: "overview",
+      name: "Tổng quan vị thế",
+      display_name: "Tổng quan vị thế",
+      display_subtitle: "Module 15 hiện tại, màn hình trung tâm",
+      purpose: "Theo dõi vị thế đang mở, biểu đồ tiến độ TP, TP/SL và lệnh đóng gần đây.",
+    },
+    {
+      key: "pending_orders",
+      name: "Pending & Orders",
+      display_name: "Pending & Orders",
+      display_subtitle: "Setup chờ, lệnh chờ và trạng thái OKX",
+      purpose: "Theo dõi setup chờ, lệnh đã gửi, fill, cancel, reject và expired.",
+    },
+    {
+      key: "protection",
+      name: "Bảo vệ vị thế",
+      display_name: "Bảo vệ vị thế",
+      display_subtitle: "SL, break-even, trailing stop, liquidation warning",
+      purpose: "Theo dõi các lớp bảo vệ sau khi vị thế đã mở.",
+    },
+    {
+      key: "profit",
+      name: "Chốt lời",
+      display_name: "Chốt lời",
+      display_subtitle: "TP, partial TP, remaining size, closed PnL",
+      purpose: "Theo dõi kế hoạch chốt lời, partial TP và PnL đã đóng.",
+    },
+    {
+      key: "sync_journal",
+      name: "Đồng bộ & Nhật ký",
+      display_name: "Đồng bộ & Nhật ký",
+      display_subtitle: "OKX reconciliation, journal và event quan trọng",
+      purpose: "Theo dõi dữ liệu bot có khớp OKX không và các sự kiện vòng đời vị thế.",
+    },
+  ];
+  return sections.map((section, index) => {
+    const summary = positionManagementStats(baseModule, section.key);
+    const warn = section.key === "sync_journal" ? summary.mismatchCount > 0 || summary.hasError : summary.hasError;
+    return {
+      ...baseModule,
+      number: `15.${index + 1}`,
+      name: section.name,
+      display_name: section.display_name,
+      display_subtitle: section.display_subtitle,
+      purpose: section.purpose,
+      status: warn ? "warn" : status,
+      position_management_section: section.key,
+      source_module_number: baseModule.number || 15,
+      stats: summary.stats.map((item) => ({ ...item, attention: warn })),
+    };
+  });
+}
+
 function renderTradeExecutionPositionCard(item) {
   const symbol = item.symbol || "-";
   const side = String(item.side || "-").toUpperCase();
@@ -4112,6 +4255,132 @@ function bindTradeExecutionTabs() {
       });
     });
   });
+}
+
+function renderPositionManagementSectionDetail(module, options = {}) {
+  if (!refs.systemModuleDetail || !refs.systemModuleOverlay || !module) return;
+  const section = String(module.position_management_section || "overview");
+  const payload = tradeExecutionPayload(module);
+  const items = tradeExecutionItems(module);
+  const closedItems = tradeExecutionClosedItems(module);
+  const config = tradeExecutionConfig(module);
+  const stats = positionManagementStats(module, section);
+  const headingBySection = {
+    overview: {
+      title: "Tổng quan vị thế",
+      subtitle: "Module 15 hiện tại, màn hình trung tâm cho vị thế đang mở và lệnh đã đóng.",
+    },
+    pending_orders: {
+      title: "Pending & Orders",
+      subtitle: "Theo dõi setup chờ, lệnh chờ, lệnh đã gửi OKX và trạng thái fill/cancel/reject.",
+    },
+    protection: {
+      title: "Bảo vệ vị thế",
+      subtitle: "Theo dõi SL, break-even, trailing stop và các cảnh báo bảo vệ vị thế.",
+    },
+    profit: {
+      title: "Chốt lời",
+      subtitle: "Theo dõi TP, partial TP, remaining size và closed PnL.",
+    },
+    sync_journal: {
+      title: "Đồng bộ & Nhật ký",
+      subtitle: "Theo dõi OKX reconciliation, nguồn dữ liệu close và event quan trọng.",
+    },
+  };
+  const heading = headingBySection[section] || headingBySection.overview;
+  const summaryCards = stats.stats.map((row) => `
+    <article class="market-pattern-summary-card">
+      <span>${escapeHtml(row.label || "-")}</span>
+      <strong>${escapeHtml(row.value ?? "-")}</strong>
+      <small>${escapeHtml(row.detail || module.display_subtitle || "-")}</small>
+    </article>
+  `).join("");
+  const protectionRows = [
+    { label: "Trailing Stop", value: config.enabled ? "Bật" : "Tắt" },
+    { label: "ATR timeframe", value: config.atr_timeframe || "-" },
+    { label: "ATR multiplier", value: config.atr_multiplier ?? "-" },
+    { label: "Activation R", value: config.activation_r_multiple ?? "-" },
+  ];
+  const profitRows = [
+    { label: "Partial TP", value: config.partial_enabled ? "Bật" : "Tắt" },
+    { label: "Mốc kích hoạt", value: config.partial_trigger_tp_progress === null || config.partial_trigger_tp_progress === undefined ? "-" : `${formatMarketRegimeNumber(Number(config.partial_trigger_tp_progress) * 100)}% tới TP` },
+    { label: "Tỷ lệ đóng", value: config.partial_close_fraction === null || config.partial_close_fraction === undefined ? "-" : `${formatMarketRegimeNumber(Number(config.partial_close_fraction) * 100)}%` },
+    { label: "Closed PnL", value: formatMarketRegimeNumber(stats.closedPnl) },
+  ];
+  state.selectedSystemModuleKey = systemModuleKey(module);
+  refs.systemModuleOverlay.hidden = false;
+  refs.systemModuleDetail.classList.add("module-detail-chart-scroll", "market-regime-detail");
+  refs.systemModuleDetail.innerHTML = `
+    <button class="module-close" type="button" aria-label="Đóng">×</button>
+    <div class="module-detail-head market-regime-head">
+      <div>
+        <span class="module-number">Module ${escapeHtml(module.number || "15")}</span>
+        <h3 id="systemModuleTitle">${escapeHtml(heading.title)}</h3>
+        <p>${escapeHtml(heading.subtitle)}</p>
+      </div>
+      <div class="module-head-actions">
+        <span class="status-pill ${module.status === "ok" ? "ok" : "warn"}">${moduleStatusLabel(module.status)}</span>
+      </div>
+    </div>
+    <div class="module-chart-scroll market-regime-scroll">
+      ${payload.error ? `<div class="market-regime-load-error" role="alert"><strong>Quản lý vị thế đang lỗi.</strong><span>${escapeHtml(payload.error)}</span></div>` : ""}
+      <section class="market-regime-section">
+        <div class="market-regime-section-head"><div><strong>Tóm tắt</strong><small>${escapeHtml(module.display_subtitle || "Theo dõi vị thế")}</small></div></div>
+        <div class="market-pattern-summary-grid">${summaryCards}</div>
+      </section>
+      ${section === "overview" ? `
+        <section class="market-regime-section">
+          <div class="market-regime-section-head"><div><strong>Biểu đồ vị thế</strong><small>Tiến độ tới TP và các mốc giá đang quản lý</small></div></div>
+          ${renderTradeExecutionPositionTabs(items)}
+        </section>
+        ${items.length ? `<section class="market-regime-section"><div class="market-regime-section-head"><div><strong>Vị thế đang mở</strong><small>Partial chỉ chạy một lần, sau đó trailing SL</small></div></div><div class="trade-execution-position-grid">${items.map(renderTradeExecutionPositionCard).join("")}</div></section>` : `<div class="market-regime-empty">Chưa có vị thế live đang mở.</div>`}
+      ` : ""}
+      ${section === "pending_orders" ? `
+        <section class="market-regime-section">
+          <div class="market-regime-section-head"><div><strong>Luồng lệnh</strong><small>AI candidate → pending setup → pending order → OKX order → position</small></div></div>
+          <div class="position-management-flow">
+            <span>Pending setup</span><span>Pending order</span><span>Submitted</span><span>Filled</span><span>Position opened</span>
+          </div>
+          <div class="market-regime-empty compact">Hiện UI đang dùng tổng pending từ storage. Chi tiết từng pending/order sẽ được nối vào khi backend expose danh sách order đầy đủ.</div>
+        </section>
+      ` : ""}
+      ${section === "protection" ? `
+        <section class="market-regime-section">
+          <div class="market-regime-section-head"><div><strong>Thông số bảo vệ</strong><small>SL, break-even và trailing stop</small></div></div>
+          <div class="market-regime-status-meta">${protectionRows.map((row) => renderMarketPatternMetric(row.label, row.value)).join("")}</div>
+        </section>
+        ${items.length ? `<section class="market-regime-section"><div class="market-regime-section-head"><div><strong>SL theo vị thế</strong><small>Entry, SL, TP và R hiện tại</small></div></div><div class="trade-execution-position-grid">${items.map(renderTradeExecutionPositionCard).join("")}</div></section>` : ""}
+      ` : ""}
+      ${section === "profit" ? `
+        <section class="market-regime-section">
+          <div class="market-regime-section-head"><div><strong>Kế hoạch chốt lời</strong><small>TP, partial TP và PnL đã đóng</small></div></div>
+          <div class="market-regime-status-meta">${profitRows.map((row) => renderMarketPatternMetric(row.label, row.value)).join("")}</div>
+        </section>
+        <section class="market-regime-section">
+          <div class="market-regime-section-head"><div><strong>Lệnh đóng gần nhất</strong><small>Màu xanh là TP, màu đỏ là SL</small></div></div>
+          ${renderTradeExecutionClosedList(closedItems)}
+        </section>
+      ` : ""}
+      ${section === "sync_journal" ? `
+        <section class="market-regime-section">
+          <div class="market-regime-section-head"><div><strong>Đồng bộ OKX</strong><small>Bot lấy OKX làm nguồn sự thật cho fill/close thực tế</small></div></div>
+          <div class="market-regime-empty compact">Chưa tạo collection mới. Màn hình này đang đọc nguồn close từ trade_executions và exchange_close_history_json nếu có.</div>
+        </section>
+        <section class="market-regime-section">
+          <div class="market-regime-section-head"><div><strong>Nhật ký close gần đây</strong><small>TP, SL, trailing stop hoặc reconciled close</small></div></div>
+          ${renderTradeExecutionClosedList(closedItems)}
+        </section>
+      ` : ""}
+    </div>
+  `;
+  refs.systemModuleDetail.querySelector(".module-close")?.addEventListener("click", closeSystemModuleDetail);
+  bindTradeExecutionTabs();
+  if (Number.isFinite(Number(options.scrollTop))) {
+    const scrollNode = refs.systemModuleDetail.querySelector(".module-chart-scroll");
+    if (scrollNode) requestAnimationFrame(() => {
+      scrollNode.scrollTop = Number(options.scrollTop);
+    });
+  }
 }
 
 function renderTradeExecutionClosedList(items) {
@@ -4238,6 +4507,10 @@ function renderTradeExecutionDetail(module, options = {}) {
 
 function renderModuleDetail(module, options = {}) {
   if (!refs.systemModuleDetail || !refs.systemModuleOverlay || !module) return;
+  if (isPositionManagementSection(module)) {
+    renderPositionManagementSectionDetail(module, options);
+    return;
+  }
   if (isTradeExecutionModule(module)) {
     renderTradeExecutionDetail(module, options);
     return;
@@ -4372,6 +4645,8 @@ function groupedSystemModules(modules) {
     realModules.get("Position Sizing"),
     realModules.get("Configuration Impact"),
   ].filter(Boolean);
+  const tradeExecutionModule = realModules.get("Thá»±c thi giao dá»‹ch & Quáº£n lÃ½ vá»‹ tháº¿") || realModules.get("Trade Execution & Position Management");
+  const positionManagementModules = positionManagementSections(tradeExecutionModule);
   return [
     {
       key: "ai-decision",
@@ -4407,10 +4682,18 @@ function groupedSystemModules(modules) {
       schedule_text: "5 phút/lần để đối chiếu",
       items: [
         realModules.get("Bunny Minimize Losses"),
-        realModules.get("Thực thi giao dịch & Quản lý vị thế") || realModules.get("Trade Execution & Position Management"),
         realModules.get("Bunny Health Monitor"),
         realModules.get("Recovery Chain Manager"),
       ].filter(Boolean),
+    },
+    {
+      key: "position-management",
+      icon: "📌",
+      title: "Quản lý vị thế",
+      subtitle_vi: "Thực thi lệnh và vòng đời vị thế",
+      event_text: "Sau khi tạo setup, gửi lệnh, fill, amend TP/SL hoặc đóng vị thế",
+      schedule_text: "Theo runtime/trailing stop và đồng bộ OKX",
+      items: positionManagementModules,
     },
     {
       key: "capital-management",
