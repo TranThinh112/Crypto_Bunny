@@ -44,6 +44,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "close_fraction": 0.3,
             "remaining_sl_buffer_r": 0.1,
             "tp_extension_fraction": 0.3,
+            "max_extension_steps": 3,
+            "sl_buffer_r_by_step": [0.1, 0.5, 1.0],
         },
         "symbol_overrides": {
             "BTC": {

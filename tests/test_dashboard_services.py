@@ -11,6 +11,7 @@ from crypto_trader.dashboard_services import (
     _persist_system_checklist_snapshot,
     _trade_execution_summary,
     attach_previous_system_checklist_snapshot,
+    system_checklist_history,
     system_modules_payload,
     system_checklist_payload,
 )
@@ -51,6 +52,18 @@ class SystemChecklistPayloadTests(unittest.TestCase):
         stored_bodies = [call.args[2] for call in set_state.call_args_list]
         self.assertTrue(any("2026-07-12T03:30:00+00:00" in body for body in stored_bodies))
         self.assertTrue(any("2026-07-13T00:00:00+00:00" in body for body in stored_bodies))
+
+    def test_system_checklist_history_returns_empty_when_storage_times_out(self) -> None:
+        with patch("crypto_trader.dashboard_services.list_journal_state_prefix", side_effect=TimeoutError("mongo timeout")):
+            self.assertEqual(system_checklist_history({}), [])
+
+    def test_previous_snapshot_is_optional_when_storage_times_out(self) -> None:
+        payload = {"date": "2026-07-22", "created_at": "2026-07-22T13:55:00+00:00", "modules": []}
+        with patch("crypto_trader.dashboard_services.get_journal_state", side_effect=TimeoutError("mongo timeout")):
+            enriched = attach_previous_system_checklist_snapshot({}, payload)
+
+        self.assertEqual(enriched["date"], "2026-07-22")
+        self.assertIsNone(enriched["previous_snapshot"])
 
     def test_returns_current_snapshot_for_today_without_rebuilding(self) -> None:
         snapshot = {
@@ -294,6 +307,29 @@ class SystemChecklistPayloadTests(unittest.TestCase):
 
         self.assertEqual(payload["pending_total"], 4)
 
+    def test_market_pattern_dashboard_uses_app_atlas_database(self) -> None:
+        class FakeRepository:
+            def __init__(self, *, db, config) -> None:
+                self.db = db
+                self.config = config
+
+            def latest(self, *, limit: int = 20) -> list[dict]:
+                return [{"symbol": "BTC/USDT:USDT", "timeframe": "15m"}]
+
+            def health(self) -> dict:
+                return {"collections": {"market_analysis_snapshots": 1}}
+
+        with patch("crypto_trader.dashboard_services.load_engine_config", return_value={"engine": True}), patch(
+            "crypto_trader.dashboard_services.atlas_database", return_value="APP_DB"
+        ) as atlas_db, patch("crypto_trader.dashboard_services.AnalysisRepository", FakeRepository):
+            from crypto_trader.dashboard_services import _market_pattern_engine_dashboard
+
+            payload = _market_pattern_engine_dashboard({"database": {"atlas": {"database": "Bunny_Runtime_Live"}}})
+
+        atlas_db.assert_called_once()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["latest"]["symbol"], "BTC/USDT:USDT")
+
     def test_module_one_uses_local_calendar_day_for_ai_decision_stats(self) -> None:
         with patch("crypto_trader.dashboard_services.ai_trade_decision_stats", return_value={"totalRecords": 389}) as trade_stats, patch(
             "crypto_trader.dashboard_services.ai_call_decision_stats",
@@ -462,7 +498,7 @@ class SystemChecklistPayloadTests(unittest.TestCase):
         self.assertEqual(history_payload["by_symbol"]["ETH/USDT:USDT"]["items"], [regime_history[-1]])
         self.assertEqual(history_payload["coverage"]["coverage_count"], 5)
         self.assertEqual(history_payload["coverage"]["target_count"], 40)
-        history_reader.assert_called_once_with(config, limit=200)
+        history_reader.assert_called_once_with(config, limit=60)
         modules_payload.assert_called_once()
         self.assertEqual(modules_payload.call_args.kwargs["regime_history_items"], [aggregate_history])
         self.assertEqual(modules_payload.call_args.kwargs["regime_history_payload"], history_payload)

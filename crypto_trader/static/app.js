@@ -5,6 +5,7 @@ const state = {
   paperTimer: null,
   okxPositionsTimer: null,
   okxPositionsInFlight: null,
+  systemChecklistTimer: null,
   paperIntervalSeconds: 60,
   maxBaseMarginUsdt: 20,
   selectedViewSymbol: null,
@@ -715,9 +716,37 @@ function activePriceFor(candidate) {
   return mark !== null ? mark : null;
 }
 
+function planChartTheme() {
+  const dark = document.body.classList.contains("dark-mode");
+  return dark
+    ? {
+        background: "#132229",
+        grid: "#30464f",
+        axis: "#d6e3e7",
+        muted: "#a8bac4",
+        entry: "#20a6a9",
+        target: "#39b878",
+        stop: "#e05b50",
+        current: "#6b94d8",
+        currentStroke: "#132229",
+      }
+    : {
+        background: "#fbfcfc",
+        grid: "#d9e1e5",
+        axis: "#172026",
+        muted: "#66727c",
+        entry: "#147a7e",
+        target: "#1f8a5b",
+        stop: "#bd3f32",
+        current: "#315f9f",
+        currentStroke: "#ffffff",
+      };
+}
+
 function renderPlan(candidate) {
   const canvas = refs.planCanvas;
   const ctx = canvas.getContext("2d");
+  const theme = planChartTheme();
   const ratio = window.devicePixelRatio || 1;
   const width = canvas.clientWidth || 760;
   const height = canvas.clientHeight || 240;
@@ -725,11 +754,11 @@ function renderPlan(candidate) {
   canvas.height = Math.floor(height * ratio);
   ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
   ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = "#fbfcfc";
+  ctx.fillStyle = theme.background;
   ctx.fillRect(0, 0, width, height);
 
   if (!candidate) {
-    ctx.fillStyle = "#66727c";
+    ctx.fillStyle = theme.muted;
     ctx.font = "700 16px system-ui";
     ctx.fillText("Chưa có tín hiệu", 24, 42);
     return;
@@ -741,7 +770,7 @@ function renderPlan(candidate) {
   const currentPrice = activePriceFor(candidate);
   const prices = [entry, stop, target].filter((value) => value !== null);
   if (prices.length < 3 || entry === null || stop === null || target === null) {
-    ctx.fillStyle = "#66727c";
+    ctx.fillStyle = theme.muted;
     ctx.font = "700 16px system-ui";
     ctx.fillText("Thieu du lieu gia de ve ke hoach", 24, 42);
     return;
@@ -759,7 +788,7 @@ function renderPlan(candidate) {
   const x = (price) => left + ((hi - price) / (hi - lo)) * (right - left);
   const y = (level) => top + level * (bottom - top);
 
-  ctx.strokeStyle = "#d9e1e5";
+  ctx.strokeStyle = theme.grid;
   ctx.lineWidth = 1;
   for (let i = 0; i < 5; i += 1) {
     const yy = y(i / 4);
@@ -775,30 +804,30 @@ function renderPlan(candidate) {
   const currentX = currentPrice !== null ? x(currentPrice) : null;
   const lineY = y(0.52);
 
-  ctx.strokeStyle = "#172026";
+  ctx.strokeStyle = theme.axis;
   ctx.lineWidth = 3;
   ctx.beginPath();
   ctx.moveTo(Math.min(stopX, targetX), lineY);
   ctx.lineTo(Math.max(stopX, targetX), lineY);
   ctx.stroke();
 
-  if (currentX !== null) drawProgress(ctx, entryX, currentX, lineY);
+  if (currentX !== null) drawProgress(ctx, entryX, currentX, lineY, theme);
 
   const tpLabel = candidate.take_profit_pct ? `TP ${fmt(candidate.take_profit_pct, 0)}%` : "TP";
   const slLabel = candidate.stop_loss_pct ? `SL ${fmt(candidate.stop_loss_pct, 0)}%` : "SL";
-  drawMarker(ctx, targetX, lineY, "#1f8a5b", tpLabel, target);
-  drawMarker(ctx, entryX, lineY, "#147a7e", "Vao", entry);
-  drawMarker(ctx, stopX, lineY, "#bd3f32", slLabel, stop);
-  if (currentX !== null) drawCurrentMarker(ctx, currentX, lineY, currentPrice);
+  drawMarker(ctx, targetX, lineY, theme.target, tpLabel, target, theme);
+  drawMarker(ctx, entryX, lineY, theme.entry, "Vao", entry, theme);
+  drawMarker(ctx, stopX, lineY, theme.stop, slLabel, stop, theme);
+  if (currentX !== null) drawCurrentMarker(ctx, currentX, lineY, currentPrice, theme);
 
   const direction = candidate.side === "short" ? "Có lợi khi giá giảm" : "Có lợi khi giá tăng";
-  ctx.fillStyle = "#66727c";
+  ctx.fillStyle = theme.muted;
   ctx.font = "700 13px system-ui";
   ctx.fillText(direction, left, height - 18);
 }
 
-function drawProgress(ctx, entryX, currentX, y) {
-  ctx.strokeStyle = "#315f9f";
+function drawProgress(ctx, entryX, currentX, y, theme) {
+  ctx.strokeStyle = theme.current;
   ctx.lineWidth = 5;
   ctx.lineCap = "round";
   ctx.beginPath();
@@ -808,24 +837,24 @@ function drawProgress(ctx, entryX, currentX, y) {
   ctx.lineCap = "butt";
 }
 
-function drawMarker(ctx, x, y, color, label, value) {
+function drawMarker(ctx, x, y, color, label, value, theme) {
   ctx.fillStyle = color;
   ctx.beginPath();
   ctx.arc(x, y, 7, 0, Math.PI * 2);
   ctx.fill();
-  ctx.fillStyle = "#172026";
+  ctx.fillStyle = theme.axis;
   ctx.font = "800 12px system-ui";
   ctx.textAlign = "center";
   ctx.fillText(label, x, y - 18);
   ctx.font = "700 12px system-ui";
-  ctx.fillStyle = "#66727c";
+  ctx.fillStyle = theme.muted;
   ctx.fillText(fmt(value, 2), x, y + 27);
   ctx.textAlign = "start";
 }
 
-function drawCurrentMarker(ctx, x, y, value) {
+function drawCurrentMarker(ctx, x, y, value, theme) {
   ctx.save();
-  ctx.strokeStyle = "#315f9f";
+  ctx.strokeStyle = theme.current;
   ctx.setLineDash([5, 5]);
   ctx.lineWidth = 1.5;
   ctx.beginPath();
@@ -833,14 +862,14 @@ function drawCurrentMarker(ctx, x, y, value) {
   ctx.lineTo(x, y + 88);
   ctx.stroke();
   ctx.setLineDash([]);
-  ctx.fillStyle = "#315f9f";
+  ctx.fillStyle = theme.current;
   ctx.beginPath();
   ctx.arc(x, y + 11, 8, 0, Math.PI * 2);
   ctx.fill();
-  ctx.strokeStyle = "#ffffff";
+  ctx.strokeStyle = theme.currentStroke;
   ctx.lineWidth = 2;
   ctx.stroke();
-  ctx.fillStyle = "#315f9f";
+  ctx.fillStyle = theme.current;
   ctx.font = "800 12px system-ui";
   ctx.textAlign = "center";
   ctx.fillText("Hien tai", x, y + 45);
@@ -1522,6 +1551,18 @@ function moduleAuxRows(module, rows) {
   });
 }
 
+function moduleToneClass(row) {
+  const rawText = `${row?.label || ""} ${row?.value || ""}`.toLowerCase();
+  if (rawText.includes("hard recovery") || rawText.includes("pause")) return "danger";
+  if (rawText.includes("soft recovery") || rawText.includes("recovery mode")) return "warning";
+  const text = viLabel(rawText);
+  if (text.includes("hard recovery") || text.includes("pause") || text.includes("tam dung")) return "danger";
+  if (text.includes("soft recovery") || text.includes("recovery") || text.includes("can chu y")) return "warning";
+  if (text.includes("loss") || text.includes("drawdown") || text.includes("loi")) return "danger";
+  if (text.includes("ok") || text.includes("tat") || text.includes("normal") || text.includes("binh thuong")) return "success";
+  return row?.attention ? "warning" : "neutral";
+}
+
 function polarPoint(cx, cy, radius, angle) {
   const radians = (angle - 90) * Math.PI / 180;
   return { x: cx + radius * Math.cos(radians), y: cy + radius * Math.sin(radians) };
@@ -1587,7 +1628,7 @@ function renderModuleVariableRows(module, chartRows, showShare = false) {
     const currentValue = moduleLegendCurrentValue(row);
     const delta = moduleDeltaInfo(module, row);
     return `
-      <button class="module-chart-legend-item ${row.attention ? "attention" : ""}" type="button" data-chart-index="${index}" title="${escapeHtml(row.label || "-")}: ${escapeHtml(currentValue)}">
+      <button class="module-chart-legend-item ${row.attention ? "attention" : ""} ${moduleToneClass(row)}" type="button" data-chart-index="${index}" title="${escapeHtml(row.label || "-")}: ${escapeHtml(currentValue)}">
         <span class="module-chart-swatch" style="background:${row.color}"></span>
         <div>
           <strong>${escapeHtml(row.label || "-")}</strong>
@@ -1631,7 +1672,7 @@ function renderModuleVariableRows(module, chartRows, showShare = false) {
       ? `<small class="module-chart-value-line"><span>Hiển thị:</span><span class="module-chart-delta flat">${escapeHtml(formatBiasWarningValue(row.value))}</span></small>`
       : `<small class="module-chart-value-line"><span>Giá trị hiện tại: ${escapeHtml(currentValue)}</span><span class="module-chart-delta ${delta.state}">${escapeHtml(delta.text)}</span></small>`;
     return `
-      <button class="module-chart-legend-item ${row.attention ? "attention" : ""}" type="button" data-chart-index="${chartIndex}" ${aiKey ? `data-ai-key="${escapeHtml(aiKey)}"` : ""} title="${escapeHtml(displayLabel)}: ${escapeHtml(currentValue)}">
+      <button class="module-chart-legend-item ${row.attention ? "attention" : ""} ${moduleToneClass(row)}" type="button" data-chart-index="${chartIndex}" ${aiKey ? `data-ai-key="${escapeHtml(aiKey)}"` : ""} title="${escapeHtml(displayLabel)}: ${escapeHtml(currentValue)}">
         <span class="module-chart-swatch" style="background:${row.color}"></span>
         <div>
           <strong>${labelHtml}</strong>
@@ -1659,7 +1700,7 @@ function moduleHelpText(row) {
     return PROFIT_FACTOR_HELP_TEXT;
   }
   if (key === "ai_other_count") {
-    return "AI khác / Chưa phân loại là số lần AI đã được gọi nhưng không thuộc 4 nhóm chính: Mini không chọn lệnh, Mini chọn LONG, Mini chọn SHORT, hoặc 5.5 từ chối/xóa setup. Thường là các lượt giữ setup, trạng thái trung gian, lỗi review, hoặc log không đủ dữ liệu để phân loại.";
+    return "Số lượt AI còn lại sau khi trừ Mini không chọn, LONG, SHORT và 5.5 từ chối/xóa setup. Gồm các trạng thái giữ setup, lỗi review, trung gian hoặc log thiếu dữ liệu.";
   }
   return "";
 }
@@ -2373,15 +2414,28 @@ function renderBunnyRiskAxisLabel(row, x, y) {
 
 function bunnyRiskKpiTone(row) {
   const key = String(row?.riskKey || "");
-  const value = String(row?.value || "").toUpperCase();
+  const rawValue = String(row?.value || "");
+  const value = rawValue.toUpperCase();
+  const normalizedValue = viLabel(rawValue).toLowerCase();
   if (key === "recoveryMode") {
-    if (value === "HARD_RECOVERY") return "red";
-    if (value === "SOFT_RECOVERY") return "orange";
+    if (value.includes("HARD") || normalizedValue.includes("hard")) return "red";
+    if (value.includes("SOFT") || normalizedValue.includes("soft") || normalizedValue.includes("recovery")) return "orange";
     return "green";
   }
   if (key === "isPaused") {
     if (value === "BẬT" || value === "BAT") return "red";
     return "green";
+  }
+  if (key === "globalLossStreak") {
+    const numeric = moduleNumericValue(row?.value);
+    if (numeric !== null && numeric >= 2) return "red";
+    if (numeric !== null && numeric > 0) return "orange";
+  }
+  if (key === "slotUtilizationPercent") {
+    const numeric = moduleNumericValue(row?.value);
+    if (numeric !== null && numeric >= 90) return "red";
+    if (numeric !== null && numeric >= 70) return "orange";
+    if (numeric !== null) return "green";
   }
   return "";
 }
@@ -4104,13 +4158,13 @@ function positionManagementStats(baseModule, sectionKey) {
       { label: "Lệnh đóng gần đây", value: common.closedCount },
       { label: "Lỗi module", value: common.hasError ? 1 : 0 },
     ],
-    protection: [
+    profit_protection: [
+      { label: "Partial TP", value: partialEnabled ? "Bật" : "Tắt" },
+      { label: "Đã partial", value: common.partialDone },
       { label: "Trailing Stop", value: trailingEnabled ? "Bật" : "Tắt" },
-      { label: "Đang được bảo vệ", value: common.openCount },
-      { label: "Đóng do SL", value: slClosed },
-      { label: "Lỗi module", value: common.hasError ? 1 : 0 },
+      { label: "Closed PnL", value: formatMarketRegimeNumber(closedPnl) },
     ],
-    profit: [
+    profit_unused: [
       { label: "Partial TP", value: partialEnabled ? "Bật" : "Tắt" },
       { label: "Đã partial", value: common.partialDone },
       { label: "Closed PnL", value: formatMarketRegimeNumber(closedPnl) },
@@ -4146,7 +4200,7 @@ function positionManagementSections(baseModule) {
       purpose: "Theo dõi setup chờ, lệnh đã gửi, fill, cancel, reject và expired.",
     },
     {
-      key: "protection",
+      key: "profit_protection",
       name: "Bảo vệ vị thế",
       display_name: "Bảo vệ vị thế",
       display_subtitle: "SL, break-even, trailing stop, liquidation warning",
@@ -4167,18 +4221,27 @@ function positionManagementSections(baseModule) {
       purpose: "Theo dõi dữ liệu bot có khớp OKX không và các sự kiện vòng đời vị thế.",
     },
   ];
-  return sections.map((section, index) => {
-    const summary = positionManagementStats(baseModule, section.key);
-    const warn = section.key === "sync_journal" ? summary.mismatchCount > 0 || summary.hasError : summary.hasError;
+  return sections.filter((section) => section.key !== "profit").map((section, index) => {
+    const mergedSection = section.key === "profit_protection"
+      ? {
+          ...section,
+          name: "Ch\u1ed1t l\u1eddi & B\u1ea3o v\u1ec7",
+          display_name: "Ch\u1ed1t l\u1eddi & B\u1ea3o v\u1ec7",
+          display_subtitle: "Partial TP, TP m\u1edbi, SL d\u01b0\u01a1ng v\u00e0 trailing stop",
+          purpose: "Theo d\u00f5i ch\u1ed1t 30%, ph\u1ea7n c\u00f2n l\u1ea1i \u0111ang g\u1ed3ng, TP m\u1edbi v\u00e0 SL b\u1ea3o v\u1ec7 theo b\u1ed1 c\u1ee5c 50/50.",
+        }
+      : section;
+    const summary = positionManagementStats(baseModule, mergedSection.key);
+    const warn = mergedSection.key === "sync_journal" ? summary.mismatchCount > 0 || summary.hasError : summary.hasError;
     return {
       ...baseModule,
       number: `15.${index + 1}`,
-      name: section.name,
-      display_name: section.display_name,
-      display_subtitle: section.display_subtitle,
-      purpose: section.purpose,
+      name: mergedSection.name,
+      display_name: mergedSection.display_name,
+      display_subtitle: mergedSection.display_subtitle,
+      purpose: mergedSection.purpose,
       status: warn ? "warn" : status,
-      position_management_section: section.key,
+      position_management_section: mergedSection.key,
       source_module_number: baseModule.number || 15,
       stats: summary.stats.map((item) => ({ ...item, attention: warn })),
     };
@@ -4275,6 +4338,83 @@ function renderTradeExecutionPositionTabs(items) {
   `;
 }
 
+function formatTradeExecutionPnl(value) {
+  const numeric = nullableNumber(value);
+  if (numeric === null) return "-";
+  const sign = numeric > 0 ? "+" : "";
+  return `${sign}${numeric.toFixed(2)} USDT`;
+}
+
+function renderProfitProtectionLevel(label, level, tone = "", options = {}) {
+  const price = level && typeof level === "object" ? level.price : null;
+  const pnl = level && typeof level === "object" ? level.pnl : null;
+  const triggerPrice = level && typeof level === "object" ? level.trigger_price : null;
+  const showTrigger = options.showTrigger !== false;
+  return `
+    <div class="profit-protection-level ${tone ? `level-${tone}` : ""}">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(formatMarketRegimeNumber(price))}</strong>
+      <b class="${nullableNumber(pnl) < 0 ? "negative" : nullableNumber(pnl) > 0 ? "positive" : ""}">${escapeHtml(formatTradeExecutionPnl(pnl))}</b>
+      ${showTrigger && nullableNumber(triggerPrice) !== null ? `<small>Kích hoạt: ${escapeHtml(formatMarketRegimeNumber(triggerPrice))}</small>` : ""}
+    </div>
+  `;
+}
+
+function renderProfitProtectionPositionPanel(item) {
+  const levels = item?.profit_protection_levels || {};
+  const tpSteps = Array.isArray(levels.tp_steps) ? levels.tp_steps : [];
+  const slSteps = Array.isArray(levels.sl_steps) ? levels.sl_steps : [];
+  const currentPnlLevel = { price: item?.mark_price, pnl: item?.pnl };
+  return `
+    <article class="trade-execution-position profit-protection-position">
+      <header>
+        <div>
+          <span>${escapeHtml(String(item?.side || "-").toUpperCase())}</span>
+          <strong>${escapeHtml(item?.symbol || "-")}</strong>
+        </div>
+        <span class="market-regime-badge ${item?.partial_take_profit_done ? "bull" : "unknown"}">${item?.partial_take_profit_done ? "Partial done" : "Waiting partial"}</span>
+      </header>
+      <div class="profit-protection-level-grid">
+        ${renderProfitProtectionLevel("SL1 ban đầu", slSteps[0] || levels.current_sl, "base")}
+        ${renderProfitProtectionLevel("TP1 ban đầu", tpSteps[0] || levels.current_tp, "base")}
+        ${renderProfitProtectionLevel("PnL hiện tại", currentPnlLevel, "current")}
+        ${renderProfitProtectionLevel("Chốt 30%", levels.partial_30, "partial")}
+        ${renderProfitProtectionLevel("SL2", slSteps[1] || levels.sl2, "step2")}
+        ${renderProfitProtectionLevel("TP2", tpSteps[1] || levels.tp2, "step2", { showTrigger: false })}
+        ${renderProfitProtectionLevel("SL3", slSteps[2] || levels.sl3, "step3")}
+        ${renderProfitProtectionLevel("TP3", tpSteps[2], "step3", { showTrigger: false })}
+        ${renderProfitProtectionLevel("SL4", slSteps[3], "step4")}
+        ${renderProfitProtectionLevel("TP4", tpSteps[3], "step4", { showTrigger: false })}
+      </div>
+      <div class="market-regime-status-meta">
+        ${renderMarketPatternMetric("Entry", formatMarketRegimeNumber(item?.initial_entry_price ?? item?.entry_price))}
+        ${renderMarketPatternMetric("Mark", formatMarketRegimeNumber(item?.mark_price))}
+        ${renderMarketPatternMetric("KL hiện tại", formatMarketRegimeNumber(levels.current_amount ?? item?.quantity))}
+        ${renderMarketPatternMetric("Còn lại", formatMarketRegimeNumber(levels.remaining_amount))}
+      </div>
+    </article>
+  `;
+}
+
+function renderProfitProtectionPositionTabs(items) {
+  const rows = Array.isArray(items) ? items : [];
+  if (!rows.length) return `<div class="market-regime-empty compact">Chưa có vị thế đang gồng.</div>`;
+  return `
+    <div class="trade-execution-tabs" role="tablist">
+      ${rows.map((item, index) => `
+        <button class="trade-execution-tab ${index === 0 ? "active" : ""}" type="button" role="tab" aria-selected="${index === 0 ? "true" : "false"}" data-trade-tab="${index}">
+          ${escapeHtml(tradeExecutionPositionTabLabel(item, index))}
+        </button>
+      `).join("")}
+    </div>
+    ${rows.map((item, index) => `
+      <div class="trade-execution-tab-panel" role="tabpanel" data-trade-panel="${index}" ${index === 0 ? "" : "hidden"}>
+        ${renderProfitProtectionPositionPanel(item)}
+      </div>
+    `).join("")}
+  `;
+}
+
 function bindTradeExecutionTabs() {
   const root = refs.systemModuleDetail;
   if (!root) return;
@@ -4319,6 +4459,10 @@ function renderPositionManagementSectionDetail(module, options = {}) {
     profit: {
       title: "Chốt lời",
       subtitle: "Theo dõi TP, partial TP, remaining size và closed PnL.",
+    },
+    profit_protection: {
+      title: "Ch\u1ed1t l\u1eddi & B\u1ea3o v\u1ec7",
+      subtitle: "Theo d\u00f5i ch\u1ed1t 30%, TP m\u1edbi, SL d\u01b0\u01a1ng v\u00e0 trailing stop theo b\u1ed1 c\u1ee5c 50/50.",
     },
     sync_journal: {
       title: "Đồng bộ & Nhật ký",
@@ -4380,6 +4524,30 @@ function renderPositionManagementSectionDetail(module, options = {}) {
             <span>Pending setup</span><span>Pending order</span><span>Submitted</span><span>Filled</span><span>Position opened</span>
           </div>
           <div class="market-regime-empty compact">Hiện UI đang dùng tổng pending từ storage. Chi tiết từng pending/order sẽ được nối vào khi backend expose danh sách order đầy đủ.</div>
+        </section>
+      ` : ""}
+      ${section === "profit_protection" ? `
+        <section class="market-regime-section">
+          <div class="position-management-split">
+            <article class="position-management-half">
+              <div class="market-regime-section-head"><div><strong>Ch\u1ed1t l\u1eddi</strong><small>Partial TP, TP m\u1edbi v\u00e0 PnL \u0111\u00e3 \u0111\u00f3ng</small></div></div>
+              <div class="market-regime-status-meta">${profitRows.map((row) => renderMarketPatternMetric(row.label, row.value)).join("")}</div>
+              <div class="position-management-note">Telegram partial TP s\u1ebd hi\u1ec3n th\u1ecb l\u00e3i \u0111\u00e3 \u0103n v\u00e0 PnL d\u1ef1 ki\u1ebfn n\u1ebfu ch\u1ea1m TP m\u1edbi.</div>
+            </article>
+            <article class="position-management-half">
+              <div class="market-regime-section-head"><div><strong>B\u1ea3o v\u1ec7</strong><small>SL d\u01b0\u01a1ng, break-even v\u00e0 trailing stop</small></div></div>
+              <div class="market-regime-status-meta">${protectionRows.map((row) => renderMarketPatternMetric(row.label, row.value)).join("")}</div>
+              <div class="position-management-note">Telegram partial TP s\u1ebd hi\u1ec3n th\u1ecb m\u1ee9c SL m\u1edbi \u0111ang b\u1ea3o v\u1ec7 bao nhi\u00eau USDT.</div>
+            </article>
+          </div>
+        </section>
+        <section class="market-regime-section">
+          <div class="market-regime-section-head"><div><strong>V\u1ecb th\u1ebf \u0111ang g\u1ed3ng</strong><small>M\u1ed7i tab l\u00e0 1 c\u1eb7p: SL/TP hi\u1ec7n t\u1ea1i, ch\u1ed1t 30%, TP2, SL2, SL3</small></div></div>
+          ${renderProfitProtectionPositionTabs(items)}
+        </section>
+        <section class="market-regime-section">
+          <div class="market-regime-section-head"><div><strong>L\u1ec7nh \u0111\u00f3ng g\u1ea7n nh\u1ea5t</strong><small>M\u00e0u xanh l\u00e0 TP, m\u00e0u \u0111\u1ecf l\u00e0 SL</small></div></div>
+          ${renderTradeExecutionClosedList(closedItems)}
         </section>
       ` : ""}
       ${section === "protection" ? `
@@ -4598,7 +4766,7 @@ function renderModuleDetail(module, options = {}) {
       ${renderModuleChart(module, rows)}
       ${auxRows.length ? `
         <div class="module-chart-meta">
-          ${auxRows.map((row) => `<div><span>${escapeHtml(row.label || "-")}</span><strong>${escapeHtml(formatCardValue(row.label, row.value))}</strong></div>`).join("")}
+          ${auxRows.map((row) => `<div class="${moduleToneClass(row)}"><span>${escapeHtml(row.label || "-")}</span><strong>${escapeHtml(formatCardValue(row.label, row.value))}</strong></div>`).join("")}
         </div>
       ` : ""}
     </div>
@@ -5541,12 +5709,12 @@ async function loadSystemChecklist(date = "", options = {}) {
   }
   renderSystemChecklist(payload);
   if (refs.systemChecklistDate && payload.date) refs.systemChecklistDate.value = payload.date;
-  if (!date && aiRange === "current") refreshSystemChecklistInBackground();
+  if (!date && aiRange === "current" && !options.forceRefresh) refreshSystemChecklistInBackground();
 }
 
 function refreshSystemChecklistInBackground() {
   const now = Date.now();
-  if (state.systemChecklistRefreshInFlight || now - state.lastSystemChecklistRefreshMs < 5 * 60 * 1000) return;
+  if (state.systemChecklistRefreshInFlight || now - state.lastSystemChecklistRefreshMs < 60 * 1000) return;
   state.systemChecklistRefreshInFlight = true;
   state.lastSystemChecklistRefreshMs = now;
   fetch(`/api/system-checklist?force_refresh=true&ai_range=current&_=${now}`, { cache: "no-store" })
@@ -5567,6 +5735,13 @@ function refreshSystemChecklistInBackground() {
     .finally(() => {
       state.systemChecklistRefreshInFlight = false;
     });
+}
+
+function startSystemChecklistRefresh() {
+  if (state.systemChecklistTimer) clearInterval(state.systemChecklistTimer);
+  state.systemChecklistTimer = setInterval(() => {
+    loadSystemChecklist("", { forceRefresh: true, aiRange: "current" }).catch((err) => setStatus(`Lỗi system health: ${err.message}`));
+  }, 60000);
 }
 
 async function loadLcPipeline() {
@@ -6125,6 +6300,7 @@ loadConfigSummary().catch((err) => {
 });
 startLcPipelineRefresh();
 loadSystemChecklist().catch((err) => setStatus(`Lỗi system health: ${err.message}`));
+startSystemChecklistRefresh();
 loadDecision()
   .then((exists) => {
     if (!exists) runAnalysis();

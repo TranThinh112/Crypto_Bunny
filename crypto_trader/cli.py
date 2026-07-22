@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from typing import Any
 
@@ -83,6 +84,7 @@ def main() -> None:
     parser.add_argument("--interval", type=int, default=None, help="Loop interval in seconds for run command")
     parser.add_argument("--host", default="127.0.0.1", help="Host for ui command")
     parser.add_argument("--port", type=int, default=8000, help="Port for ui command")
+    parser.add_argument("--reload", action="store_true", help="Auto-reload the local UI server when code changes")
     parser.add_argument("--json", action="store_true", help="Print full JSON decision")
     parser.add_argument(
         "--allow-missing-secrets",
@@ -102,9 +104,20 @@ def main() -> None:
 
         from .ui import create_app
 
-        app = create_app(args.config)
         console.print(f"[bold]UI:[/bold] http://{args.host}:{args.port}")
-        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+        if args.reload:
+            os.environ["CRYPTO_TRADER_CONFIG"] = args.config
+            uvicorn.run(
+                "crypto_trader.ui:create_app_from_env",
+                host=args.host,
+                port=args.port,
+                log_level="info",
+                reload=True,
+                factory=True,
+            )
+        else:
+            app = create_app(args.config)
+            uvicorn.run(app, host=args.host, port=args.port, log_level="info")
         return
 
     if args.command == "run":

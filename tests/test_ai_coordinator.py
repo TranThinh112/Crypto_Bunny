@@ -551,6 +551,71 @@ class AiCoordinatorTest(TestCase):
         self.assertEqual(result["skip_reason"], f"mini scan already ran for slot {slot_id}")
         self.assertEqual(result["selected_symbols"], ["BTC/USDT:USDT"])
 
+    @patch("crypto_trader.ai_coordinator._openai_internal_market_scan")
+    @patch("crypto_trader.ai_coordinator.fetch_top_volume_symbols")
+    @patch("crypto_trader.ai_coordinator.acquire_journal_lease", return_value=False)
+    def test_internal_market_scan_slot_lease_blocks_duplicate_ai_call(
+        self,
+        acquire_journal_lease,
+        fetch_top_volume_symbols,
+        openai_internal_market_scan,
+    ) -> None:
+        config = self._config()
+        config["ai"]["internal"]["provider"] = "openai"
+        config["ai"]["internal"]["market_scan_use_ai"] = True
+        config["ai"]["internal"]["market_scan_fixed_schedule"] = True
+
+        result = run_internal_market_scan(config, force=True)
+
+        acquire_journal_lease.assert_called_once()
+        fetch_top_volume_symbols.assert_not_called()
+        openai_internal_market_scan.assert_not_called()
+        self.assertTrue(result["skipped"])
+        self.assertTrue(result["slot_lease_guard"])
+
+    @patch("crypto_trader.ai_coordinator.notify_mini_pool_summary")
+    @patch("crypto_trader.ai_coordinator.release_journal_lease", side_effect=RuntimeError("release timeout"))
+    @patch("crypto_trader.ai_coordinator.acquire_journal_lease", return_value=True)
+    @patch("crypto_trader.ai_coordinator.recent_market_scan_memory")
+    @patch("crypto_trader.ai_coordinator.enrich_quantities")
+    @patch("crypto_trader.ai_coordinator.apply_position_sizing")
+    @patch("crypto_trader.ai_coordinator.build_candidates")
+    @patch("crypto_trader.ai_coordinator.market_guard_symbol_layers")
+    @patch("crypto_trader.ai_coordinator.fetch_market_snapshots")
+    @patch("crypto_trader.ai_coordinator.fetch_top_volume_symbols")
+    @patch("crypto_trader.ai_coordinator.collect_news")
+    def test_internal_market_scan_ignores_slot_lease_release_error(
+        self,
+        collect_news,
+        fetch_top_volume_symbols,
+        fetch_market_snapshots,
+        market_guard_symbol_layers,
+        build_candidates,
+        apply_position_sizing,
+        enrich_quantities,
+        recent_market_scan_memory_mock,
+        acquire_journal_lease,
+        release_journal_lease,
+        notify_mini_pool_summary,
+    ) -> None:
+        config = self._config()
+        config["ai"]["internal"]["market_scan_fixed_schedule"] = True
+        collect_news.return_value = {}
+        fetch_top_volume_symbols.return_value = (["BTC/USDT:USDT"], [])
+        fetch_market_snapshots.return_value = ([], [])
+        market_guard_symbol_layers.return_value = {}
+        build_candidates.return_value = []
+        apply_position_sizing.return_value = None
+        enrich_quantities.return_value = []
+        recent_market_scan_memory_mock.return_value = {}
+
+        result = run_internal_market_scan(config, force=True)
+
+        self.assertIn(result["status"], {"waiting_lc", "ai_rejected"})
+        acquire_journal_lease.assert_called_once()
+        release_journal_lease.assert_called_once()
+        notify_mini_pool_summary.assert_called_once()
+
     def test_internal_market_scan_not_due_when_current_four_hour_pool_is_empty(self) -> None:
         config = self._config()
         config["ai"]["internal"]["market_scan_fixed_schedule"] = True

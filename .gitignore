@@ -4,5 +4,6 @@ __pycache__/
 *.py[cod]
 reports/
 data/
+logs/
 config.yaml
 .allow-live-trading

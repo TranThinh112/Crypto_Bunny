@@ -205,6 +205,9 @@ class TrailingStopTest(TestCase):
         self.assertEqual(result["partial_closed"], 1)
         send_message.assert_called_once()
         message = send_message.call_args.args[1]
+        self.assertIn("+105.00 USDT", message)
+        self.assertIn("+8.75 USDT", message)
+        self.assertIn("+455.00 USDT", message)
         self.assertIn("PARTIAL TP + GỒNG LÃI", message)
         self.assertIn("BTC/USDT:USDT LONG", message)
         self.assertIn("Đã chốt 30% vị thế", message)

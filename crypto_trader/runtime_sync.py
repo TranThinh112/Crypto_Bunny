@@ -89,6 +89,79 @@ def _close_reason_from_realized_pnl(pnl: float | None) -> str:
         return "take_profit"
     return "exchange_position_no_longer_open"
 
+def _number_from_payloads(payloads: list[dict[str, Any]], *keys: str) -> float | None:
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        info = _payload_info(payload)
+        for source in (payload, info):
+            for key in keys:
+                value = _float(source.get(key))
+                if value is not None:
+                    return value
+    return None
+
+def _history_close_price(row: dict[str, Any] | None) -> float | None:
+    if not isinstance(row, dict):
+        return None
+    return _number_from_payloads(
+        [row],
+        "closeAvgPx",
+        "closePrice",
+        "closePx",
+        "avgPx",
+        "fillPx",
+        "price",
+        "markPx",
+    )
+
+def _row_close_targets(row: dict[str, Any]) -> dict[str, float | None]:
+    payload = _row_payload(row)
+    position = payload.get("position") if isinstance(payload.get("position"), dict) else {}
+    target = {
+        "take_profit": _float(row.get("take_profit")),
+        "stop_loss": _float(row.get("stop_loss")),
+    }
+    if target["take_profit"] is None:
+        target["take_profit"] = _target_price_from_snapshot(position, "take_profit") if position else None
+    if target["stop_loss"] is None:
+        target["stop_loss"] = _target_price_from_snapshot(position, "stop_loss") if position else None
+    return target
+
+def _price_near_target(price: float, target: float) -> bool:
+    tolerance = max(abs(target) * 0.001, 1e-8)
+    return abs(price - target) <= tolerance
+
+def _close_reason_from_exchange_close(
+    row: dict[str, Any],
+    *,
+    pnl: float | None,
+    history: dict[str, Any] | None = None,
+) -> str:
+    close_price = _history_close_price(history)
+    targets = _row_close_targets(row)
+    side = str(row.get("side") or "").strip().lower()
+    take_profit = targets.get("take_profit")
+    stop_loss = targets.get("stop_loss")
+    if close_price is not None:
+        if take_profit is not None and _price_near_target(close_price, take_profit):
+            return "take_profit"
+        if stop_loss is not None and _price_near_target(close_price, stop_loss):
+            return "stop_loss"
+        if side == "long":
+            if take_profit is not None and close_price >= take_profit:
+                return "take_profit"
+            if stop_loss is not None and close_price <= stop_loss:
+                return "stop_loss"
+        if side == "short":
+            if take_profit is not None and close_price <= take_profit:
+                return "take_profit"
+            if stop_loss is not None and close_price >= stop_loss:
+                return "stop_loss"
+    if pnl is not None:
+        return "manual"
+    return "exchange_position_no_longer_open"
+
 
 def _payload_info(payload: dict[str, Any]) -> dict[str, Any]:
     return payload.get("info", {}) if isinstance(payload.get("info"), dict) else {}
@@ -347,8 +420,8 @@ def _close_missing_exchange_execution(
     pnl = _history_pnl(history or {}) if history else None
     pnl = pnl if pnl is not None else _float(row.get("pnl"))
     pnl_pct = _history_pnl_pct(history or {}) if history else None
-    close_reason = _close_reason_from_realized_pnl(pnl)
-    if history is None:
+    close_reason = _close_reason_from_exchange_close(row, pnl=pnl, history=history)
+    if history is None and close_reason in {"take_profit", "stop_loss"}:
         estimated_pnl, estimated_pct = _estimated_closed_pnl_from_snapshot(config, row, close_reason)
         if estimated_pnl is not None:
             pnl = estimated_pnl
@@ -362,7 +435,7 @@ def _close_missing_exchange_execution(
             "status": _status_from_realized_pnl(pnl),
             "pnl": pnl,
             "pnl_pct": pnl_pct,
-            "close_reason": _close_reason_from_realized_pnl(pnl),
+            "close_reason": close_reason,
             "closed_at": actual_closed_at,
             "updated_at": closed_at,
             "position_slot": None,
@@ -395,6 +468,7 @@ def _backfill_reconciled_exchange_close_notifications(
         pnl = pnl if pnl is not None else _float(row.get("pnl"))
         pnl_pct = _history_pnl_pct(history or {}) if history else None
         history_closed_at = _history_closed_at(history or {}) if history else None
+        close_reason = _close_reason_from_exchange_close(row, pnl=pnl, history=history)
         payload = update_trade_execution(
             config,
             int(row["id"]),
@@ -402,7 +476,7 @@ def _backfill_reconciled_exchange_close_notifications(
                 "status": _status_from_realized_pnl(pnl),
                 "pnl": pnl,
                 "pnl_pct": pnl_pct,
-                "close_reason": _close_reason_from_realized_pnl(pnl),
+                "close_reason": close_reason,
                 "closed_at": history_closed_at.isoformat() if history_closed_at else row.get("closed_at"),
                 "exchange_close_source": "okx_positions_history" if history else "runtime_sync",
                 "exchange_close_history_json": json.dumps(to_jsonable(history), ensure_ascii=False) if history else row.get("exchange_close_history_json"),
@@ -430,7 +504,7 @@ def _correct_recent_exchange_closes_from_history(
     rows = list_trade_execution_rows(config, statuses=["WIN", "LOSS", "BREAKEVEN", "CLOSED"], limit=200, order="closed_desc")
     for row in rows:
         reason = str(row.get("close_reason") or "")
-        if reason not in {"stop_loss", "take_profit", "exchange_position_no_longer_open"}:
+        if reason not in {"stop_loss", "take_profit", "exchange_position_no_longer_open", "manual"}:
             continue
         closed_at = _parse_time(row.get("closed_at") or row.get("updated_at"))
         if closed_at is not None and closed_at < cutoff:
@@ -438,9 +512,13 @@ def _correct_recent_exchange_closes_from_history(
         history = _matching_position_history(row, positions_history, now)
         pnl = _history_pnl(history) if history else None
         pnl_pct = _history_pnl_pct(history) if history else None
-        source = "okx_positions_history" if history else "estimated_from_position_snapshot"
+        close_reason = _close_reason_from_exchange_close(row, pnl=pnl, history=history)
+        source = "okx_positions_history" if history else "runtime_sync"
         if pnl is None:
-            pnl, pnl_pct = _estimated_closed_pnl_from_snapshot(config, row, reason)
+            estimate_reason = close_reason if close_reason in {"take_profit", "stop_loss"} else reason
+            if estimate_reason in {"take_profit", "stop_loss"}:
+                pnl, pnl_pct = _estimated_closed_pnl_from_snapshot(config, row, estimate_reason)
+                source = "estimated_from_position_snapshot"
         if pnl is None:
             continue
         current_pnl = _float(row.get("pnl"))
@@ -449,7 +527,7 @@ def _correct_recent_exchange_closes_from_history(
             "status": _status_from_realized_pnl(pnl),
             "pnl": pnl,
             "pnl_pct": pnl_pct,
-            "close_reason": _close_reason_from_realized_pnl(pnl),
+            "close_reason": close_reason,
             "closed_at": history_closed_at.isoformat() if history_closed_at else row.get("closed_at"),
             "updated_at": now.isoformat(),
             "exchange_close_source": source,
@@ -461,7 +539,8 @@ def _correct_recent_exchange_closes_from_history(
             pnl_pct is not None
             and (current_pct is None or abs(current_pct - pnl_pct) > 1e-9)
         )
-        if current_pnl is None or abs(current_pnl - pnl) > 1e-9 or pct_changed:
+        reason_changed = reason != close_reason
+        if current_pnl is None or abs(current_pnl - pnl) > 1e-9 or pct_changed or reason_changed:
             update_trade_execution(config, int(row["id"]), updates)
             corrected += 1
     return corrected

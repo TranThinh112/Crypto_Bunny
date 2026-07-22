@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import json
@@ -183,13 +183,17 @@ _SYSTEM_ERROR_NOTIFY_LOCK = threading.Lock()
 _SYSTEM_ERROR_NOTIFICATIONS: dict[str, tuple[str, datetime]] = {}
 
 
+def _is_railway_runtime() -> bool:
+    return bool(os.getenv("RAILWAY_SERVICE_ID") or os.getenv("RAILWAY_DEPLOYMENT_ID"))
+
+
 def _notify_system_error(config: dict[str, Any], component: str, error: Any) -> bool:
     now = datetime.now(timezone.utc)
     raw_error_text = str(error or "").strip()
     if "cannot schedule new futures after interpreter shutdown" in raw_error_text.lower():
         LOGGER.info("Suppressing background shutdown error from %s: %s", component, raw_error_text)
         return False
-    message_text = str(error or "Lỗi không xác định").strip() or "Lỗi không xác định"
+    message_text = str(error or "Lá»—i khÃ´ng xÃ¡c Ä‘á»‹nh").strip() or "Lá»—i khÃ´ng xÃ¡c Ä‘á»‹nh"
     fingerprint = hashlib.sha256(message_text.encode("utf-8", errors="replace")).hexdigest()[:16]
     with _SYSTEM_ERROR_NOTIFY_LOCK:
         previous = _SYSTEM_ERROR_NOTIFICATIONS.get(component)
@@ -199,13 +203,16 @@ def _notify_system_error(config: dict[str, Any], component: str, error: Any) -> 
                 return False
         _SYSTEM_ERROR_NOTIFICATIONS[component] = (fingerprint, now)
     LOGGER.error("%s failed: %s", component, message_text)
+    if not _is_railway_runtime():
+        LOGGER.warning("Suppressing Telegram system error from local runtime: %s", component)
+        return False
     return send_telegram_message(
         config,
-        "🚨 LỖI HỆ THỐNG\n"
+        "ðŸš¨ Lá»–I Há»† THá»NG\n"
         f"Module: {component}\n"
-        f"Thời gian: {now.astimezone(_system_timezone(config)).strftime('%d/%m/%Y %H:%M:%S')}\n"
-        f"Lỗi: {message_text[:1200]}\n"
-        "Hệ thống sẽ tự động thử lại.",
+        f"Thá»i gian: {now.astimezone(_system_timezone(config)).strftime('%d/%m/%Y %H:%M:%S')}\n"
+        f"Lá»—i: {message_text[:1200]}\n"
+        "Há»‡ thá»‘ng sáº½ tá»± Ä‘á»™ng thá»­ láº¡i.",
         with_buttons=False,
         replace_previous=False,
     )
@@ -486,11 +493,11 @@ def _order_usdt_menu_message(config: dict[str, Any]) -> str:
     notional = margin * leverage
     max_margin = _max_base_margin_usdt(config)
     return (
-        "💰 Cài USDT cho lệnh sau\n"
-        f"Đang dùng: {_margin_label(margin)} USDT margin/lệnh\n"
-        f"Giá trị vị thế ước tính: {_margin_label(notional)} USDT ({leverage:g}x)\n"
-        f"Giới hạn: {_margin_label(MIN_BASE_MARGIN_USDT)}-{_margin_label(max_margin)} USDT margin\n"
-        "Chọn nút bên dưới hoặc gửi /usdt 5"
+        "ðŸ’° CÃ i USDT cho lá»‡nh sau\n"
+        f"Äang dÃ¹ng: {_margin_label(margin)} USDT margin/lá»‡nh\n"
+        f"GiÃ¡ trá»‹ vá»‹ tháº¿ Æ°á»›c tÃ­nh: {_margin_label(notional)} USDT ({leverage:g}x)\n"
+        f"Giá»›i háº¡n: {_margin_label(MIN_BASE_MARGIN_USDT)}-{_margin_label(max_margin)} USDT margin\n"
+        "Chá»n nÃºt bÃªn dÆ°á»›i hoáº·c gá»­i /usdt 5"
     )
 
 
@@ -500,9 +507,9 @@ def _setup_menu_message(config: dict[str, Any]) -> str:
     leverage = int(float(config.get("exchange", {}).get("leverage", 10) or 10))
     max_positions = int(float(config.get("risk", {}).get("max_active_trades", 1) or 1))
     return (
-        "⚙️ Setup giao dịch\n"
-        f"USDT/lệnh: {_margin_label(margin)} USDT\n"
-        f"Đòn bẩy: {leverage}x\n"
+        "âš™ï¸ Setup giao dá»‹ch\n"
+        f"USDT/lá»‡nh: {_margin_label(margin)} USDT\n"
+        f"ÄÃ²n báº©y: {leverage}x\n"
         f"Max VT: {max_positions}\n"
         "Chon nut ben duoi hoac go /setup."
     )
@@ -516,12 +523,12 @@ def _set_base_margin_from_telegram(
     try:
         margin = float(raw_value)
     except (TypeError, ValueError):
-        return config, "⚠️ USDT/lệnh không hợp lệ. Ví dụ: /usdt 5", telegram_order_usdt_keyboard(config)
+        return config, "âš ï¸ USDT/lá»‡nh khÃ´ng há»£p lá»‡. VÃ­ dá»¥: /usdt 5", telegram_order_usdt_keyboard(config)
     max_margin = _max_base_margin_usdt(config)
     if not math.isfinite(margin) or margin < MIN_BASE_MARGIN_USDT or margin > max_margin:
         return (
             config,
-            f"⚠️ Chỉ nhận từ {_margin_label(MIN_BASE_MARGIN_USDT)} đến {_margin_label(max_margin)} USDT margin/lệnh.",
+            f"âš ï¸ Chá»‰ nháº­n tá»« {_margin_label(MIN_BASE_MARGIN_USDT)} Ä‘áº¿n {_margin_label(max_margin)} USDT margin/lá»‡nh.",
             telegram_order_usdt_keyboard(config),
         )
 
@@ -530,10 +537,10 @@ def _set_base_margin_from_telegram(
     leverage = float(updated.get("exchange", {}).get("leverage", 1) or 1)
     notional = margin * leverage
     message = (
-        "✅ Đã lưu USDT cho lệnh sau\n"
-        f"Margin/lệnh: {_margin_label(margin)} USDT\n"
-        f"Giá trị vị thế ước tính: {_margin_label(notional)} USDT ({leverage:g}x)\n"
-        "Áp dụng từ lệnh mở sau."
+        "âœ… ÄÃ£ lÆ°u USDT cho lá»‡nh sau\n"
+        f"Margin/lá»‡nh: {_margin_label(margin)} USDT\n"
+        f"GiÃ¡ trá»‹ vá»‹ tháº¿ Æ°á»›c tÃ­nh: {_margin_label(notional)} USDT ({leverage:g}x)\n"
+        "Ãp dá»¥ng tá»« lá»‡nh má»Ÿ sau."
     )
     return updated, message, telegram_order_usdt_keyboard(updated)
 
@@ -543,12 +550,12 @@ def _leverage_menu_message(config: dict[str, Any]) -> str:
     margin = float(config.get("position_sizing", {}).get("base_margin_usdt", 2) or 2)
     notional = margin * leverage
     return (
-        "⚙️ Cài đòn bẩy cho lệnh sau\n"
-        f"Đang dùng: {leverage}x\n"
-        f"Margin/lệnh hiện tại: {_margin_label(margin)} USDT\n"
-        f"Giá trị vị thế ước tính: {_margin_label(notional)} USDT\n"
-        f"Giới hạn: {MIN_LEVERAGE}-{MAX_LEVERAGE}x\n"
-        "Chọn nút bên dưới hoặc gửi /lev 15"
+        "âš™ï¸ CÃ i Ä‘Ã²n báº©y cho lá»‡nh sau\n"
+        f"Äang dÃ¹ng: {leverage}x\n"
+        f"Margin/lá»‡nh hiá»‡n táº¡i: {_margin_label(margin)} USDT\n"
+        f"GiÃ¡ trá»‹ vá»‹ tháº¿ Æ°á»›c tÃ­nh: {_margin_label(notional)} USDT\n"
+        f"Giá»›i háº¡n: {MIN_LEVERAGE}-{MAX_LEVERAGE}x\n"
+        "Chá»n nÃºt bÃªn dÆ°á»›i hoáº·c gá»­i /lev 15"
     )
 
 
@@ -560,11 +567,11 @@ def _set_leverage_from_telegram(
     try:
         leverage = int(float(raw_value))
     except (TypeError, ValueError):
-        return config, "⚠️ Đòn bẩy không hợp lệ. Ví dụ: /lev 15", telegram_leverage_keyboard(config)
+        return config, "âš ï¸ ÄÃ²n báº©y khÃ´ng há»£p lá»‡. VÃ­ dá»¥: /lev 15", telegram_leverage_keyboard(config)
     if leverage < MIN_LEVERAGE or leverage > MAX_LEVERAGE:
         return (
             config,
-            f"⚠️ Chỉ nhận đòn bẩy từ {MIN_LEVERAGE}x đến {MAX_LEVERAGE}x.",
+            f"âš ï¸ Chá»‰ nháº­n Ä‘Ã²n báº©y tá»« {MIN_LEVERAGE}x Ä‘áº¿n {MAX_LEVERAGE}x.",
             telegram_leverage_keyboard(config),
         )
 
@@ -572,11 +579,11 @@ def _set_leverage_from_telegram(
     margin = float(updated.get("position_sizing", {}).get("base_margin_usdt", 2) or 2)
     notional = margin * leverage
     message = (
-        "✅ Đã lưu đòn bẩy cho lệnh sau\n"
-        f"Đòn bẩy: {leverage}x\n"
-        f"Margin/lệnh: {_margin_label(margin)} USDT\n"
-        f"Giá trị vị thế ước tính: {_margin_label(notional)} USDT\n"
-        "Áp dụng từ lệnh mở sau."
+        "âœ… ÄÃ£ lÆ°u Ä‘Ã²n báº©y cho lá»‡nh sau\n"
+        f"ÄÃ²n báº©y: {leverage}x\n"
+        f"Margin/lá»‡nh: {_margin_label(margin)} USDT\n"
+        f"GiÃ¡ trá»‹ vá»‹ tháº¿ Æ°á»›c tÃ­nh: {_margin_label(notional)} USDT\n"
+        "Ãp dá»¥ng tá»« lá»‡nh má»Ÿ sau."
     )
     return updated, message, telegram_leverage_keyboard(updated)
 
@@ -933,7 +940,7 @@ def _run_automation_cycle(app: FastAPI) -> None:
         except Exception as sync_exc:
             status["runtime_sync_error"] = str(sync_exc)
             _publish_automation_status(app, status)
-            _notify_system_error(config, "Đồng bộ OKX/MongoDB", sync_exc)
+            _notify_system_error(config, "Äá»“ng bá»™ OKX/MongoDB", sync_exc)
 
         _set_automation_phase(app, status, "trailing_stop")
         try:
@@ -998,9 +1005,9 @@ def _run_automation_cycle(app: FastAPI) -> None:
                 f"#{item.get('number')} {item.get('name')}"
                 for item in failed_modules
             )
-            _notify_system_error(config, "Kiểm tra 8 module", f"Module đang FAIL: {labels}")
+            _notify_system_error(config, "Kiá»ƒm tra 8 module", f"Module Ä‘ang FAIL: {labels}")
     except Exception as exc:
-        _notify_system_error(config, "Cập nhật System Checklist", exc)
+        _notify_system_error(config, "Cáº­p nháº­t System Checklist", exc)
     try:
         timeframe_state_dashboard(config, force_refresh=True)
         scan_memory_dashboard(config, force_refresh=True)
@@ -1259,7 +1266,7 @@ def _run_lc_pipeline_slot_cycle(app: FastAPI) -> None:
             }
         )
         app.state.lc_pipeline_status = current_status
-        _notify_system_error(config, "Lịch pool 1h/2h/4h và Mini", exc)
+        _notify_system_error(config, "Lá»‹ch pool 1h/2h/4h vÃ  Mini", exc)
     finally:
         app.state.lc_pipeline_slot_lock.release()
 
@@ -1304,9 +1311,9 @@ def _max_positions_menu_message(config: dict[str, Any]) -> str:
     except (TypeError, ValueError):
         current = 1
     return (
-        "📈 Cài số vị thế tối đa mở cùng lúc\n"
-        f"Đang dùng: {current} vị thế\n"
-        "Chọn nút bên dưới hoặc gửi /maxvt 3"
+        "ðŸ“ˆ CÃ i sá»‘ vá»‹ tháº¿ tá»‘i Ä‘a má»Ÿ cÃ¹ng lÃºc\n"
+        f"Äang dÃ¹ng: {current} vá»‹ tháº¿\n"
+        "Chá»n nÃºt bÃªn dÆ°á»›i hoáº·c gá»­i /maxvt 3"
     )
 
 
@@ -1318,15 +1325,15 @@ def _set_max_positions_from_telegram(
     try:
         max_positions = int(float(raw_value))
     except (TypeError, ValueError):
-        return config, "⚠️ Số vị thế không hợp lệ. Ví dụ: /maxvt 3", telegram_max_positions_keyboard(config)
+        return config, "âš ï¸ Sá»‘ vá»‹ tháº¿ khÃ´ng há»£p lá»‡. VÃ­ dá»¥: /maxvt 3", telegram_max_positions_keyboard(config)
     if max_positions < 1 or max_positions > 10:
-        return config, "⚠️ Chỉ nhận số vị thế từ 1 đến 10.", telegram_max_positions_keyboard(config)
+        return config, "âš ï¸ Chá»‰ nháº­n sá»‘ vá»‹ tháº¿ tá»« 1 Ä‘áº¿n 10.", telegram_max_positions_keyboard(config)
 
     updated = _save_max_positions(config_path, max_positions)
     message = (
-        "✅ Đã lưu số vị thế tối đa\n"
-        f"Max vị thế mở cùng lúc: {max_positions}\n"
-        "Áp dụng từ chu kỳ scan/lệnh tiếp theo."
+        "âœ… ÄÃ£ lÆ°u sá»‘ vá»‹ tháº¿ tá»‘i Ä‘a\n"
+        f"Max vá»‹ tháº¿ má»Ÿ cÃ¹ng lÃºc: {max_positions}\n"
+        "Ãp dá»¥ng tá»« chu ká»³ scan/lá»‡nh tiáº¿p theo."
     )
     return updated, message, telegram_max_positions_keyboard(updated)
 
@@ -1334,10 +1341,10 @@ def _set_max_positions_from_telegram(
 def _ai_history_keyboard(*, expanded: bool, has_more: bool) -> dict[str, Any]:
     rows: list[list[dict[str, str]]] = []
     if has_more and not expanded:
-        rows.append([{"text": "🔎 Xem thêm 10 lần cũ", "callback_data": "view_ai_more"}])
+        rows.append([{"text": "ðŸ”Ž Xem thÃªm 10 láº§n cÅ©", "callback_data": "view_ai_more"}])
     if expanded:
-        rows.append([{"text": "🔙 Thu gọn 5 lần gần nhất", "callback_data": "view_ai"}])
-    rows.append([{"text": "📲 Menu", "callback_data": "view_menu"}])
+        rows.append([{"text": "ðŸ”™ Thu gá»n 5 láº§n gáº§n nháº¥t", "callback_data": "view_ai"}])
+    rows.append([{"text": "ðŸ“² Menu", "callback_data": "view_menu"}])
     return {"inline_keyboard": rows}
 
 
@@ -1394,85 +1401,85 @@ def _mini_reason_vi(text: str) -> str:
         source,
         re.IGNORECASE,
     ):
-        direction = "tăng" if match.group(1).lower() == "bullish" else "giảm"
-        return f"1h/5m đang đồng thuận xu hướng {direction} và có ủng hộ khối lượng."
+        direction = "tÄƒng" if match.group(1).lower() == "bullish" else "giáº£m"
+        return f"1h/5m Ä‘ang Ä‘á»“ng thuáº­n xu hÆ°á»›ng {direction} vÃ  cÃ³ á»§ng há»™ khá»‘i lÆ°á»£ng."
     if match := re.search(
         r"RR only ([0-9.]+) and no 4h data, but local policy approved it\.?",
         source,
         re.IGNORECASE,
     ):
-        return f"R:R chỉ {match.group(1)}, chưa có dữ liệu 4h, nhưng vẫn được local policy duyệt."
+        return f"R:R chá»‰ {match.group(1)}, chÆ°a cÃ³ dá»¯ liá»‡u 4h, nhÆ°ng váº«n Ä‘Æ°á»£c local policy duyá»‡t."
     if match := re.search(
         r"([A-Z0-9]+) has aligned 1h/5m uptrend and strong volume\.?",
         source,
         re.IGNORECASE,
     ):
-        return f"{match.group(1).upper()} đang đồng thuận xu hướng tăng 1h/5m và khối lượng mạnh."
+        return f"{match.group(1).upper()} Ä‘ang Ä‘á»“ng thuáº­n xu hÆ°á»›ng tÄƒng 1h/5m vÃ  khá»‘i lÆ°á»£ng máº¡nh."
     if match := re.search(
         r"([A-Z0-9]+) has aligned 1h/5m downtrend and strong volume\.?",
         source,
         re.IGNORECASE,
     ):
-        return f"{match.group(1).upper()} đang đồng thuận xu hướng giảm 1h/5m và khối lượng mạnh."
+        return f"{match.group(1).upper()} Ä‘ang Ä‘á»“ng thuáº­n xu hÆ°á»›ng giáº£m 1h/5m vÃ  khá»‘i lÆ°á»£ng máº¡nh."
     if match := re.search(
         r"([A-Z0-9]+) lacks volume support and has mixed 1h bearish candle\.?",
         source,
         re.IGNORECASE,
     ):
-        return f"{match.group(1).upper()} thiếu ủng hộ khối lượng, nến 1h còn lẫn tín hiệu giảm."
+        return f"{match.group(1).upper()} thiáº¿u á»§ng há»™ khá»‘i lÆ°á»£ng, náº¿n 1h cÃ²n láº«n tÃ­n hiá»‡u giáº£m."
     if match := re.search(
         r"([A-Z0-9]+) lacks volume support and has mixed 1h bullish candle\.?",
         source,
         re.IGNORECASE,
     ):
-        return f"{match.group(1).upper()} thiếu ủng hộ khối lượng, nến 1h còn lẫn tín hiệu tăng."
+        return f"{match.group(1).upper()} thiáº¿u á»§ng há»™ khá»‘i lÆ°á»£ng, náº¿n 1h cÃ²n láº«n tÃ­n hiá»‡u tÄƒng."
     if match := re.search(r"Strategic long bias target 60/40 adds ([0-9.]+) point", source, re.IGNORECASE):
-        return f"Thiên hướng long chiến lược cộng thêm {match.group(1)} điểm."
+        return f"ThiÃªn hÆ°á»›ng long chiáº¿n lÆ°á»£c cá»™ng thÃªm {match.group(1)} Ä‘iá»ƒm."
     if match := re.search(r"Strategic long bias requires stronger short evidence \(([0-9.]+) point edge\)", source, re.IGNORECASE):
-        return f"Thiên hướng long đang mạnh, short cần thêm lợi thế {match.group(1)} điểm."
+        return f"ThiÃªn hÆ°á»›ng long Ä‘ang máº¡nh, short cáº§n thÃªm lá»£i tháº¿ {match.group(1)} Ä‘iá»ƒm."
     if match := re.search(r"Market regime is neutral: breadth ([0-9.]+)% favors longs", source, re.IGNORECASE):
-        return f"Thị trường trung tính, độ rộng {match.group(1)}% nghiêng về long."
+        return f"Thá»‹ trÆ°á»ng trung tÃ­nh, Ä‘á»™ rá»™ng {match.group(1)}% nghiÃªng vá» long."
     if match := re.search(r"Market regime is bullish: breadth ([0-9.]+)% favors longs", source, re.IGNORECASE):
-        return f"Thị trường nghiêng tăng, độ rộng {match.group(1)}% ủng hộ long."
+        return f"Thá»‹ trÆ°á»ng nghiÃªng tÄƒng, Ä‘á»™ rá»™ng {match.group(1)}% á»§ng há»™ long."
     if match := re.search(r"Market regime is bearish: breadth ([0-9.]+)% allows shorts", source, re.IGNORECASE):
-        return f"Thị trường nghiêng giảm, độ rộng {match.group(1)}% cho phép short."
+        return f"Thá»‹ trÆ°á»ng nghiÃªng giáº£m, Ä‘á»™ rá»™ng {match.group(1)}% cho phÃ©p short."
     if re.search(r"5M trend confirms long", source, re.IGNORECASE):
-        return "Xu hướng 5m xác nhận LONG."
+        return "Xu hÆ°á»›ng 5m xÃ¡c nháº­n LONG."
     if re.search(r"5M trend confirms short", source, re.IGNORECASE):
-        return "Xu hướng 5m xác nhận SHORT."
+        return "Xu hÆ°á»›ng 5m xÃ¡c nháº­n SHORT."
     if re.search(r"1H trend confirms long", source, re.IGNORECASE):
-        return "Xu hướng 1h xác nhận LONG."
+        return "Xu hÆ°á»›ng 1h xÃ¡c nháº­n LONG."
     if re.search(r"1H trend confirms short", source, re.IGNORECASE):
-        return "Xu hướng 1h xác nhận SHORT."
+        return "Xu hÆ°á»›ng 1h xÃ¡c nháº­n SHORT."
     if re.search(r"1M candlestick supports LONG", source, re.IGNORECASE):
-        return "Nến 1m đang ủng hộ LONG."
+        return "Náº¿n 1m Ä‘ang á»§ng há»™ LONG."
     if re.search(r"1M candlestick supports SHORT", source, re.IGNORECASE):
-        return "Nến 1m đang ủng hộ SHORT."
+        return "Náº¿n 1m Ä‘ang á»§ng há»™ SHORT."
     if match := re.search(
         r"Aligned (long|short) bias with 1h/5m (uptrend|downtrend), modest RR ([0-9.]+), and no critical warnings",
         source,
         re.IGNORECASE,
     ):
         side = match.group(1).upper()
-        trend = "xu hướng tăng 1h/5m" if match.group(2).lower() == "uptrend" else "xu hướng giảm 1h/5m"
-        return f"Mini thấy {side} đồng thuận với {trend}, R:R {match.group(3)}, chưa có cảnh báo lớn."
+        trend = "xu hÆ°á»›ng tÄƒng 1h/5m" if match.group(2).lower() == "uptrend" else "xu hÆ°á»›ng giáº£m 1h/5m"
+        return f"Mini tháº¥y {side} Ä‘á»“ng thuáº­n vá»›i {trend}, R:R {match.group(3)}, chÆ°a cÃ³ cáº£nh bÃ¡o lá»›n."
     if re.search(r"no critical warnings", source, re.IGNORECASE):
-        return "Chưa có cảnh báo lớn."
+        return "ChÆ°a cÃ³ cáº£nh bÃ¡o lá»›n."
     if match := re.search(r"modest RR ([0-9.]+)", source, re.IGNORECASE):
-        return f"R:R đang ở mức {match.group(1)}."
+        return f"R:R Ä‘ang á»Ÿ má»©c {match.group(1)}."
     if re.search(r"5m hesitation lowers confidence", source, re.IGNORECASE):
-        return "Khung 5m còn do dự nên độ tin cậy bị giảm."
+        return "Khung 5m cÃ²n do dá»± nÃªn Ä‘á»™ tin cáº­y bá»‹ giáº£m."
     compact = source
     replacements = {
-        "Market regime is neutral": "Thị trường trung tính",
-        "Market regime is bullish": "Thị trường nghiêng tăng",
-        "Market regime is bearish": "Thị trường nghiêng giảm",
-        "favors longs": "nghiêng về long",
-        "allows shorts": "cho phép short",
-        "trend confirms long": "xác nhận LONG",
-        "trend confirms short": "xác nhận SHORT",
-        "no critical warnings": "không có cảnh báo lớn",
-        "hesitation lowers confidence": "còn do dự nên giảm độ tin cậy",
+        "Market regime is neutral": "Thá»‹ trÆ°á»ng trung tÃ­nh",
+        "Market regime is bullish": "Thá»‹ trÆ°á»ng nghiÃªng tÄƒng",
+        "Market regime is bearish": "Thá»‹ trÆ°á»ng nghiÃªng giáº£m",
+        "favors longs": "nghiÃªng vá» long",
+        "allows shorts": "cho phÃ©p short",
+        "trend confirms long": "xÃ¡c nháº­n LONG",
+        "trend confirms short": "xÃ¡c nháº­n SHORT",
+        "no critical warnings": "khÃ´ng cÃ³ cáº£nh bÃ¡o lá»›n",
+        "hesitation lowers confidence": "cÃ²n do dá»± nÃªn giáº£m Ä‘á»™ tin cáº­y",
     }
     for old, new in replacements.items():
         compact = compact.replace(old, new)
@@ -1491,17 +1498,17 @@ def _ai_symbol_detail_lines(item: dict[str, Any]) -> list[str]:
     scores = item.get("setup_scores") if isinstance(item.get("setup_scores"), dict) else {}
     lines: list[str] = []
     if details:
-        lines.append("3 cặp giao dịch được mini đánh giá:")
+        lines.append("3 cáº·p giao dá»‹ch Ä‘Æ°á»£c mini Ä‘Ã¡nh giÃ¡:")
         for index, detail in enumerate(details[:3], start=1):
             if not isinstance(detail, dict):
                 continue
             symbol = str(detail.get("symbol") or "-")
-            chosen = " ✅ mini gửi LC" if symbol in approved else ""
+            chosen = " âœ… mini gá»­i LC" if symbol in approved else ""
             metric_parts = []
             if detail.get("win_probability_pct") is not None:
                 metric_parts.append(f"Win {_telegram_number(detail.get('win_probability_pct'), '%')}")
             if detail.get("confidence") is not None:
-                metric_parts.append(f"Tin cậy {_telegram_number(detail.get('confidence'))}")
+                metric_parts.append(f"Tin cáº­y {_telegram_number(detail.get('confidence'))}")
             if detail.get("risk_reward") is not None:
                 metric_parts.append(f"R:R {_telegram_number(detail.get('risk_reward'))}")
             if scores.get(symbol) is not None:
@@ -1511,20 +1518,20 @@ def _ai_symbol_detail_lines(item: dict[str, Any]) -> list[str]:
                 lines.append("   " + " | ".join(metric_parts))
             reasons = [str(reason) for reason in detail.get("reasons") or [] if str(reason)]
             if reasons:
-                lines.append("   Lý do:")
+                lines.append("   LÃ½ do:")
                 for reason in reasons[:3]:
                     lines.append(f"   - {reason[:180]}")
         if approved:
-            lines.append("Mini chọn gửi:")
+            lines.append("Mini chá»n gá»­i:")
             for symbol in approved[:3]:
                 lines.append(f"- {symbol}")
         return lines
 
     symbols = [str(symbol) for symbol in item.get("symbols") or [] if str(symbol)]
     if symbols:
-        lines.append("Cặp giao dịch:")
+        lines.append("Cáº·p giao dá»‹ch:")
         for index, symbol in enumerate(symbols[:5], start=1):
-            marker = " ✅ mini gửi LC" if symbol in approved else ""
+            marker = " âœ… mini gá»­i LC" if symbol in approved else ""
             lines.append(f"{index}. {symbol}{marker}")
     return lines
 
@@ -1535,41 +1542,41 @@ def _ai_symbol_detail_lines_v2(item: dict[str, Any]) -> list[str]:
     scores = item.get("setup_scores") if isinstance(item.get("setup_scores"), dict) else {}
     lines: list[str] = []
     if details:
-        lines.append("3 cặp mini đã đánh giá:")
+        lines.append("3 cáº·p mini Ä‘Ã£ Ä‘Ã¡nh giÃ¡:")
         for index, detail in enumerate(details[:3], start=1):
             if not isinstance(detail, dict):
                 continue
             symbol = str(detail.get("symbol") or "-")
-            chosen = " ✅ mini gửi LC" if symbol in approved else ""
+            chosen = " âœ… mini gá»­i LC" if symbol in approved else ""
             metric_parts = []
             if detail.get("win_probability_pct") is not None:
                 metric_parts.append(f"Win {_telegram_number(detail.get('win_probability_pct'), '%')}")
             if detail.get("confidence") is not None:
-                metric_parts.append(f"Tin cậy {_telegram_number(detail.get('confidence'))}")
+                metric_parts.append(f"Tin cáº­y {_telegram_number(detail.get('confidence'))}")
             if detail.get("risk_reward") is not None:
                 metric_parts.append(f"R:R {_telegram_number(detail.get('risk_reward'))}")
             if scores.get(symbol) is not None:
-                metric_parts.append(f"Điểm mini {_telegram_number(scores.get(symbol))}")
+                metric_parts.append(f"Äiá»ƒm mini {_telegram_number(scores.get(symbol))}")
             lines.append(f"{index}. {symbol} | {_telegram_side_label(detail.get('side'))}{chosen}")
             if metric_parts:
                 lines.append("   " + " | ".join(metric_parts))
             reasons = [str(reason) for reason in detail.get("reasons") or [] if str(reason)]
             short_reasons = _top_mini_reasons(reasons, limit=2)
             if short_reasons:
-                lines.append("   Lý do gửi:")
+                lines.append("   LÃ½ do gá»­i:")
                 for reason in short_reasons:
                     lines.append(f"   - {reason}")
         if approved:
-            lines.append("Mini chọn:")
+            lines.append("Mini chá»n:")
             for symbol in approved[:3]:
                 lines.append(f"- {symbol}")
         return lines
 
     symbols = [str(symbol) for symbol in item.get("symbols") or [] if str(symbol)]
     if symbols:
-        lines.append("Cặp giao dịch:")
+        lines.append("Cáº·p giao dá»‹ch:")
         for index, symbol in enumerate(symbols[:5], start=1):
-            marker = " ✅ mini gửi LC" if symbol in approved else ""
+            marker = " âœ… mini gá»­i LC" if symbol in approved else ""
             lines.append(f"{index}. {symbol}{marker}")
     return lines
 
@@ -1580,9 +1587,9 @@ def _mini_comment_lines(reason: Any, *, limit: int = 2) -> list[str]:
 
 def _ai_history_header(*, expanded: bool) -> str:
     return (
-        "🤖 Lịch sử gọi AI gần nhất (15 lần, mới nhất ở dưới)"
+        "ðŸ¤– Lá»‹ch sá»­ gá»i AI gáº§n nháº¥t (15 láº§n, má»›i nháº¥t á»Ÿ dÆ°á»›i)"
         if expanded
-        else "🤖 Lịch sử gọi AI gần nhất (5 lần, mới nhất ở dưới)"
+        else "ðŸ¤– Lá»‹ch sá»­ gá»i AI gáº§n nháº¥t (5 láº§n, má»›i nháº¥t á»Ÿ dÆ°á»›i)"
     )
 
 
@@ -1598,13 +1605,13 @@ def _format_ai_call_history_entry(config: dict[str, Any], item: dict[str, Any]) 
         symbol = str(item.get("symbol") or ((item.get("symbols") or ["-"])[0]))
         side = _telegram_side_label(item.get("side"))
         lines = [
-            f"🕒 {created_label}",
-            f"Vai trò: OKX",
+            f"ðŸ•’ {created_label}",
+            f"Vai trÃ²: OKX",
             f"Model: {item.get('model', '-')}",
-            f"Trạng thái: {item.get('status', '-')}",
+            f"Tráº¡ng thÃ¡i: {item.get('status', '-')}",
             f"LC_OKX: #{lc_id if lc_id not in (None, '') else '-'}",
-            f"Cặp: {symbol} | {side}",
-            f"Giải thích: {okx_review_explanation_vi(item)[:180]}",
+            f"Cáº·p: {symbol} | {side}",
+            f"Giáº£i thÃ­ch: {okx_review_explanation_vi(item)[:180]}",
         ]
         return "\n".join(lines)
     role = str(item.get("role") or "ai").upper()
@@ -1616,15 +1623,15 @@ def _format_ai_call_history_entry(config: dict[str, Any], item: dict[str, Any]) 
     except ValueError:
         created_label = created_at[:16] or "-"
     lines = [
-        f"🕒 {created_label}",
-        f"Vai trò: {role}",
+        f"ðŸ•’ {created_label}",
+        f"Vai trÃ²: {role}",
         f"Model: {item.get('model', '-')}",
-        f"Trạng thái: {item.get('status', '-')}",
+        f"Tráº¡ng thÃ¡i: {item.get('status', '-')}",
     ]
     lines.extend(_ai_symbol_detail_lines_v2(item))
     reason = str(item.get("reason") or "")
     if reason:
-        lines.append("Nhận xét của mini:")
+        lines.append("Nháº­n xÃ©t cá»§a mini:")
         for text in _mini_comment_lines(reason, limit=2):
             lines.append(f"- {text[:180]}")
     return "\n".join(lines)
@@ -1639,7 +1646,7 @@ def ai_call_history_timeline_messages(config: dict[str, Any], *, expanded: bool 
 def _format_ai_call_history_view(config: dict[str, Any], *, expanded: bool = False) -> str:
     items = ai_call_history_timeline_messages(config, expanded=expanded)
     if not items:
-        return "🤖 AI: chưa có lịch sử gọi GPT nào được lưu."
+        return "ðŸ¤– AI: chÆ°a cÃ³ lá»‹ch sá»­ gá»i GPT nÃ o Ä‘Æ°á»£c lÆ°u."
     return "\n\n".join([_ai_history_header(expanded=expanded), *items])
 
 def _telegram_number(value: Any, suffix: str = "") -> str:
@@ -1718,47 +1725,47 @@ def _telegram_dashboard_message(
     except Exception:
         balance_label = "khong lay duoc"
 
-    auto_label = "bật" if status.get("enabled") else "tắt"
-    execute_label = "có gửi lệnh" if status.get("execute") else "chỉ theo dõi"
-    okx_label = "sẵn sàng" if demo.get("ready") else demo.get("message", "chưa sẵn sàng")
+    auto_label = "báº­t" if status.get("enabled") else "táº¯t"
+    execute_label = "cÃ³ gá»­i lá»‡nh" if status.get("execute") else "chá»‰ theo dÃµi"
+    okx_label = "sáºµn sÃ ng" if demo.get("ready") else demo.get("message", "chÆ°a sáºµn sÃ ng")
 
     lines = [
-        "📲 Bảng điều khiển Telegram",
-        f"⚙️ Mode: {config.get('mode', '-')} | Auto: {auto_label} | {execute_label}",
-        f"🧪 OKX demo: {okx_label}",
-        f"💵 So du: {balance_label}",
+        "ðŸ“² Báº£ng Ä‘iá»u khiá»ƒn Telegram",
+        f"âš™ï¸ Mode: {config.get('mode', '-')} | Auto: {auto_label} | {execute_label}",
+        f"ðŸ§ª OKX demo: {okx_label}",
+        f"ðŸ’µ So du: {balance_label}",
         (
-            "💰 Lệnh sau: "
+            "ðŸ’° Lá»‡nh sau: "
             f"{_telegram_number(margin, ' USDT')} margin | "
             f"{_telegram_number(leverage, 'x')} | "
-            f"vị thế {_telegram_number(notional, ' USDT')}"
+            f"vá»‹ tháº¿ {_telegram_number(notional, ' USDT')}"
         ),
-        f"🟡 LC nội bộ: {internal_lc_count}",
+        f"ðŸŸ¡ LC ná»™i bá»™: {internal_lc_count}",
     ]
     lines.insert(3, f"AI: internal {ai_internal.get('model', '-')} | OKX {ai_okx.get('model', '-')}")
     try:
         next_mini = _telegram_vn_time(config, next_internal_market_scan_at(config))
-        lines.insert(4, f"🤖 Mini scan tiếp: {next_mini}")
+        lines.insert(4, f"ðŸ¤– Mini scan tiáº¿p: {next_mini}")
     except Exception as exc:
-        _notify_system_error(config, "Tính lịch Mini", exc)
+        _notify_system_error(config, "TÃ­nh lá»‹ch Mini", exc)
     if top:
         lines.append(
-            "🏆 Top hiện tại: "
+            "ðŸ† Top hiá»‡n táº¡i: "
             f"{top.get('symbol', '-')} {str(top.get('side', '-')).upper()} | "
-            f"tin cậy {_telegram_number(top.get('confidence'))}"
+            f"tin cáº­y {_telegram_number(top.get('confidence'))}"
         )
     else:
-        lines.append("🏆 Top hiện tại: chưa có dữ liệu scan")
+        lines.append("ðŸ† Top hiá»‡n táº¡i: chÆ°a cÃ³ dá»¯ liá»‡u scan")
     if risk.get("passed") is not None:
-        lines.append(f"🛡 Risk gate: {'PASS' if risk.get('passed') else 'BLOCK'}")
+        lines.append(f"ðŸ›¡ Risk gate: {'PASS' if risk.get('passed') else 'BLOCK'}")
     elif status.get("risk_passed") is not None:
-        lines.append(f"🛡 Risk gate: {'PASS' if status.get('risk_passed') else 'BLOCK'}")
+        lines.append(f"ðŸ›¡ Risk gate: {'PASS' if status.get('risk_passed') else 'BLOCK'}")
     if reasons:
-        lines.append("⚠️ Lý do: " + " | ".join(str(item) for item in reasons[:2]))
+        lines.append("âš ï¸ LÃ½ do: " + " | ".join(str(item) for item in reasons[:2]))
     if status.get("last_finished_at"):
-        lines.append(f"🕒 Scan gần nhất: {_telegram_vn_time(config, status.get('last_finished_at'))}")
+        lines.append(f"ðŸ•’ Scan gáº§n nháº¥t: {_telegram_vn_time(config, status.get('last_finished_at'))}")
     if status.get("next_scan_at"):
-        lines.append(f"⏭ Scan tự động tiếp: {_telegram_vn_time(config, status.get('next_scan_at'))}")
+        lines.append(f"â­ Scan tá»± Ä‘á»™ng tiáº¿p: {_telegram_vn_time(config, status.get('next_scan_at'))}")
     lines.append("Bam nut ben duoi hoac go /menu, /setup trong Telegram.")
     return "\n".join(lines)
 
@@ -1768,7 +1775,7 @@ def _telegram_guard_message(config: dict[str, Any], app: FastAPI | None = None) 
     status = status or latest_market_guard_status(config)
     if status:
         return format_market_guard_message(status)
-    return "🛡 Market Guard chưa có dữ liệu. Bấm Scan ngay hoặc chờ chu kỳ guard kế tiếp."
+    return "ðŸ›¡ Market Guard chÆ°a cÃ³ dá»¯ liá»‡u. Báº¥m Scan ngay hoáº·c chá» chu ká»³ guard káº¿ tiáº¿p."
 
 
 def _run_telegram_scan(app: FastAPI | None, config_path: str | Path) -> tuple[dict[str, Any], str, dict[str, Any]]:
@@ -1776,13 +1783,13 @@ def _run_telegram_scan(app: FastAPI | None, config_path: str | Path) -> tuple[di
     if atlas_runtime_is_read_only(config):
         return (
             config,
-            "⚠️ Runtime hiện tại đang ở chế độ chỉ đọc. Chỉ Railway primary mới được phép scan và ghi state.",
+            "âš ï¸ Runtime hiá»‡n táº¡i Ä‘ang á»Ÿ cháº¿ Ä‘á»™ chá»‰ Ä‘á»c. Chá»‰ Railway primary má»›i Ä‘Æ°á»£c phÃ©p scan vÃ  ghi state.",
             telegram_control_keyboard(),
         )
     if app is None:
-        return config, "⚠️ Scan ngay chỉ khả dụng khi bot UI server đang chạy.", telegram_control_keyboard()
+        return config, "âš ï¸ Scan ngay chá»‰ kháº£ dá»¥ng khi bot UI server Ä‘ang cháº¡y.", telegram_control_keyboard()
     if not app.state.lock.acquire(blocking=False):
-        return config, "⏳ Bot đang bận scan chu kỳ khác. Thử lại sau vài giây.", telegram_control_keyboard()
+        return config, "â³ Bot Ä‘ang báº­n scan chu ká»³ khÃ¡c. Thá»­ láº¡i sau vÃ i giÃ¢y.", telegram_control_keyboard()
     try:
         config = load_config(config_path)
         started = datetime.now(timezone.utc)
@@ -1810,7 +1817,7 @@ def _run_telegram_scan(app: FastAPI | None, config_path: str | Path) -> tuple[di
         }
         return config, format_scan_message(config, payload, status), telegram_control_keyboard()
     except Exception as exc:
-        return config, f"🚨 Scan lỗi: {exc}", telegram_control_keyboard()
+        return config, f"ðŸš¨ Scan lá»—i: {exc}", telegram_control_keyboard()
     finally:
         app.state.lock.release()
 
@@ -1959,7 +1966,7 @@ def _send_ai_history_sequence(
     has_more = len(recent_ai_call_history(config, limit=6)) > 5 if not expanded else False
     reply_markup = _ai_history_keyboard(expanded=expanded, has_more=has_more)
     if not timeline_messages:
-        empty_text = "🤖 AI: chưa có lịch sử gọi GPT nào được lưu."
+        empty_text = "ðŸ¤– AI: chÆ°a cÃ³ lá»‹ch sá»­ gá»i GPT nÃ o Ä‘Æ°á»£c lÆ°u."
         if message_id is not None:
             edited = edit_telegram_chat_message(
                 config,
@@ -2025,7 +2032,7 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
         callback_id = str(callback.get("id") or "")
         action = str(callback.get("data") or "view_menu")
         if callback_id:
-            answer_callback_query(config, callback_id, "Đang chạy scan..." if action == "scan_now" else "Đang lấy dữ liệu...")
+            answer_callback_query(config, callback_id, "Äang cháº¡y scan..." if action == "scan_now" else "Äang láº¥y dá»¯ liá»‡u...")
         try:
             set_journal_state(
                 config,
@@ -2057,9 +2064,9 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
                 config,
                 chat_id,
                 thread_id=thread_id,
-                header_text="🔔 Thông báo nội bộ",
+                header_text="ðŸ”” ThÃ´ng bÃ¡o ná»™i bá»™",
                 timeline_messages=timeline_messages,
-                empty_text="🔔 Thông báo nội bộ: chưa có dữ liệu 1h/2h/4h/Mini.",
+                empty_text="ðŸ”” ThÃ´ng bÃ¡o ná»™i bá»™: chÆ°a cÃ³ dá»¯ liá»‡u 1h/2h/4h/Mini.",
             )
             return
         if action == "view_wait_slot_notifications":
@@ -2073,9 +2080,9 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
                 config,
                 chat_id,
                 thread_id=thread_id,
-                header_text="🟡 Thông báo Wait Slot",
+                header_text="ðŸŸ¡ ThÃ´ng bÃ¡o Wait Slot",
                 timeline_messages=timeline_messages,
-                empty_text="🟡 Wait Slot: chưa có thông báo nào.",
+                empty_text="ðŸŸ¡ Wait Slot: chÆ°a cÃ³ thÃ´ng bÃ¡o nÃ o.",
             )
             return
         if action == "view_undecided_lc":
@@ -2095,7 +2102,7 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
                 config,
                 chat_id,
                 thread_id=thread_id,
-                header_text="📋 Thông báo Chưa duyệt",
+                header_text="ðŸ“‹ ThÃ´ng bÃ¡o ChÆ°a duyá»‡t",
                 timeline_messages=timeline_messages,
                 empty_text=empty_text,
             )
@@ -2299,9 +2306,9 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
             config,
             chat_id,
             thread_id=message.get("message_thread_id"),
-            header_text="🔔 Thông báo nội bộ",
+            header_text="ðŸ”” ThÃ´ng bÃ¡o ná»™i bá»™",
             timeline_messages=internal_notification_timeline_messages(config),
-            empty_text="🔔 Thông báo nội bộ: chưa có dữ liệu 1h/2h/4h/Mini.",
+            empty_text="ðŸ”” ThÃ´ng bÃ¡o ná»™i bá»™: chÆ°a cÃ³ dá»¯ liá»‡u 1h/2h/4h/Mini.",
         )
         return
     if action == "view_wait_slot_notifications":
@@ -2309,9 +2316,9 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
             config,
             chat_id,
             thread_id=message.get("message_thread_id"),
-            header_text="🟡 Thông báo Wait Slot",
+            header_text="ðŸŸ¡ ThÃ´ng bÃ¡o Wait Slot",
             timeline_messages=wait_slot_notification_timeline_messages(config),
-            empty_text="🟡 Wait Slot: chưa có thông báo nào.",
+            empty_text="ðŸŸ¡ Wait Slot: chÆ°a cÃ³ thÃ´ng bÃ¡o nÃ o.",
         )
         return
     if action == "view_undecided_lc":
@@ -2319,7 +2326,7 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
             config,
             chat_id,
             thread_id=message.get("message_thread_id"),
-            header_text="📋 Thông báo Chưa duyệt",
+            header_text="ðŸ“‹ ThÃ´ng bÃ¡o ChÆ°a duyá»‡t",
             timeline_messages=undecided_notification_timeline_messages(config),
             empty_text=format_undecided_lc_view(config),
         )
@@ -2356,7 +2363,7 @@ def _telegram_button_worker(app: FastAPI) -> None:
     except Exception as exc:
         offset_value = None
         if config is not None:
-            _notify_system_error(config, "Telegram Polling khởi tạo", exc)
+            _notify_system_error(config, "Telegram Polling khá»Ÿi táº¡o", exc)
 
     while not app.state.automation_stop.is_set():
         try:
@@ -2795,11 +2802,14 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
         except Exception as exc:
             LOGGER.warning("Skipping deprecated journal state purge during startup: %s", exc)
         clear_dashboard_snapshot_cache(config)
-        try:
-            sync_runtime_state(config)
-        except Exception as exc:
-            _notify_system_error(config, "Khởi động đồng bộ OKX/MongoDB", exc)
-        sync_telegram_commands(config)
+        if _is_railway_runtime():
+            try:
+                sync_runtime_state(config)
+            except Exception as exc:
+                _notify_system_error(config, "Khởi động đồng bộ OKX/MongoDB", exc)
+            sync_telegram_commands(config)
+        else:
+            LOGGER.info("Skipping blocking OKX/Telegram startup sync on local runtime")
         initial_delay = max(0, int(config.get("automation", {}).get("initial_delay_seconds", 5) or 0))
         interval = _automation_interval(config)
         enabled = _automation_enabled(config)
@@ -2811,7 +2821,18 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
             "automation_phase": "waiting_initial_delay" if enabled else "disabled",
             "next_scan_at": (now + timedelta(seconds=initial_delay)).isoformat() if enabled else None,
         }
-        if config.get("notifications", {}).get("telegram", {}).get("startup_message_enabled", True):
+        if not _is_railway_runtime():
+            app.state.automation_status.update(
+                {
+                    "enabled": False,
+                    "last_result": "local_ui_only",
+                    "automation_phase": "local_ui_only",
+                    "next_scan_at": None,
+                }
+            )
+            LOGGER.info("Local runtime is UI-only; background trading workers are disabled")
+            return
+        if _is_railway_runtime() and config.get("notifications", {}).get("telegram", {}).get("startup_message_enabled", True):
             send_telegram_message(
                 config,
                 STARTUP_TELEGRAM_MESSAGE,
@@ -3551,13 +3572,13 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
         }
         after_prompt = prompt_status(config)
         summary = (
-            "🧪 Fake AI sandbox hoàn tất\n"
-            f"✅ Mini gọi: {internal_config.get('model', 'gpt-5.4-mini')}\n"
-            f"Mini duyệt: {', '.join(approved_symbols) if approved_symbols else 'không duyệt rõ, dùng BTC fake để test OKX'}\n"
-            f"✅ OKX gọi: {okx_config.get('model', 'gpt-5.5')}\n"
-            f"OKX quyết định: {okx_decision.get('decision') or okx_decision.get('approved')}\n"
-            f"Lệnh mô phỏng: {selected.get('side')} {selected.get('symbol')}\n"
-            "⚠️ Không gửi lệnh thật lên OKX."
+            "ðŸ§ª Fake AI sandbox hoÃ n táº¥t\n"
+            f"âœ… Mini gá»i: {internal_config.get('model', 'gpt-5.4-mini')}\n"
+            f"Mini duyá»‡t: {', '.join(approved_symbols) if approved_symbols else 'khÃ´ng duyá»‡t rÃµ, dÃ¹ng BTC fake Ä‘á»ƒ test OKX'}\n"
+            f"âœ… OKX gá»i: {okx_config.get('model', 'gpt-5.5')}\n"
+            f"OKX quyáº¿t Ä‘á»‹nh: {okx_decision.get('decision') or okx_decision.get('approved')}\n"
+            f"Lá»‡nh mÃ´ phá»ng: {selected.get('side')} {selected.get('symbol')}\n"
+            "âš ï¸ KhÃ´ng gá»­i lá»‡nh tháº­t lÃªn OKX."
         )
         send_telegram_message(config, summary, with_buttons=False)
         return {
@@ -3913,3 +3934,6 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
         return payload
 
     return app
+
+def create_app_from_env() -> FastAPI:
+    return create_app(os.environ.get("CRYPTO_TRADER_CONFIG", "config.example.yaml"))

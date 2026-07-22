@@ -10,6 +10,7 @@ from market_pattern_engine.infrastructure.config_loader import load_engine_confi
 from market_pattern_engine.repositories.analysis_repository import AnalysisRepository
 from market_pattern_engine.services.analysis_service import AnalysisService
 
+from .atlas_mirror import atlas_database
 from .models import MarketSnapshot, TradeCandidate
 
 
@@ -132,7 +133,10 @@ def analyze_market_pattern_snapshots(
         return {"enabled": True, "source": source, "analyzed": 0, "by_symbol": {}, "warnings": ["No OHLCV snapshots available for Market Pattern Engine"]}
     try:
         engine_config = load_engine_config()
-        service = AnalysisService(engine_config, repository or AnalysisRepository(config=engine_config))
+        service = AnalysisService(
+            engine_config,
+            repository or AnalysisRepository(db=atlas_database(config), config=engine_config),
+        )
     except Exception as exc:
         return {"enabled": True, "source": source, "analyzed": 0, "by_symbol": {}, "warnings": [f"Market Pattern Engine unavailable: {exc}"]}
 

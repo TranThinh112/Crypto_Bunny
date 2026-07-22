@@ -469,11 +469,35 @@ def format_partial_take_profit_message(config: dict[str, Any], event: dict[str, 
             return "-"
         return f"{number:.{digits}f}"
 
+    def pnl_at(price: Any, amount: Any) -> float | None:
+        entry = _float(event.get("entry"))
+        target = _float(price)
+        qty = _float(amount)
+        contract_size = _float(event.get("contract_size")) or 1.0
+        if entry is None or target is None or qty is None:
+            return None
+        gross = (target - entry) if str(event.get("side") or "").lower() == "long" else (entry - target)
+        return gross * qty * contract_size
+
+    def fmt_usdt(value: Any) -> str:
+        number = _float(value)
+        if number is None:
+            return "-"
+        return f"{number:+.2f} USDT"
+
     side = str(event.get("side") or "-").upper()
     symbol = str(event.get("symbol") or "-")
     close_pct = (_float(event.get("close_fraction")) or 0.0) * 100
+    partial_pnl = pnl_at(event.get("trigger_price"), event.get("partial_amount"))
+    remaining_amount = _float(event.get("remaining_amount"))
+    if remaining_amount is None:
+        partial_amount = _float(event.get("partial_amount")) or 0.0
+        close_fraction = _float(event.get("close_fraction")) or 0.0
+        remaining_amount = partial_amount * max(0.0, (1.0 - close_fraction) / close_fraction) if close_fraction > 0 else None
+    protected_sl_pnl = pnl_at(event.get("new_stop_loss"), remaining_amount)
+    extended_tp_pnl = pnl_at(event.get("new_take_profit"), remaining_amount)
     lines = [
-        "\U0001f7e2 PARTIAL TP + G\u1ed2NG L\u00c3I",
+        "\U0001f7e2 N\u1ea4C 1: PARTIAL TP + G\u1ed2NG L\u00c3I",
         "",
         f"{symbol} {side}",
         f"Entry: {fmt(event.get('entry'))}",
@@ -481,15 +505,63 @@ def format_partial_take_profit_message(config: dict[str, Any], event: dict[str, 
         "",
         f"\u2705 \u0110\u00e3 ch\u1ed1t {fmt(close_pct, 0)}% v\u1ecb th\u1ebf",
         f"Kh\u1ed1i l\u01b0\u1ee3ng: {fmt(event.get('partial_amount'))}",
+        f"L\u00e3i \u0111\u00e3 \u0103n: {fmt_usdt(partial_pnl)}",
         "",
         "\U0001f6e1\ufe0f SL \u0111\u00e3 k\u00e9o d\u01b0\u01a1ng",
         f"{fmt(event.get('old_stop_loss'))} \u2192 {fmt(event.get('new_stop_loss'))}",
+        f"M\u1ee9c n\u00e0y b\u1ea3o v\u1ec7: {fmt_usdt(protected_sl_pnl)}",
         "",
-        "\U0001f3af TP \u0111\u00e3 n\u00e2ng",
+        "\U0001f3af TP1 \u0111\u00e3 n\u00e2ng l\u00ean TP2",
         f"{fmt(event.get('old_take_profit'))} \u2192 {fmt(event.get('new_take_profit'))}",
+        f"N\u1ebfu ch\u1ea1m TP m\u1edbi: {fmt_usdt(extended_tp_pnl)}",
         "",
         "Ph\u1ea7n c\u00f2n l\u1ea1i s\u1ebd \u0111\u01b0\u1ee3c g\u1ed3ng t\u1edbi TP m\u1edbi.",
-        "C\u00e1c l\u1ea7n sau bot ch\u1ec9 n\u00e2ng SL, kh\u00f4ng ch\u1ed1t th\u00eam partial.",
+        "C\u00e1c n\u1ea5c sau bot kh\u00f4ng ch\u1ed1t th\u00eam, ch\u1ec9 n\u00e2ng TP/SL t\u1ed1i \u0111a 3 n\u1ea5c.",
+    ]
+    return "\n".join(lines)
+
+def format_profit_extension_step_message(config: dict[str, Any], event: dict[str, Any]) -> str:
+    def fmt(value: Any, digits: int = 6) -> str:
+        number = _float(value)
+        if number is None:
+            return "-"
+        return f"{number:.{digits}f}"
+
+    def pnl_at(price: Any) -> float | None:
+        entry = _float(event.get("entry"))
+        target = _float(price)
+        qty = _float(event.get("remaining_amount"))
+        contract_size = _float(event.get("contract_size")) or 1.0
+        if entry is None or target is None or qty is None:
+            return None
+        gross = (target - entry) if str(event.get("side") or "").lower() == "long" else (entry - target)
+        return gross * qty * contract_size
+
+    def fmt_usdt(value: Any) -> str:
+        number = _float(value)
+        if number is None:
+            return "-"
+        return f"{number:+.2f} USDT"
+
+    step = int(_float(event.get("step")) or 0)
+    side = str(event.get("side") or "-").upper()
+    symbol = str(event.get("symbol") or "-")
+    lines = [
+        f"\U0001f7e2 N\u1ea4C {step}: N\u00c2NG TP/SL G\u1ed2NG L\u00c3I",
+        "",
+        f"{symbol} {side}",
+        f"Entry: {fmt(event.get('entry'))}",
+        f"Gi\u00e1 k\u00edch ho\u1ea1t: {fmt(event.get('trigger_price'))}",
+        "",
+        f"\U0001f6e1\ufe0f SL{step} \u2192 SL{step + 1}",
+        f"{fmt(event.get('old_stop_loss'))} \u2192 {fmt(event.get('new_stop_loss'))}",
+        f"M\u1ee9c n\u00e0y b\u1ea3o v\u1ec7: {fmt_usdt(pnl_at(event.get('new_stop_loss')))}",
+        "",
+        f"\U0001f3af TP{step} \u2192 TP{step + 1}",
+        f"{fmt(event.get('old_take_profit'))} \u2192 {fmt(event.get('new_take_profit'))}",
+        f"N\u1ebfu ch\u1ea1m TP m\u1edbi: {fmt_usdt(pnl_at(event.get('new_take_profit')))}",
+        "",
+        "\u0110\u00e2y l\u00e0 n\u1ea5c g\u1ed3ng l\u00e3i, kh\u00f4ng ch\u1ed1t th\u00eam partial.",
     ]
     return "\n".join(lines)
 

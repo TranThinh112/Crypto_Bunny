@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone, tzinfo
@@ -8,6 +9,7 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from .ai_coordinator import latest_internal_market_scan, next_internal_market_scan_at
+from .atlas_mirror import atlas_database
 from .capital import (
     analyze_configuration_change,
     build_capital_snapshot,
@@ -54,6 +56,7 @@ from .storage import (
 from market_pattern_engine.infrastructure.config_loader import load_engine_config
 from market_pattern_engine.repositories.analysis_repository import AnalysisRepository
 
+LOGGER = logging.getLogger(__name__)
 SYSTEM_CHECKLIST_CURRENT_KEY = "system_checklist_current"
 SYSTEM_CHECKLIST_PREVIOUS_KEY = "system_checklist_previous"
 SYSTEM_CHECKLIST_DEFAULT_TTL_SECONDS = 300
@@ -61,9 +64,10 @@ DASHBOARD_SNAPSHOT_PREFIX = "dashboard_snapshot"
 DASHBOARD_DEFAULT_TTL_SECONDS = 300
 
 
-def _market_pattern_engine_dashboard() -> dict[str, Any]:
+def _market_pattern_engine_dashboard(config: dict[str, Any]) -> dict[str, Any]:
     try:
-        repository = AnalysisRepository(config=load_engine_config())
+        engine_config = load_engine_config()
+        repository = AnalysisRepository(db=atlas_database(config), config=engine_config)
         latest = repository.latest(limit=20)
         health = repository.health()
     except Exception as exc:
@@ -262,7 +266,11 @@ def _trade_memory_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def system_checklist_history(config: dict[str, Any], *, limit: int = 30) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    rows = list_journal_state_prefix(config, "system_checklist:", limit=max(1, min(limit, 366)))
+    try:
+        rows = list_journal_state_prefix(config, "system_checklist:", limit=max(1, min(limit, 366)))
+    except Exception as exc:
+        LOGGER.warning("Skipping system checklist history after storage timeout/error: %s", exc)
+        return items
     for row in rows:
         try:
             payload = json.loads(str(row.get("value")))
@@ -277,7 +285,11 @@ def system_checklist_history(config: dict[str, Any], *, limit: int = 30) -> list
 
 
 def system_checklist_snapshot(config: dict[str, Any], date_key: str) -> dict[str, Any] | None:
-    raw = get_journal_state(config, f"system_checklist:{date_key}")
+    try:
+        raw = get_journal_state(config, f"system_checklist:{date_key}")
+    except Exception as exc:
+        LOGGER.warning("Skipping dated system checklist snapshot after storage timeout/error: %s", exc)
+        return None
     if not raw:
         return None
     try:
@@ -288,7 +300,11 @@ def system_checklist_snapshot(config: dict[str, Any], date_key: str) -> dict[str
 
 
 def _current_system_checklist_snapshot(config: dict[str, Any]) -> dict[str, Any] | None:
-    raw = get_journal_state(config, SYSTEM_CHECKLIST_CURRENT_KEY)
+    try:
+        raw = get_journal_state(config, SYSTEM_CHECKLIST_CURRENT_KEY)
+    except Exception as exc:
+        LOGGER.warning("Skipping current system checklist snapshot after storage timeout/error: %s", exc)
+        return None
     if not raw:
         return None
     try:
@@ -397,7 +413,11 @@ def _strip_system_checklist_comparison_snapshot(payload: dict[str, Any] | None) 
 
 
 def _raw_previous_system_checklist_snapshot(config: dict[str, Any]) -> dict[str, Any] | None:
-    raw = get_journal_state(config, SYSTEM_CHECKLIST_PREVIOUS_KEY)
+    try:
+        raw = get_journal_state(config, SYSTEM_CHECKLIST_PREVIOUS_KEY)
+    except Exception as exc:
+        LOGGER.warning("Skipping previous system checklist snapshot after storage timeout/error: %s", exc)
+        return None
     if not raw:
         return None
     try:
@@ -581,6 +601,53 @@ def _trade_execution_price(row: dict[str, Any], key: str) -> float | None:
     number = _safe_float(value, float("nan"))
     return None if number != number else number
 
+def _trade_execution_position_payload(row: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    payload = _trade_execution_payload(row)
+    position = payload.get("position") if isinstance(payload.get("position"), dict) else {}
+    info = position.get("info") if isinstance(position.get("info"), dict) else {}
+    return position, info
+
+
+def _trade_execution_live_entry_price(row: dict[str, Any]) -> float | None:
+    position, info = _trade_execution_position_payload(row)
+    for value in (
+        row.get("entry_price"),
+        position.get("entryPrice"),
+        position.get("entry_price"),
+        info.get("avgPx"),
+        row.get("initial_entry_price"),
+        row.get("entry"),
+    ):
+        number = _safe_float(value, float("nan"))
+        if number == number and number > 0:
+            return number
+    return None
+
+def _trade_execution_target_from_payload(row: dict[str, Any], target: str) -> float | None:
+    _, info = _trade_execution_position_payload(row)
+    orders = info.get("closeOrderAlgo")
+    if isinstance(orders, str):
+        try:
+            orders = json.loads(orders)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            orders = []
+    key = "tpTriggerPx" if target == "take_profit" else "slTriggerPx"
+    fallback_key = "tpOrdPx" if target == "take_profit" else "slOrdPx"
+    if isinstance(orders, list):
+        for order in orders:
+            if not isinstance(order, dict):
+                continue
+            number = _safe_float(order.get(key) or order.get(fallback_key), float("nan"))
+            if number == number:
+                return number
+    return None
+
+def _trade_execution_effective_stop_loss(row: dict[str, Any]) -> float | None:
+    return _trade_execution_price(row, "stop_loss") or _trade_execution_target_from_payload(row, "stop_loss")
+
+def _trade_execution_effective_take_profit(row: dict[str, Any]) -> float | None:
+    return _trade_execution_price(row, "take_profit") or _trade_execution_target_from_payload(row, "take_profit")
+
 
 def _trade_execution_mark_price(row: dict[str, Any]) -> float | None:
     direct = _trade_execution_price(row, "last_price") or _trade_execution_price(row, "mark_price")
@@ -611,8 +678,8 @@ def _trade_execution_mark_price(row: dict[str, Any]) -> float | None:
 
 def _trade_execution_progress(row: dict[str, Any]) -> float | None:
     side = str(row.get("side") or "").lower()
-    entry = _trade_execution_price(row, "initial_entry_price") or _trade_execution_price(row, "entry_price")
-    take_profit = _trade_execution_price(row, "take_profit")
+    entry = _trade_execution_live_entry_price(row)
+    take_profit = _trade_execution_effective_take_profit(row)
     mark = _trade_execution_mark_price(row)
     if entry is None or take_profit is None or mark != mark:
         return None
@@ -625,8 +692,8 @@ def _trade_execution_progress(row: dict[str, Any]) -> float | None:
 
 def _trade_execution_r_multiple(row: dict[str, Any]) -> float | None:
     side = str(row.get("side") or "").lower()
-    entry = _trade_execution_price(row, "initial_entry_price") or _trade_execution_price(row, "entry_price")
-    initial_sl = _trade_execution_price(row, "initial_stop_loss") or _trade_execution_price(row, "stop_loss")
+    entry = _trade_execution_live_entry_price(row)
+    initial_sl = _trade_execution_price(row, "initial_stop_loss") or _trade_execution_effective_stop_loss(row)
     mark = _trade_execution_mark_price(row)
     if entry is None or initial_sl is None or mark != mark:
         return None
@@ -635,6 +702,190 @@ def _trade_execution_r_multiple(row: dict[str, Any]) -> float | None:
         return None
     gained = mark - entry if side == "long" else entry - mark
     return round(gained / risk, 4)
+
+
+def _trade_execution_payload(row: dict[str, Any]) -> dict[str, Any]:
+    for key in ("snapshot_json", "payload_json"):
+        raw = row.get(key)
+        if not raw:
+            continue
+        try:
+            payload = json.loads(str(raw))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return {}
+
+
+def _trade_execution_quantity(row: dict[str, Any]) -> float | None:
+    payload = _trade_execution_payload(row)
+    position, info = _trade_execution_position_payload(row)
+    for value in (
+        row.get("quantity"),
+        row.get("contracts"),
+        payload.get("quantity"),
+        payload.get("contracts"),
+        position.get("contracts"),
+        info.get("pos"),
+    ):
+        number = _safe_float(value, float("nan"))
+        if number == number and number > 0:
+            return abs(number)
+    side = str(row.get("side") or "").lower()
+    entry = _trade_execution_live_entry_price(row)
+    mark = _trade_execution_mark_price(row)
+    pnl = _safe_float(row.get("pnl"), float("nan"))
+    contract_size = _trade_execution_contract_size(row)
+    if entry is not None and mark is not None and pnl == pnl and contract_size > 0:
+        price_delta = mark - entry if side == "long" else entry - mark
+        denominator = price_delta * contract_size
+        if abs(denominator) > 1e-12:
+            inferred = pnl / denominator
+            if inferred > 0:
+                return inferred
+    return None
+
+
+def _trade_execution_contract_size(row: dict[str, Any]) -> float:
+    payload = _trade_execution_payload(row)
+    position = payload.get("position") if isinstance(payload.get("position"), dict) else {}
+    info = position.get("info") if isinstance(position.get("info"), dict) else {}
+    for value in (
+        row.get("contract_size"),
+        row.get("contractSize"),
+        payload.get("contract_size"),
+        payload.get("contractSize"),
+        position.get("contractSize"),
+        info.get("ctVal"),
+    ):
+        number = _safe_float(value, float("nan"))
+        if number == number and number > 0:
+            return number
+    return 1.0
+
+
+def _trade_execution_pnl_at(row: dict[str, Any], price: Any, amount: Any | None = None) -> float | None:
+    side = str(row.get("side") or "").lower()
+    entry = _trade_execution_live_entry_price(row)
+    target = _safe_float(price, float("nan"))
+    qty = _safe_float(amount, float("nan")) if amount is not None else (_trade_execution_quantity(row) or float("nan"))
+    if entry is None or target != target or qty != qty or qty <= 0:
+        return None
+    gross = target - entry if side == "long" else entry - target
+    return round(gross * qty * _trade_execution_contract_size(row), 6)
+
+
+def _trade_execution_trigger_price(side: str, entry: float | None, target: float | None, progress: float) -> float | None:
+    if entry is None or target is None:
+        return None
+    reward = target - entry if side == "long" else entry - target
+    if reward <= 0:
+        return None
+    return entry + reward * progress if side == "long" else entry - reward * progress
+
+
+def _trade_execution_profit_protection_levels(row: dict[str, Any], partial_config: dict[str, Any] | None = None) -> dict[str, Any]:
+    partial_config = partial_config if isinstance(partial_config, dict) else {}
+    side = str(row.get("side") or "").lower()
+    entry = _trade_execution_live_entry_price(row)
+    initial_sl = _trade_execution_price(row, "initial_stop_loss") or _trade_execution_effective_stop_loss(row)
+    take_profit = _trade_execution_effective_take_profit(row)
+    qty = _trade_execution_quantity(row)
+    partial_fraction = _safe_float(row.get("partial_take_profit_fraction"), float("nan"))
+    if partial_fraction != partial_fraction:
+        partial_fraction = _safe_float(partial_config.get("close_fraction"), float("nan"))
+    if partial_fraction != partial_fraction:
+        partial_fraction = 0.3
+    partial_amount = _safe_float(row.get("partial_take_profit_amount"), float("nan"))
+    if partial_amount != partial_amount and qty:
+        partial_amount = qty * partial_fraction
+    remaining_amount = max(0.0, qty - (partial_amount if partial_amount == partial_amount else 0.0)) if qty else None
+    current_amount = remaining_amount if row.get("partial_take_profit_done") and remaining_amount else qty
+    current_sl = _trade_execution_effective_stop_loss(row)
+    current_tp = _trade_execution_effective_take_profit(row)
+    partial_price = row.get("partial_take_profit_price")
+    original_tp = row.get("partial_take_profit_original_tp") or current_tp
+    extended_tp = row.get("partial_take_profit_extended_tp")
+    if partial_price is None and entry is not None and take_profit is not None:
+        progress = _safe_float(partial_config.get("trigger_tp_progress"), float("nan"))
+        if progress != progress:
+            progress = 0.7
+        partial_price = _trade_execution_trigger_price(side, entry, take_profit, progress)
+    if extended_tp is None and entry is not None and take_profit is not None:
+        extension_fraction = _safe_float(partial_config.get("tp_extension_fraction"), float("nan"))
+        if extension_fraction != extension_fraction:
+            extension_fraction = partial_fraction
+        reward = take_profit - entry if side == "long" else entry - take_profit
+        if reward > 0:
+            extended_tp = take_profit + reward * max(0.0, extension_fraction) if side == "long" else take_profit - reward * max(0.0, extension_fraction)
+    tp_steps: list[dict[str, Any]] = []
+    sl_steps: list[dict[str, Any]] = []
+    base_tp = original_tp or take_profit
+    if entry is not None and base_tp is not None:
+        extension_fraction = _safe_float(partial_config.get("tp_extension_fraction"), float("nan"))
+        if extension_fraction != extension_fraction:
+            extension_fraction = partial_fraction
+        trigger_progress = _safe_float(partial_config.get("trigger_tp_progress"), float("nan"))
+        if trigger_progress != trigger_progress:
+            trigger_progress = 0.7
+        reward = base_tp - entry if side == "long" else entry - base_tp
+        if reward > 0:
+            previous_tp = None
+            for step_index in range(4):
+                price = base_tp if step_index == 0 else (base_tp + reward * extension_fraction * step_index if side == "long" else base_tp - reward * extension_fraction * step_index)
+                amount = qty if step_index == 0 else remaining_amount
+                trigger_price = None if step_index == 0 else _trade_execution_trigger_price(side, entry, previous_tp, trigger_progress)
+                tp_steps.append({"step": step_index + 1, "price": price, "pnl": _trade_execution_pnl_at(row, price, amount), "trigger_price": trigger_price})
+                previous_tp = price
+    if entry is not None and initial_sl is not None:
+        initial_r = entry - initial_sl if side == "long" else initial_sl - entry
+        buffers = partial_config.get("sl_buffer_r_by_step") if isinstance(partial_config.get("sl_buffer_r_by_step"), list) else [0.1, 0.5, 1.0]
+        sl_steps.append({"step": 1, "price": initial_sl, "pnl": _trade_execution_pnl_at(row, initial_sl, qty), "trigger_price": None})
+        if initial_r > 0:
+            trigger_progress = _safe_float(partial_config.get("trigger_tp_progress"), float("nan"))
+            if trigger_progress != trigger_progress:
+                trigger_progress = 0.7
+            step_base_tp = original_tp or take_profit
+            extension_fraction = _safe_float(partial_config.get("tp_extension_fraction"), float("nan"))
+            if extension_fraction != extension_fraction:
+                extension_fraction = partial_fraction
+            base_reward = (step_base_tp - entry if side == "long" else entry - step_base_tp) if step_base_tp is not None else 0.0
+            for index, buffer in enumerate(buffers[:3], start=2):
+                buffer_value = _safe_float(buffer, 0.0)
+                price = entry + initial_r * max(0.0, buffer_value) if side == "long" else entry - initial_r * max(0.0, buffer_value)
+                previous_tp = None
+                if step_base_tp is not None and base_reward > 0:
+                    previous_tp = step_base_tp if index == 2 else (step_base_tp + base_reward * extension_fraction * (index - 2) if side == "long" else step_base_tp - base_reward * extension_fraction * (index - 2))
+                trigger_price = _trade_execution_trigger_price(side, entry, previous_tp, trigger_progress)
+                sl_steps.append({"step": index, "price": price, "pnl": _trade_execution_pnl_at(row, price, remaining_amount), "trigger_price": trigger_price})
+    projected_sl2 = current_sl
+    if entry is not None and initial_sl is not None:
+        initial_r = entry - initial_sl if side == "long" else initial_sl - entry
+        if initial_r > 0:
+            buffer_r = _safe_float(partial_config.get("remaining_sl_buffer_r"), float("nan"))
+            if buffer_r != buffer_r:
+                buffer_r = 0.1
+            protected_sl = entry + initial_r * max(0.0, buffer_r) if side == "long" else entry - initial_r * max(0.0, buffer_r)
+            current_sl_number = _safe_float(current_sl, float("nan"))
+            projected_sl2 = max(current_sl_number, protected_sl) if side == "long" and current_sl_number == current_sl_number else protected_sl
+            if side == "short" and current_sl_number == current_sl_number:
+                projected_sl2 = min(current_sl_number, protected_sl)
+    return {
+        "quantity": qty,
+        "contract_size": _trade_execution_contract_size(row),
+        "current_amount": current_amount,
+        "remaining_amount": remaining_amount,
+        "current_sl": {"price": current_sl, "pnl": _trade_execution_pnl_at(row, current_sl, current_amount)},
+        "current_tp": {"price": current_tp, "pnl": _trade_execution_pnl_at(row, current_tp, current_amount)},
+        "partial_30": {"price": partial_price, "pnl": _trade_execution_pnl_at(row, partial_price, partial_amount), "trigger_price": partial_price},
+        "tp2": {"price": extended_tp, "pnl": _trade_execution_pnl_at(row, extended_tp, remaining_amount), "trigger_price": partial_price},
+        "sl2": {"price": projected_sl2, "pnl": _trade_execution_pnl_at(row, projected_sl2, remaining_amount), "trigger_price": partial_price},
+        "sl3": {"price": None, "pnl": None},
+        "tp_steps": tp_steps,
+        "sl_steps": sl_steps,
+        "original_tp": {"price": original_tp, "pnl": _trade_execution_pnl_at(row, original_tp, qty)},
+    }
 
 
 def _trade_execution_closed_pnl(row: dict[str, Any]) -> float | None:
@@ -693,8 +944,10 @@ def _trade_execution_summary(config: dict[str, Any]) -> dict[str, Any]:
                 "entry_price": row.get("entry_price"),
                 "initial_entry_price": row.get("initial_entry_price"),
                 "initial_stop_loss": row.get("initial_stop_loss"),
-                "stop_loss": row.get("stop_loss"),
-                "take_profit": row.get("take_profit"),
+                "stop_loss": _trade_execution_effective_stop_loss(row),
+                "take_profit": _trade_execution_effective_take_profit(row),
+                "quantity": _trade_execution_quantity(row),
+                "contract_size": _trade_execution_contract_size(row),
                 "mark_price": _trade_execution_mark_price(row),
                 "pnl": row.get("pnl"),
                 "pnl_pct": row.get("pnl_pct"),
@@ -710,6 +963,7 @@ def _trade_execution_summary(config: dict[str, Any]) -> dict[str, Any]:
                 "trailing_stop_atr": row.get("trailing_stop_atr"),
                 "tp_progress_pct": _trade_execution_progress(row),
                 "r_multiple": _trade_execution_r_multiple(row),
+                "profit_protection_levels": _trade_execution_profit_protection_levels(row, partial),
             }
         )
     closed_items = [
@@ -807,10 +1061,11 @@ def _market_regime_history_payload(
 ) -> dict[str, Any]:
     detail_symbols = _market_regime_top_symbols(config)
     aggregate_limit = _market_regime_aggregate_limit(config)
-    read_limit = max(200, limit * max(4, len(detail_symbols) + 3))
+    read_limit = max(limit, min(60, limit * 2))
     try:
         rows = market_regime_history(config, limit=read_limit)
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning("Skipping market regime history after storage timeout/error: %s", exc)
         rows = []
     aggregate_items: list[dict[str, Any]] = []
     by_symbol: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in detail_symbols}
@@ -1048,7 +1303,7 @@ def system_modules_payload(
     capital_reserve_ok = bool(capital_reserve_state.get("ok", True)) and capital_reserve_state.get("realized_capital") is not None
     capital_position_ok = bool(capital_position_size.get("allowed"))
     config_impact_safe = bool(config_impact.get("is_safe")) and str(config_impact.get("risk_level") or "").upper() not in {"HIGH", "CRITICAL"}
-    market_pattern = _market_pattern_engine_dashboard()
+    market_pattern = _market_pattern_engine_dashboard(config)
     market_pattern_latest = market_pattern.get("latest") or {}
     market_pattern_counts = market_pattern.get("counts") or {}
     market_pattern_structure = market_pattern_latest.get("market_structure") if isinstance(market_pattern_latest, dict) else {}
@@ -1746,6 +2001,31 @@ def _system_checklist_with_ai_range(
     return next_payload
 
 
+def _refresh_trade_execution_in_payload(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    modules = payload.get("modules")
+    if not isinstance(modules, list):
+        return payload
+    try:
+        trade_execution = _trade_execution_summary(config)
+    except Exception:
+        return payload
+    next_payload = dict(payload)
+    next_modules: list[dict[str, Any]] = []
+    for module in modules:
+        if not isinstance(module, dict):
+            next_modules.append(module)
+            continue
+        if module.get("trade_execution") is not None or int(module.get("number") or 0) == 15:
+            next_module = dict(module)
+            next_module["trade_execution"] = trade_execution
+            next_module["status"] = "warn" if trade_execution.get("error") else next_module.get("status", "ok")
+            next_modules.append(next_module)
+        else:
+            next_modules.append(module)
+    next_payload["modules"] = next_modules
+    return next_payload
+
+
 def system_checklist_payload(
     config: dict[str, Any],
     *,
@@ -1767,9 +2047,11 @@ def system_checklist_payload(
     if not force_refresh:
         snapshot = _preferred_system_checklist_snapshot(config, date_key)
         if snapshot is not None:
+            snapshot = _refresh_trade_execution_in_payload(config, snapshot)
             return attach_previous_system_checklist_snapshot(config, snapshot)
         snapshot = _latest_system_checklist_snapshot(config)
         if isinstance(snapshot, dict) and str(snapshot.get("date") or "") == date_key:
+            snapshot = _refresh_trade_execution_in_payload(config, snapshot)
             return attach_previous_system_checklist_snapshot(config, snapshot)
     return refresh_system_checklist_snapshot(config, automation=automation, ai_range=ai_range_key)
 

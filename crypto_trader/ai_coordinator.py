@@ -33,7 +33,7 @@ from .market_pattern import analyze_market_pattern_snapshots, attach_market_patt
 from .models import RiskCheck, TradeCandidate
 from .news import collect_news
 from .sizing import apply_position_sizing
-from .storage import is_retryable_storage_error, list_pending_orders, recent_market_scan_memory
+from .storage import acquire_journal_lease, is_retryable_storage_error, list_pending_orders, recent_market_scan_memory, release_journal_lease
 from .strategy import build_candidates, enrich_quantities
 
 
@@ -43,6 +43,7 @@ _PENDING_STATUS_PRIORITY = {
     "OPEN": 2,
 }
 OKX_REVIEW_CACHE_STATE_KEY = "okx_review_cache"
+MINI_MARKET_SCAN_SLOT_LEASE_PREFIX = "mini_market_scan_slot"
 OKX_REJECTION_HARD_DELETE = "hard_delete"
 OKX_REJECTION_KEEP_MONITOR = "keep_monitor"
 LEGACY_OKX_REJECTION_WATCHLIST = "watchlist"
@@ -1308,6 +1309,22 @@ def _mini_symbol_name(symbol: str) -> str:
     return str(symbol or "").split("/")[0] or str(symbol or "-")
 
 
+def _mini_market_scan_slot_lease_key(slot_id: str | None) -> str | None:
+    clean_slot = str(slot_id or "").strip()
+    if not clean_slot:
+        return None
+    return f"{MINI_MARKET_SCAN_SLOT_LEASE_PREFIX}:{clean_slot}"
+
+
+def _release_mini_market_scan_slot_lease(config: dict[str, Any], lease_key: str | None, owner: str, acquired: bool) -> None:
+    if not lease_key or not acquired:
+        return
+    try:
+        release_journal_lease(config, lease_key, owner)
+    except Exception:
+        return
+
+
 def _mini_reason_signals(raw_reason: str) -> tuple[list[str], list[str]]:
     lowered = raw_reason.lower()
     keep_reasons: list[str] = []
@@ -1437,6 +1454,36 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
             "skip_reason": f"mini scan already ran for slot {slot_id}",
             "duplicate_slot_guard": True,
         }
+    lease_key = _mini_market_scan_slot_lease_key(slot_id) if fixed_schedule else None
+    lease_owner = f"mini_market_scan:{now.isoformat()}"
+    lease_acquired = False
+    if lease_key:
+        lease_acquired = acquire_journal_lease(config, lease_key, lease_owner, ttl_seconds=240)
+        if not lease_acquired:
+            latest = latest_internal_market_scan(config)
+            if latest:
+                return {
+                    **latest,
+                    "skipped": True,
+                    "skip_reason": f"mini scan is already running for slot {slot_id}",
+                    "duplicate_slot_guard": True,
+                    "slot_lease_guard": True,
+                }
+            return {
+                "enabled": True,
+                "agent": "internal_market_scan",
+                "created_at": now.isoformat(),
+                "slot_id": slot_id,
+                "slot_start": slot_start.isoformat() if slot_start else None,
+                "status": "scanning",
+                "skipped": True,
+                "skip_reason": f"mini scan is already running for slot {slot_id}",
+                "duplicate_slot_guard": True,
+                "slot_lease_guard": True,
+                "pool_symbols": [],
+                "selected_symbols": [],
+                "approved_symbols": [],
+            }
     max_source_symbols = max(1, min(30, int(internal_config.get("market_scan_source_symbols", 30) or 30)))
     max_symbols = max(1, min(3, int(internal_config.get("market_scan_max_symbols", 3) or 3)))
     pending_limit = max(1, min(max_symbols, int(internal_config.get("market_scan_pending_limit", 1) or 1)))
@@ -1610,6 +1657,7 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
         scan=saved_result,
         slot_id=slot_id,
     )
+    _release_mini_market_scan_slot_lease(config, lease_key, lease_owner, lease_acquired)
     return saved_result
 
 

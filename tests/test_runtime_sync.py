@@ -262,7 +262,7 @@ class RuntimeSyncTest(TestCase):
         self.assertEqual(result["exchange"]["executions_closed"], 1)
         self.assertEqual(list_trade_execution_rows(config, statuses=["OPEN"]), [])
         losses = list_trade_execution_rows(config, statuses=["LOSS"])
-        self.assertEqual(losses[0]["close_reason"], "stop_loss")
+        self.assertEqual(losses[0]["close_reason"], "manual")
         self.assertIsNone(losses[0]["position_slot"])
         send_message.assert_called_once()
         self.assertIn("SOL/USDT:USDT", send_message.call_args.args[1])
@@ -552,9 +552,56 @@ class RuntimeSyncTest(TestCase):
 
         self.assertEqual(result["exchange"]["backfilled_close_notifications"], 1)
         losses = list_trade_execution_rows(config, statuses=["LOSS"])
-        self.assertEqual(losses[0]["close_reason"], "stop_loss")
+        self.assertEqual(losses[0]["close_reason"], "manual")
         send_message.assert_called_once()
         self.assertIn("ETC/USDT:USDT", send_message.call_args.args[1])
+
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_manual_profitable_exchange_close_is_not_labeled_take_profit(self, send_message) -> None:
+        config = self._config()
+        insert_trade_execution_row(
+            config,
+            {
+                "created_at": "2026-07-08T00:00:00+00:00",
+                "updated_at": "2026-07-08T00:05:00+00:00",
+                "symbol": "LAB/USDT:USDT",
+                "side": "LONG",
+                "status": "OPEN",
+                "entry_price": 0.05,
+                "take_profit": 0.07,
+                "stop_loss": 0.04,
+                "pnl": 1.33,
+                "pnl_pct": 26.42,
+                "position_slot": 5,
+            },
+        )
+
+        result = sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-07-08T00:06:00+00:00",
+                "positions": [],
+                "open_orders": [],
+                "positions_history": [
+                    {
+                        "instId": "LAB-USDT-SWAP",
+                        "posSide": "long",
+                        "realizedPnl": "1.33",
+                        "pnlRatio": "0.2642",
+                        "closeAvgPx": "0.056",
+                        "uTime": "2026-07-08T00:05:30+00:00",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(result["exchange"]["executions_closed"], 1)
+        wins = list_trade_execution_rows(config, statuses=["WIN"])
+        self.assertEqual(wins[0]["close_reason"], "manual")
+        send_message.assert_called_once()
+        self.assertIn("Tự đóng", send_message.call_args.args[1])
 
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_sync_retries_unnotified_exchange_close(self, send_message) -> None:
