@@ -216,7 +216,7 @@ class SystemChecklistPayloadTests(unittest.TestCase):
         recovery = next(item for item in modules if item["name"] == "Recovery Chain Manager")
         self.assertEqual(recovery["status"], "warn")
 
-    def test_recovery_module_fails_for_blocked_state_with_trade_records(self) -> None:
+    def test_recovery_module_warns_for_blocked_state_with_trade_records(self) -> None:
         blocked_state = {
             "blocked": True,
             "block_reason": "Recovery step limit reached: 4/4",
@@ -241,7 +241,33 @@ class SystemChecklistPayloadTests(unittest.TestCase):
             )
 
         recovery = next(item for item in modules if item["name"] == "Recovery Chain Manager")
-        self.assertEqual(recovery["status"], "fail")
+        self.assertEqual(recovery["status"], "warn")
+
+    def test_health_monitor_critical_is_guard_warning_not_module_failure(self) -> None:
+        health = {
+            "isCritical": True,
+            "isWarning": False,
+            "isPaused": True,
+            "totalTrades": 5,
+            "minimumTradesForEvaluation": 5,
+            "reason": "Critical health threshold breached",
+        }
+
+        modules = system_modules_payload(
+            {},
+            checked_date="2026-07-12",
+            checked_at_iso="2026-07-12T09:00:00+00:00",
+            ai_history=[],
+            replay={},
+            strategy={},
+            regime={},
+            health=health,
+            risk_state={},
+            row_counts={},
+        )
+
+        module = next(item for item in modules if item["name"] == "Bunny Health Monitor")
+        self.assertEqual(module["status"], "warn")
 
     def test_bunny_minimize_losses_dashboard_exposes_threshold_and_slot_rows(self) -> None:
         risk_state = {

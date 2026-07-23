@@ -15,6 +15,7 @@ from .sizing import apply_position_sizing
 from .storage import (
     clear_dashboard_snapshot_cache,
     get_journal_state,
+    get_trading_system_state_row,
     open_pending_symbols,
     purge_deprecated_journal_state,
     set_journal_state,
@@ -41,6 +42,7 @@ _SAMPLE_SYMBOL_PATTERN = re.compile(r"\b([A-Z])\1{2,}(?:/USDT:USDT)?\b")
 # DEMO_RULE_TEST:
 # Giữ lại rule cũ trong comment ở dưới; hiện dùng rule_test để demo luồng pipeline.
 rule_test = 57
+LC_PIPELINE_RECOVERY_MODE_STEP_PCT = 2.0
 
 
 def _parse_time(value: Any) -> datetime | None:
@@ -226,7 +228,7 @@ def _sanitize_pipeline_state_sample_symbols(config: dict[str, Any], state: dict[
 
 def _pipeline_config(config: dict[str, Any]) -> dict[str, Any]:
     internal = config.get("ai", {}).get("internal", {})
-    shared_min_win = float(internal.get("lc_pipeline_min_win_probability_pct", 62) or 62)
+    shared_min_win = float(internal.get("lc_pipeline_min_win_probability_pct", 60) or 60)
     promote_after_hours = max(1.0, float(internal.get("lc_pipeline_promote_after_hours", 6) or 6))
     undecided_max_age_hours = max(
         promote_after_hours,
@@ -251,13 +253,13 @@ def _pipeline_config(config: dict[str, Any]) -> dict[str, Any]:
         "slot_tolerance_minutes": max(1, min(10, int(internal.get("lc_pipeline_slot_tolerance_minutes", 3) or 3))),
         "min_win_probability_pct": shared_min_win,
         "one_hour_min_win_probability_pct": float(
-            internal.get("lc_pipeline_one_hour_min_win_probability_pct", 61) or 61
+            internal.get("lc_pipeline_one_hour_min_win_probability_pct", 58) or 58
         ),
         "two_hour_min_win_probability_pct": float(
             internal.get("lc_pipeline_two_hour_min_win_probability_pct", shared_min_win) or shared_min_win
         ),
         "four_hour_min_win_probability_pct": float(
-            internal.get("lc_pipeline_four_hour_min_win_probability_pct", 63) or 63
+            internal.get("lc_pipeline_four_hour_min_win_probability_pct", 62) or 62
         ),
         "relaxed_min_win_probability_pct": float(internal.get("lc_pipeline_relaxed_min_win_probability_pct", 55) or 55),
         "relaxed_min_confidence": float(internal.get("lc_pipeline_relaxed_min_confidence", 70) or 70),
@@ -654,9 +656,11 @@ def _phase_min_win_probability(settings: dict[str, Any], phase: str) -> float:
     # DEMO_RULE_ACTIVE:
     # Giữ rule cũ cho 1h; chỉ dùng rule_test cho các pool sau recheck (2h/4h) để demo pipeline.
     if phase_key == "1h":
-        return float(settings.get("one_hour_min_win_probability_pct", settings.get("min_win_probability_pct", 61)) or 61)
-    if phase_key in {"2h", "4h"}:
-        return float(rule_test)
+        return float(settings.get("one_hour_min_win_probability_pct", 58) or 58)
+    if phase_key == "4h":
+        return float(settings.get("four_hour_min_win_probability_pct", 62) or 62)
+    if phase_key == "2h":
+        return float(settings.get("two_hour_min_win_probability_pct", 60) or 60)
     return float(settings.get("min_win_probability_pct", 62) or 62)
 
 
@@ -664,6 +668,33 @@ def _phase_settings(settings: dict[str, Any], phase: str) -> dict[str, Any]:
     output = dict(settings)
     output["min_win_probability_pct"] = _phase_min_win_probability(settings, phase)
     return output
+
+
+def _recovery_mode_threshold_offset_pct(config: dict[str, Any]) -> float:
+    try:
+        row = get_trading_system_state_row(config)
+    except Exception:
+        row = None
+    payload: dict[str, Any] = {}
+    if isinstance(row, dict):
+        try:
+            payload = json.loads(str(row.get("payload_json") or "{}"))
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+    mode = str((payload or {}).get("recoveryMode") or "").strip().upper()
+    if not mode and isinstance(row, dict):
+        mode = "HARD_RECOVERY" if bool(row.get("is_recovery_mode")) else "NORMAL"
+    if mode == "HARD_RECOVERY":
+        return LC_PIPELINE_RECOVERY_MODE_STEP_PCT * 2.0
+    if mode == "SOFT_RECOVERY":
+        return LC_PIPELINE_RECOVERY_MODE_STEP_PCT
+    return 0.0
+
+
+def _pipeline_settings_with_recovery_mode(config: dict[str, Any]) -> dict[str, Any]:
+    settings = _pipeline_config(config)
+    settings["recovery_mode_threshold_offset_pct"] = _recovery_mode_threshold_offset_pct(config)
+    return settings
 
 
 def _candidate_passes_lc_threshold(
@@ -676,7 +707,9 @@ def _candidate_passes_lc_threshold(
     if raw in (None, ""):
         return True
     try:
-        return float(raw) >= _phase_min_win_probability(settings, phase)
+        return float(raw) >= _phase_min_win_probability(settings, phase) + float(
+            settings.get("recovery_mode_threshold_offset_pct", 0.0) or 0.0
+        )
     except (TypeError, ValueError):
         return True
 
@@ -3416,7 +3449,7 @@ def _row_age_payload(row: dict[str, Any], now: datetime) -> dict[str, Any]:
 def lc_pipeline_dashboard_payload(config: dict[str, Any]) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     state = _load_state(config, now, reset_for_new_day=False)
-    settings = _pipeline_config(config)
+    settings = _pipeline_settings_with_recovery_mode(config)
     undecided = _sort_saved_rows(
         [
             _row_age_payload(row, now)
@@ -3463,7 +3496,7 @@ def lc_pipeline_dashboard_payload(config: dict[str, Any]) -> dict[str, Any]:
 def format_internal_lc_view(config: dict[str, Any], *, limit: int = 10) -> str:
     now = datetime.now(timezone.utc)
     state = _load_state(config, now, reset_for_new_day=False)
-    settings = _pipeline_config(config)
+    settings = _pipeline_settings_with_recovery_mode(config)
     rows = _sort_saved_rows([_row_age_payload(row, now) for row in state.get("internal_lc") or []], settings, reverse=True)[
         : max(1, int(limit))
     ]
@@ -3548,7 +3581,7 @@ def notify_mini_pool_summary(
     now: datetime | None = None,
 ) -> None:
     now = now or datetime.now(timezone.utc)
-    settings = _pipeline_config(config)
+    settings = _pipeline_settings_with_recovery_mode(config)
     state = _load_state(config, now)
     latest_four_hour = state.get("four_hour_history")[-1] if state.get("four_hour_history") else None
     scan = scan or latest_lc_pipeline_mini_scan(config) or {}
@@ -3931,7 +3964,7 @@ def _update_lc_internal_pipeline_impl(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
-    settings = _pipeline_config(config)
+    settings = _pipeline_settings_with_recovery_mode(config)
     if not settings["enabled"]:
         return {"enabled": False}
     state = _load_state(config, now)
@@ -4399,7 +4432,7 @@ def _update_lc_internal_pipeline_impl(
 
 
 def lc_pipeline_mini_pool(config: dict[str, Any], candidates: list[TradeCandidate], *, limit: int = 3) -> list[TradeCandidate]:
-    settings = _pipeline_config(config)
+    settings = _pipeline_settings_with_recovery_mode(config)
     if not settings["enabled"]:
         return _rank_candidates(candidates, limit, settings=_phase_settings(settings, "4h"), phase="4h")
     state = _load_state(config, datetime.now(timezone.utc), reset_for_new_day=False)

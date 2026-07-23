@@ -1158,18 +1158,18 @@ class LcPipelineTest(TestCase):
     @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
     def test_pipeline_uses_stage_specific_thresholds(self, recheck_rows) -> None:
         config = self._config()
-        config["ai"]["internal"]["lc_pipeline_one_hour_min_win_probability_pct"] = 61
-        config["ai"]["internal"]["lc_pipeline_two_hour_min_win_probability_pct"] = 62
-        config["ai"]["internal"]["lc_pipeline_four_hour_min_win_probability_pct"] = 63
+        config["ai"]["internal"]["lc_pipeline_one_hour_min_win_probability_pct"] = 58
+        config["ai"]["internal"]["lc_pipeline_two_hour_min_win_probability_pct"] = 60
+        config["ai"]["internal"]["lc_pipeline_four_hour_min_win_probability_pct"] = 62
         config["ai"]["internal"]["lc_pipeline_recheck_interval_minutes"] = 999
         start = datetime(2026, 7, 6, 2, 5, tzinfo=timezone.utc)
 
         hour_one = update_lc_internal_pipeline(
             config,
             [
-                _candidate("AAA/USDT:USDT", 61.2),
-                _candidate("BBB/USDT:USDT", 61.0),
-                _candidate("CCC/USDT:USDT", 60.9),
+                _candidate("AAA/USDT:USDT", 58.2),
+                _candidate("BBB/USDT:USDT", 58.0),
+                _candidate("CCC/USDT:USDT", 57.9),
             ],
             now=start,
         )
@@ -1178,11 +1178,11 @@ class LcPipelineTest(TestCase):
         recheck_rows.side_effect = [
             (
                 [
-                    _saved_row("AAA/USDT:USDT", 61.9),
-                    _saved_row("BBB/USDT:USDT", 61.8),
+                    _saved_row("AAA/USDT:USDT", 59.9),
+                    _saved_row("BBB/USDT:USDT", 59.8),
                     _saved_row("DDD/USDT:USDT", 64.0),
                     _saved_row("EEE/USDT:USDT", 63.0),
-                    _saved_row("FFF/USDT:USDT", 62.0),
+                    _saved_row("FFF/USDT:USDT", 60.0),
                 ],
                 {"refreshed_count": 5, "dropped": [], "warnings": []},
             ),
@@ -1190,7 +1190,7 @@ class LcPipelineTest(TestCase):
                 [
                     _saved_row("DDD/USDT:USDT", 62.8, state="LC_NOI_BO"),
                     _saved_row("EEE/USDT:USDT", 62.4, state="LC_NOI_BO"),
-                    _saved_row("FFF/USDT:USDT", 62.1, state="LC_NOI_BO"),
+                    _saved_row("FFF/USDT:USDT", 61.9, state="LC_NOI_BO"),
                 ],
                 {"refreshed_count": 3, "dropped": [], "warnings": []},
             ),
@@ -1198,10 +1198,10 @@ class LcPipelineTest(TestCase):
                 [
                     _saved_row("DDD/USDT:USDT", 62.8, state="LC_NOI_BO"),
                     _saved_row("EEE/USDT:USDT", 62.4, state="LC_NOI_BO"),
-                    _saved_row("FFF/USDT:USDT", 62.1, state="LC_NOI_BO"),
+                    _saved_row("FFF/USDT:USDT", 61.9, state="LC_NOI_BO"),
                     _saved_row("GGG/USDT:USDT", 64.5, state="LC_NOI_BO"),
                     _saved_row("HHH/USDT:USDT", 63.0, state="LC_NOI_BO"),
-                    _saved_row("III/USDT:USDT", 62.9, state="LC_NOI_BO"),
+                    _saved_row("III/USDT:USDT", 61.9, state="LC_NOI_BO"),
                 ],
                 {"refreshed_count": 6, "dropped": [], "warnings": []},
             ),
@@ -1209,10 +1209,10 @@ class LcPipelineTest(TestCase):
                 [
                     _saved_row("DDD/USDT:USDT", 62.8, state="LC_NOI_BO"),
                     _saved_row("EEE/USDT:USDT", 62.4, state="LC_NOI_BO"),
-                    _saved_row("FFF/USDT:USDT", 62.1, state="LC_NOI_BO"),
+                    _saved_row("FFF/USDT:USDT", 61.9, state="LC_NOI_BO"),
                     _saved_row("GGG/USDT:USDT", 64.5, state="LC_NOI_BO"),
                     _saved_row("HHH/USDT:USDT", 63.0, state="LC_NOI_BO"),
-                    _saved_row("III/USDT:USDT", 62.9, state="LC_NOI_BO"),
+                    _saved_row("III/USDT:USDT", 61.9, state="LC_NOI_BO"),
                 ],
                 {"refreshed_count": 6, "dropped": [], "warnings": []},
             ),
@@ -1252,8 +1252,39 @@ class LcPipelineTest(TestCase):
         )
         self.assertEqual(
             [row["symbol"] for row in four_hour["four_hour_event"]["approved"]],
-            ["GGG/USDT:USDT", "HHH/USDT:USDT", "III/USDT:USDT"],
+            ["GGG/USDT:USDT", "HHH/USDT:USDT", "DDD/USDT:USDT"],
         )
+
+    def test_pipeline_thresholds_add_two_points_per_recovery_mode_step(self) -> None:
+        config = self._config()
+        config["ai"]["internal"]["lc_pipeline_one_hour_min_win_probability_pct"] = 58
+        config["ai"]["internal"]["lc_pipeline_two_hour_min_win_probability_pct"] = 60
+        config["ai"]["internal"]["lc_pipeline_four_hour_min_win_probability_pct"] = 62
+
+        with patch("crypto_trader.lc_pipeline.get_trading_system_state_row", return_value=None):
+            normal = lc_pipeline_module._pipeline_settings_with_recovery_mode(config)
+        self.assertEqual(normal["recovery_mode_threshold_offset_pct"], 0.0)
+        self.assertTrue(lc_pipeline_module._candidate_passes_lc_threshold(_saved_row("ONE/USDT:USDT", 58), normal, phase="1h"))
+        self.assertTrue(lc_pipeline_module._candidate_passes_lc_threshold(_saved_row("TWO/USDT:USDT", 60), normal, phase="2h"))
+        self.assertTrue(lc_pipeline_module._candidate_passes_lc_threshold(_saved_row("FOUR/USDT:USDT", 62), normal, phase="4h"))
+
+        soft_row = {"payload_json": json.dumps({"recoveryMode": "SOFT_RECOVERY"})}
+        with patch("crypto_trader.lc_pipeline.get_trading_system_state_row", return_value=soft_row):
+            soft = lc_pipeline_module._pipeline_settings_with_recovery_mode(config)
+        self.assertEqual(soft["recovery_mode_threshold_offset_pct"], 2.0)
+        self.assertFalse(lc_pipeline_module._candidate_passes_lc_threshold(_saved_row("ONE/USDT:USDT", 59.9), soft, phase="1h"))
+        self.assertTrue(lc_pipeline_module._candidate_passes_lc_threshold(_saved_row("ONE/USDT:USDT", 60), soft, phase="1h"))
+        self.assertTrue(lc_pipeline_module._candidate_passes_lc_threshold(_saved_row("TWO/USDT:USDT", 62), soft, phase="2h"))
+        self.assertTrue(lc_pipeline_module._candidate_passes_lc_threshold(_saved_row("FOUR/USDT:USDT", 64), soft, phase="4h"))
+
+        hard_row = {"payload_json": json.dumps({"recoveryMode": "HARD_RECOVERY"})}
+        with patch("crypto_trader.lc_pipeline.get_trading_system_state_row", return_value=hard_row):
+            hard = lc_pipeline_module._pipeline_settings_with_recovery_mode(config)
+        self.assertEqual(hard["recovery_mode_threshold_offset_pct"], 4.0)
+        self.assertFalse(lc_pipeline_module._candidate_passes_lc_threshold(_saved_row("TWO/USDT:USDT", 63.9), hard, phase="2h"))
+        self.assertTrue(lc_pipeline_module._candidate_passes_lc_threshold(_saved_row("ONE/USDT:USDT", 62), hard, phase="1h"))
+        self.assertTrue(lc_pipeline_module._candidate_passes_lc_threshold(_saved_row("TWO/USDT:USDT", 64), hard, phase="2h"))
+        self.assertTrue(lc_pipeline_module._candidate_passes_lc_threshold(_saved_row("FOUR/USDT:USDT", 66), hard, phase="4h"))
 
     @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
     def test_two_hour_recheck_keeps_old_win_rate_as_reference(self, recheck_rows) -> None:
@@ -1832,15 +1863,20 @@ class LcPipelineTest(TestCase):
             now=start + timedelta(hours=1),
         )
 
-        self.assertEqual([row["symbol"] for row in result["two_hour_event"]["approved"]], ["AAA/USDT:USDT", "CCC/USDT:USDT"])
+        self.assertEqual([row["symbol"] for row in result["two_hour_event"]["approved"]], [])
         rejected = [(row["symbol"], row["side"], row["source_slot"]) for row in result["two_hour_event"]["rejected"]]
         self.assertEqual(
             rejected,
             [
+                ("AAA/USDT:USDT", "long", "2h"),
+                ("CCC/USDT:USDT", "long", "2h"),
                 ("DDD/USDT:USDT", "long", "2h"),
             ],
         )
-        self.assertEqual([row["symbol"] for row in result["undecided"]], ["DDD/USDT:USDT"])
+        self.assertEqual(
+            [row["symbol"] for row in result["undecided"]],
+            ["AAA/USDT:USDT", "CCC/USDT:USDT", "DDD/USDT:USDT"],
+        )
         self.assertNotIn("BBB/USDT:USDT", [row["symbol"] for row in result["undecided"]])
 
     @patch("crypto_trader.lc_pipeline.enrich_quantities")

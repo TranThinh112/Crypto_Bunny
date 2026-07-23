@@ -1261,7 +1261,7 @@ def system_modules_payload(
         for key in ("trade_executions", "pending_orders", "internal_pending_orders", "paper_trades", "trade_memory")
     )
     recovery_orphaned_block = recovery_blocked and open_count <= 0 and recovery_runtime_records <= 0
-    recovery_status = "warn" if recovery_orphaned_block else "fail" if recovery_blocked else "ok" if sizing_state else "warn"
+    recovery_status = "warn" if recovery_blocked else "ok" if sizing_state else "warn"
     try:
         capital_snapshot = latest_capital_snapshot(config) or build_capital_snapshot(config, use_cache=True)
     except Exception as exc:
@@ -1349,7 +1349,7 @@ def system_modules_payload(
             "number": 2,
             "name": "Bunny Minimize Losses",
             "purpose": "Theo dõi chuỗi thua, recovery mode, pause và trạng thái slot thực tế của hệ thống.",
-            "status": "fail" if risk_state.get("isPaused") else "warn" if risk_state.get("isRecoveryMode") else "ok",
+            "status": "warn" if risk_state.get("isPaused") or risk_state.get("isRecoveryMode") else "ok",
             "recovery_mode": risk_state.get("recoveryMode") or ("HARD_RECOVERY" if risk_state.get("isRecoveryMode") else "NORMAL"),
             "stats": [
                 _module_row("recoveryMode", risk_state.get("recoveryMode") or ("HARD_RECOVERY" if risk_state.get("isRecoveryMode") else "NORMAL"), "Mode hiện tại của Bunny Minimize Losses.", attention=True),
@@ -1390,7 +1390,7 @@ def system_modules_payload(
             "number": 3,
             "name": "Bunny Health Monitor",
             "purpose": "Theo dõi win rate, profit factor, drawdown và cảnh báo sức khỏe từ dữ liệu lệnh thực tế.",
-            "status": "fail" if health.get("isCritical") else "warn" if health.get("isWarning") else "ok",
+            "status": "warn" if health.get("isCritical") or health.get("isWarning") else "ok",
             "stats": [
                 _module_row("minimumTradesForEvaluation", health.get("minimumTradesForEvaluation"), "Số lệnh đóng tối thiểu trước khi Health Monitor được phép cảnh báo hoặc pause."),
                 _module_row("totalTrades", health.get("totalTrades"), "Số lệnh đã đóng được dùng để tính health."),
