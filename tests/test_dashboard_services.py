@@ -9,6 +9,7 @@ from crypto_trader.dashboard_services import (
     _build_system_checklist_payload,
     _persist_cached_payload,
     _persist_system_checklist_snapshot,
+    _trade_execution_profit_protection_levels,
     _trade_execution_summary,
     attach_previous_system_checklist_snapshot,
     system_checklist_history,
@@ -332,6 +333,34 @@ class SystemChecklistPayloadTests(unittest.TestCase):
             payload = _trade_execution_summary({})
 
         self.assertEqual(payload["pending_total"], 4)
+
+    def test_profit_protection_prefers_okx_live_sl_tp_over_stored_values(self) -> None:
+        row = {
+            "side": "long",
+            "entry_price": 1.1369,
+            "initial_stop_loss": 1.0539,
+            "stop_loss": 1.0539,
+            "take_profit": 1.28,
+            "quantity": 100,
+            "payload_json": json.dumps(
+                {
+                    "position": {
+                        "info": {
+                            "closeOrderAlgo": [
+                                {"slTriggerPx": "1.045", "tpTriggerPx": "1.2800"}
+                            ]
+                        }
+                    }
+                }
+            ),
+        }
+
+        levels = _trade_execution_profit_protection_levels(row)
+
+        self.assertEqual(levels["sl_steps"][0]["price"], 1.045)
+        self.assertEqual(levels["current_sl"]["price"], 1.045)
+        self.assertEqual(levels["tp_steps"][0]["price"], 1.28)
+        self.assertEqual(levels["current_tp"]["price"], 1.28)
 
     def test_market_pattern_dashboard_uses_app_atlas_database(self) -> None:
         class FakeRepository:

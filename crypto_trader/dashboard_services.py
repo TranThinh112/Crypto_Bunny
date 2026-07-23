@@ -681,10 +681,10 @@ def _trade_execution_target_from_payload(row: dict[str, Any], target: str) -> fl
     return None
 
 def _trade_execution_effective_stop_loss(row: dict[str, Any]) -> float | None:
-    return _trade_execution_price(row, "stop_loss") or _trade_execution_target_from_payload(row, "stop_loss")
+    return _trade_execution_target_from_payload(row, "stop_loss") or _trade_execution_price(row, "stop_loss")
 
 def _trade_execution_effective_take_profit(row: dict[str, Any]) -> float | None:
-    return _trade_execution_price(row, "take_profit") or _trade_execution_target_from_payload(row, "take_profit")
+    return _trade_execution_target_from_payload(row, "take_profit") or _trade_execution_price(row, "take_profit")
 
 
 def _trade_execution_mark_price(row: dict[str, Any]) -> float | None:
@@ -731,7 +731,7 @@ def _trade_execution_progress(row: dict[str, Any]) -> float | None:
 def _trade_execution_r_multiple(row: dict[str, Any]) -> float | None:
     side = str(row.get("side") or "").lower()
     entry = _trade_execution_live_entry_price(row)
-    initial_sl = _trade_execution_price(row, "initial_stop_loss") or _trade_execution_effective_stop_loss(row)
+    initial_sl = _trade_execution_effective_stop_loss(row) or _trade_execution_price(row, "initial_stop_loss")
     mark = _trade_execution_mark_price(row)
     if entry is None or initial_sl is None or mark != mark:
         return None
@@ -827,7 +827,7 @@ def _trade_execution_profit_protection_levels(row: dict[str, Any], partial_confi
     partial_config = partial_config if isinstance(partial_config, dict) else {}
     side = str(row.get("side") or "").lower()
     entry = _trade_execution_live_entry_price(row)
-    initial_sl = _trade_execution_price(row, "initial_stop_loss") or _trade_execution_effective_stop_loss(row)
+    initial_sl = _trade_execution_effective_stop_loss(row) or _trade_execution_price(row, "initial_stop_loss")
     take_profit = _trade_execution_effective_take_profit(row)
     qty = _trade_execution_quantity(row)
     partial_fraction = _safe_float(row.get("partial_take_profit_fraction"), float("nan"))
