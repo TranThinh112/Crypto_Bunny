@@ -398,7 +398,8 @@ def _persist_system_checklist_snapshot(config: dict[str, Any], payload: dict[str
     current_created_at = str((current_clean or {}).get("created_at") or "")
     next_created_at = str(clean_payload.get("created_at") or "")
     if current_clean and (current_created_at != next_created_at or current_clean != clean_payload):
-        set_journal_state(config, SYSTEM_CHECKLIST_PREVIOUS_KEY, json.dumps(current_clean, ensure_ascii=False))
+        previous_body = json.dumps(_compact_system_checklist_comparison_snapshot(current_clean), ensure_ascii=False)
+        set_journal_state(config, SYSTEM_CHECKLIST_PREVIOUS_KEY, previous_body)
     body = json.dumps(clean_payload, ensure_ascii=False)
     set_journal_state(config, SYSTEM_CHECKLIST_CURRENT_KEY, body)
     set_journal_state(config, f"system_checklist:{clean_payload['date']}", body)
@@ -410,6 +411,43 @@ def _strip_system_checklist_comparison_snapshot(payload: dict[str, Any] | None) 
     clean_payload = dict(payload)
     clean_payload.pop("previous_snapshot", None)
     return clean_payload
+
+def _compact_system_checklist_comparison_snapshot(payload: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    compact: dict[str, Any] = {
+        "date": payload.get("date"),
+        "created_at": payload.get("created_at"),
+        "ok_count": payload.get("ok_count"),
+        "total": payload.get("total"),
+        "status_counts": payload.get("status_counts"),
+    }
+    modules: list[dict[str, Any]] = []
+    for module in payload.get("modules") or []:
+        if not isinstance(module, dict):
+            continue
+        module_compact = {
+                "number": module.get("number"),
+                "name": module.get("name"),
+                "status": module.get("status"),
+                "summary": module.get("summary"),
+                "stats": module.get("stats") if isinstance(module.get("stats"), list) else [],
+        }
+        modules.append({key: value for key, value in module_compact.items() if value not in (None, [], {})})
+    if modules:
+        compact["modules"] = modules
+    criteria = payload.get("criteria") or payload.get("items")
+    if isinstance(criteria, list):
+        compact["criteria"] = [
+            {
+                "label": item.get("label"),
+                "status": item.get("status"),
+                "detail": item.get("detail"),
+            }
+            for item in criteria
+            if isinstance(item, dict)
+        ]
+    return {key: value for key, value in compact.items() if value is not None}
 
 
 def _raw_previous_system_checklist_snapshot(config: dict[str, Any]) -> dict[str, Any] | None:
@@ -443,7 +481,7 @@ def _fallback_previous_system_checklist_snapshot(
             continue
         if current_date and item_date == current_date:
             continue
-        return _strip_system_checklist_comparison_snapshot(item)
+        return _compact_system_checklist_comparison_snapshot(item)
     return None
 
 
@@ -455,7 +493,7 @@ def attach_previous_system_checklist_snapshot(
     if not clean_payload:
         return {}
     previous = _raw_previous_system_checklist_snapshot(config)
-    previous_clean = _strip_system_checklist_comparison_snapshot(previous) if isinstance(previous, dict) else None
+    previous_clean = _compact_system_checklist_comparison_snapshot(previous) if isinstance(previous, dict) else None
     current_created_at = str(clean_payload.get("created_at") or "")
     if previous_clean and str(previous_clean.get("created_at") or "") == current_created_at:
         previous_clean = None
@@ -463,7 +501,7 @@ def attach_previous_system_checklist_snapshot(
         previous_clean = _fallback_previous_system_checklist_snapshot(config, clean_payload)
     enriched = dict(clean_payload)
     enriched["previous_snapshot"] = previous_clean
-    return enriched
+    return _compact_system_checklist_response(enriched)
 
 
 def system_checklist_summary(config: dict[str, Any], period: str) -> dict[str, Any]:
@@ -1052,6 +1090,91 @@ def _market_regime_history_items(
         rows = [item for item in rows if _market_regime_snapshot_symbol(item) == symbol]
     return rows[:limit]
 
+def _slim_market_regime_snapshot(item: dict[str, Any]) -> dict[str, Any]:
+    indicators = item.get("indicators") if isinstance(item.get("indicators"), dict) else {}
+    keep_indicator_keys = {
+        "symbol",
+        "scope",
+        "ema_fast",
+        "ema_slow",
+        "rsi",
+        "adx",
+        "macd",
+        "median_rsi",
+        "bull_percent",
+        "bear_percent",
+        "sideway_percent",
+        "high_volatility_percent",
+        "low_volatility_percent",
+        "coverage_count",
+        "target_count",
+        "coverage_pct",
+        "market_symbols",
+        "top_symbols",
+        "covered_symbols",
+        "missing_symbols",
+    }
+    slim = {
+        "created_at": item.get("created_at"),
+        "regime": item.get("regime"),
+        "confidence": item.get("confidence"),
+        "symbol": item.get("symbol"),
+        "scope": item.get("scope"),
+        "reason": item.get("reason"),
+        "indicators": {key: indicators.get(key) for key in keep_indicator_keys if key in indicators},
+    }
+    return {key: value for key, value in slim.items() if value not in (None, {}, [])}
+
+def _slim_market_regime_history_payload(payload: Any, *, limit: int = 12) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    chart_limit = max(1, min(int(limit or 12), 12))
+
+    def slim_items(items: Any) -> list[dict[str, Any]]:
+        return [
+            _slim_market_regime_snapshot(item)
+            for item in (items or [])[:chart_limit]
+            if isinstance(item, dict)
+        ]
+
+    compact = dict(payload)
+    compact["items"] = slim_items(payload.get("items"))
+    aggregate = payload.get("aggregate") if isinstance(payload.get("aggregate"), dict) else {}
+    compact["aggregate"] = {
+        **aggregate,
+        "items": slim_items(aggregate.get("items")),
+        "count": len(slim_items(aggregate.get("items"))),
+    }
+    by_symbol: dict[str, Any] = {}
+    for symbol, bucket in (payload.get("by_symbol") or {}).items():
+        if isinstance(bucket, dict):
+            items = slim_items(bucket.get("items"))
+            by_symbol[str(symbol)] = {**bucket, "items": items, "count": len(items)}
+        elif isinstance(bucket, list):
+            by_symbol[str(symbol)] = slim_items(bucket)
+    compact["by_symbol"] = by_symbol
+    return compact
+
+def _compact_system_checklist_response(payload: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    compact = dict(payload)
+    history_payload = _slim_market_regime_history_payload(compact.get("market_regime_history"))
+    compact["market_regime_history"] = history_payload
+    modules: list[Any] = []
+    for module in compact.get("modules") or []:
+        if not isinstance(module, dict):
+            modules.append(module)
+            continue
+        next_module = dict(module)
+        if next_module.get("market_regime_history") is not None:
+            next_module["market_regime_history"] = history_payload
+        modules.append(next_module)
+    compact["modules"] = modules
+    if isinstance(compact.get("previous_snapshot"), dict):
+        compact["previous_snapshot"] = _compact_system_checklist_comparison_snapshot(compact.get("previous_snapshot"))
+    return compact
+
 
 def _market_regime_history_payload(
     config: dict[str, Any],
@@ -1059,6 +1182,7 @@ def _market_regime_history_payload(
     limit: int = 30,
     current_regime: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    chart_limit = max(1, min(int(limit or 30), 12))
     detail_symbols = _market_regime_top_symbols(config)
     aggregate_limit = _market_regime_aggregate_limit(config)
     read_limit = max(limit, min(60, limit * 2))
@@ -1087,25 +1211,25 @@ def _market_regime_history_payload(
     symbol_payload = {
         symbol: {
             "label": symbol.split("/", 1)[0],
-            "items": items[:limit],
-            "count": len(items[:limit]),
+            "items": [_slim_market_regime_snapshot(item) for item in items[:chart_limit]],
+            "count": len(items[:chart_limit]),
             "latest_created_at": items[0].get("created_at") if items else None,
         }
         for symbol, items in by_symbol.items()
     }
     fallback_symbol = _market_regime_snapshot_symbol(current_regime) if isinstance(current_regime, dict) else ""
-    fallback_items = by_symbol.get(fallback_symbol, [])[:limit] if fallback_symbol in by_symbol else []
-    active_items = aggregate_items[:limit] if aggregate_items else fallback_items
+    fallback_items = by_symbol.get(fallback_symbol, [])[:chart_limit] if fallback_symbol in by_symbol else []
+    active_items = aggregate_items[:chart_limit] if aggregate_items else fallback_items
     latest_aggregate = aggregate_items[0] if aggregate_items else None
     aggregate_indicators = latest_aggregate.get("indicators") if isinstance(latest_aggregate, dict) and isinstance(latest_aggregate.get("indicators"), dict) else {}
     coverage_count = aggregate_indicators.get("coverage_count")
     target_count = aggregate_indicators.get("target_count") or aggregate_limit
     return {
-        "items": active_items,
+        "items": [_slim_market_regime_snapshot(item) for item in active_items],
         "aggregate": {
             "label": "Thị trường",
-            "items": aggregate_items[:limit],
-            "count": len(aggregate_items[:limit]),
+            "items": [_slim_market_regime_snapshot(item) for item in aggregate_items[:chart_limit]],
+            "count": len(aggregate_items[:chart_limit]),
             "latest_created_at": latest_aggregate.get("created_at") if latest_aggregate else None,
         },
         "top_symbols": detail_symbols,

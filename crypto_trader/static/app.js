@@ -6,6 +6,11 @@ const state = {
   okxPositionsTimer: null,
   okxPositionsInFlight: null,
   systemChecklistTimer: null,
+  systemChecklistInFlight: null,
+  lcPipelineInFlight: null,
+  pricesInFlight: null,
+  decisionInFlight: null,
+  automationStatusInFlight: null,
   paperIntervalSeconds: 60,
   maxBaseMarginUsdt: 20,
   selectedViewSymbol: null,
@@ -32,6 +37,14 @@ const el = (id) => document.getElementById(id);
 const MIN_LEVERAGE = 5;
 const MAX_LEVERAGE = 25;
 const MIN_BASE_MARGIN_USDT = 1;
+const SYSTEM_CHECKLIST_REFRESH_MS = 5 * 60 * 1000;
+const LC_PIPELINE_REFRESH_MS = 3 * 60 * 1000;
+const PRICE_REFRESH_MS = 30 * 1000;
+const OKX_POSITIONS_REFRESH_MS = 15 * 1000;
+
+function dashboardIsVisible() {
+  return document.visibilityState !== "hidden";
+}
 
 const refs = {
   statusLine: el("statusLine"),
@@ -4189,7 +4202,7 @@ function positionManagementSections(baseModule) {
       key: "overview",
       name: "Tổng quan vị thế",
       display_name: "Tổng quan vị thế",
-      display_subtitle: "Module 15 hiện tại, màn hình trung tâm",
+      display_subtitle: "",
       purpose: "Theo dõi vị thế đang mở, biểu đồ tiến độ TP, TP/SL và lệnh đóng gần đây.",
     },
     {
@@ -4446,7 +4459,7 @@ function renderPositionManagementSectionDetail(module, options = {}) {
   const headingBySection = {
     overview: {
       title: "Tổng quan vị thế",
-      subtitle: "Module 15 hiện tại, màn hình trung tâm cho vị thế đang mở và lệnh đã đóng.",
+      subtitle: "",
     },
     pending_orders: {
       title: "Pending & Orders",
@@ -4474,7 +4487,7 @@ function renderPositionManagementSectionDetail(module, options = {}) {
     <article class="market-pattern-summary-card">
       <span>${escapeHtml(row.label || "-")}</span>
       <strong>${escapeHtml(row.value ?? "-")}</strong>
-      <small>${escapeHtml(row.detail || module.display_subtitle || "-")}</small>
+      ${row.detail || module.display_subtitle ? `<small>${escapeHtml(row.detail || module.display_subtitle)}</small>` : ""}
     </article>
   `).join("");
   const protectionRows = [
@@ -4498,7 +4511,7 @@ function renderPositionManagementSectionDetail(module, options = {}) {
       <div>
         <span class="module-number">Module ${escapeHtml(module.number || "15")}</span>
         <h3 id="systemModuleTitle">${escapeHtml(heading.title)}</h3>
-        <p>${escapeHtml(heading.subtitle)}</p>
+        ${heading.subtitle ? `<p>${escapeHtml(heading.subtitle)}</p>` : ""}
       </div>
       <div class="module-head-actions">
         <span class="status-pill ${module.status === "ok" ? "ok" : "warn"}">${moduleStatusLabel(module.status)}</span>
@@ -4507,7 +4520,7 @@ function renderPositionManagementSectionDetail(module, options = {}) {
     <div class="module-chart-scroll market-regime-scroll">
       ${payload.error ? `<div class="market-regime-load-error" role="alert"><strong>Quản lý vị thế đang lỗi.</strong><span>${escapeHtml(payload.error)}</span></div>` : ""}
       <section class="market-regime-section">
-        <div class="market-regime-section-head"><div><strong>Tóm tắt</strong><small>${escapeHtml(module.display_subtitle || "Theo dõi vị thế")}</small></div></div>
+        <div class="market-regime-section-head"><div><strong>Tóm tắt</strong>${module.display_subtitle ? `<small>${escapeHtml(module.display_subtitle)}</small>` : ""}</div></div>
         <div class="market-pattern-summary-grid">${summaryCards}</div>
       </section>
       ${section === "overview" ? `
@@ -5668,9 +5681,11 @@ renderSystemSummaryChart = function renderSystemSummaryChartPatched(payload) {
 };
 
 async function loadSystemChecklist(date = "", options = {}) {
+  const canReuseInFlight = !date && !options.forceRefresh;
+  if (canReuseInFlight && state.systemChecklistInFlight) return state.systemChecklistInFlight;
   const hasExistingPayload = Boolean(state.lastSystemChecklistPayload);
-  if (!date && !hasExistingPayload && refs.systemChecklistStatus) refs.systemChecklistStatus.textContent = "Đang tải...";
-  if (!date && !hasExistingPayload && refs.systemModuleStatus) refs.systemModuleStatus.textContent = "Đang tải...";
+  if (!date && !hasExistingPayload && refs.systemChecklistStatus) refs.systemChecklistStatus.textContent = "?ang t?i...";
+  if (!date && !hasExistingPayload && refs.systemModuleStatus) refs.systemModuleStatus.textContent = "?ang t?i...";
   if (!date && !hasExistingPayload && refs.systemModuleGrid) refs.systemModuleGrid.innerHTML = renderMarketRegimeLoadingSkeleton();
   const aiRange = date ? "current" : normalizeSystemModuleAiRange(options.aiRange || state.systemModuleAiRange);
   if (!date) state.systemModuleAiRange = aiRange;
@@ -5680,16 +5695,22 @@ async function loadSystemChecklist(date = "", options = {}) {
   const url = date
     ? `/api/system-checklist?date=${encodeURIComponent(date)}&_=${Date.now()}`
     : `/api/system-checklist?_=${Date.now()}${forceParam}${aiRangeParam}`;
-  let payload;
-  try {
+  const request = (async () => {
     const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    payload = await res.json();
+    return res.json();
+  })();
+  if (canReuseInFlight) state.systemChecklistInFlight = request;
+  let payload;
+  try {
+    payload = await request;
   } catch (err) {
     if (!date && !hasExistingPayload && refs.systemModuleGrid) {
       refs.systemModuleGrid.innerHTML = renderMarketRegimeLoadError(err?.message || String(err));
     }
     throw err;
+  } finally {
+    if (canReuseInFlight && state.systemChecklistInFlight === request) state.systemChecklistInFlight = null;
   }
   if (!date && requestSeq !== state.systemChecklistRequestSeq) return;
   const backendPreviousPayload = payload && typeof payload.previous_snapshot === "object" ? payload.previous_snapshot : null;
@@ -5709,53 +5730,39 @@ async function loadSystemChecklist(date = "", options = {}) {
   }
   renderSystemChecklist(payload);
   if (refs.systemChecklistDate && payload.date) refs.systemChecklistDate.value = payload.date;
-  if (!date && aiRange === "current" && !options.forceRefresh) refreshSystemChecklistInBackground();
-}
-
-function refreshSystemChecklistInBackground() {
-  const now = Date.now();
-  if (state.systemChecklistRefreshInFlight || now - state.lastSystemChecklistRefreshMs < 60 * 1000) return;
-  state.systemChecklistRefreshInFlight = true;
-  state.lastSystemChecklistRefreshMs = now;
-  fetch(`/api/system-checklist?force_refresh=true&ai_range=current&_=${now}`, { cache: "no-store" })
-    .then((res) => {
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return res.json();
-    })
-    .then((payload) => {
-      state.systemChecklistPayloadByRange.current = payload;
-      if (normalizeSystemModuleAiRange(state.systemModuleAiRange) !== "current") return;
-      const previous = state.lastSystemChecklistPayload;
-      state.previousSystemChecklistPayload = previous || state.previousSystemChecklistPayload;
-      state.lastSystemChecklistPayload = payload;
-      renderSystemChecklist(payload);
-      if (refs.systemChecklistDate && payload.date) refs.systemChecklistDate.value = payload.date;
-    })
-    .catch((err) => setStatus(`Lỗi system health: ${err.message}`))
-    .finally(() => {
-      state.systemChecklistRefreshInFlight = false;
-    });
 }
 
 function startSystemChecklistRefresh() {
   if (state.systemChecklistTimer) clearInterval(state.systemChecklistTimer);
   state.systemChecklistTimer = setInterval(() => {
-    loadSystemChecklist("", { forceRefresh: true, aiRange: "current" }).catch((err) => setStatus(`Lỗi system health: ${err.message}`));
-  }, 60000);
+    if (!dashboardIsVisible()) return;
+    loadSystemChecklist("", { aiRange: "current" }).catch((err) => setStatus(`Lá»i system health: ${err.message}`));
+  }, SYSTEM_CHECKLIST_REFRESH_MS);
 }
 
 async function loadLcPipeline() {
-  const res = await fetch(`/api/lc-pipeline?_=${Date.now()}`, { cache: "no-store" });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  renderLcPipelineEnhanced(await res.json());
+  if (state.lcPipelineInFlight) return state.lcPipelineInFlight;
+  state.lcPipelineInFlight = (async () => {
+    const res = await fetch(`/api/lc-pipeline?_=${Date.now()}`, { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    renderLcPipelineEnhanced(await res.json());
+  })();
+  try {
+    return await state.lcPipelineInFlight;
+  } finally {
+    state.lcPipelineInFlight = null;
+  }
 }
 
 function startLcPipelineRefresh() {
   if (state.lcPipelineTimer) clearInterval(state.lcPipelineTimer);
-  loadLcPipeline().catch((err) => setStatus(`Lỗi LC pipeline: ${err.message}`));
+  loadLcPipeline().catch((err) => setStatus(`Lá»i LC pipeline: ${err.message}`));
   state.lcPipelineTimer = setInterval(
-    () => loadLcPipeline().catch((err) => setStatus(`Lỗi LC pipeline: ${err.message}`)),
-    60000,
+    () => {
+      if (!dashboardIsVisible()) return;
+      loadLcPipeline().catch((err) => setStatus(`Lá»i LC pipeline: ${err.message}`));
+    },
+    LC_PIPELINE_REFRESH_MS,
   );
 }
 
@@ -6046,24 +6053,40 @@ function renderPricePulse(payload) {
 }
 
 async function loadPrices() {
-  const res = await fetch("/api/prices");
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  renderPricePulse(await res.json());
+  if (state.pricesInFlight) return state.pricesInFlight;
+  state.pricesInFlight = (async () => {
+    const res = await fetch("/api/prices");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    renderPricePulse(await res.json());
+  })();
+  try {
+    return await state.pricesInFlight;
+  } finally {
+    state.pricesInFlight = null;
+  }
 }
 
 async function loadDecision() {
-  const res = await fetch("/api/decision");
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const payload = await res.json();
-  if (!payload.report_exists || !payload.decision) {
-    setStatus("Chưa có báo cáo");
+  if (state.decisionInFlight) return state.decisionInFlight;
+  state.decisionInFlight = (async () => {
+    const res = await fetch("/api/decision");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const payload = await res.json();
+    if (!payload.report_exists || !payload.decision) {
+      setStatus("Ch?a c? b?o c?o");
+      renderPaperState(payload.paper_state);
+      return false;
+    }
+    renderDecision(payload.decision);
     renderPaperState(payload.paper_state);
-    return false;
+    setStatus(`B?o c?o: ${payload.report_path}`);
+    return true;
+  })();
+  try {
+    return await state.decisionInFlight;
+  } finally {
+    state.decisionInFlight = null;
   }
-  renderDecision(payload.decision);
-  renderPaperState(payload.paper_state);
-  setStatus(`Bao cao: ${payload.report_path}`);
-  return true;
 }
 
 async function loadOkxDemoStatus() {
@@ -6073,9 +6096,17 @@ async function loadOkxDemoStatus() {
 }
 
 async function loadAutomationStatus() {
-  const res = await fetch("/api/automation-status");
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  renderAutomationStatus(await res.json());
+  if (state.automationStatusInFlight) return state.automationStatusInFlight;
+  state.automationStatusInFlight = (async () => {
+    const res = await fetch("/api/automation-status");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    renderAutomationStatus(await res.json());
+  })();
+  try {
+    return await state.automationStatusInFlight;
+  } finally {
+    state.automationStatusInFlight = null;
+  }
 }
 
 async function loadConfigSummary() {
@@ -6165,8 +6196,11 @@ function startOkxPositionsRefresh() {
   if (state.okxPositionsTimer) clearInterval(state.okxPositionsTimer);
   loadOkxPositions({ force: true }).catch((err) => setStatus(`Lỗi vị thế OKX: ${err.message}`));
   state.okxPositionsTimer = setInterval(
-    () => loadOkxPositions().catch((err) => setStatus(`Lỗi vị thế OKX: ${err.message}`)),
-    3000,
+    () => {
+      if (!dashboardIsVisible()) return;
+      loadOkxPositions().catch((err) => setStatus(`Lỗi vị thế OKX: ${err.message}`));
+    },
+    OKX_POSITIONS_REFRESH_MS,
   );
 }
 
@@ -6196,19 +6230,20 @@ async function runAnalysis() {
 
 function startPricePulse() {
   if (state.priceTimer) clearInterval(state.priceTimer);
-  loadPrices().catch((err) => setStatus(`Lỗi gia: ${err.message}`));
-  state.priceTimer = setInterval(() => loadPrices().catch((err) => setStatus(`Lỗi gia: ${err.message}`)), 60000);
+  loadPrices().catch((err) => setStatus(`Lỗi giá: ${err.message}`));
+  state.priceTimer = setInterval(() => {
+    if (!dashboardIsVisible()) return;
+    loadPrices().catch((err) => setStatus(`Lỗi giá: ${err.message}`));
+  }, PRICE_REFRESH_MS);
 }
 
 function startPaperAutoScan() {
   if (state.paperTimer) clearInterval(state.paperTimer);
   const seconds = Math.max(60, Number(state.paperIntervalSeconds || 600));
   const refresh = () => {
-    loadDecision().catch((err) => setStatus(`Lỗi: ${err.message}`));
-    loadAutomationStatus().catch((err) => setStatus(`Lỗi auto server: ${err.message}`));
-    loadLcPipeline().catch((err) => setStatus(`Lỗi LC pipeline: ${err.message}`));
-    loadSystemChecklist().catch((err) => setStatus(`Lỗi system health: ${err.message}`));
-    loadPrices().catch((err) => setStatus(`Lỗi gia: ${err.message}`));
+    if (!dashboardIsVisible()) return;
+    loadDecision().catch((err) => setStatus(`Lá»i: ${err.message}`));
+    loadAutomationStatus().catch((err) => setStatus(`Lá»i auto server: ${err.message}`));
   };
   state.paperTimer = setInterval(refresh, seconds * 1000);
   if (refs.paperNextScan) refs.paperNextScan.textContent = `Server auto: ${intervalLabel(seconds)}`;
@@ -6228,7 +6263,7 @@ refs.refreshBtn.addEventListener("click", () => {
   loadDecision().catch((err) => setStatus(`Lỗi: ${err.message}`));
   loadOkxPositions({ force: true }).catch((err) => setStatus(`Lỗi vi the OKX: ${err.message}`));
   loadLcPipeline().catch((err) => setStatus(`Lỗi LC pipeline: ${err.message}`));
-  loadSystemChecklist().catch((err) => setStatus(`Lỗi system health: ${err.message}`));
+  loadSystemChecklist("", { forceRefresh: true, aiRange: "current" }).catch((err) => setStatus(`Lỗi system health: ${err.message}`));
 });
 refs.analyzeBtn.addEventListener("click", runAnalysis);
 refs.autoRun.addEventListener("change", resetAutoTimer);
@@ -6291,6 +6326,12 @@ if (refs.leverageInput) {
 window.addEventListener("resize", () => {
   if (state.currentDecision) renderSelected(state.currentDecision);
 });
+document.addEventListener("visibilitychange", () => {
+  if (!dashboardIsVisible()) return;
+  loadDecision().catch((err) => setStatus(`Lỗi: ${err.message}`));
+  loadOkxPositions().catch((err) => setStatus(`Lỗi vị thế OKX: ${err.message}`));
+  loadPrices().catch((err) => setStatus(`Lỗi giá: ${err.message}`));
+});
 
 initTheme();
 
@@ -6309,7 +6350,6 @@ loadDecision()
       .finally(() => {
         loadAutomationStatus().catch((err) => setStatus(`Lỗi auto server: ${err.message}`));
         startOkxPositionsRefresh();
-        loadSystemChecklist().catch((err) => setStatus(`Lỗi system health: ${err.message}`));
         startPaperAutoScan();
       });
   })

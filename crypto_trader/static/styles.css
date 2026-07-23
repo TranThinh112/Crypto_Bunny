@@ -1773,14 +1773,20 @@ tr:last-child td {
   min-height: 40px;
   display: grid;
   place-items: center;
-  border: 1px solid var(--line);
+  border: 1px solid rgba(20, 122, 126, 0.22);
   border-radius: 7px;
-  background: #fff;
-  color: var(--ink);
+  background: #f3f7f8;
+  color: #34454e;
   font-size: 12px;
   font-weight: 900;
   text-align: center;
   overflow-wrap: anywhere;
+}
+
+body.dark-mode .position-management-flow span {
+  border-color: rgba(32, 166, 169, 0.28);
+  background: #17272e;
+  color: #c4d3da;
 }
 
 .module-stat-head {
