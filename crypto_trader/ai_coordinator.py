@@ -1159,9 +1159,8 @@ def internal_market_scan_due(config: dict[str, Any], now: datetime | None = None
     if not bool(internal_config.get("market_scan_enabled", True)):
         return False
     now = now or datetime.now(timezone.utc)
-    if not _internal_market_scan_slot_open(config, now):
-        return False
-    if _current_four_hour_event_for_market_scan(config, now) is None:
+    current_four_hour = _current_four_hour_event_for_market_scan(config, now)
+    if current_four_hour is None:
         return False
     latest = latest_internal_market_scan(config)
     created_at = _parse_time((latest or {}).get("created_at"))
@@ -1172,7 +1171,10 @@ def internal_market_scan_due(config: dict[str, Any], now: datetime | None = None
         slot_id = _internal_market_scan_slot_id(config, now)
         if latest.get("slot_id") == slot_id:
             return False
-        return created_at < slot_start <= now
+        slot_end = slot_start + timedelta(seconds=internal_market_scan_interval(config))
+        return slot_start <= now < slot_end
+    if not _internal_market_scan_slot_open(config, now):
+        return False
     return (now - created_at).total_seconds() >= internal_market_scan_interval(config)
 
 

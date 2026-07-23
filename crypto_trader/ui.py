@@ -183,36 +183,69 @@ _SYSTEM_ERROR_NOTIFY_LOCK = threading.Lock()
 _SYSTEM_ERROR_NOTIFICATIONS: dict[str, tuple[str, datetime]] = {}
 
 
+def _clean_system_error_text(error: Any) -> str:
+    text = str(error or "").strip()
+    if not text:
+        return "Lỗi không xác định"
+    return " ".join(text.split())
+
+
+def _system_error_group(component: str, error_text: str) -> str:
+    lower = error_text.lower()
+    if (
+        "read operation timed out" in lower
+        or "serverselectiontimeouterror" in lower
+        or "sockettimeoutms" in lower
+        or ".mongodb.net:27017" in lower
+    ):
+        return "MongoDB Atlas timeout"
+    if "okx requires" in lower or "apikey" in lower:
+        return "OKX credential"
+    return component
+
+
+def _system_error_action(error_group: str) -> str:
+    if error_group == "MongoDB Atlas timeout":
+        return "Hệ thống sẽ tự thử lại. Nếu lặp lại, cần kiểm tra Atlas/network hoặc tăng timeout."
+    if error_group == "OKX credential":
+        return "Cần kiểm tra biến OKX_API_KEY/OKX_SECRET/OKX_PASSPHRASE trên Railway."
+    return "Hệ thống sẽ tự động thử lại."
+
+
 def _is_railway_runtime() -> bool:
     return bool(os.getenv("RAILWAY_SERVICE_ID") or os.getenv("RAILWAY_DEPLOYMENT_ID"))
 
 
 def _notify_system_error(config: dict[str, Any], component: str, error: Any) -> bool:
     now = datetime.now(timezone.utc)
-    raw_error_text = str(error or "").strip()
+    raw_error_text = _clean_system_error_text(error)
     if "cannot schedule new futures after interpreter shutdown" in raw_error_text.lower():
         LOGGER.info("Suppressing background shutdown error from %s: %s", component, raw_error_text)
         return False
-    message_text = str(error or "Lá»—i khÃ´ng xÃ¡c Ä‘á»‹nh").strip() or "Lá»—i khÃ´ng xÃ¡c Ä‘á»‹nh"
-    fingerprint = hashlib.sha256(message_text.encode("utf-8", errors="replace")).hexdigest()[:16]
+    message_text = raw_error_text
+    error_group = _system_error_group(component, message_text)
+    fingerprint_source = f"{error_group}|{message_text[:300]}"
+    fingerprint = hashlib.sha256(fingerprint_source.encode("utf-8", errors="replace")).hexdigest()[:16]
+    notification_key = error_group
     with _SYSTEM_ERROR_NOTIFY_LOCK:
-        previous = _SYSTEM_ERROR_NOTIFICATIONS.get(component)
+        previous = _SYSTEM_ERROR_NOTIFICATIONS.get(notification_key)
         if previous and previous[0] == fingerprint:
             age_seconds = (now - previous[1]).total_seconds()
             if age_seconds < SYSTEM_ERROR_NOTIFY_COOLDOWN_SECONDS:
                 return False
-        _SYSTEM_ERROR_NOTIFICATIONS[component] = (fingerprint, now)
+        _SYSTEM_ERROR_NOTIFICATIONS[notification_key] = (fingerprint, now)
     LOGGER.error("%s failed: %s", component, message_text)
     if not _is_railway_runtime():
         LOGGER.warning("Suppressing Telegram system error from local runtime: %s", component)
         return False
     return send_telegram_message(
         config,
-        "ðŸš¨ Lá»–I Há»† THá»NG\n"
+        "\U0001f6a8 LỖI HỆ THỐNG\n"
         f"Module: {component}\n"
-        f"Thá»i gian: {now.astimezone(_system_timezone(config)).strftime('%d/%m/%Y %H:%M:%S')}\n"
-        f"Lá»—i: {message_text[:1200]}\n"
-        "Há»‡ thá»‘ng sáº½ tá»± Ä‘á»™ng thá»­ láº¡i.",
+        f"Nhóm lỗi: {error_group}\n"
+        f"Thời gian: {now.astimezone(_system_timezone(config)).strftime('%d/%m/%Y %H:%M:%S')}\n"
+        f"Lỗi: {message_text[:1200]}\n"
+        f"Hành động: {_system_error_action(error_group)}",
         with_buttons=False,
         replace_previous=False,
     )

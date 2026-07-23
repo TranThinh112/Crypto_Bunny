@@ -643,6 +643,38 @@ class AiCoordinatorTest(TestCase):
 
         self.assertFalse(internal_market_scan_due(config, now=now))
 
+    def test_internal_market_scan_due_after_slot_tolerance_when_four_hour_pool_has_candidates(self) -> None:
+        config = self._config()
+        config["ai"]["internal"]["market_scan_fixed_schedule"] = True
+        config["ai"]["internal"]["market_scan_interval_seconds"] = 14400
+        config["ai"]["internal"]["market_scan_slot_tolerance_minutes"] = 3
+        config["ai"]["internal"]["market_scan_timezone"] = "UTC"
+        now = datetime(2026, 7, 4, 12, 55, tzinfo=timezone.utc)
+        set_journal_state(
+            config,
+            "lc_internal_pipeline_state",
+            json.dumps(
+                {
+                    "state_version": 3,
+                    "day_key": "2026-07-04",
+                    "latest_mini_scan": {
+                        "slot_id": "2026-07-04T08:00:00+00:00",
+                        "created_at": "2026-07-04T08:02:00+00:00",
+                    },
+                    "four_hour_history": [
+                        {
+                            "frame": "4h",
+                            "slot": "2026-07-04T12:00:00+00:00",
+                            "approved": [{"symbol": "UB/USDT:USDT", "side": "long"}],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+        self.assertTrue(internal_market_scan_due(config, now=now))
+
     @patch("crypto_trader.ai_coordinator.fetch_top_volume_symbols")
     def test_internal_market_scan_skips_without_fetching_when_four_hour_pool_is_empty(self, fetch_top_volume_symbols) -> None:
         config = self._config()

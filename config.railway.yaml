@@ -40,6 +40,10 @@ database:
     ai_database_env: MONGODB_AI_DATABASE
     ai_database: AI_Bunny_Live
     app_name: Crypto_Bunny
+    server_selection_timeout_ms: 20000
+    connect_timeout_ms: 15000
+    socket_timeout_ms: 30000
+    wait_queue_timeout_ms: 20000
 
 exchange:
   leverage: 25

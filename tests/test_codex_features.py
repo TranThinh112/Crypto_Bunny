@@ -804,6 +804,40 @@ class CodexFeaturesTest(TestCase):
         self.assertIn("Cycle PnL: -4.8000 USDT", message)
 
     @patch("crypto_trader.notifier.send_telegram_message")
+    def test_recovery_mode_stays_soft_when_cycle_pnl_negative_and_loss_streak_below_hard(
+        self,
+        send_telegram_message,
+    ) -> None:
+        config = self._config()
+        config["trading_risk"] = {
+            "global_loss_streak_threshold": 2,
+            "soft_recovery_min_rule_score": 87,
+            "soft_recovery_min_gpt_confidence": 89,
+            "soft_recovery_min_risk_reward": 2.0,
+            "soft_recovery_risk_percent": 0.75,
+        }
+        rows = [
+            {"id": 3, "status": "LOSS", "pnl": -0.77, "closed_at": "2026-07-20T12:00:00+00:00"},
+            {"id": 2, "status": "WIN", "pnl": 0.77, "closed_at": "2026-07-20T11:00:00+00:00"},
+            {"id": 1, "status": "LOSS", "pnl": -1.0, "closed_at": "2026-07-20T10:00:00+00:00"},
+        ]
+        sizing_state = {"cycle_pnl_usdt": -1.77}
+
+        with patch("crypto_trader.codex_features._closed_trade_executions", return_value=rows), patch(
+            "crypto_trader.codex_features.get_trading_system_state_row",
+            return_value={"is_recovery_mode": 0, "payload_json": json.dumps({"recoveryMode": "NORMAL"})},
+        ), patch("crypto_trader.codex_features.get_journal_state", return_value=json.dumps(sizing_state)), patch(
+            "crypto_trader.codex_features.upsert_trading_system_state_row"
+        ):
+            state = refresh_trading_system_state(config)
+
+        self.assertTrue(state["isRecoveryMode"])
+        self.assertEqual(state["recoveryMode"], "SOFT_RECOVERY")
+        self.assertEqual(state["globalLossStreak"], 1)
+        self.assertEqual(state["recoveryCyclePnlUsdt"], -1.77)
+        send_telegram_message.assert_called_once()
+
+    @patch("crypto_trader.notifier.send_telegram_message")
     def test_recovery_mode_does_not_send_telegram_without_transition(self, send_telegram_message) -> None:
         config = self._config()
         config["trading_risk"] = {"global_loss_streak_threshold": 2}

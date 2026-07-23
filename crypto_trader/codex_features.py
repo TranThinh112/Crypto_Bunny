@@ -2217,7 +2217,6 @@ def refresh_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
     soft_recovery = (
         not hard_recovery
         and bool(settings.get("enable_soft_recovery_mode", True))
-        and global_loss_streak <= 0
         and cycle_pnl < -1e-9
     )
     recovery_mode = "HARD_RECOVERY" if hard_recovery else "SOFT_RECOVERY" if soft_recovery else "NORMAL"
