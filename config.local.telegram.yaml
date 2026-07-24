@@ -5,6 +5,7 @@ ledger_path: data/trades.jsonl
 runtime:
   instance_role: secondary
 exchange:
+  simulated_trading: true
   leverage: 25
   leverage_presets:
   - 5

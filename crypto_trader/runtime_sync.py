@@ -15,6 +15,7 @@ from .executor import candidate_client_order_id
 from .market import create_exchange
 from .models import TradeCandidate, to_jsonable
 from .storage import (
+    append_trade_execution_event,
     ensure_ai_model_version,
     get_journal_state,
     get_prompt_metric,
@@ -443,6 +444,21 @@ def _close_missing_exchange_execution(
             "exchange_close_history_json": json.dumps(to_jsonable(history), ensure_ascii=False) if history else None,
         },
     )
+    append_trade_execution_event(
+        config,
+        int(row["id"]),
+        {
+            "type": "exchange_close",
+            "created_at": closed_at,
+            "closed_at": actual_closed_at,
+            "status": _status_from_realized_pnl(pnl),
+            "pnl": pnl,
+            "pnl_pct": pnl_pct,
+            "close_reason": close_reason,
+            "source": "okx_positions_history" if history else "estimated_from_position_snapshot",
+            "history": to_jsonable(history) if history else None,
+        },
+    )
     if payload:
         _notify_exchange_closed_execution(config, payload)
     return payload
@@ -482,6 +498,21 @@ def _backfill_reconciled_exchange_close_notifications(
                 "exchange_close_history_json": json.dumps(to_jsonable(history), ensure_ascii=False) if history else row.get("exchange_close_history_json"),
                 "updated_at": now.isoformat(),
                 "position_slot": None,
+            },
+        )
+        append_trade_execution_event(
+            config,
+            int(row["id"]),
+            {
+                "type": "exchange_close_backfill",
+                "created_at": now.isoformat(),
+                "closed_at": history_closed_at.isoformat() if history_closed_at else row.get("closed_at"),
+                "status": _status_from_realized_pnl(pnl),
+                "pnl": pnl,
+                "pnl_pct": pnl_pct,
+                "close_reason": close_reason,
+                "source": "okx_positions_history" if history else "runtime_sync",
+                "history": to_jsonable(history) if history else None,
             },
         )
         if payload:
@@ -542,6 +573,21 @@ def _correct_recent_exchange_closes_from_history(
         reason_changed = reason != close_reason
         if current_pnl is None or abs(current_pnl - pnl) > 1e-9 or pct_changed or reason_changed:
             update_trade_execution(config, int(row["id"]), updates)
+            append_trade_execution_event(
+                config,
+                int(row["id"]),
+                {
+                    "type": "exchange_close_correction",
+                    "created_at": now.isoformat(),
+                    "closed_at": updates.get("closed_at"),
+                    "previous_pnl": current_pnl,
+                    "pnl": pnl,
+                    "pnl_pct": pnl_pct,
+                    "close_reason": close_reason,
+                    "source": source,
+                    "history": to_jsonable(history) if history else None,
+                },
+            )
             corrected += 1
     return corrected
 
@@ -994,6 +1040,16 @@ def sync_exchange_runtime_state(
             "snapshot_json": json.dumps(payload, ensure_ascii=False),
         }
         if matched:
+            previous_quantity = _float(matched.get("quantity"))
+            max_contracts_seen = max(
+                value
+                for value in (contracts, previous_quantity or 0.0, _float(matched.get("max_contracts_seen")) or 0.0)
+                if value is not None
+            )
+            updates["quantity"] = contracts
+            updates["max_contracts_seen"] = max_contracts_seen
+            if _float(matched.get("initial_quantity")) is None:
+                updates["initial_quantity"] = max_contracts_seen
             if _float(matched.get("initial_entry_price")) is None and entry_price is not None:
                 updates["initial_entry_price"] = _float(matched.get("entry_price")) or entry_price
             if _float(matched.get("initial_stop_loss")) is None and stop_loss is not None:
@@ -1022,6 +1078,9 @@ def sync_exchange_runtime_state(
                     "rule_score": None,
                     "gpt_confidence": None,
                     "status": "OPEN",
+                    "quantity": contracts,
+                    "initial_quantity": contracts,
+                    "max_contracts_seen": contracts,
                     "pnl": _float(position.get("unrealized_pnl") or position.get("unrealizedPnl") or info.get("upl")),
                     "reject_reason": None,
                     "closed_at": None,

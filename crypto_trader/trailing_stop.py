@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .market import create_exchange
-from .storage import get_journal_state, list_trade_execution_rows, set_journal_state, update_trade_execution
+from .storage import append_trade_execution_event, get_journal_state, list_trade_execution_rows, set_journal_state, update_trade_execution
 
 
 STATE_KEY = "trailing_stop:last_status"
@@ -88,11 +88,14 @@ def _base_symbol(symbol: str) -> str:
 
 
 def _json_payload(row: dict[str, Any]) -> dict[str, Any]:
-    try:
-        payload = json.loads(str(row.get("payload_json") or "{}"))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
+    for key in ("snapshot_json", "payload_json"):
+        try:
+            payload = json.loads(str(row.get(key) or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return {}
 
 
 def _initial_entry(row: dict[str, Any], fallback: float | None) -> float | None:
@@ -114,6 +117,25 @@ def _initial_stop_loss(row: dict[str, Any]) -> float | None:
         or _float(payload.get("stopLoss"))
         or _float(row.get("stop_loss"))
     )
+
+def _initial_contracts(row: dict[str, Any]) -> float | None:
+    payload = _json_payload(row)
+    position = payload.get("position") if isinstance(payload.get("position"), dict) else {}
+    info = position.get("info") if isinstance(position.get("info"), dict) else {}
+    values = (
+        row.get("initial_quantity"),
+        row.get("max_contracts_seen"),
+        row.get("original_quantity"),
+        row.get("quantity"),
+        row.get("contracts"),
+        payload.get("initial_quantity"),
+        payload.get("quantity"),
+        payload.get("contracts"),
+        position.get("contracts"),
+        info.get("pos"),
+    )
+    numbers = [abs(value) for raw in values if (value := (_float(raw) or 0.0)) > 0]
+    return max(numbers) if numbers else None
 
 
 def _matching_execution(rows: list[dict[str, Any]], symbol: str, side: str) -> dict[str, Any] | None:
@@ -270,20 +292,72 @@ def _close_partial_position(
     amount: float,
 ) -> dict[str, Any]:
     close_side = "sell" if side == "long" else "buy"
-    params: dict[str, Any] = {
+    base_params: dict[str, Any] = {
         "tdMode": config.get("exchange", {}).get("td_mode", "isolated"),
         "reduceOnly": True,
     }
     if config.get("exchange", {}).get("position_side_mode") == "long_short":
-        params["posSide"] = side
-    return exchange.create_order(
-        symbol,
-        "market",
-        close_side,
-        _amount_to_precision(exchange, symbol, amount),
-        None,
-        params,
-    )
+        base_params["posSide"] = side
+
+    def submit(params: dict[str, Any]) -> dict[str, Any]:
+        return exchange.create_order(
+            symbol,
+            "market",
+            close_side,
+            _amount_to_precision(exchange, symbol, amount),
+            None,
+            params,
+        )
+
+    try:
+        return submit(base_params)
+    except Exception as exc:
+        message = str(exc).lower()
+        pos_side = str(base_params.get("posSide") or "").strip().lower()
+        if pos_side and (
+            "don't have any positions in this direction" in message
+            or "no positions in this direction" in message
+            or "posside" in message
+        ):
+            retry_params = dict(base_params)
+            retry_params.pop("posSide", None)
+            return submit(retry_params)
+        raise
+
+
+def _live_position_for_symbol(exchange: Any, symbol: str, side: str) -> dict[str, Any] | None:
+    try:
+        positions = [item for item in (exchange.fetch_positions() or []) if isinstance(item, dict)]
+    except Exception:
+        return None
+    for position in positions:
+        if _position_symbol(position) != symbol:
+            continue
+        if _position_side(position) != side:
+            continue
+        if _position_contracts(position) <= 0:
+            continue
+        return position
+    return None
+
+def _partial_already_reduced_amount(
+    *,
+    stored_contracts: float,
+    live_contracts: float,
+    close_fraction: float,
+) -> float | None:
+    if stored_contracts <= 0 or live_contracts <= 0:
+        return None
+    reduced = stored_contracts - live_contracts
+    if reduced <= 0:
+        return None
+    expected = stored_contracts * max(0.0, close_fraction)
+    tolerance = max(stored_contracts * 0.08, 1e-8)
+    if expected > 0 and abs(reduced - expected) <= tolerance:
+        return reduced
+    if live_contracts < stored_contracts:
+        return reduced
+    return None
 
 
 def _evaluate_new_stop(
@@ -454,13 +528,24 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
         partial_done = bool(execution.get("partial_take_profit_done"))
         initial_take_profit = _float(execution.get("partial_take_profit_original_tp")) or take_profit
         if partial_enabled and not partial_done:
+            live_position = _live_position_for_symbol(exchange, symbol, side)
+            live_contracts = _position_contracts(live_position) if live_position is not None else 0.0
+            initial_contracts = _initial_contracts(execution) or 0.0
+            live_snapshot_contracts = _position_contracts(position)
+            stored_contracts = max(initial_contracts, live_snapshot_contracts)
+            close_fraction = float(partial_settings.get("close_fraction", 0.3) or 0.3)
+            manually_reduced_amount = _partial_already_reduced_amount(
+                stored_contracts=stored_contracts,
+                live_contracts=live_contracts,
+                close_fraction=close_fraction,
+            )
             progress = _tp_progress(side, initial_entry, take_profit, mark)
             trigger_progress = float(partial_settings.get("trigger_tp_progress", 0.7) or 0.7)
             if progress is None:
                 skipped += 1
                 rows.append(_status_row(symbol, side, "skipped", "TP progress unavailable", take_profit=take_profit))
                 continue
-            if progress < trigger_progress:
+            if progress < trigger_progress and manually_reduced_amount is None:
                 skipped += 1
                 rows.append(
                     _status_row(
@@ -477,11 +562,21 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
                 skipped += 1
                 rows.append(_status_row(symbol, side, "skipped", "OKX SL/TP algo order not found"))
                 continue
-            contracts = _position_contracts(position)
-            partial_amount = contracts * float(partial_settings.get("close_fraction", 0.3) or 0.3)
+            if live_position is None:
+                skipped += 1
+                rows.append(_status_row(symbol, side, "skipped", "position no longer open before partial close"))
+                continue
+            if live_contracts <= 0:
+                skipped += 1
+                rows.append(_status_row(symbol, side, "skipped", "position size already zero"))
+                continue
+            contracts = max(stored_contracts, live_contracts)
+            close_partial_on_exchange = manually_reduced_amount is None
+            active_contracts = live_contracts if manually_reduced_amount is not None else min(contracts, live_contracts)
+            partial_amount = manually_reduced_amount if manually_reduced_amount is not None else active_contracts * close_fraction
             if partial_amount <= 0 or partial_amount >= contracts:
                 skipped += 1
-                rows.append(_status_row(symbol, side, "skipped", "invalid partial close amount", contracts=contracts, partial_amount=partial_amount))
+                rows.append(_status_row(symbol, side, "skipped", "invalid partial close amount", contracts=contracts, live_contracts=live_contracts, partial_amount=partial_amount))
                 continue
             positive_sl = _positive_stop_from_entry(
                 side,
@@ -497,7 +592,16 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
                 1,
                 float(partial_settings.get("tp_extension_fraction", partial_settings.get("close_fraction", 0.3)) or 0.0),
             )
-            partial_order = _close_partial_position(exchange, config, symbol=symbol, side=side, amount=partial_amount)
+            partial_order = (
+                {
+                    "source": "manual_partial_detected",
+                    "stored_contracts": contracts,
+                    "live_contracts": live_contracts,
+                    "partial_amount": partial_amount,
+                }
+                if not close_partial_on_exchange
+                else _close_partial_position(exchange, config, symbol=symbol, side=side, amount=partial_amount)
+            )
             amend_result = _amend_stop_loss(exchange, symbol, algo, new_sl, settings, new_tp=new_tp)
             updated_at = datetime.now(timezone.utc).isoformat()
             update_trade_execution(
@@ -522,6 +626,29 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
                     "trailing_stop_r_multiple": round(r_multiple, 6),
                 },
             )
+            append_trade_execution_event(
+                config,
+                int(execution["id"]),
+                {
+                    "type": "partial_close",
+                    "created_at": updated_at,
+                    "symbol": symbol,
+                    "side": side,
+                    "mark_price": mark,
+                    "close_fraction": float(partial_settings.get("close_fraction", 0.3) or 0.3),
+                    "partial_amount": partial_amount,
+                    "remaining_amount": max(0.0, live_contracts if manually_reduced_amount is not None else active_contracts - partial_amount),
+                    "manual_partial_detected": manually_reduced_amount is not None,
+                    "contract_size": _position_contract_size(position),
+                    "old_stop_loss": current_sl,
+                    "new_stop_loss": new_sl,
+                    "old_take_profit": take_profit,
+                    "new_take_profit": new_tp,
+                    "r_multiple": round(r_multiple, 6),
+                    "exchange_order": partial_order,
+                    "amend_request": amend_result.get("request"),
+                },
+            )
             notification_sent = _notify_partial_take_profit(
                 config,
                 {
@@ -532,7 +659,7 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
                     "trigger_price": mark,
                     "close_fraction": float(partial_settings.get("close_fraction", 0.3) or 0.3),
                     "partial_amount": partial_amount,
-                    "remaining_amount": max(0.0, contracts - partial_amount),
+                    "remaining_amount": max(0.0, live_contracts if manually_reduced_amount is not None else active_contracts - partial_amount),
                     "contract_size": _position_contract_size(position),
                     "old_stop_loss": current_sl,
                     "new_stop_loss": new_sl,
@@ -551,6 +678,7 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
                     "partial TP closed; SL protected and TP extended",
                     tp_progress=round(progress, 4),
                     partial_amount=round(partial_amount, 8),
+                    manual_partial_detected=manually_reduced_amount is not None,
                     new_stop_loss=round(new_sl, 8),
                     new_take_profit=None if new_tp is None else round(new_tp, 8),
                     notification_sent=notification_sent,
@@ -602,6 +730,24 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
                             "trailing_stop_r_multiple": round(r_multiple, 6),
                         },
                     )
+                    append_trade_execution_event(
+                        config,
+                        int(execution["id"]),
+                        {
+                            "type": "profit_step_extend",
+                            "created_at": updated_at,
+                            "symbol": symbol,
+                            "side": side,
+                            "step": next_step,
+                            "mark_price": mark,
+                            "old_stop_loss": current_sl,
+                            "new_stop_loss": new_sl,
+                            "old_take_profit": take_profit,
+                            "new_take_profit": new_tp,
+                            "r_multiple": round(r_multiple, 6),
+                            "amend_request": amend_result.get("request"),
+                        },
+                    )
                     notification_sent = _notify_profit_extension_step(
                         config,
                         {
@@ -635,6 +781,32 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
                         )
                     )
                     continue
+                skipped += 1
+                rows.append(
+                    _status_row(
+                        symbol,
+                        side,
+                        "waiting",
+                        "next profit step not reached",
+                        tp_progress=round(progress, 4),
+                        trigger_tp_progress=trigger_progress,
+                        current_step=current_step,
+                        max_steps=max_steps,
+                    )
+                )
+                continue
+            skipped += 1
+            rows.append(
+                _status_row(
+                    symbol,
+                    side,
+                    "waiting",
+                    "max profit steps reached",
+                    current_step=current_step,
+                    max_steps=max_steps,
+                )
+            )
+            continue
         if not partial_done and r_multiple < float(settings["activation_r_multiple"]):
             skipped += 1
             rows.append(
@@ -695,6 +867,22 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
                 "trailing_stop_updated_at": updated_at,
                 "trailing_stop_r_multiple": round(r_multiple, 6),
                 "trailing_stop_atr": round(atr, 8),
+            },
+        )
+        append_trade_execution_event(
+            config,
+            int(execution["id"]),
+            {
+                "type": "trailing_stop_update",
+                "created_at": updated_at,
+                "symbol": symbol,
+                "side": side,
+                "mark_price": mark,
+                "old_stop_loss": current_sl,
+                "new_stop_loss": new_sl,
+                "r_multiple": round(r_multiple, 6),
+                "atr": round(atr, 8),
+                "amend_request": amend_result.get("request"),
             },
         )
         amended += 1

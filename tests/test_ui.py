@@ -34,8 +34,9 @@ from crypto_trader.ui import (
 
 
 class UiTest(TestCase):
+    @patch("crypto_trader.ui._is_railway_runtime", return_value=True)
     @patch("crypto_trader.ui.send_telegram_message", return_value=True)
-    def test_system_error_notification_is_vietnamese_and_deduplicated(self, send_message) -> None:
+    def test_system_error_notification_is_vietnamese_and_deduplicated(self, send_message, _railway_runtime) -> None:
         config = {"timezone": "Asia/Ho_Chi_Minh"}
         component = f"test-component-{id(self)}"
 
@@ -174,6 +175,22 @@ class UiTest(TestCase):
         self.assertIn("Lý do mở Market: Dong luc tang va volume on dinh, co the mo Market.", message)
         self.assertIn("Lý do giữ setup: -", message)
         self.assertIn("Lý do xóa setup: -", message)
+
+    @patch("crypto_trader.ui.recent_ai_call_history")
+    def test_ai_history_view_formats_created_at_in_vietnam_time(self, recent_history) -> None:
+        recent_history.return_value = [
+            {
+                "created_at": "2026-07-23T17:02:46+00:00",
+                "role": "mini",
+                "model": "gpt-5.4-mini",
+                "status": "NO_TRADE",
+                "symbols": ["XRP/USDT:USDT"],
+            }
+        ]
+
+        message = _format_ai_call_history_view({"timezone": "Asia/Ho_Chi_Minh"})
+
+        self.assertIn("24/07/2026 00:02:46 VN", message)
 
     def test_market_guard_notification_status_ignores_mild_positive_move(self) -> None:
         config = {
@@ -457,6 +474,65 @@ class UiTest(TestCase):
         self.assertEqual(payload["positions"][0]["tp_sl_status"], "ok")
         self.assertEqual(payload["algo_target_count"], 1)
 
+    def test_okx_position_history_endpoint_uses_raw_okx_history(self) -> None:
+        class HistoryExchange:
+            def __init__(self) -> None:
+                self.params: dict[str, object] | None = None
+
+            def load_markets(self) -> None:
+                return None
+
+            def privateGetAccountPositionsHistory(self, params: dict[str, object]) -> dict[str, object]:
+                self.params = params
+                return {
+                    "data": [
+                        {
+                            "instId": "TAO-USDT-SWAP",
+                            "posId": "3740224303088656384",
+                            "realizedPnl": "-13.74",
+                            "openAvgPx": "197.2",
+                            "closeAvgPx": "188.4",
+                        }
+                    ]
+                }
+
+        exchange = HistoryExchange()
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text("mode: live\n", encoding="utf-8")
+            app = create_app(str(config_path))
+            client = TestClient(app)
+
+            with patch("crypto_trader.ui.create_exchange", return_value=exchange):
+                response = client.get(
+                    "/api/okx-position-history",
+                    params={
+                        "instId": "TAO-USDT-SWAP",
+                        "posId": "3740224303088656384",
+                        "limit": 50,
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(exchange.params, {"instType": "SWAP", "limit": "50", "instId": "TAO-USDT-SWAP", "posId": "3740224303088656384"})
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["items"][0]["realized_pnl"], "-13.74")
+
+    def test_okx_position_history_endpoint_handles_missing_selector(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text("mode: live\n", encoding="utf-8")
+            app = create_app(str(config_path))
+            client = TestClient(app)
+
+            response = client.get("/api/okx-position-history", params={"limit": "bad"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["count"], 0)
+        self.assertIn("Provide instId or symbol", payload["message"])
+
     def test_leverage_endpoint_limits_values_to_5_25x(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             config_path = Path(tmpdir) / "config.yaml"
@@ -700,9 +776,10 @@ class UiTest(TestCase):
         self.assertIn("Setup", sent_text)
         self.assertEqual(callbacks, ["set_order_usdt", "set_leverage", "set_max_positions", "view_menu"])
 
+    @patch("crypto_trader.ui._is_railway_runtime", return_value=True)
     @patch("crypto_trader.ui.send_telegram_message")
     @patch("crypto_trader.ui.sync_telegram_commands")
-    def test_app_startup_syncs_native_telegram_commands(self, sync_commands, send_message) -> None:
+    def test_app_startup_syncs_native_telegram_commands(self, sync_commands, send_message, _railway_runtime) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             config_path = Path(tmpdir) / "config.yaml"
             config_path.write_text("mode: dry_run\n", encoding="utf-8")

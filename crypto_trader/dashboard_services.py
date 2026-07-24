@@ -784,6 +784,24 @@ def _trade_execution_quantity(row: dict[str, Any]) -> float | None:
                 return inferred
     return None
 
+def _trade_execution_initial_quantity(row: dict[str, Any]) -> float | None:
+    payload = _trade_execution_payload(row)
+    position, info = _trade_execution_position_payload(row)
+    for value in (
+        row.get("initial_quantity"),
+        row.get("max_contracts_seen"),
+        row.get("original_quantity"),
+        payload.get("initial_quantity"),
+        payload.get("max_contracts_seen"),
+        payload.get("original_quantity"),
+        position.get("initial_quantity"),
+        info.get("initialQty"),
+    ):
+        number = _safe_float(value, float("nan"))
+        if number == number and number > 0:
+            return abs(number)
+    return _trade_execution_quantity(row)
+
 
 def _trade_execution_contract_size(row: dict[str, Any]) -> float:
     payload = _trade_execution_payload(row)
@@ -827,19 +845,25 @@ def _trade_execution_profit_protection_levels(row: dict[str, Any], partial_confi
     partial_config = partial_config if isinstance(partial_config, dict) else {}
     side = str(row.get("side") or "").lower()
     entry = _trade_execution_live_entry_price(row)
-    initial_sl = _trade_execution_effective_stop_loss(row) or _trade_execution_price(row, "initial_stop_loss")
+    partial_done = bool(row.get("partial_take_profit_done"))
+    stored_initial_sl = _trade_execution_price(row, "initial_stop_loss")
+    live_sl = _trade_execution_effective_stop_loss(row)
+    initial_sl = (stored_initial_sl or live_sl) if partial_done else (live_sl or stored_initial_sl)
     take_profit = _trade_execution_effective_take_profit(row)
     qty = _trade_execution_quantity(row)
+    base_qty = _trade_execution_initial_quantity(row) or qty
     partial_fraction = _safe_float(row.get("partial_take_profit_fraction"), float("nan"))
     if partial_fraction != partial_fraction:
         partial_fraction = _safe_float(partial_config.get("close_fraction"), float("nan"))
     if partial_fraction != partial_fraction:
         partial_fraction = 0.3
     partial_amount = _safe_float(row.get("partial_take_profit_amount"), float("nan"))
-    if partial_amount != partial_amount and qty:
-        partial_amount = qty * partial_fraction
-    remaining_amount = max(0.0, qty - (partial_amount if partial_amount == partial_amount else 0.0)) if qty else None
-    current_amount = remaining_amount if row.get("partial_take_profit_done") and remaining_amount else qty
+    if partial_amount != partial_amount and base_qty:
+        partial_amount = base_qty * partial_fraction
+    current_amount = qty if row.get("partial_take_profit_done") and qty else base_qty
+    remaining_amount = current_amount
+    if not row.get("partial_take_profit_done") and base_qty is not None:
+        remaining_amount = max(0.0, base_qty - (partial_amount if partial_amount == partial_amount else 0.0))
     current_sl = _trade_execution_effective_stop_loss(row)
     current_tp = _trade_execution_effective_take_profit(row)
     partial_price = row.get("partial_take_profit_price")
@@ -954,6 +978,16 @@ def _trade_execution_closed_pnl(row: dict[str, Any]) -> float | None:
             adjusted = True
     return round(pnl + adjustments, 6) if adjusted else pnl
 
+def _trade_execution_event_history(row: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = row.get("trade_event_history_json")
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(str(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return [item for item in parsed if isinstance(item, dict)] if isinstance(parsed, list) else []
+
 
 def _trade_execution_summary(config: dict[str, Any]) -> dict[str, Any]:
     try:
@@ -972,6 +1006,7 @@ def _trade_execution_summary(config: dict[str, Any]) -> dict[str, Any]:
         pending_total = None
     open_items: list[dict[str, Any]] = []
     for row in open_rows:
+        event_history = _trade_execution_event_history(row)
         open_items.append(
             {
                 "id": row.get("id"),
@@ -1002,6 +1037,8 @@ def _trade_execution_summary(config: dict[str, Any]) -> dict[str, Any]:
                 "tp_progress_pct": _trade_execution_progress(row),
                 "r_multiple": _trade_execution_r_multiple(row),
                 "profit_protection_levels": _trade_execution_profit_protection_levels(row, partial),
+                "trade_event_count": len(event_history),
+                "trade_event_history": event_history[-10:],
             }
         )
     closed_items = [
@@ -1019,6 +1056,8 @@ def _trade_execution_summary(config: dict[str, Any]) -> dict[str, Any]:
             "pnl_pct": row.get("pnl_pct"),
             "exchange_close_source": row.get("exchange_close_source"),
             "partial_take_profit_done": bool(row.get("partial_take_profit_done")),
+            "trade_event_count": len(_trade_execution_event_history(row)),
+            "trade_event_history": _trade_execution_event_history(row)[-10:],
         }
         for row in closed_rows
     ]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 from datetime import datetime, timedelta, timezone
 from unittest import TestCase
@@ -8,6 +9,7 @@ from unittest.mock import patch
 from crypto_trader.atlas_mirror import atlas_database, atlas_database_for_collection
 from crypto_trader.models import Decision, RiskCheck, TradeCandidate
 from crypto_trader.storage import (
+    append_trade_execution_event,
     claim_journal_state,
     clear_dashboard_snapshot_cache,
     compact_market_scan_observations,
@@ -25,7 +27,9 @@ from crypto_trader.storage import (
     save_market_scan_observations,
     save_pending_order,
     storage_stats,
+    get_trade_execution,
     insert_ai_trade_decision_row,
+    insert_trade_execution_row,
     prune_ai_trade_decisions,
 )
 
@@ -57,6 +61,39 @@ class StorageTest(TestCase):
                 "paper_trades_keep_days": 365,
             },
         }
+
+    def test_trade_execution_event_history_is_initialized_and_appended(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._config(tmpdir)
+            row = insert_trade_execution_row(
+                config,
+                {
+                    "created_at": "2026-07-24T00:00:00+00:00",
+                    "updated_at": "2026-07-24T00:00:00+00:00",
+                    "symbol": "TAO/USDT:USDT",
+                    "side": "LONG",
+                    "status": "OPEN",
+                    "entry_price": 197.2,
+                    "stop_loss": 187.0,
+                    "take_profit": 210.0,
+                },
+            )
+
+            append_trade_execution_event(
+                config,
+                int(row["id"]),
+                {
+                    "type": "partial_close",
+                    "created_at": "2026-07-24T01:00:00+00:00",
+                    "pnl": -7.77,
+                    "partial_amount": 25,
+                },
+            )
+
+            stored = get_trade_execution(config, int(row["id"])) or {}
+            history = json.loads(str(stored["trade_event_history_json"]))
+            self.assertEqual([event["type"] for event in history], ["open", "partial_close"])
+            self.assertEqual(history[1]["pnl"], -7.77)
 
     def test_ai_trade_decision_retention_defaults_to_365_days(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

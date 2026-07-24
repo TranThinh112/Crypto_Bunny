@@ -6,14 +6,16 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from crypto_trader.config import DEFAULT_CONFIG
+from crypto_trader.reporting import format_partial_take_profit_message
 from crypto_trader.storage import get_journal_state, insert_trade_execution_row, list_trade_execution_rows
 from crypto_trader.trailing_stop import STATE_KEY, run_trailing_stop_cycle
 
 
 class FakeTrailingExchange:
-    def __init__(self, *, mark: float, current_sl: float) -> None:
+    def __init__(self, *, mark: float, current_sl: float, contracts: float = 1.0) -> None:
         self.mark = mark
         self.current_sl = current_sl
+        self.contracts = contracts
         self.amend_requests: list[dict] = []
         self.orders: list[dict] = []
 
@@ -28,7 +30,7 @@ class FakeTrailingExchange:
             {
                 "symbol": "BTC/USDT:USDT",
                 "side": "long",
-                "contracts": 1,
+                "contracts": self.contracts,
                 "entry_price": 64532.0,
                 "mark_price": self.mark,
             }
@@ -78,6 +80,18 @@ class FakeTrailingExchange:
         return order
 
 
+class FakeTrailingExchangePosSideRetry(FakeTrailingExchange):
+    def __init__(self, *, mark: float, current_sl: float) -> None:
+        super().__init__(mark=mark, current_sl=current_sl)
+        self.fail_first = True
+
+    def create_order(self, symbol: str, order_type: str, side: str, amount: str, price: float | None, params: dict) -> dict:
+        if self.fail_first and "posSide" in params:
+            self.fail_first = False
+            raise RuntimeError("Order failed because you don't have any positions in this direction for this contract to reduce or close.")
+        return super().create_order(symbol, order_type, side, amount, price, params)
+
+
 class TrailingStopTest(TestCase):
     def _config(self) -> dict:
         self.tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
@@ -115,6 +129,7 @@ class TrailingStopTest(TestCase):
                 "entry_price": 64532.0,
                 "stop_loss": stop_loss,
                 "take_profit": 65032.0,
+                "quantity": 1.0,
                 "initial_entry_price": 64532.0,
                 "initial_stop_loss": 64407.0,
             },
@@ -210,6 +225,7 @@ class TrailingStopTest(TestCase):
         self.assertIn("+455.00 USDT", message)
         self.assertIn("PARTIAL TP + GỒNG LÃI", message)
         self.assertIn("BTC/USDT:USDT LONG", message)
+        self.assertIn("ID lệnh: VT #1", message)
         self.assertIn("Đã chốt 30% vị thế", message)
         self.assertIn("64407.000000 → 64544.500000", message)
         self.assertIn("65032.000000 → 65182.000000", message)
@@ -231,3 +247,99 @@ class TrailingStopTest(TestCase):
 
         self.assertEqual(second["partial_closed"], 0)
         self.assertEqual(exchange_again.orders, [])
+
+    def test_partial_take_profit_message_labels_manual_partial(self) -> None:
+        message = format_partial_take_profit_message(
+            self._config(),
+            {
+                "trade_execution_id": 10,
+                "symbol": "GMX/USDT:USDT",
+                "side": "short",
+                "entry": 7.247036,
+                "trigger_price": 6.828,
+                "close_fraction": 0.3,
+                "partial_amount": 18,
+                "remaining_amount": 42,
+                "contract_size": 0.1,
+                "old_stop_loss": 7.682,
+                "new_stop_loss": 7.203539,
+                "old_take_profit": 6.724,
+                "new_take_profit": 6.567089,
+                "manual_partial_detected": True,
+            },
+        )
+
+        self.assertIn("ID lệnh: VT #10", message)
+        self.assertIn("Đã ghi nhận chốt 30% vị thế", message)
+        self.assertNotIn("Đã chốt 30% vị thế", message)
+        self.assertIn("Nấc tiếp theo kích hoạt khi giá chạm", message)
+
+    def test_partial_take_profit_retries_without_pos_side_when_okx_rejects_direction(self) -> None:
+        config = self._config()
+        config["exchange"]["position_side_mode"] = "long_short"
+        config["trailing_stop"]["partial_take_profit"] = {
+            "enabled": True,
+            "trigger_tp_progress": 0.7,
+            "close_fraction": 0.3,
+            "remaining_sl_buffer_r": 0.1,
+            "tp_extension_fraction": 0.3,
+        }
+        self._insert_open_execution(config)
+        exchange = FakeTrailingExchangePosSideRetry(mark=64882.0, current_sl=64407.0)
+
+        with patch("crypto_trader.trailing_stop.create_exchange", return_value=exchange):
+            result = run_trailing_stop_cycle(config)
+
+        self.assertEqual(result["partial_closed"], 1)
+        self.assertEqual(len(exchange.orders), 1)
+        self.assertNotIn("posSide", exchange.orders[0]["params"])
+        self.assertTrue(exchange.orders[0]["params"]["reduceOnly"])
+
+    def test_partial_take_profit_marks_manual_reduction_and_only_amends_targets(self) -> None:
+        config = self._config()
+        config["trailing_stop"]["partial_take_profit"] = {
+            "enabled": True,
+            "trigger_tp_progress": 0.7,
+            "close_fraction": 0.3,
+            "remaining_sl_buffer_r": 0.1,
+            "tp_extension_fraction": 0.3,
+        }
+        self._insert_open_execution(config)
+        exchange = FakeTrailingExchange(mark=64882.0, current_sl=64407.0, contracts=0.7)
+
+        with patch("crypto_trader.trailing_stop.create_exchange", return_value=exchange):
+            result = run_trailing_stop_cycle(config)
+
+        self.assertEqual(result["partial_closed"], 1)
+        self.assertEqual(exchange.orders, [])
+        self.assertEqual(result["items"][0]["manual_partial_detected"], True)
+        self.assertEqual(exchange.amend_requests[0]["newSlTriggerPx"], "64544.5")
+        self.assertEqual(exchange.amend_requests[0]["newTpTriggerPx"], "65182.0")
+        row = list_trade_execution_rows(config, statuses=["OPEN"])[0]
+        self.assertTrue(row["partial_take_profit_done"])
+        self.assertAlmostEqual(row["partial_take_profit_amount"], 0.3)
+
+    def test_manual_reduction_still_protects_when_price_falls_back_below_trigger(self) -> None:
+        config = self._config()
+        config["trailing_stop"]["partial_take_profit"] = {
+            "enabled": True,
+            "trigger_tp_progress": 0.7,
+            "close_fraction": 0.3,
+            "remaining_sl_buffer_r": 0.1,
+            "tp_extension_fraction": 0.3,
+        }
+        self._insert_open_execution(config)
+        row = list_trade_execution_rows(config, statuses=["OPEN"])[0]
+        from crypto_trader.storage import update_trade_execution
+
+        update_trade_execution(config, int(row["id"]), {"initial_quantity": 1.0, "quantity": 0.7})
+        exchange = FakeTrailingExchange(mark=64700.0, current_sl=64407.0, contracts=0.7)
+
+        with patch("crypto_trader.trailing_stop.create_exchange", return_value=exchange):
+            result = run_trailing_stop_cycle(config)
+
+        self.assertEqual(result["partial_closed"], 1)
+        self.assertEqual(exchange.orders, [])
+        self.assertEqual(result["items"][0]["manual_partial_detected"], True)
+        self.assertEqual(exchange.amend_requests[0]["newSlTriggerPx"], "64544.5")
+        self.assertEqual(exchange.amend_requests[0]["newTpTriggerPx"], "65182.0")

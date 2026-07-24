@@ -93,6 +93,15 @@ def prefetch_market_data(
     }
 
 
+def _okx_simulated_trading_enabled(config: dict[str, Any]) -> bool:
+    exchange_config = config.get("exchange", {}) if isinstance(config.get("exchange"), dict) else {}
+    explicit = exchange_config.get("simulated_trading")
+    if explicit is None:
+        explicit = exchange_config.get("okx_simulated_trading")
+    if explicit is not None:
+        return bool(explicit)
+    return str(config.get("mode") or "").lower() == "demo"
+
 def create_exchange(config: dict[str, Any], authenticated: bool = False) -> Any:
     import ccxt
 
@@ -127,7 +136,7 @@ def create_exchange(config: dict[str, Any], authenticated: bool = False) -> Any:
         )
 
     exchange = exchange_class(params)
-    if config.get("mode") == "demo":
+    if _okx_simulated_trading_enabled(config):
         exchange.headers = {**getattr(exchange, "headers", {}), "x-simulated-trading": "1"}
         try:
             exchange.set_sandbox_mode(True)

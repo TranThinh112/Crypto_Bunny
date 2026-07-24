@@ -1082,6 +1082,24 @@ def insert_trade_execution_row(config: dict[str, Any], row: dict[str, Any]) -> d
     _ensure_mongo_write_allowed(config)
     payload = dict(row)
     payload["id"] = _mongo_next_id(config, "trade_executions")
+    payload.setdefault(
+        "trade_event_history_json",
+        json.dumps(
+            [
+                {
+                    "type": "open",
+                    "created_at": payload.get("created_at"),
+                    "status": payload.get("status"),
+                    "symbol": payload.get("symbol"),
+                    "side": payload.get("side"),
+                    "entry_price": payload.get("entry_price"),
+                    "stop_loss": payload.get("stop_loss"),
+                    "take_profit": payload.get("take_profit"),
+                }
+            ],
+            ensure_ascii=False,
+        ),
+    )
     _mongo_upsert_by_pk(config, "trade_executions", "id", payload)
     _best_effort_retryable_storage_side_effect(config, lambda: prune_trade_executions(config))
     return payload
@@ -1143,6 +1161,36 @@ def update_trade_execution(config: dict[str, Any], trade_execution_id: int, upda
         return get_trade_execution(config, trade_execution_id)
     _ensure_mongo_write_allowed(config)
     _mongo_collection(config, "trade_executions").update_one({"id": int(trade_execution_id)}, {"$set": dict(updates)})
+    return get_trade_execution(config, trade_execution_id)
+
+def append_trade_execution_event(
+    config: dict[str, Any],
+    trade_execution_id: int,
+    event: dict[str, Any],
+    *,
+    max_events: int = 50,
+) -> dict[str, Any] | None:
+    row = get_trade_execution(config, trade_execution_id)
+    if row is None:
+        return None
+    history_raw = row.get("trade_event_history_json")
+    history: list[dict[str, Any]] = []
+    if history_raw:
+        try:
+            parsed = json.loads(str(history_raw))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed = []
+        if isinstance(parsed, list):
+            history = [item for item in parsed if isinstance(item, dict)]
+    history.append(dict(event))
+    if max_events > 0 and len(history) > max_events:
+        history = history[-max_events:]
+    updates = {
+        "trade_event_history_json": json.dumps(history, ensure_ascii=False, default=str),
+        "updated_at": str(event.get("created_at") or event.get("updated_at") or row.get("updated_at") or ""),
+    }
+    _ensure_mongo_write_allowed(config)
+    _mongo_collection(config, "trade_executions").update_one({"id": int(trade_execution_id)}, {"$set": updates})
     return get_trade_execution(config, trade_execution_id)
 
 

@@ -2246,8 +2246,8 @@ function bunnyRiskValue(row) {
 function formatBunnyCyclePnl(value) {
   const numeric = moduleSignedNumericValue(value);
   if (numeric === null) return "-";
-  const fixed = numeric.toFixed(1);
-  return `${Number(fixed) > 0 ? "+" : ""}${Number(fixed).toLocaleString("en-US", { minimumFractionDigits: fixed.includes(".") ? fixed.split(".")[1].length : 0 })}u`;
+  const fixed = numeric.toFixed(2);
+  return `${Number(fixed) > 0 ? "+" : ""}${Number(fixed).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}u`;
 }
 
 function bunnyRiskChartRow(rows, key, chartIndex, colorIndex) {
@@ -4363,9 +4363,10 @@ function renderProfitProtectionLevel(label, level, tone = "", options = {}) {
   const pnl = level && typeof level === "object" ? level.pnl : null;
   const triggerPrice = level && typeof level === "object" ? level.trigger_price : null;
   const showTrigger = options.showTrigger !== false;
+  const achieved = Boolean(options.achieved);
   return `
-    <div class="profit-protection-level ${tone ? `level-${tone}` : ""}">
-      <span>${escapeHtml(label)}</span>
+    <div class="profit-protection-level ${tone ? `level-${tone}` : ""} ${achieved ? "level-achieved" : ""}">
+      <span>${escapeHtml(label)}${achieved ? `<i class="profit-level-check" aria-label="Da dat">✓</i>` : ""}</span>
       <strong>${escapeHtml(formatMarketRegimeNumber(price))}</strong>
       <b class="${nullableNumber(pnl) < 0 ? "negative" : nullableNumber(pnl) > 0 ? "positive" : ""}">${escapeHtml(formatTradeExecutionPnl(pnl))}</b>
       ${showTrigger && nullableNumber(triggerPrice) !== null ? `<small>Kích hoạt: ${escapeHtml(formatMarketRegimeNumber(triggerPrice))}</small>` : ""}
@@ -4377,7 +4378,11 @@ function renderProfitProtectionPositionPanel(item) {
   const levels = item?.profit_protection_levels || {};
   const tpSteps = Array.isArray(levels.tp_steps) ? levels.tp_steps : [];
   const slSteps = Array.isArray(levels.sl_steps) ? levels.sl_steps : [];
+  const levelByStep = (rows, step) => rows.find((level) => Number(level?.step) === step) || null;
   const currentPnlLevel = { price: item?.mark_price, pnl: item?.pnl };
+  const partialDone = Boolean(item?.partial_take_profit_done);
+  const achievedStep = partialDone ? Math.max(1, Math.min(3, Number(item?.profit_extension_step) || 1)) : 0;
+  const stepAchieved = (step) => achievedStep >= step;
   return `
     <article class="trade-execution-position profit-protection-position">
       <header>
@@ -4385,19 +4390,19 @@ function renderProfitProtectionPositionPanel(item) {
           <span>${escapeHtml(String(item?.side || "-").toUpperCase())}</span>
           <strong>${escapeHtml(item?.symbol || "-")}</strong>
         </div>
-        <span class="market-regime-badge ${item?.partial_take_profit_done ? "bull" : "unknown"}">${item?.partial_take_profit_done ? "Partial done" : "Waiting partial"}</span>
+        <span class="market-regime-badge ${partialDone ? "bull" : "unknown"}">${partialDone ? "Partial done" : "Waiting partial"}</span>
       </header>
       <div class="profit-protection-level-grid">
-        ${renderProfitProtectionLevel("SL1 ban đầu", slSteps[0] || levels.current_sl, "base")}
-        ${renderProfitProtectionLevel("TP1 ban đầu", tpSteps[0] || levels.current_tp, "base")}
+        ${renderProfitProtectionLevel("SL1 ban đầu", levelByStep(slSteps, 1) || levels.current_sl, "base")}
+        ${renderProfitProtectionLevel("TP1 ban đầu", levelByStep(tpSteps, 1) || levels.current_tp, "base")}
         ${renderProfitProtectionLevel("PnL hiện tại", currentPnlLevel, "current")}
-        ${renderProfitProtectionLevel("Chốt 30%", levels.partial_30, "partial")}
-        ${renderProfitProtectionLevel("SL2", slSteps[1] || levels.sl2, "step2")}
-        ${renderProfitProtectionLevel("TP2", tpSteps[1] || levels.tp2, "step2", { showTrigger: false })}
-        ${renderProfitProtectionLevel("SL3", slSteps[2] || levels.sl3, "step3")}
-        ${renderProfitProtectionLevel("TP3", tpSteps[2], "step3", { showTrigger: false })}
-        ${renderProfitProtectionLevel("SL4", slSteps[3], "step4")}
-        ${renderProfitProtectionLevel("TP4", tpSteps[3], "step4", { showTrigger: false })}
+        ${renderProfitProtectionLevel("Chốt 30%", levels.partial_30, "partial", { achieved: partialDone })}
+        ${renderProfitProtectionLevel("SL2", levelByStep(slSteps, 2) || levels.sl2, "step2", { achieved: stepAchieved(1) })}
+        ${renderProfitProtectionLevel("TP2", levelByStep(tpSteps, 2) || levels.tp2, "step2", { showTrigger: false, achieved: stepAchieved(1) })}
+        ${renderProfitProtectionLevel("SL3", levelByStep(slSteps, 3) || levels.sl3, "step3", { achieved: stepAchieved(2) })}
+        ${renderProfitProtectionLevel("TP3", levelByStep(tpSteps, 3), "step3", { showTrigger: false, achieved: stepAchieved(2) })}
+        ${renderProfitProtectionLevel("SL4", levelByStep(slSteps, 4), "step4", { achieved: stepAchieved(3) })}
+        ${renderProfitProtectionLevel("TP4", levelByStep(tpSteps, 4), "step4", { showTrigger: false, achieved: stepAchieved(3) })}
       </div>
       <div class="market-regime-status-meta">
         ${renderMarketPatternMetric("Entry", formatMarketRegimeNumber(item?.initial_entry_price ?? item?.entry_price))}
@@ -6355,5 +6360,3 @@ loadDecision()
   })
   .catch((err) => setStatus(`Lỗi: ${err.message}`));
 startPricePulse();
-
-

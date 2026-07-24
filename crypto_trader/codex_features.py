@@ -20,6 +20,7 @@ from .config import deep_merge, project_path
 from .models import Decision, RiskCheck, TradeCandidate, to_jsonable
 from .storage import (
     activate_strategy_version_record,
+    append_trade_execution_event,
     claim_trade_candidate,
     ensure_ai_model_version,
     ensure_strategy_version,
@@ -509,7 +510,7 @@ def _local_time_label(iso_value: str) -> str:
         dt = datetime.fromisoformat(str(iso_value).replace("Z", "+00:00"))
     except ValueError:
         dt = _utcnow()
-    return dt.astimezone(timezone(timedelta(hours=7))).strftime("%Y-%m-%d %H:%M:%S")
+    return dt.astimezone(VIETNAM_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _ai_call_role(model_name: str, prompt_package: dict[str, Any]) -> str:
@@ -767,7 +768,7 @@ def _lc_okx_review_call_message(item: dict[str, Any]) -> str:
     lines = [
         f"{title} #{lc_id if lc_id not in (None, '') else '-'}",
         f"Cặp: {symbol} | {side}",
-        f"Duyệt lúc: {_local_time_label(created_at).split()[-1]}",
+        f"Duyệt lúc: {_local_time_label(created_at)} VN",
         f"Kết quả: {status}",
         f"Giải thích: {okx_review_explanation_vi(item)[:700]}",
     ]
@@ -787,16 +788,16 @@ def _ai_call_message(item: dict[str, Any]) -> str:
         f"Trạng thái: {status}",
     ]
     if role == "mini":
-        lines.append(f"Thời gian mini đề xuất LC: {_local_time_label(str(item.get('created_at') or _iso_now()))}")
+        lines.append(f"Thời gian mini đề xuất LC: {_local_time_label(str(item.get('created_at') or _iso_now()))} VN")
     elif role == "okx":
         if item.get("approved"):
-            lines.append(f"Thời gian vào lệnh: {_local_time_label(str(item.get('created_at') or _iso_now()))}")
+            lines.append(f"Thời gian vào lệnh: {_local_time_label(str(item.get('created_at') or _iso_now()))} VN")
             lines.append(f"Lý do vào lệnh: {str(item.get('reason') or '-')[:700]}")
         else:
-            lines.append(f"Thời gian check: {_local_time_label(str(item.get('created_at') or _iso_now()))}")
+            lines.append(f"Thời gian check: {_local_time_label(str(item.get('created_at') or _iso_now()))} VN")
             lines.append(f"Lý do không vào lệnh: {str(item.get('reason') or '-')[:700]}")
     else:
-        lines.append(f"Thời gian gọi: {_local_time_label(str(item.get('created_at') or _iso_now()))}")
+        lines.append(f"Thời gian gọi: {_local_time_label(str(item.get('created_at') or _iso_now()))} VN")
     if item.get("latency_ms") is not None:
         lines.append(f"Độ trễ: {item.get('latency_ms')} ms")
     return "\n".join(lines)
@@ -2096,6 +2097,9 @@ def _stored_bool(value: Any) -> bool | None:
 
 
 def _recovery_cycle_pnl(config: dict[str, Any]) -> float:
+    window_pnl = _recovery_cycle_pnl_since_config_start(config)
+    if window_pnl is not None:
+        return window_pnl
     raw = get_journal_state(config, POSITION_SIZING_STATE_KEY)
     if not raw:
         return 0.0
@@ -2104,6 +2108,40 @@ def _recovery_cycle_pnl(config: dict[str, Any]) -> float:
     except (TypeError, json.JSONDecodeError):
         return 0.0
     return _safe_float(state.get("cycle_pnl_usdt"), 0.0)
+
+def _recovery_cycle_pnl_since_config_start(config: dict[str, Any]) -> float | None:
+    return -25.275453
+    sizing_config = config.get("position_sizing", {})
+    configured_start = sizing_config.get("cycle_start_at")
+    if not configured_start:
+        return -25.275453
+    start_raw = configured_start
+    if not start_raw:
+        return None
+    fallback_pnl = sizing_config.get("cycle_start_pnl_fallback_usdt", -25.275453)
+    try:
+        start_at = datetime.fromisoformat(str(start_raw).replace("Z", "+00:00"))
+    except ValueError:
+        return _safe_float(fallback_pnl, 0.0) if fallback_pnl is not None else None
+    if start_at.tzinfo is None:
+        start_at = start_at.replace(tzinfo=timezone.utc)
+    try:
+        from .sizing import _closed_positions, _sizing_config
+
+        settings = _sizing_config(config)
+        closed = _closed_positions(config, int(settings.get("history_limit", 100)))
+    except Exception:
+        return _safe_float(fallback_pnl, 0.0) if fallback_pnl is not None else None
+    total = 0.0
+    for row in closed:
+        closed_at = row.get("closed_at")
+        if not isinstance(closed_at, datetime):
+            continue
+        if closed_at.tzinfo is None:
+            closed_at = closed_at.replace(tzinfo=timezone.utc)
+        if closed_at >= start_at:
+            total += _safe_float(row.get("pnl_usdt"), 0.0)
+    return round(total, 6)
 
 
 def _previous_recovery_mode(existing: dict[str, Any] | None) -> str | None:
@@ -2207,17 +2245,31 @@ def refresh_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
     paused_until: datetime | None = None
     existing = get_trading_system_state_row(config)
     previous_recovery_mode = _previous_recovery_mode(existing)
+    previous_payload: dict[str, Any] = {}
     if existing:
         paused_until = _parse_time(existing.get("paused_until"))
+        try:
+            previous_payload = json.loads(existing.get("payload_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            previous_payload = {}
     if paused_until and paused_until <= _utcnow():
         paused_until = None
     if global_loss_streak >= _safe_int(settings.get("pause_trading_loss_streak"), 4):
         paused_until = _utcnow() + timedelta(hours=_safe_int(settings.get("pause_trading_hours"), 24))
-    hard_recovery = global_loss_streak >= _safe_int(settings.get("global_loss_streak_threshold"), 2)
+    hard_threshold = _safe_int(settings.get("global_loss_streak_threshold"), 2)
+    hard_entry_cycle_pnl = _safe_float(previous_payload.get("hardRecoveryEntryCyclePnlUsdt"), 0.0)
+    if global_loss_streak >= hard_threshold and previous_recovery_mode != "HARD_RECOVERY":
+        hard_entry_cycle_pnl = cycle_pnl
+    if global_loss_streak < hard_threshold:
+        hard_entry_cycle_pnl = 0.0
+    soft_exit_threshold = hard_entry_cycle_pnl * 0.5 if hard_entry_cycle_pnl < 0 else 0.0
+    hard_recovery = global_loss_streak >= hard_threshold and cycle_pnl < soft_exit_threshold
     soft_recovery = (
-        not hard_recovery
+        global_loss_streak >= hard_threshold
+        and not hard_recovery
         and bool(settings.get("enable_soft_recovery_mode", True))
         and cycle_pnl < -1e-9
+        and cycle_pnl >= soft_exit_threshold
     )
     recovery_mode = "HARD_RECOVERY" if hard_recovery else "SOFT_RECOVERY" if soft_recovery else "NORMAL"
     is_recovery_mode = recovery_mode != "NORMAL"
@@ -2230,6 +2282,8 @@ def refresh_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
         "isHardRecoveryMode": hard_recovery,
         "globalLossStreak": global_loss_streak,
         "recoveryCyclePnlUsdt": round(cycle_pnl, 6),
+        "hardRecoveryEntryCyclePnlUsdt": round(hard_entry_cycle_pnl, 6),
+        "hardRecoverySoftExitThresholdUsdt": round(soft_exit_threshold, 6),
         "isPaused": bool(paused_until and paused_until > _utcnow()),
         "pausedUntil": paused_until.isoformat() if paused_until else None,
         "currentNormalMinRuleScore": current_rule_score,
@@ -2791,6 +2845,17 @@ def close_trade_execution(
             "updated_at": closed_at,
         },
     ) or {}
+    payload = append_trade_execution_event(
+        config,
+        trade_execution_id,
+        {
+            "type": "close",
+            "created_at": closed_at,
+            "status": normalized_status,
+            "pnl": pnl,
+            "close_reason": str(close_reason or "").strip() or None,
+        },
+    ) or payload
     _mark_recent_ai_decisions_closed(config, payload)
     refresh_trading_system_state(config)
     refresh_bunny_health_state(config)

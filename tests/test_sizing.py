@@ -8,8 +8,8 @@ from unittest.mock import patch
 
 from crypto_trader.config import DEFAULT_CONFIG
 from crypto_trader.models import TradeCandidate
-from crypto_trader.sizing import apply_position_sizing
-from crypto_trader.storage import set_journal_state
+from crypto_trader.sizing import apply_position_sizing, rebuild_recovery_cycle_state
+from crypto_trader.storage import get_journal_state, set_journal_state
 
 
 def _candidate(
@@ -46,6 +46,14 @@ class FakeExchange:
 
     def fetch_positions_history(self, *_args) -> list[dict]:
         return self.rows
+
+class RawHistoryExchange(FakeExchange):
+    def __init__(self, rows: list[dict], raw_rows: list[dict]) -> None:
+        super().__init__(rows)
+        self.raw_rows = raw_rows
+
+    def privateGetAccountPositionsHistory(self, params: dict[str, object]) -> dict[str, object]:
+        return {"data": self.raw_rows}
 
 
 class SizingTest(TestCase):
@@ -165,6 +173,29 @@ class SizingTest(TestCase):
 
         self.assertAlmostEqual(result["cycle_pnl_usdt"], 3.2916, places=4)
         self.assertAlmostEqual(result["last_realized_net_pnl"], 3.2916, places=4)
+
+    def test_rebuild_recovery_cycle_uses_raw_okx_realized_pnl_for_tao(self) -> None:
+        config = self._config()
+        config["position_sizing"]["target_profit_usdt"] = 30.0
+        raw_tao = {
+            "instId": "TAO-USDT-SWAP",
+            "posId": "3740224303088656384",
+            "direction": "long",
+            "realizedPnl": "-13.7361275492279702",
+            "pnl": "-13.2400000000000003",
+            "fee": "-0.281165",
+            "fundingFee": "-0.2149625492279699",
+            "uTime": int(datetime.now(timezone.utc).timestamp() * 1000),
+        }
+
+        with patch("crypto_trader.sizing.create_exchange", return_value=RawHistoryExchange([], [raw_tao])):
+            result = rebuild_recovery_cycle_state(config)
+
+        self.assertEqual(result["closed_count"], 1)
+        self.assertAlmostEqual(result["state"]["cycle_pnl_usdt"], -13.736128, places=6)
+        self.assertIn("TAO/USDT:USDT:3740224303088656384", result["state"]["processed_keys"])
+        state = get_journal_state(config, "position_sizing:recovery_cycle")
+        self.assertIn("TAO/USDT:USDT:3740224303088656384", state or "")
 
     def test_recovery_cycle_ignores_cycle_loss_and_max_margin_caps(self) -> None:
         config = self._config()

@@ -485,9 +485,27 @@ def format_partial_take_profit_message(config: dict[str, Any], event: dict[str, 
             return "-"
         return f"{number:+.2f} USDT"
 
+    def trigger_price(entry: Any, target: Any, progress: Any) -> float | None:
+        entry_value = _float(entry)
+        target_value = _float(target)
+        progress_value = _float(progress)
+        if entry_value is None or target_value is None or progress_value is None:
+            return None
+        reward = target_value - entry_value if str(event.get("side") or "").lower() == "long" else entry_value - target_value
+        if reward <= 0:
+            return None
+        return entry_value + reward * progress_value if str(event.get("side") or "").lower() == "long" else entry_value - reward * progress_value
+
     side = str(event.get("side") or "-").upper()
     symbol = str(event.get("symbol") or "-")
+    trade_id = event.get("trade_execution_id") or event.get("id") or "-"
     close_pct = (_float(event.get("close_fraction")) or 0.0) * 100
+    manual_partial = bool(event.get("manual_partial_detected"))
+    partial_action = (
+        f"\u2705 \u0110\u00e3 ghi nh\u1eadn ch\u1ed1t {fmt(close_pct, 0)}% v\u1ecb th\u1ebf"
+        if manual_partial
+        else f"\u2705 \u0110\u00e3 ch\u1ed1t {fmt(close_pct, 0)}% v\u1ecb th\u1ebf"
+    )
     partial_pnl = pnl_at(event.get("trigger_price"), event.get("partial_amount"))
     remaining_amount = _float(event.get("remaining_amount"))
     if remaining_amount is None:
@@ -496,14 +514,17 @@ def format_partial_take_profit_message(config: dict[str, Any], event: dict[str, 
         remaining_amount = partial_amount * max(0.0, (1.0 - close_fraction) / close_fraction) if close_fraction > 0 else None
     protected_sl_pnl = pnl_at(event.get("new_stop_loss"), remaining_amount)
     extended_tp_pnl = pnl_at(event.get("new_take_profit"), remaining_amount)
+    trigger_progress = _float(((config.get("trailing_stop", {}) or {}).get("partial_take_profit", {}) or {}).get("trigger_tp_progress")) or 0.7
+    next_step_trigger = trigger_price(event.get("entry"), event.get("new_take_profit") or event.get("old_take_profit"), trigger_progress)
     lines = [
         "\U0001f7e2 N\u1ea4C 1: PARTIAL TP + G\u1ed2NG L\u00c3I",
         "",
         f"{symbol} {side}",
+        f"ID l\u1ec7nh: VT #{trade_id}",
         f"Entry: {fmt(event.get('entry'))}",
         f"Gi\u00e1 k\u00edch ho\u1ea1t: {fmt(event.get('trigger_price'))}",
         "",
-        f"\u2705 \u0110\u00e3 ch\u1ed1t {fmt(close_pct, 0)}% v\u1ecb th\u1ebf",
+        partial_action,
         f"Kh\u1ed1i l\u01b0\u1ee3ng: {fmt(event.get('partial_amount'))}",
         f"L\u00e3i \u0111\u00e3 \u0103n: {fmt_usdt(partial_pnl)}",
         "",
@@ -514,6 +535,7 @@ def format_partial_take_profit_message(config: dict[str, Any], event: dict[str, 
         "\U0001f3af TP1 \u0111\u00e3 n\u00e2ng l\u00ean TP2",
         f"{fmt(event.get('old_take_profit'))} \u2192 {fmt(event.get('new_take_profit'))}",
         f"N\u1ebfu ch\u1ea1m TP m\u1edbi: {fmt_usdt(extended_tp_pnl)}",
+        f"N\u1ea5c ti\u1ebfp theo k\u00edch ho\u1ea1t khi gi\u00e1 ch\u1ea1m: {fmt(next_step_trigger)}",
         "",
         "Ph\u1ea7n c\u00f2n l\u1ea1i s\u1ebd \u0111\u01b0\u1ee3c g\u1ed3ng t\u1edbi TP m\u1edbi.",
         "C\u00e1c n\u1ea5c sau bot kh\u00f4ng ch\u1ed1t th\u00eam, ch\u1ec9 n\u00e2ng TP/SL t\u1ed1i \u0111a 3 n\u1ea5c.",
@@ -543,6 +565,17 @@ def format_profit_extension_step_message(config: dict[str, Any], event: dict[str
             return "-"
         return f"{number:+.2f} USDT"
 
+    def trigger_price(entry: Any, target: Any, progress: Any) -> float | None:
+        entry_value = _float(entry)
+        target_value = _float(target)
+        progress_value = _float(progress)
+        if entry_value is None or target_value is None or progress_value is None:
+            return None
+        reward = target_value - entry_value if str(event.get("side") or "").lower() == "long" else entry_value - target_value
+        if reward <= 0:
+            return None
+        return entry_value + reward * progress_value if str(event.get("side") or "").lower() == "long" else entry_value - reward * progress_value
+
     step = int(_float(event.get("step")) or 0)
     side = str(event.get("side") or "-").upper()
     symbol = str(event.get("symbol") or "-")
@@ -552,6 +585,7 @@ def format_profit_extension_step_message(config: dict[str, Any], event: dict[str
         f"{symbol} {side}",
         f"Entry: {fmt(event.get('entry'))}",
         f"Gi\u00e1 k\u00edch ho\u1ea1t: {fmt(event.get('trigger_price'))}",
+        f"N\u1ea5c ti\u1ebfp theo k\u00edch ho\u1ea1t khi gi\u00e1 ch\u1ea1m: {fmt(trigger_price(event.get('entry'), event.get('new_take_profit'), ((config.get('trailing_stop', {}) or {}).get('partial_take_profit', {}) or {}).get('trigger_tp_progress') or 0.7))}",
         "",
         f"\U0001f6e1\ufe0f SL{step} \u2192 SL{step + 1}",
         f"{fmt(event.get('old_stop_loss'))} \u2192 {fmt(event.get('new_stop_loss'))}",

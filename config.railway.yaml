@@ -46,6 +46,7 @@ database:
     wait_queue_timeout_ms: 20000
 
 exchange:
+  simulated_trading: false
   leverage: 25
   position_side_mode: long_short
   leverage_presets:
@@ -300,6 +301,8 @@ strategy:
 
 position_sizing:
   enabled: true
+  cycle_start_at: '2026-07-05T00:00:00+07:00'
+  cycle_start_pnl_fallback_usdt: -25.275453
   base_margin_usdt: 2.0
   target_profit_usdt: 0.30
   tp_roi: 0.75

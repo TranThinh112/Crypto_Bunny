@@ -30,17 +30,27 @@ def _event_time(value: Any) -> datetime | None:
         return None
 
 
+def _canonical_position_symbol(value: Any) -> str:
+    symbol = str(value or "").strip()
+    if symbol.endswith("-SWAP"):
+        parts = symbol[:-5].split("-")
+        if len(parts) >= 2:
+            base = "-".join(parts[:-1])
+            quote = parts[-1]
+            return f"{base}/{quote}:{quote}"
+    return symbol
+
 def _position_key(row: dict[str, Any]) -> str:
     info = row.get("info", {}) if isinstance(row.get("info"), dict) else {}
-    symbol = row.get("symbol") or info.get("instId") or ""
-    pos_id = row.get("id") or info.get("posId")
+    symbol = _canonical_position_symbol(row.get("symbol") or row.get("instId") or info.get("instId") or "")
+    pos_id = row.get("id") or row.get("posId") or info.get("posId")
     updated = row.get("timestamp") or info.get("uTime") or info.get("cTime") or info.get("closeTime")
     return f"{symbol}:{pos_id or updated or 'unknown'}"
 
 
 def _position_symbol(row: dict[str, Any]) -> str:
     info = row.get("info", {}) if isinstance(row.get("info"), dict) else {}
-    return str(row.get("symbol") or info.get("instId") or "")
+    return _canonical_position_symbol(row.get("symbol") or row.get("instId") or info.get("instId") or "")
 
 
 def _normalize_side(value: Any) -> str:
@@ -59,6 +69,7 @@ def _position_side(row: dict[str, Any]) -> str:
         info.get("posSide"),
         row.get("side"),
         info.get("side"),
+        row.get("direction"),
         info.get("direction"),
     ):
         side = _normalize_side(value)
@@ -109,6 +120,40 @@ def _position_time(row: dict[str, Any]) -> datetime | None:
         return datetime.fromtimestamp(numeric, tz=timezone.utc)
     return _event_time(timestamp)
 
+def _add_position_history_rows(rows: Any, target: list[dict[str, Any]], seen: set[str]) -> None:
+    if not isinstance(rows, list):
+        return
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        key = _position_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        target.append(row)
+
+def _fetch_positions_history_rows(exchange: Any, limit: int) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    fetch_history = getattr(exchange, "fetch_positions_history", None)
+    if callable(fetch_history):
+        try:
+            _add_position_history_rows(fetch_history(None, None, limit), rows, seen)
+        except Exception:
+            pass
+
+    fetch_raw = getattr(exchange, "privateGetAccountPositionsHistory", None)
+    if not callable(fetch_raw):
+        fetch_raw = getattr(exchange, "private_get_account_positions_history", None)
+    if callable(fetch_raw):
+        try:
+            response = fetch_raw({"instType": "SWAP", "limit": str(max(1, min(int(limit or 100), 100)))})
+            raw_rows = response.get("data") if isinstance(response, dict) else response
+            _add_position_history_rows(raw_rows, rows, seen)
+        except Exception:
+            pass
+    return rows
+
 
 def _sizing_config(config: dict[str, Any]) -> dict[str, Any]:
     raw = config.get("position_sizing", {})
@@ -143,6 +188,7 @@ def _default_state(base_margin: float) -> dict[str, Any]:
         "recovery_step": 0,
         "next_margin_usdt": base_margin,
         "processed_keys": [],
+        "processed_pnl_by_key": {},
         "blocked": False,
         "block_reason": None,
         "last_processed_key": None,
@@ -228,6 +274,8 @@ def _load_state(config: dict[str, Any], base_margin: float) -> dict[str, Any]:
     default.update({key: value for key, value in state.items() if key in default})
     if not isinstance(default.get("processed_keys"), list):
         default["processed_keys"] = []
+    if not isinstance(default.get("processed_pnl_by_key"), dict):
+        default["processed_pnl_by_key"] = {}
     default, was_orphaned_reset = _reset_orphaned_blocked_state(config, default, base_margin)
     _normalize_idle_state(default, base_margin)
     default["_is_new"] = was_orphaned_reset
@@ -237,6 +285,10 @@ def _load_state(config: dict[str, Any], base_margin: float) -> dict[str, Any]:
 def _save_state(config: dict[str, Any], state: dict[str, Any]) -> None:
     state["updated_at"] = datetime.now(timezone.utc).isoformat()
     state["processed_keys"] = list(dict.fromkeys([str(item) for item in state.get("processed_keys", [])]))[-200:]
+    processed = state.get("processed_pnl_by_key")
+    if isinstance(processed, dict):
+        keep = set(state["processed_keys"])
+        state["processed_pnl_by_key"] = {str(key): value for key, value in processed.items() if str(key) in keep}
     clean_state = {key: value for key, value in state.items() if key != "_is_new"}
     set_journal_state(config, STATE_KEY, json.dumps(clean_state, ensure_ascii=False))
 
@@ -246,7 +298,7 @@ def _closed_positions(config: dict[str, Any], limit: int) -> list[dict[str, Any]
         return []
     exchange = create_exchange(config, authenticated=True)
     exchange.load_markets()
-    rows = exchange.fetch_positions_history(None, None, limit)
+    rows = _fetch_positions_history_rows(exchange, limit)
     closed: list[dict[str, Any]] = []
     for row in rows:
         if not isinstance(row, dict):
@@ -369,11 +421,44 @@ def _update_cycle_state(config: dict[str, Any], settings: dict[str, Any]) -> tup
         )
         notes.append(f"{row['symbol']} closed {float(row['pnl_usdt']):+.4f} USDT. {note}")
         state["processed_keys"].append(key)
+        state.setdefault("processed_pnl_by_key", {})[key] = round(float(row["pnl_usdt"]), 6)
         state["last_processed_key"] = key
         processed.add(key)
 
     _save_state(config, state)
     return state, notes
+
+def rebuild_recovery_cycle_state(config: dict[str, Any]) -> dict[str, Any]:
+    settings = _sizing_config(config)
+    base_margin = float(settings["base_margin_usdt"])
+    state = _default_state(base_margin)
+    notes: list[str] = []
+    try:
+        closed = _closed_positions(config, int(settings["history_limit"]))
+    except Exception as exc:
+        state["rebuild_error"] = str(exc)
+        return {"state": state, "notes": [f"Recovery history unavailable: {exc}"], "closed_count": 0}
+
+    for row in closed:
+        key = str(row["key"])
+        pnl = float(row["pnl_usdt"])
+        note = _apply_realized_pnl(
+            state,
+            settings,
+            pnl,
+            symbol=str(row.get("symbol") or ""),
+            side=str(row.get("side") or ""),
+            key=key,
+        )
+        state["processed_keys"].append(key)
+        state.setdefault("processed_pnl_by_key", {})[key] = round(pnl, 6)
+        state["last_processed_key"] = key
+        notes.append(f"{row['symbol']} closed {pnl:+.4f} USDT. {note}")
+
+    state["rebuilt_at"] = datetime.now(timezone.utc).isoformat()
+    state["rebuild_closed_count"] = len(closed)
+    _save_state(config, state)
+    return {"state": {key: value for key, value in state.items() if key != "_is_new"}, "notes": notes, "closed_count": len(closed)}
 
 
 def _candidate_4h_rsi(candidate: TradeCandidate) -> float | None:

@@ -669,6 +669,13 @@ def _decision_focus(decision: dict[str, Any] | None) -> dict[str, Any]:
 
 def _okx_demo_status(config: dict[str, Any]) -> dict[str, Any]:
     load_dotenv()
+    exchange_config = config.get("exchange", {}) if isinstance(config.get("exchange"), dict) else {}
+    simulated_trading = bool(
+        exchange_config.get(
+            "simulated_trading",
+            exchange_config.get("okx_simulated_trading", str(config.get("mode", "dry_run")) == "demo"),
+        )
+    )
     names = {
         "api_key": config["exchange"].get("api_key_env", "OKX_API_KEY"),
         "secret": config["exchange"].get("secret_env", "OKX_SECRET"),
@@ -676,9 +683,9 @@ def _okx_demo_status(config: dict[str, Any]) -> dict[str, Any]:
     }
     missing = [name for name in names.values() if not os.getenv(name, "")]
     mode = str(config.get("mode", "dry_run"))
-    ready = mode == "demo" and not missing
-    if mode != "demo":
-        message = f"OKX demo is inactive because mode is {mode}"
+    ready = simulated_trading and not missing
+    if not simulated_trading:
+        message = f"OKX simulated trading is inactive because exchange.simulated_trading is false and mode is {mode}"
     elif missing:
         message = f"Missing OKX demo env: {', '.join(missing)}"
     else:
@@ -687,7 +694,7 @@ def _okx_demo_status(config: dict[str, Any]) -> dict[str, Any]:
         "mode": mode,
         "ready": ready,
         "missing_env": missing,
-        "simulated_trading_header": mode == "demo",
+        "simulated_trading_header": simulated_trading,
         "message": message,
     }
 
@@ -1627,13 +1634,15 @@ def _ai_history_header(*, expanded: bool) -> str:
 
 
 def _format_ai_call_history_entry(config: dict[str, Any], item: dict[str, Any]) -> str:
-    if str(item.get("review_kind") or "") == "lc_okx_review":
+    def _vn_label(value: Any) -> str:
         try:
-            created_label = datetime.fromisoformat(str(item.get("created_at") or "").replace("Z", "+00:00")).astimezone(
-                _system_timezone(config)
-            ).strftime("%d/%m/%Y %H:%M:%S VN")
+            dt = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+            return dt.astimezone(timezone(timedelta(hours=7))).strftime("%d/%m/%Y %H:%M:%S VN")
         except ValueError:
-            created_label = str(item.get("created_at") or "-")
+            return str(value or "-")
+
+    if str(item.get("review_kind") or "") == "lc_okx_review":
+        created_label = _vn_label(item.get("created_at"))
         lc_id = item.get("lc_okx_id")
         symbol = str(item.get("symbol") or ((item.get("symbols") or ["-"])[0]))
         side = _telegram_side_label(item.get("side"))
@@ -1651,7 +1660,7 @@ def _format_ai_call_history_entry(config: dict[str, Any], item: dict[str, Any]) 
     created_at = str(item.get("created_at") or "")
     try:
         created_label = datetime.fromisoformat(created_at.replace("Z", "+00:00")).astimezone(
-            _system_timezone(config)
+            timezone(timedelta(hours=7))
         ).strftime("%d/%m/%Y %H:%M:%S VN")
     except ValueError:
         created_label = created_at[:16] or "-"
@@ -2777,6 +2786,90 @@ def _open_okx_positions(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _okx_position_history_rows(exchange: Any, *, inst_id: str = "", pos_id: str = "", limit: Any = 100) -> list[dict[str, Any]]:
+    fetch_raw = getattr(exchange, "privateGetAccountPositionsHistory", None)
+    if not callable(fetch_raw):
+        fetch_raw = getattr(exchange, "private_get_account_positions_history", None)
+    if not callable(fetch_raw):
+        raise RuntimeError("OKX positions-history endpoint is unavailable on this exchange client")
+
+    try:
+        limit_value = int(limit or 100)
+    except (TypeError, ValueError):
+        limit_value = 100
+    params: dict[str, Any] = {"instType": "SWAP", "limit": str(max(1, min(limit_value, 100)))}
+    if inst_id:
+        params["instId"] = inst_id
+    if pos_id:
+        params["posId"] = pos_id
+    response = fetch_raw(params)
+    rows = response.get("data") if isinstance(response, dict) else response
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+def _okx_position_history_summary(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "inst_id": row.get("instId"),
+        "pos_id": row.get("posId"),
+        "side": row.get("direction") or row.get("posSide"),
+        "open_avg_price": row.get("openAvgPx"),
+        "close_avg_price": row.get("closeAvgPx"),
+        "open_max_position": row.get("openMaxPos"),
+        "close_total_position": row.get("closeTotalPos"),
+        "realized_pnl": row.get("realizedPnl"),
+        "pnl": row.get("pnl"),
+        "fee": row.get("fee"),
+        "funding_fee": row.get("fundingFee"),
+        "open_time": row.get("cTime"),
+        "updated_time": row.get("uTime"),
+        "raw": row,
+    }
+
+def _okx_position_history(config: dict[str, Any], *, symbol: str = "", inst_id: str = "", pos_id: str = "", limit: Any = 100) -> dict[str, Any]:
+    if config.get("mode") == "dry_run":
+        return {
+            "enabled": False,
+            "mode": config.get("mode"),
+            "items": [],
+            "message": "OKX position history is unavailable in dry_run",
+        }
+    symbol = symbol.strip()
+    inst_id = inst_id.strip()
+    pos_id = pos_id.strip()
+    if not inst_id and not symbol:
+        return {
+            "enabled": True,
+            "mode": config.get("mode"),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "symbol": "",
+            "inst_id": "",
+            "pos_id": pos_id,
+            "count": 0,
+            "items": [],
+            "message": "Provide instId or symbol to query OKX position history",
+        }
+    exchange = create_exchange(config, authenticated=True)
+    exchange.load_markets()
+    resolved_inst_id = inst_id
+    if not resolved_inst_id and symbol:
+        try:
+            market = exchange.market(symbol)
+            resolved_inst_id = str(market.get("id") or "")
+        except Exception:
+            resolved_inst_id = symbol.replace("/", "-").replace(":USDT", "-SWAP")
+    rows = _okx_position_history_rows(exchange, inst_id=resolved_inst_id, pos_id=pos_id, limit=limit)
+    return {
+        "enabled": True,
+        "mode": config.get("mode"),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "symbol": symbol,
+        "inst_id": resolved_inst_id,
+        "pos_id": pos_id,
+        "count": len(rows),
+        "items": [_okx_position_history_summary(row) for row in rows],
+    }
+
 def create_app(config_path: str = "config.example.yaml") -> FastAPI:
     app = FastAPI(title="Crypto Signal Bot UI")
     app.include_router(market_pattern_router)
@@ -2834,7 +2927,8 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
             purge_deprecated_journal_state(config)
         except Exception as exc:
             LOGGER.warning("Skipping deprecated journal state purge during startup: %s", exc)
-        clear_dashboard_snapshot_cache(config)
+        if _is_railway_runtime():
+            clear_dashboard_snapshot_cache(config)
         if _is_railway_runtime():
             try:
                 sync_runtime_state(config)
@@ -3252,6 +3346,22 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
                 "positions": [],
                 "open_orders": [],
                 "message": f"OKX position fetch failed: {exc}",
+            }
+
+    @app.get("/api/okx-position-history")
+    def okx_position_history(symbol: str = "", instId: str = "", posId: str = "", limit: str = "100") -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        try:
+            return _okx_position_history(config, symbol=symbol, inst_id=instId, pos_id=posId, limit=limit)
+        except Exception as exc:
+            return {
+                "enabled": False,
+                "mode": config.get("mode"),
+                "symbol": symbol,
+                "inst_id": instId,
+                "pos_id": posId,
+                "items": [],
+                "message": f"OKX position history fetch failed: {exc}",
             }
 
     @app.post("/api/okx/manual-review-once")
