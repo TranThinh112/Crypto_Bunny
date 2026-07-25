@@ -32,6 +32,7 @@ from .storage import (
 )
 
 EXCHANGE_CLOSE_NOTIFICATION_PREFIX = "runtime_sync_exchange_close_notified"
+MANUAL_POSITION_TARGET_NOTIFICATION_PREFIX = "runtime_sync_manual_position_target_notified"
 
 
 def _float(value: Any) -> float | None:
@@ -410,6 +411,37 @@ def _notify_exchange_closed_execution(config: dict[str, Any], row: dict[str, Any
     except Exception:
         pass
 
+def _manual_position_target_notification_key(event: dict[str, Any]) -> str:
+    return (
+        f"{MANUAL_POSITION_TARGET_NOTIFICATION_PREFIX}:"
+        f"{event.get('trade_execution_id') or '-'}:"
+        f"{event.get('symbol') or '-'}:"
+        f"{str(event.get('side') or '-').upper()}:"
+        f"{event.get('stop_loss') or '-'}:"
+        f"{event.get('take_profit') or '-'}"
+    )
+
+def _notify_manual_position_targets(config: dict[str, Any], event: dict[str, Any]) -> bool:
+    key = _manual_position_target_notification_key(event)
+    if get_journal_state(config, key):
+        return False
+    try:
+        from .notifier import send_telegram_message
+        from .reporting import format_manual_position_target_message
+
+        sent = send_telegram_message(
+            config,
+            format_manual_position_target_message(config, event),
+            with_buttons=False,
+            replace_previous=False,
+            allow_during_startup_quiet=True,
+        )
+        if sent:
+            set_journal_state(config, key, datetime.now(timezone.utc).isoformat())
+        return bool(sent)
+    except Exception:
+        return False
+
 
 def _close_missing_exchange_execution(
     config: dict[str, Any],
@@ -743,6 +775,7 @@ def _strategy_target_settings(config: dict[str, Any]) -> dict[str, float]:
     take_roi_pct = _safe_float(target.get("take_profit_pct"), 75.0)
     rr = take_roi_pct / stop_roi_pct if stop_roi_pct > 0 else _safe_float(strategy.get("min_risk_reward"), 1.5)
     return {
+        "leverage": leverage,
         "stop_price_pct": stop_roi_pct / leverage,
         "take_price_pct": take_roi_pct / leverage,
         "risk_reward": max(0.01, rr or 1.5),
@@ -1116,7 +1149,7 @@ def sync_exchange_runtime_state(
         active_position_keys.add(position_key)
         entry_price = _float(position.get("entry_price") or position.get("entryPrice") or info.get("avgPx"))
         mark_price = _float(position.get("mark_price") or position.get("markPrice") or info.get("markPx"))
-        leverage = _safe_float(position.get("leverage") or info.get("lever"), _safe_float(config.get("exchange", {}).get("leverage"), 1.0))
+        leverage = _safe_float(position.get("leverage") or info.get("lever"), _strategy_target_settings(config).get("leverage", 1.0))
         stop_loss = _float(position.get("stop_loss"))
         take_profit = _float(position.get("take_profit"))
         algo_target = position_targets.get(position_key, {}) if isinstance(position_targets, dict) else {}
@@ -1190,12 +1223,15 @@ def sync_exchange_runtime_state(
                 updates["initial_entry_price"] = _float(matched.get("entry_price")) or entry_price
             if _float(matched.get("initial_stop_loss")) is None and stop_loss is not None:
                 updates["initial_stop_loss"] = stop_loss
+        trade_execution_id: int | None = None
+        manual_imported = False
         if matched:
             update_trade_execution(config, int(matched["id"]), updates)
+            trade_execution_id = int(matched["id"])
             matched_execution_ids.add(int(matched["id"]))
         else:
             prompt_row = ensure_prompt_version(config)
-            insert_trade_execution_row(
+            inserted = insert_trade_execution_row(
                 config,
                 {
                     "created_at": created_at,
@@ -1247,8 +1283,28 @@ def sync_exchange_runtime_state(
                     "exchange_leverage": leverage,
                 },
             )
+            trade_execution_id = int(inserted["id"])
+            manual_imported = True
             manual_positions_imported += 1
             next_slot += 1
+        if target_attach_result and target_attach_result.get("submitted") and trade_execution_id is not None:
+            _notify_manual_position_targets(
+                config,
+                {
+                    "trade_execution_id": trade_execution_id,
+                    "symbol": symbol,
+                    "side": side,
+                    "entry": entry_price,
+                    "quantity": contracts,
+                    "contract_size": _safe_float(position.get("contractSize") or info.get("ctVal"), 1.0),
+                    "leverage": leverage,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "manual_import": manual_imported,
+                    "request": target_attach_result.get("request"),
+                    "response": target_attach_result.get("response"),
+                },
+            )
         positions_synced += 1
 
     # A successful OKX snapshot is authoritative. Close internal OPEN rows that

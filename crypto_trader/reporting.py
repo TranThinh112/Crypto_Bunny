@@ -462,6 +462,58 @@ def format_trade_execution_close_message(config: dict[str, Any], row: dict[str, 
     return "\n".join(lines)
 
 
+def format_manual_position_target_message(config: dict[str, Any], event: dict[str, Any]) -> str:
+    def fmt(value: Any, digits: int = 6) -> str:
+        number = _float(value)
+        if number is None:
+            return "-"
+        text = f"{number:.{digits}f}"
+        return text if digits <= 0 else text.rstrip("0").rstrip(".")
+
+    def pnl_at(price: Any) -> float | None:
+        entry = _float(event.get("entry"))
+        target = _float(price)
+        qty = _float(event.get("quantity"))
+        contract_size = _float(event.get("contract_size")) or 1.0
+        if entry is None or target is None or qty is None:
+            return None
+        gross = (target - entry) if str(event.get("side") or "").lower() == "long" else (entry - target)
+        return gross * qty * contract_size
+
+    def fmt_usdt(value: Any) -> str:
+        number = _float(value)
+        if number is None:
+            return "-"
+        return f"{number:+.2f} USDT"
+
+    side = str(event.get("side") or "-").upper()
+    symbol = str(event.get("symbol") or "-")
+    trade_id = event.get("trade_execution_id") or event.get("id") or "-"
+    leverage = _float(event.get("leverage"))
+    stop_loss = event.get("stop_loss")
+    take_profit = event.get("take_profit")
+    request = event.get("request") if isinstance(event.get("request"), dict) else {}
+    order_type = str(request.get("ordType") or "-").upper()
+    source_label = "Lệnh vào tay" if event.get("manual_import") else "Vị thế đang mở"
+    lines = [
+        "🛡️ BOT ĐÃ GẮN TP/SL",
+        "",
+        f"{source_label}: {symbol} {side}",
+        f"ID lệnh: VT #{trade_id}",
+        f"Entry: {fmt(event.get('entry'))}",
+        f"Khối lượng: {fmt(event.get('quantity'))}",
+        f"Đòn bẩy: {fmt(leverage, 0)}x" if leverage is not None else "Đòn bẩy: -",
+        "",
+        f"🎯 TP: {fmt(take_profit)}",
+        f"Nếu chạm TP: {fmt_usdt(pnl_at(take_profit))}",
+        "",
+        f"🛑 SL: {fmt(stop_loss)}",
+        f"Nếu chạm SL: {fmt_usdt(pnl_at(stop_loss))}",
+        "",
+        f"OKX: {order_type} reduce-only TP/SL đã được tạo.",
+    ]
+    return "\n".join(lines)
+
 def format_partial_take_profit_message(config: dict[str, Any], event: dict[str, Any]) -> str:
     def fmt(value: Any, digits: int = 6) -> str:
         number = _float(value)

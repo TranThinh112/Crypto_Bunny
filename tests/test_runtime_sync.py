@@ -257,8 +257,10 @@ class RuntimeSyncTest(TestCase):
         self.assertAlmostEqual(executions[0]["take_profit"], 87.68775)
         self.assertAlmostEqual(executions[0]["risk_reward"], 1.5)
 
-    def test_sync_runtime_state_sets_missing_targets_for_manual_position_on_okx(self) -> None:
+    @patch("crypto_trader.notifier.send_telegram_message", return_value=True)
+    def test_sync_runtime_state_sets_missing_targets_for_manual_position_on_okx(self, send_message) -> None:
         config = self._config()
+        config["exchange"]["leverage"] = 10
         exchange = RuntimeSyncExchange()
 
         result = sync_runtime_state(
@@ -275,6 +277,7 @@ class RuntimeSyncTest(TestCase):
                         "contracts": 29,
                         "entry_price": 58.175,
                         "mark_price": 57.9,
+                        "leverage": 10,
                     }
                 ],
                 "open_orders": [],
@@ -293,6 +296,16 @@ class RuntimeSyncTest(TestCase):
         self.assertEqual(exchange.algo_orders[0]["ordType"], "oco")
         self.assertEqual(exchange.algo_orders[0]["slTriggerPx"], "61.0838")
         self.assertEqual(exchange.algo_orders[0]["tpTriggerPx"], "53.8119")
+        send_message.assert_called_once()
+        message = send_message.call_args.args[1]
+        self.assertIn("BOT ĐÃ GẮN TP/SL", message)
+        self.assertIn("HYPE/USDT:USDT SHORT", message)
+        self.assertIn("ID lệnh: VT #", message)
+        self.assertIn("Entry: 58.175", message)
+        self.assertIn("Khối lượng: 29", message)
+        self.assertIn("Đòn bẩy: 10x", message)
+        self.assertIn("TP: 53.811875", message)
+        self.assertIn("SL: 61.08375", message)
 
     def test_sync_runtime_state_derives_missing_tp_from_existing_manual_sl(self) -> None:
         config = self._config()
