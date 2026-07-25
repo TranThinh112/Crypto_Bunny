@@ -80,6 +80,7 @@ AI_CALL_HISTORY_STATE_KEY = "ai_call_history"
 AI_CALL_STATUS_STATS_STATE_KEY = "ai_call_status_stats"
 VIETNAM_TZ = timezone(timedelta(hours=7))
 POSITION_SIZING_STATE_KEY = "position_sizing:recovery_cycle"
+RISK_MODE_NOTIFICATION_STATE_KEY = "trading_risk:last_mode_notification"
 
 
 def _utcnow() -> datetime:
@@ -2287,6 +2288,19 @@ def _notify_recovery_mode_transition(
     current_mode = str(payload.get("recoveryMode") or "NORMAL").upper()
     if previous_mode is None or previous_mode == current_mode:
         return
+    signature_payload = {
+        "previous_mode": previous_mode,
+        "current_mode": current_mode,
+        "global_loss_streak": _safe_int(payload.get("globalLossStreak"), 0),
+        "cycle_pnl": round(_safe_float(payload.get("recoveryCyclePnlUsdt"), 0.0), 4),
+        "hard_entry_cycle_pnl": round(_safe_float(payload.get("hardRecoveryEntryCyclePnlUsdt"), 0.0), 4),
+        "soft_exit_threshold": round(_safe_float(payload.get("hardRecoverySoftExitThresholdUsdt"), 0.0), 4),
+    }
+    signature = hashlib.sha256(
+        json.dumps(signature_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:24]
+    if get_journal_state(config, RISK_MODE_NOTIFICATION_STATE_KEY) == signature:
+        return
     icon = "🔴" if current_mode == "HARD_RECOVERY" else "🟡" if current_mode == "SOFT_RECOVERY" else "🟢"
     score, confidence, risk_reward, risk_percent = _mode_thresholds(current_mode, payload, settings)
     time_label = _vietnam_time_label(_parse_time(payload.get("updatedAt")) or _utcnow())
@@ -2308,6 +2322,7 @@ def _notify_recovery_mode_transition(
     try:
         from .notifier import send_telegram_message
 
+        set_journal_state(config, RISK_MODE_NOTIFICATION_STATE_KEY, signature)
         send_telegram_message(config, "\n".join(lines), with_buttons=False, replace_previous=False)
     except Exception:
         return
