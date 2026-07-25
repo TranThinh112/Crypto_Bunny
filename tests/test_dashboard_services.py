@@ -9,6 +9,7 @@ from crypto_trader.dashboard_services import (
     _build_system_checklist_payload,
     _persist_cached_payload,
     _persist_system_checklist_snapshot,
+    _slim_market_regime_snapshot,
     _trade_execution_profit_protection_levels,
     _trade_execution_summary,
     attach_previous_system_checklist_snapshot,
@@ -65,6 +66,114 @@ class SystemChecklistPayloadTests(unittest.TestCase):
 
         self.assertEqual(enriched["date"], "2026-07-22")
         self.assertIsNone(enriched["previous_snapshot"])
+
+    def test_bunny_minimize_refresh_keeps_chart_stats(self) -> None:
+        snapshot = {
+            "date": "2026-07-25",
+            "created_at": "2026-07-25T12:00:00+00:00",
+            "modules": [
+                {
+                    "number": 2,
+                    "name": "Bunny Minimize Losses",
+                    "stats": [{"label": "recoveryMode", "value": "NORMAL"}],
+                }
+            ],
+        }
+        risk_state = {
+            "recoveryMode": "SOFT_RECOVERY",
+            "isRecoveryMode": True,
+            "isPaused": False,
+            "globalLossStreak": 1,
+            "globalLossStreakThreshold": 2,
+            "pauseTradingLossStreak": 4,
+            "openPositionsCount": 3,
+            "maxConcurrentPositions": 5,
+            "normalRiskPercent": 1.0,
+            "softRecoveryRiskPercent": 0.75,
+            "recoveryModeRiskPercent": 0.5,
+            "currentNormalMinRuleScore": 78,
+            "currentNormalMinGptConfidence": 80,
+            "normalMinRiskReward": 1.5,
+            "softRecoveryMinRuleScore": 87,
+            "softRecoveryMinGptConfidence": 89,
+            "softRecoveryMinRiskReward": 2.0,
+            "recoveryMinRuleScore": 90,
+            "recoveryMinGptConfidence": 92,
+            "recoveryMinRiskReward": 2.5,
+            "strongSetupRuleScore": 85,
+            "strongSetupGptConfidence": 88,
+            "strongSetupMinRiskReward": 2.0,
+            "enableAdaptiveThreshold": True,
+            "weeklyTargetMinTrades": 3,
+            "weeklyTargetMaxTrades": 7,
+            "adaptiveScoreStep": 3,
+            "adaptiveConfidenceStep": 3,
+            "recoveryCyclePnlUsdt": -18.05,
+            "updatedAt": "2026-07-25T12:01:00+00:00",
+        }
+
+        with patch("crypto_trader.dashboard_services._system_report_date", return_value="2026-07-25"), patch(
+            "crypto_trader.dashboard_services._preferred_system_checklist_snapshot", return_value=snapshot
+        ), patch(
+            "crypto_trader.dashboard_services._latest_system_checklist_snapshot", return_value=None
+        ), patch(
+            "crypto_trader.dashboard_services.get_trading_system_state", return_value=risk_state
+        ), patch(
+            "crypto_trader.dashboard_services.attach_previous_system_checklist_snapshot", side_effect=lambda _config, payload: payload
+        ):
+            payload = system_checklist_payload({})
+
+        module = payload["modules"][0]
+        values = {row["label"]: row["value"] for row in module["stats"]}
+        self.assertEqual(values["recoveryMode"], "SOFT_RECOVERY")
+        self.assertEqual(values["recoveryCyclePnlUsdt"], -18.05)
+        for key in [
+            "openPositionsCount",
+            "maxConcurrentPositions",
+            "slotUtilizationPercent",
+            "softRecoveryMinRuleScore",
+            "normalMinRiskReward",
+            "normalRiskPercent",
+        ]:
+            self.assertIn(key, values)
+
+    def test_slim_market_regime_snapshot_keeps_chart_indicators(self) -> None:
+        snapshot = {
+            "created_at": "2026-07-25T12:00:00+00:00",
+            "regime": "LOW_VOLATILITY",
+            "indicators": {
+                "scope": "aggregate",
+                "symbol": "MARKET",
+                "trend_score": 61.25,
+                "price_above_ema20_pct": 75.0,
+                "ema20_above_ema50_pct": 60.0,
+                "price_above_ema200_pct": 55.0,
+                "price_above_vwap_pct": 55.0,
+                "fear_greed": 27.0,
+                "news_score": -0.43,
+                "median_atr_pct": 0.1336,
+                "funding_rate": -0.000033,
+                "median_volume_ratio": 0.0494,
+                "open_interest": 8586805.7685,
+            },
+        }
+
+        indicators = _slim_market_regime_snapshot(snapshot)["indicators"]
+
+        for key in [
+            "trend_score",
+            "price_above_ema20_pct",
+            "ema20_above_ema50_pct",
+            "price_above_ema200_pct",
+            "price_above_vwap_pct",
+            "fear_greed",
+            "news_score",
+            "median_atr_pct",
+            "funding_rate",
+            "median_volume_ratio",
+            "open_interest",
+        ]:
+            self.assertIn(key, indicators)
 
     def test_returns_current_snapshot_for_today_without_rebuilding(self) -> None:
         snapshot = {

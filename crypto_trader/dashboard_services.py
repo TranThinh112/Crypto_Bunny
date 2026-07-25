@@ -1248,12 +1248,36 @@ def _slim_market_regime_snapshot(item: dict[str, Any]) -> dict[str, Any]:
     keep_indicator_keys = {
         "symbol",
         "scope",
+        "trend_score",
+        "price_above_ema20_pct",
+        "ema20_above_ema50_pct",
+        "price_above_ema200_pct",
+        "price_above_vwap_pct",
         "ema_fast",
         "ema_slow",
+        "ema200",
+        "vwap",
+        "atr",
+        "atr_pct",
+        "volatility",
         "rsi",
+        "average_rsi",
         "adx",
         "macd",
         "median_rsi",
+        "fear_greed",
+        "news_score",
+        "median_atr_pct",
+        "funding_rate",
+        "funding",
+        "fundingRate",
+        "median_volume_ratio",
+        "volume_ratio",
+        "volume",
+        "open_interest",
+        "open_interest_change",
+        "openInterest",
+        "openInterestChange",
         "bull_percent",
         "bear_percent",
         "sideway_percent",
@@ -2303,12 +2327,49 @@ def _refresh_trade_execution_in_payload(config: dict[str, Any], payload: dict[st
     return next_payload
 
 
+def _bunny_minimize_realtime_rows(risk_state: dict[str, Any], slot_utilization: Any, paused_minutes: Any) -> list[dict[str, Any]]:
+    return [
+        _module_row("recoveryMode", risk_state.get("recoveryMode"), "Current Bunny Minimize Losses mode.", attention=True),
+        _module_row("isRecoveryMode", _module_bool_percent(risk_state.get("isRecoveryMode")), "100 means recovery mode is active.", attention=True),
+        _module_row("isPaused", _module_bool_percent(risk_state.get("isPaused")), "100 means trading is paused.", attention=True),
+        _module_row("globalLossStreak", risk_state.get("globalLossStreak"), "Current system-wide loss streak.", attention=True),
+        _module_row("globalLossStreakThreshold", risk_state.get("globalLossStreakThreshold"), "Loss streak threshold for recovery mode."),
+        _module_row("pauseTradingLossStreak", risk_state.get("pauseTradingLossStreak"), "Loss streak threshold for pausing trading."),
+        _module_row("openPositionsCount", risk_state.get("openPositionsCount"), "Current open positions occupying slots.", attention=True),
+        _module_row("maxConcurrentPositions", risk_state.get("maxConcurrentPositions"), "Maximum concurrent position slots."),
+        _module_row("slotUtilizationPercent", slot_utilization, "Current slot utilization percent."),
+        _module_row("pausedMinutesRemaining", paused_minutes, "Minutes remaining before pause expires."),
+        _module_row("normalRiskPercent", risk_state.get("normalRiskPercent"), "Risk percent in normal mode."),
+        _module_row("softRecoveryRiskPercent", risk_state.get("softRecoveryRiskPercent"), "Risk percent in soft recovery mode."),
+        _module_row("recoveryModeRiskPercent", risk_state.get("recoveryModeRiskPercent"), "Risk percent in hard recovery mode."),
+        _module_row("currentNormalMinRuleScore", risk_state.get("currentNormalMinRuleScore"), "Current adaptive rule score threshold."),
+        _module_row("currentNormalMinGptConfidence", risk_state.get("currentNormalMinGptConfidence"), "Current adaptive GPT confidence threshold."),
+        _module_row("normalMinRiskReward", risk_state.get("normalMinRiskReward"), "Minimum risk reward in normal mode."),
+        _module_row("softRecoveryMinRuleScore", risk_state.get("softRecoveryMinRuleScore"), "Minimum rule score in soft recovery."),
+        _module_row("softRecoveryMinGptConfidence", risk_state.get("softRecoveryMinGptConfidence"), "Minimum GPT confidence in soft recovery."),
+        _module_row("softRecoveryMinRiskReward", risk_state.get("softRecoveryMinRiskReward"), "Minimum risk reward in soft recovery."),
+        _module_row("recoveryMinRuleScore", risk_state.get("recoveryMinRuleScore"), "Minimum rule score in hard recovery."),
+        _module_row("recoveryMinGptConfidence", risk_state.get("recoveryMinGptConfidence"), "Minimum GPT confidence in hard recovery."),
+        _module_row("recoveryMinRiskReward", risk_state.get("recoveryMinRiskReward"), "Minimum risk reward in hard recovery."),
+        _module_row("strongSetupRuleScore", risk_state.get("strongSetupRuleScore"), "Rule score threshold for strong setup."),
+        _module_row("strongSetupGptConfidence", risk_state.get("strongSetupGptConfidence"), "GPT confidence threshold for strong setup."),
+        _module_row("strongSetupMinRiskReward", risk_state.get("strongSetupMinRiskReward"), "Minimum risk reward for strong setup."),
+        _module_row("enableAdaptiveThreshold", _module_bool_percent(risk_state.get("enableAdaptiveThreshold")), "100 means adaptive threshold is enabled."),
+        _module_row("weeklyTargetMinTrades", risk_state.get("weeklyTargetMinTrades"), "Minimum target closed trades in 7 days."),
+        _module_row("weeklyTargetMaxTrades", risk_state.get("weeklyTargetMaxTrades"), "Maximum target closed trades in 7 days."),
+        _module_row("adaptiveScoreStep", risk_state.get("adaptiveScoreStep"), "Adaptive rule score adjustment step."),
+        _module_row("adaptiveConfidenceStep", risk_state.get("adaptiveConfidenceStep"), "Adaptive confidence adjustment step."),
+        _module_row("recoveryCyclePnlUsdt", risk_state.get("recoveryCyclePnlUsdt"), "Cycle PnL used to choose Soft Recovery or Normal.", attention=True),
+        _module_row("updatedAt", risk_state.get("updatedAt"), "Latest trading system state refresh time."),
+    ]
+
+
 def _refresh_bunny_minimize_losses_in_payload(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     modules = payload.get("modules")
     if not isinstance(modules, list):
         return payload
     try:
-        risk_state = refresh_trading_system_state(config)
+        risk_state = get_trading_system_state(config)
     except Exception:
         return payload
     slot_utilization = None
@@ -2323,6 +2384,8 @@ def _refresh_bunny_minimize_losses_in_payload(config: dict[str, Any], payload: d
         if paused_until is not None
         else "-"
     )
+    realtime_rows = _bunny_minimize_realtime_rows(risk_state, slot_utilization, paused_minutes)
+    realtime_by_label = {str(row.get("label") or "").strip(): row for row in realtime_rows}
     next_payload = dict(payload)
     next_modules: list[dict[str, Any]] = []
     for module in modules:
@@ -2335,20 +2398,20 @@ def _refresh_bunny_minimize_losses_in_payload(config: dict[str, Any], payload: d
         next_module = dict(module)
         next_module["recovery_mode"] = risk_state.get("recoveryMode")
         next_module["status"] = "fail" if risk_state.get("isPaused") else "warn" if risk_state.get("isRecoveryMode") else "ok"
-        next_module["stats"] = [
-            _module_row("recoveryMode", risk_state.get("recoveryMode"), "Mode hiện tại của Bunny Minimize Losses.", attention=True),
-            _module_row("isRecoveryMode", _module_bool_percent(risk_state.get("isRecoveryMode")), "100 nghĩa là hệ thống đang ở recovery mode.", attention=True),
-            _module_row("isPaused", _module_bool_percent(risk_state.get("isPaused")), "100 nghĩa là hệ thống đang pause, không nên mở lệnh mới.", attention=True),
-            _module_row("globalLossStreak", risk_state.get("globalLossStreak"), "Chuỗi thua hiện tại của toàn hệ thống.", attention=True),
-            _module_row("globalLossStreakThreshold", risk_state.get("globalLossStreakThreshold"), "Ngưỡng chuỗi thua để bật recovery mode."),
-            _module_row("pauseTradingLossStreak", risk_state.get("pauseTradingLossStreak"), "Ngưỡng chuỗi thua để pause toàn hệ thống."),
-            _module_row("openPositionsCount", risk_state.get("openPositionsCount"), "Số vị thế đang mở tại thời điểm kiểm tra.", attention=True),
-            _module_row("maxConcurrentPositions", risk_state.get("maxConcurrentPositions"), "Số slot vị thế tối đa được phép chạy song song."),
-            _module_row("slotUtilizationPercent", slot_utilization, "Mức sử dụng slot vị thế hiện tại theo phần trăm."),
-            _module_row("pausedMinutesRemaining", paused_minutes, "Số phút còn lại trước khi trạng thái pause tự hết."),
-            _module_row("recoveryCyclePnlUsdt", risk_state.get("recoveryCyclePnlUsdt"), "PnL cycle dùng để phân biệt Soft Recovery và Normal.", attention=True),
-            _module_row("updatedAt", risk_state.get("updatedAt"), "Thời điểm trading system state được refresh gần nhất."),
-        ]
+        old_stats = [row for row in module.get("stats") or [] if isinstance(row, dict)]
+        seen: set[str] = set()
+        merged_stats: list[dict[str, Any]] = []
+        for row in old_stats:
+            label = str(row.get("label") or "").strip()
+            replacement = realtime_by_label.get(label)
+            merged_stats.append(replacement if replacement is not None else row)
+            if label:
+                seen.add(label)
+        for row in realtime_rows:
+            label = str(row.get("label") or "").strip()
+            if label and label not in seen:
+                merged_stats.append(row)
+        next_module["stats"] = merged_stats
         next_modules.append(next_module)
     next_payload["modules"] = next_modules
     return next_payload
@@ -2370,6 +2433,8 @@ def system_checklist_payload(
             payload = _system_checklist_with_ai_range(config, snapshot, ai_range=ai_range_key)
         else:
             payload = _build_system_checklist_payload(config, automation=automation, ai_range=ai_range_key)
+        payload = _refresh_bunny_minimize_losses_in_payload(config, payload)
+        payload = _refresh_trade_execution_in_payload(config, payload)
         return attach_previous_system_checklist_snapshot(config, payload)
     date_key = _system_report_date(config)
     if not force_refresh:
