@@ -781,6 +781,133 @@ def _strategy_target_settings(config: dict[str, Any]) -> dict[str, float]:
         "risk_reward": max(0.01, rr or 1.5),
     }
 
+def _manual_target_settings(config: dict[str, Any]) -> dict[str, float | bool | str]:
+    raw = config.get("manual_position_targets", {}) if isinstance(config.get("manual_position_targets"), dict) else {}
+    fallback = _strategy_target_settings(config)
+    return {
+        "enabled": bool(raw.get("enabled", True)),
+        "risk_reward": max(0.01, _safe_float(raw.get("risk_reward"), fallback["risk_reward"])),
+        "extended_risk_reward": max(0.01, _safe_float(raw.get("extended_risk_reward"), 1.75)),
+        "extended_requires_unrealized_pnl_non_negative": bool(raw.get("extended_requires_unrealized_pnl_non_negative", True)),
+        "extended_max_atr_pct": max(0.0, _safe_float(raw.get("extended_max_atr_pct"), 2.5)),
+        "trend_fast_ema": max(1.0, _safe_float(raw.get("trend_fast_ema"), 34.0)),
+        "trend_slow_ema": max(1.0, _safe_float(raw.get("trend_slow_ema"), 89.0)),
+        "default_stop_distance_pct": max(0.01, _safe_float(raw.get("default_stop_distance_pct"), 3.0)),
+        "medium_volatility_stop_distance_pct": max(0.01, _safe_float(raw.get("medium_volatility_stop_distance_pct"), 4.0)),
+        "high_volatility_stop_distance_pct": max(0.01, _safe_float(raw.get("high_volatility_stop_distance_pct"), 5.0)),
+        "medium_volatility_atr_pct": max(0.0, _safe_float(raw.get("medium_volatility_atr_pct"), 1.5)),
+        "high_volatility_atr_pct": max(0.0, _safe_float(raw.get("high_volatility_atr_pct"), 3.0)),
+        "atr_timeframe": str(raw.get("atr_timeframe") or "15m"),
+        "atr_period": max(1.0, _safe_float(raw.get("atr_period"), 14.0)),
+        "ohlcv_limit": max(20.0, _safe_float(raw.get("ohlcv_limit"), 80.0)),
+    }
+
+def _ema(values: list[float], period: int) -> float | None:
+    if period <= 0 or len(values) < period:
+        return None
+    alpha = 2.0 / (period + 1.0)
+    ema = sum(values[:period]) / period
+    for value in values[period:]:
+        ema = value * alpha + ema * (1.0 - alpha)
+    return ema
+
+def _manual_stop_distance_pct(config: dict[str, Any], volatility_pct: float | None = None) -> float:
+    settings = _manual_target_settings(config)
+    stop_pct = float(settings["default_stop_distance_pct"])
+    atr_pct = _float(volatility_pct)
+    if atr_pct is None:
+        return stop_pct
+    if atr_pct >= float(settings["high_volatility_atr_pct"]):
+        return float(settings["high_volatility_stop_distance_pct"])
+    if atr_pct >= float(settings["medium_volatility_atr_pct"]):
+        return float(settings["medium_volatility_stop_distance_pct"])
+    return stop_pct
+
+def _atr_volatility_pct(exchange: Any, config: dict[str, Any], symbol: str) -> float | None:
+    context = _manual_market_context(exchange, config, symbol)
+    return _float(context.get("atr_pct")) if context else None
+
+def _manual_market_context(exchange: Any, config: dict[str, Any], symbol: str) -> dict[str, float | None]:
+    fetch_ohlcv = getattr(exchange, "fetch_ohlcv", None)
+    if not callable(fetch_ohlcv):
+        return {}
+    settings = _manual_target_settings(config)
+    period = int(settings["atr_period"])
+    slow_period = int(settings["trend_slow_ema"])
+    limit = max(period + 1, slow_period + 5, int(settings["ohlcv_limit"]))
+    try:
+        rows = fetch_ohlcv(symbol, timeframe=str(settings["atr_timeframe"]), limit=limit)
+    except Exception:
+        return {}
+    if not isinstance(rows, list) or len(rows) < period + 1:
+        return {}
+    true_ranges: list[float] = []
+    closes: list[float] = []
+    previous_close: float | None = None
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) < 5:
+            continue
+        high = _float(row[2])
+        low = _float(row[3])
+        close = _float(row[4])
+        if high is None or low is None or close is None:
+            continue
+        closes.append(close)
+        if previous_close is None:
+            true_range = high - low
+        else:
+            true_range = max(high - low, abs(high - previous_close), abs(low - previous_close))
+        if true_range >= 0:
+            true_ranges.append(true_range)
+        previous_close = close
+    if len(true_ranges) < period or previous_close is None or previous_close <= 0:
+        return {}
+    atr = sum(true_ranges[-period:]) / period
+    fast_ema = _ema(closes, int(settings["trend_fast_ema"]))
+    slow_ema = _ema(closes, slow_period)
+    return {
+        "atr_pct": atr / previous_close * 100.0,
+        "fast_ema": fast_ema,
+        "slow_ema": slow_ema,
+        "last_close": previous_close,
+    }
+
+def _manual_rr_decision(
+    config: dict[str, Any],
+    *,
+    side: str,
+    unrealized_pnl: float | None,
+    market_context: dict[str, float | None] | None,
+) -> dict[str, Any]:
+    settings = _manual_target_settings(config)
+    base_rr = float(settings["risk_reward"])
+    extended_rr = float(settings["extended_risk_reward"])
+    reasons: list[str] = []
+    atr_pct = _float((market_context or {}).get("atr_pct"))
+    fast_ema = _float((market_context or {}).get("fast_ema"))
+    slow_ema = _float((market_context or {}).get("slow_ema"))
+    trend_ok = False
+    if fast_ema is not None and slow_ema is not None:
+        trend_ok = fast_ema >= slow_ema if side == "long" else fast_ema <= slow_ema
+        reasons.append("trend_ema_aligned" if trend_ok else "trend_ema_not_aligned")
+    else:
+        reasons.append("trend_unavailable")
+    pnl_ok = True
+    if bool(settings["extended_requires_unrealized_pnl_non_negative"]):
+        pnl_ok = unrealized_pnl is not None and unrealized_pnl >= 0
+        reasons.append("pnl_non_negative" if pnl_ok else "pnl_negative_or_unavailable")
+    atr_ok = atr_pct is not None and atr_pct <= float(settings["extended_max_atr_pct"])
+    reasons.append("atr_ok_for_extended_rr" if atr_ok else "atr_too_high_or_unavailable")
+    use_extended = trend_ok and pnl_ok and atr_ok and extended_rr > base_rr
+    return {
+        "risk_reward": extended_rr if use_extended else base_rr,
+        "mode": "extended" if use_extended else "base",
+        "reasons": reasons,
+        "atr_pct": atr_pct,
+        "fast_ema": fast_ema,
+        "slow_ema": slow_ema,
+    }
+
 def _manual_position_targets(
     config: dict[str, Any],
     *,
@@ -788,11 +915,14 @@ def _manual_position_targets(
     entry: float | None,
     stop_loss: float | None,
     take_profit: float | None,
-) -> dict[str, float | None]:
+    volatility_pct: float | None = None,
+    unrealized_pnl: float | None = None,
+    market_context: dict[str, float | None] | None = None,
+) -> dict[str, Any]:
     if entry is None or entry <= 0:
         return {"stop_loss": stop_loss, "take_profit": take_profit, "risk_reward": None}
-    settings = _strategy_target_settings(config)
-    rr = settings["risk_reward"]
+    rr_decision = _manual_rr_decision(config, side=side, unrealized_pnl=unrealized_pnl, market_context=market_context)
+    rr = float(rr_decision["risk_reward"])
     if stop_loss is not None and take_profit is None:
         risk = abs(entry - stop_loss)
         take_profit = entry + risk * rr if side == "long" else entry - risk * rr
@@ -801,8 +931,9 @@ def _manual_position_targets(
         risk = reward / rr
         stop_loss = entry - risk if side == "long" else entry + risk
     elif stop_loss is None and take_profit is None:
-        stop_move = entry * max(0.0, settings["stop_price_pct"]) / 100.0
-        take_move = entry * max(0.0, settings["take_price_pct"]) / 100.0
+        stop_pct = _manual_stop_distance_pct(config, volatility_pct)
+        stop_move = entry * stop_pct / 100.0
+        take_move = stop_move * rr
         stop_loss = entry - stop_move if side == "long" else entry + stop_move
         take_profit = entry + take_move if side == "long" else entry - take_move
     risk = abs(entry - stop_loss) if stop_loss is not None else None
@@ -812,6 +943,8 @@ def _manual_position_targets(
         "stop_loss": None if stop_loss is None else round(stop_loss, 8),
         "take_profit": None if take_profit is None else round(take_profit, 8),
         "risk_reward": None if actual_rr is None else round(actual_rr, 6),
+        "rr_mode": rr_decision.get("mode"),
+        "rr_reasons": rr_decision.get("reasons"),
     }
 
 def _price_to_precision(exchange: Any, symbol: str, price: float) -> str:
@@ -1166,12 +1299,22 @@ def sync_exchange_runtime_state(
                 stop_loss = _float(matched.get("stop_loss"))
             if take_profit is None:
                 take_profit = _float(matched.get("take_profit"))
+        market_context = (
+            _manual_market_context(exchange, config, symbol)
+            if exchange is not None and (okx_stop_loss is None or okx_take_profit is None)
+            else {}
+        )
+        volatility_pct = _float(market_context.get("atr_pct"))
+        unrealized_pnl = _float(position.get("unrealized_pnl") or position.get("unrealizedPnl") or info.get("upl"))
         target_plan = _manual_position_targets(
             config,
             side=side,
             entry=entry_price,
             stop_loss=stop_loss,
             take_profit=take_profit,
+            volatility_pct=volatility_pct,
+            unrealized_pnl=unrealized_pnl,
+            market_context=market_context,
         )
         stop_loss = _float(target_plan.get("stop_loss"))
         take_profit = _float(target_plan.get("take_profit"))
@@ -1197,6 +1340,8 @@ def sync_exchange_runtime_state(
             "position": to_jsonable(position),
             "snapshot_created_at": created_at,
             "manual_target_plan": to_jsonable(target_plan),
+            "manual_target_volatility_pct": volatility_pct,
+            "manual_target_market_context": to_jsonable(market_context),
             "target_attach_result": to_jsonable(target_attach_result),
         }
         updates = {
@@ -1205,7 +1350,7 @@ def sync_exchange_runtime_state(
             "entry_price": entry_price,
             "stop_loss": stop_loss,
             "take_profit": take_profit,
-            "pnl": _float(position.get("unrealized_pnl") or position.get("unrealizedPnl") or info.get("upl")),
+            "pnl": unrealized_pnl,
             "snapshot_json": json.dumps(payload, ensure_ascii=False),
         }
         if matched:
@@ -1253,7 +1398,7 @@ def sync_exchange_runtime_state(
                     "quantity": contracts,
                     "initial_quantity": contracts,
                     "max_contracts_seen": contracts,
-                    "pnl": _float(position.get("unrealized_pnl") or position.get("unrealizedPnl") or info.get("upl")),
+                    "pnl": unrealized_pnl,
                     "reject_reason": None,
                     "closed_at": None,
                     "payload_json": json.dumps(payload, ensure_ascii=False),
@@ -1300,6 +1445,9 @@ def sync_exchange_runtime_state(
                     "leverage": leverage,
                     "stop_loss": stop_loss,
                     "take_profit": take_profit,
+                    "risk_reward": target_plan.get("risk_reward"),
+                    "rr_mode": target_plan.get("rr_mode"),
+                    "rr_reasons": target_plan.get("rr_reasons"),
                     "manual_import": manual_imported,
                     "request": target_attach_result.get("request"),
                     "response": target_attach_result.get("response"),

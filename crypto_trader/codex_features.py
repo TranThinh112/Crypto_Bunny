@@ -2112,6 +2112,71 @@ def _recovery_cycle_pnl_from_state(config: dict[str, Any]) -> float:
         return 0.0
     return _safe_float(state.get("cycle_pnl_usdt"), 0.0)
 
+def _recovery_cycle_pnl_from_trade_executions(start_at: datetime, config: dict[str, Any]) -> float | None:
+    try:
+        closed = _closed_trade_executions(config)
+    except Exception:
+        return None
+    total = 0.0
+    seen = False
+    for row in closed:
+        closed_at = _parse_time(row.get("closed_at") or row.get("updated_at") or row.get("created_at"))
+        if closed_at is None:
+            continue
+        if closed_at >= start_at:
+            total += _safe_float(row.get("pnl"), 0.0)
+            seen = True
+    return round(total, 6) if seen else None
+
+def _recovery_cycle_display_pnl_from_okx(start_at: datetime, config: dict[str, Any]) -> float | None:
+    try:
+        from .market import create_exchange
+        from .sizing import _fetch_positions_history_rows, _position_key, _position_time
+
+        limit = int(config.get("position_sizing", {}).get("history_limit", 100) or 100)
+        exchange = create_exchange(config, authenticated=True)
+        exchange.load_markets()
+        rows = _fetch_positions_history_rows(exchange, limit)
+    except Exception:
+        return None
+    total = 0.0
+    seen_any = False
+    seen_keys: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        closed_at = _position_time(row)
+        if closed_at is None:
+            continue
+        if closed_at.tzinfo is None:
+            closed_at = closed_at.replace(tzinfo=timezone.utc)
+        if closed_at < start_at:
+            continue
+        key = str(_position_key(row) or "")
+        if key and key in seen_keys:
+            continue
+        if key:
+            seen_keys.add(key)
+        info = row.get("info", {}) if isinstance(row.get("info"), dict) else {}
+        pnl = None
+        for payload in (row, info):
+            pnl = _safe_float(payload.get("pnl"), None)
+            if pnl is not None:
+                break
+        if pnl is None:
+            for payload in (row, info):
+                for name in ("realizedPnl", "realisedPnl", "netPnl", "netProfit"):
+                    pnl = _safe_float(payload.get(name), None)
+                    if pnl is not None:
+                        break
+                if pnl is not None:
+                    break
+        if pnl is None:
+            continue
+        total += pnl
+        seen_any = True
+    return round(total, 6) if seen_any else None
+
 def _recovery_cycle_pnl_since_config_start(config: dict[str, Any]) -> float | None:
     sizing_config = config.get("position_sizing", {})
     configured_start = sizing_config.get("cycle_start_at")
@@ -2119,18 +2184,20 @@ def _recovery_cycle_pnl_since_config_start(config: dict[str, Any]) -> float | No
         state_pnl = _recovery_cycle_pnl_from_state(config)
         if abs(state_pnl) > 1e-9:
             return state_pnl
-        fallback_pnl = sizing_config.get("cycle_start_pnl_fallback_usdt", -25.275453)
-        return _safe_float(fallback_pnl, 0.0) if fallback_pnl is not None else None
+        fallback = _recovery_cycle_pnl_from_trade_executions(datetime.min.replace(tzinfo=timezone.utc), config)
+        return fallback if fallback is not None else None
     start_raw = configured_start
     if not start_raw:
         return None
-    fallback_pnl = sizing_config.get("cycle_start_pnl_fallback_usdt", -25.275453)
     try:
         start_at = datetime.fromisoformat(str(start_raw).replace("Z", "+00:00"))
     except ValueError:
-        return _safe_float(fallback_pnl, 0.0) if fallback_pnl is not None else None
+        return None
     if start_at.tzinfo is None:
         start_at = start_at.replace(tzinfo=timezone.utc)
+    display_pnl = _recovery_cycle_display_pnl_from_okx(start_at, config)
+    if display_pnl is not None:
+        return display_pnl
     try:
         from .sizing import _closed_positions, _sizing_config
 
@@ -2140,8 +2207,8 @@ def _recovery_cycle_pnl_since_config_start(config: dict[str, Any]) -> float | No
         return None
     if not closed:
         state_pnl = _recovery_cycle_pnl_from_state(config)
-        return state_pnl if abs(state_pnl) > 1e-9 else (_safe_float(fallback_pnl, 0.0) if fallback_pnl is not None else None)
-    total = _safe_float(fallback_pnl, 0.0) if fallback_pnl is not None else 0.0
+        return state_pnl if abs(state_pnl) > 1e-9 else 0.0
+    total = 0.0
     for row in closed:
         closed_at = row.get("closed_at")
         if not isinstance(closed_at, datetime):
@@ -2274,11 +2341,9 @@ def refresh_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
     soft_exit_threshold = hard_entry_cycle_pnl * 0.5 if hard_entry_cycle_pnl < 0 else 0.0
     hard_recovery = global_loss_streak >= hard_threshold and cycle_pnl < soft_exit_threshold
     soft_recovery = (
-        global_loss_streak >= hard_threshold
-        and not hard_recovery
+        not hard_recovery
         and bool(settings.get("enable_soft_recovery_mode", True))
         and cycle_pnl < -1e-9
-        and cycle_pnl >= soft_exit_threshold
     )
     recovery_mode = "HARD_RECOVERY" if hard_recovery else "SOFT_RECOVERY" if soft_recovery else "NORMAL"
     is_recovery_mode = recovery_mode != "NORMAL"

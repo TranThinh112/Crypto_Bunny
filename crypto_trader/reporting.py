@@ -486,6 +486,26 @@ def format_manual_position_target_message(config: dict[str, Any], event: dict[st
             return "-"
         return f"{number:+.2f} USDT"
 
+    def partial_trigger_price() -> float | None:
+        entry = _float(event.get("entry"))
+        target = _float(event.get("take_profit"))
+        progress = _float(event.get("partial_trigger_progress"))
+        if progress is None:
+            trailing = config.get("trailing_stop", {}) if isinstance(config.get("trailing_stop"), dict) else {}
+            partial = trailing.get("partial_take_profit", {}) if isinstance(trailing.get("partial_take_profit"), dict) else {}
+            progress = _float(partial.get("trigger_tp_progress")) or 0.7
+        if entry is None or target is None:
+            return None
+        return entry + (target - entry) * progress
+
+    def partial_close_fraction() -> float:
+        value = _float(event.get("partial_close_fraction"))
+        if value is not None:
+            return value
+        trailing = config.get("trailing_stop", {}) if isinstance(config.get("trailing_stop"), dict) else {}
+        partial = trailing.get("partial_take_profit", {}) if isinstance(trailing.get("partial_take_profit"), dict) else {}
+        return _float(partial.get("close_fraction")) or 0.3
+
     side = str(event.get("side") or "-").upper()
     symbol = str(event.get("symbol") or "-")
     trade_id = event.get("trade_execution_id") or event.get("id") or "-"
@@ -494,6 +514,14 @@ def format_manual_position_target_message(config: dict[str, Any], event: dict[st
     take_profit = event.get("take_profit")
     request = event.get("request") if isinstance(event.get("request"), dict) else {}
     order_type = str(request.get("ordType") or "-").upper()
+    risk_reward = _float(event.get("risk_reward"))
+    rr_mode = str(event.get("rr_mode") or "base").lower()
+    rr_mode_label = "mở rộng" if rr_mode == "extended" else "cơ bản"
+    partial_price = partial_trigger_price()
+    partial_fraction = partial_close_fraction()
+    partial_pct = partial_fraction * 100
+    partial_qty = (_float(event.get("quantity")) or 0) * partial_fraction
+    partial_pnl = pnl_at(partial_price)
     source_label = "Lệnh vào tay" if event.get("manual_import") else "Vị thế đang mở"
     lines = [
         "🛡️ BOT ĐÃ GẮN TP/SL",
@@ -504,11 +532,17 @@ def format_manual_position_target_message(config: dict[str, Any], event: dict[st
         f"Khối lượng: {fmt(event.get('quantity'))}",
         f"Đòn bẩy: {fmt(leverage, 0)}x" if leverage is not None else "Đòn bẩy: -",
         "",
+        f"Bot đánh giá: setup theo RR {fmt(risk_reward, 2)}R ({rr_mode_label})" if risk_reward is not None else "Bot đánh giá: setup theo RR -",
+        "",
         f"🎯 TP: {fmt(take_profit)}",
         f"Nếu chạm TP: {fmt_usdt(pnl_at(take_profit))}",
         "",
         f"🛑 SL: {fmt(stop_loss)}",
         f"Nếu chạm SL: {fmt_usdt(pnl_at(stop_loss))}",
+        "",
+        f"Nấc chốt {fmt(partial_pct, 0)}% đầu tiên: {fmt(partial_price)}",
+        f"Khối lượng dự kiến chốt: {fmt(partial_qty)}",
+        f"Lãi dự kiến khi chốt: {fmt_usdt(partial_pnl * partial_fraction if partial_pnl is not None else None)}",
         "",
         f"OKX: {order_type} reduce-only TP/SL đã được tạo.",
     ]

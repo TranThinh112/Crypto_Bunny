@@ -4362,6 +4362,7 @@ function renderProfitProtectionLevel(label, level, tone = "", options = {}) {
   const price = level && typeof level === "object" ? level.price : null;
   const pnl = level && typeof level === "object" ? level.pnl : null;
   const triggerPrice = level && typeof level === "object" ? level.trigger_price : null;
+  const extraRows = Array.isArray(options.extraRows) ? options.extraRows : [];
   const showTrigger = options.showTrigger !== false;
   const achieved = Boolean(options.achieved);
   return `
@@ -4370,6 +4371,7 @@ function renderProfitProtectionLevel(label, level, tone = "", options = {}) {
       <strong>${escapeHtml(formatMarketRegimeNumber(price))}</strong>
       <b class="${nullableNumber(pnl) < 0 ? "negative" : nullableNumber(pnl) > 0 ? "positive" : ""}">${escapeHtml(formatTradeExecutionPnl(pnl))}</b>
       ${showTrigger && nullableNumber(triggerPrice) !== null ? `<small>Kích hoạt: ${escapeHtml(formatMarketRegimeNumber(triggerPrice))}</small>` : ""}
+      ${extraRows.map((row) => `<small>${escapeHtml(row)}</small>`).join("")}
     </div>
   `;
 }
@@ -4383,6 +4385,12 @@ function renderProfitProtectionPositionPanel(item) {
   const partialDone = Boolean(item?.partial_take_profit_done);
   const achievedStep = partialDone ? Math.max(1, Math.min(3, Number(item?.profit_extension_step) || 1)) : 0;
   const stepAchieved = (step) => achievedStep >= step;
+  const lossGuard = levels.loss_guard && typeof levels.loss_guard === "object" ? levels.loss_guard : null;
+  const lossGuardRows = lossGuard ? [
+    `RR hiện tại: ${nullableNumber(lossGuard.risk_reward) === null ? "-" : `${Number(lossGuard.risk_reward).toFixed(2)}R`}`,
+    `Đóng lỗ ${Math.round((Number(lossGuard.partial_close_fraction) || 0) * 100)}%: ${formatMarketRegimeNumber(lossGuard.partial_close_price)}`,
+    `Lỗ dự kiến: ${formatTradeExecutionPnl(lossGuard.partial_close_pnl)}`,
+  ] : [];
   return `
     <article class="trade-execution-position profit-protection-position">
       <header>
@@ -4393,7 +4401,7 @@ function renderProfitProtectionPositionPanel(item) {
         <span class="market-regime-badge ${partialDone ? "bull" : "unknown"}">${partialDone ? "Partial done" : "Waiting partial"}</span>
       </header>
       <div class="profit-protection-level-grid">
-        ${renderProfitProtectionLevel("SL1 ban đầu", levelByStep(slSteps, 1) || levels.current_sl, "base")}
+        ${renderProfitProtectionLevel("SL1 ban đầu", levelByStep(slSteps, 1) || levels.current_sl, "base", { extraRows: lossGuardRows })}
         ${renderProfitProtectionLevel("TP1 ban đầu", levelByStep(tpSteps, 1) || levels.current_tp, "base")}
         ${renderProfitProtectionLevel("PnL hiện tại", currentPnlLevel, "current")}
         ${renderProfitProtectionLevel("Chốt 30%", levels.partial_30, "partial", { achieved: partialDone })}

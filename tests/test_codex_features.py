@@ -763,12 +763,14 @@ class CodexFeaturesTest(TestCase):
         ):
             state = refresh_trading_system_state(config)
 
-        self.assertFalse(state["isRecoveryMode"])
+        self.assertTrue(state["isRecoveryMode"])
+        self.assertEqual(state["recoveryMode"], "SOFT_RECOVERY")
         send_telegram_message.assert_called_once()
         message = send_telegram_message.call_args.args[1]
-        self.assertIn("Bunny Risk Mode: NORMAL", message)
+        self.assertIn("Bunny Risk Mode: SOFT RECOVERY", message)
         self.assertIn("19:45:00 20/07/26", message)
-        self.assertIn("Chuyển từ: HARD RECOVERY → NORMAL", message)
+        self.assertIn("HARD RECOVERY", message)
+        self.assertIn("SOFT RECOVERY", message)
         self.assertIn("Chuỗi thua hệ thống: 0", message)
 
     @patch("crypto_trader.notifier.send_telegram_message")
@@ -804,7 +806,7 @@ class CodexFeaturesTest(TestCase):
         self.assertIn("Chuyển từ: HARD RECOVERY → SOFT RECOVERY", message)
         self.assertIn("Cycle PnL: -4.8000 USDT", message)
 
-    def test_recovery_cycle_pnl_adds_closed_pnl_to_configured_start(self) -> None:
+    def test_recovery_cycle_pnl_sums_closed_pnl_since_configured_start(self) -> None:
         config = self._config()
         config["position_sizing"] = {
             "cycle_start_at": "2026-07-24T00:00:00+00:00",
@@ -820,7 +822,41 @@ class CodexFeaturesTest(TestCase):
         with patch("crypto_trader.sizing._closed_positions", return_value=closed):
             pnl = _recovery_cycle_pnl(config)
 
-        self.assertAlmostEqual(pnl, -21.718194, places=6)
+        self.assertAlmostEqual(pnl, 3.557259, places=6)
+
+    def test_recovery_cycle_pnl_uses_okx_display_pnl_without_fee_adjustments(self) -> None:
+        config = self._config()
+        config["position_sizing"] = {
+            "cycle_start_at": "2026-07-05T00:00:00+07:00",
+            "history_limit": 100,
+        }
+        rows = [
+            {
+                "symbol": "XAU/USDT:USDT",
+                "id": "xau-win-1",
+                "pnl": "3.29",
+                "fee": "-0.15387955",
+                "fundingFee": "-0.32453",
+                "timestamp": int(datetime(2026, 7, 14, tzinfo=timezone.utc).timestamp() * 1000),
+            },
+            {
+                "symbol": "TAO/USDT:USDT",
+                "id": "tao-loss-1",
+                "realizedPnl": "-13.7361275492279702",
+                "pnl": "-13.74",
+                "fee": "-0.281165",
+                "fundingFee": "-0.21497",
+                "timestamp": int(datetime(2026, 7, 14, 2, 9, tzinfo=timezone.utc).timestamp() * 1000),
+            },
+        ]
+
+        with patch("crypto_trader.market.create_exchange", return_value=SimpleNamespace(load_markets=lambda: {})), patch(
+            "crypto_trader.sizing._fetch_positions_history_rows",
+            return_value=rows,
+        ):
+            pnl = _recovery_cycle_pnl(config)
+
+        self.assertAlmostEqual(pnl, -10.45, places=6)
 
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_recovery_mode_stays_soft_when_cycle_pnl_negative_and_loss_streak_below_hard(

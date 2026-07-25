@@ -301,8 +301,7 @@ strategy:
 
 position_sizing:
   enabled: true
-  cycle_start_at: '2026-07-05T00:00:00+07:00'
-  cycle_start_pnl_fallback_usdt: -25.275453
+cycle_start_at: '2026-07-05T00:00:00+07:00'
   base_margin_usdt: 2.0
   target_profit_usdt: 0.30
   tp_roi: 0.75

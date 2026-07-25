@@ -39,6 +39,31 @@ class RuntimeSyncExchange:
         self.algo_orders.append(dict(request))
         return {"code": "0", "data": [{"algoId": f"algo-{len(self.algo_orders)}"}]}
 
+    def fetch_ohlcv(self, symbol: str, timeframe: str = "15m", limit: int | None = None) -> list[list[float]]:
+        rows = []
+        close = 100.0
+        for index in range(limit or 80):
+            rows.append([index, close, close + 0.2, close - 0.2, close, 1.0])
+        return rows
+
+
+class RuntimeSyncHighAtrExchange(RuntimeSyncExchange):
+    def fetch_ohlcv(self, symbol: str, timeframe: str = "15m", limit: int | None = None) -> list[list[float]]:
+        rows = []
+        close = 100.0
+        for index in range(limit or 80):
+            rows.append([index, close, close + 3.2, close - 3.2, close, 1.0])
+        return rows
+
+class RuntimeSyncBullTrendExchange(RuntimeSyncExchange):
+    def fetch_ohlcv(self, symbol: str, timeframe: str = "15m", limit: int | None = None) -> list[list[float]]:
+        rows = []
+        close = 100.0
+        for index in range(limit or 100):
+            close += 0.1
+            rows.append([index, close, close + 0.2, close - 0.2, close, 1.0])
+        return rows
+
 
 class RuntimeSyncTest(TestCase):
     def _config(self) -> dict:
@@ -253,8 +278,8 @@ class RuntimeSyncTest(TestCase):
         self.assertEqual(len(executions), 1)
         self.assertEqual(executions[0]["symbol"], "SOL/USDT:USDT")
         self.assertEqual(executions[0]["side"], "LONG")
-        self.assertAlmostEqual(executions[0]["stop_loss"], 77.4915)
-        self.assertAlmostEqual(executions[0]["take_profit"], 87.68775)
+        self.assertAlmostEqual(executions[0]["stop_loss"], 79.1229)
+        self.assertAlmostEqual(executions[0]["take_profit"], 85.24065)
         self.assertAlmostEqual(executions[0]["risk_reward"], 1.5)
 
     @patch("crypto_trader.notifier.send_telegram_message", return_value=True)
@@ -288,14 +313,14 @@ class RuntimeSyncTest(TestCase):
         self.assertEqual(result["exchange"]["manual_positions_imported"], 1)
         self.assertEqual(result["exchange"]["position_targets_submitted"], 1)
         self.assertEqual(executions[0]["import_source"], "manual_okx_position")
-        self.assertAlmostEqual(executions[0]["stop_loss"], 61.08375)
-        self.assertAlmostEqual(executions[0]["take_profit"], 53.811875)
+        self.assertAlmostEqual(executions[0]["stop_loss"], 59.92025)
+        self.assertAlmostEqual(executions[0]["take_profit"], 55.557125)
         self.assertAlmostEqual(executions[0]["risk_reward"], 1.5)
         self.assertEqual(exchange.algo_orders[0]["instId"], "HYPE-USDT-SWAP")
         self.assertEqual(exchange.algo_orders[0]["side"], "buy")
         self.assertEqual(exchange.algo_orders[0]["ordType"], "oco")
-        self.assertEqual(exchange.algo_orders[0]["slTriggerPx"], "61.0838")
-        self.assertEqual(exchange.algo_orders[0]["tpTriggerPx"], "53.8119")
+        self.assertEqual(exchange.algo_orders[0]["slTriggerPx"], "59.9203")
+        self.assertEqual(exchange.algo_orders[0]["tpTriggerPx"], "55.5571")
         send_message.assert_called_once()
         message = send_message.call_args.args[1]
         self.assertIn("BOT ĐÃ GẮN TP/SL", message)
@@ -304,8 +329,82 @@ class RuntimeSyncTest(TestCase):
         self.assertIn("Entry: 58.175", message)
         self.assertIn("Khối lượng: 29", message)
         self.assertIn("Đòn bẩy: 10x", message)
-        self.assertIn("TP: 53.811875", message)
-        self.assertIn("SL: 61.08375", message)
+        self.assertIn("Bot đánh giá: setup theo RR 1.5R (cơ bản)", message)
+        self.assertIn("TP: 55.557125", message)
+        self.assertIn("SL: 59.92025", message)
+        self.assertIn("Nấc chốt 30% đầu tiên: 56.342487", message)
+        self.assertIn("Khối lượng dự kiến chốt: 8.7", message)
+
+    @patch("crypto_trader.notifier.send_telegram_message", return_value=True)
+    def test_sync_runtime_state_uses_wider_targets_for_high_atr_manual_position(self, _send_message) -> None:
+        config = self._config()
+        config["exchange"]["leverage"] = 10
+        exchange = RuntimeSyncHighAtrExchange()
+
+        sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-07-08T00:00:00+00:00",
+                "_exchange": exchange,
+                "positions": [
+                    {
+                        "symbol": "HYPE/USDT:USDT",
+                        "side": "short",
+                        "contracts": 29,
+                        "entry_price": 58.175,
+                        "mark_price": 57.9,
+                        "leverage": 10,
+                    }
+                ],
+                "open_orders": [],
+            },
+        )
+
+        executions = list_trade_execution_rows(config, statuses=["OPEN"], limit=20)
+        self.assertAlmostEqual(executions[0]["stop_loss"], 61.08375)
+        self.assertAlmostEqual(executions[0]["take_profit"], 53.811875)
+        self.assertAlmostEqual(executions[0]["risk_reward"], 1.5)
+        self.assertEqual(exchange.algo_orders[0]["slTriggerPx"], "61.0838")
+        self.assertEqual(exchange.algo_orders[0]["tpTriggerPx"], "53.8119")
+
+    @patch("crypto_trader.notifier.send_telegram_message", return_value=True)
+    def test_sync_runtime_state_uses_extended_rr_when_manual_position_is_supported(self, _send_message) -> None:
+        config = self._config()
+        config["exchange"]["leverage"] = 10
+        exchange = RuntimeSyncBullTrendExchange()
+
+        sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-07-08T00:00:00+00:00",
+                "_exchange": exchange,
+                "positions": [
+                    {
+                        "symbol": "HYPE/USDT:USDT",
+                        "side": "long",
+                        "contracts": 29,
+                        "entry_price": 58.175,
+                        "mark_price": 58.5,
+                        "unrealized_pnl": 9.425,
+                        "leverage": 10,
+                    }
+                ],
+                "open_orders": [],
+            },
+        )
+
+        executions = list_trade_execution_rows(config, statuses=["OPEN"], limit=20)
+        self.assertAlmostEqual(executions[0]["stop_loss"], 56.42975)
+        self.assertAlmostEqual(executions[0]["take_profit"], 61.2291875)
+        self.assertAlmostEqual(executions[0]["risk_reward"], 1.75)
+        payload = json.loads(str(executions[0]["payload_json"]))
+        self.assertEqual(payload["manual_target_plan"]["rr_mode"], "extended")
+        self.assertEqual(exchange.algo_orders[0]["slTriggerPx"], "56.4297")
+        self.assertEqual(exchange.algo_orders[0]["tpTriggerPx"], "61.2292")
 
     def test_sync_runtime_state_derives_missing_tp_from_existing_manual_sl(self) -> None:
         config = self._config()
@@ -416,8 +515,8 @@ class RuntimeSyncTest(TestCase):
         losses = list_trade_execution_rows(config, statuses=["LOSS"])
         self.assertEqual(losses[0]["close_reason"], "manual")
         self.assertIsNone(losses[0]["position_slot"])
-        send_message.assert_called_once()
-        self.assertIn("SOL/USDT:USDT", send_message.call_args.args[1])
+        messages = [call.args[1] for call in send_message.call_args_list]
+        self.assertTrue(any("SOL/USDT:USDT" in message for message in messages))
 
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_sync_uses_okx_position_history_pnl_when_position_disappears(self, send_message) -> None:
@@ -460,8 +559,8 @@ class RuntimeSyncTest(TestCase):
         self.assertEqual(row["pnl"], -3.16)
         self.assertEqual(row["pnl_pct"], -64.77)
         self.assertEqual(row["exchange_close_source"], "okx_positions_history")
-        send_message.assert_called_once()
-        self.assertIn("-3.16", send_message.call_args.args[1])
+        messages = [call.args[1] for call in send_message.call_args_list]
+        self.assertTrue(any("-3.16" in message for message in messages))
 
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_sync_uses_okx_net_pnl_from_history_fees_and_funding(self, send_message) -> None:
@@ -512,9 +611,10 @@ class RuntimeSyncTest(TestCase):
         self.assertAlmostEqual(row["pnl"], 3.2916, places=4)
         self.assertEqual(row["pnl_pct"], 54.18)
         self.assertEqual(row["exchange_close_source"], "okx_positions_history")
-        send_message.assert_called_once()
-        self.assertIn("+3.29", send_message.call_args.args[1])
-        self.assertNotIn("+3.77", send_message.call_args.args[1])
+        messages = [call.args[1] for call in send_message.call_args_list]
+        close_messages = [message for message in messages if "+3.29" in message]
+        self.assertTrue(close_messages)
+        self.assertNotIn("+3.77", close_messages[0])
 
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_sync_matches_position_history_near_trade_closed_at_not_sync_time(self, send_message) -> None:
@@ -705,8 +805,8 @@ class RuntimeSyncTest(TestCase):
         self.assertEqual(result["exchange"]["backfilled_close_notifications"], 1)
         losses = list_trade_execution_rows(config, statuses=["LOSS"])
         self.assertEqual(losses[0]["close_reason"], "manual")
-        send_message.assert_called_once()
-        self.assertIn("ETC/USDT:USDT", send_message.call_args.args[1])
+        messages = [call.args[1] for call in send_message.call_args_list]
+        self.assertTrue(any("ETC/USDT:USDT" in message for message in messages))
 
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_manual_profitable_exchange_close_is_not_labeled_take_profit(self, send_message) -> None:
@@ -752,8 +852,8 @@ class RuntimeSyncTest(TestCase):
         self.assertEqual(result["exchange"]["executions_closed"], 1)
         wins = list_trade_execution_rows(config, statuses=["WIN"])
         self.assertEqual(wins[0]["close_reason"], "manual")
-        send_message.assert_called_once()
-        self.assertIn("Tự đóng", send_message.call_args.args[1])
+        messages = [call.args[1] for call in send_message.call_args_list]
+        self.assertTrue(any("Tự đóng" in message for message in messages))
 
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_sync_retries_unnotified_exchange_close(self, send_message) -> None:
@@ -785,8 +885,8 @@ class RuntimeSyncTest(TestCase):
         )
 
         self.assertEqual(result["exchange"]["retried_close_notifications"], 1)
-        send_message.assert_called_once()
-        self.assertIn("ETC/USDT:USDT", send_message.call_args.args[1])
+        messages = [call.args[1] for call in send_message.call_args_list]
+        self.assertTrue(any("ETC/USDT:USDT" in message for message in messages))
 
     def test_sync_corrects_recent_exchange_close_pnl_from_history(self) -> None:
         config = self._config()

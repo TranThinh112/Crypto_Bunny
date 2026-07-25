@@ -34,6 +34,7 @@ from .codex_features import (
     prompt_status,
     recent_ai_call_history,
     recent_ai_trade_decisions,
+    refresh_trading_system_state,
     replay_stats,
 )
 from .market_guard import market_guard_block_status
@@ -860,7 +861,82 @@ def _trade_execution_trigger_price(side: str, entry: float | None, target: float
     return entry + reward * progress if side == "long" else entry - reward * progress
 
 
-def _trade_execution_profit_protection_levels(row: dict[str, Any], partial_config: dict[str, Any] | None = None) -> dict[str, Any]:
+def _loss_guard_settings(config: dict[str, Any]) -> dict[str, Any]:
+    raw = config.get("loss_guard", {}) if isinstance(config.get("loss_guard"), dict) else {}
+    return {
+        "enabled": bool(raw.get("enabled", True)),
+        "effective_from": str(raw.get("effective_from") or ""),
+        "apply_to_existing_positions": bool(raw.get("apply_to_existing_positions", False)),
+        "auto_close_enabled": bool(raw.get("auto_close_enabled", False)),
+        "warning_r": _safe_float(raw.get("warning_r"), -0.5),
+        "strong_warning_r": _safe_float(raw.get("strong_warning_r"), -0.7),
+        "partial_close_r": _safe_float(raw.get("partial_close_r"), -0.8),
+        "partial_close_fraction": max(0.01, min(0.9, _safe_float(raw.get("partial_close_fraction"), 0.25))),
+        "require_broken_setup_for_partial_close": bool(raw.get("require_broken_setup_for_partial_close", True)),
+    }
+
+def _loss_guard_applies_to_row(row: dict[str, Any], settings: dict[str, Any]) -> bool:
+    if settings.get("apply_to_existing_positions"):
+        return True
+    effective_raw = str(settings.get("effective_from") or "").strip()
+    if not effective_raw:
+        return False
+    created_raw = row.get("created_at")
+    if not created_raw:
+        return False
+    try:
+        effective_at = datetime.fromisoformat(effective_raw.replace("Z", "+00:00"))
+        created_at = datetime.fromisoformat(str(created_raw).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if effective_at.tzinfo is None:
+        effective_at = effective_at.replace(tzinfo=timezone.utc)
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    return created_at >= effective_at
+
+def _trade_execution_loss_guard(row: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:
+    settings = _loss_guard_settings(config)
+    if not settings["enabled"] or not _loss_guard_applies_to_row(row, settings):
+        return None
+    side = str(row.get("side") or "").lower()
+    entry = _trade_execution_live_entry_price(row)
+    initial_sl = _trade_execution_effective_stop_loss(row) or _trade_execution_price(row, "initial_stop_loss")
+    take_profit = _trade_execution_effective_take_profit(row)
+    qty = _trade_execution_quantity(row)
+    if side not in {"long", "short"} or entry is None or initial_sl is None or qty is None:
+        return None
+    risk = entry - initial_sl if side == "long" else initial_sl - entry
+    if risk <= 0:
+        return None
+    risk_reward = None
+    if take_profit is not None:
+        reward = take_profit - entry if side == "long" else entry - take_profit
+        if reward > 0:
+            risk_reward = round(reward / risk, 4)
+    partial_r = float(settings["partial_close_r"])
+    partial_price = entry + risk * partial_r if side == "long" else entry - risk * partial_r
+    partial_fraction = float(settings["partial_close_fraction"])
+    partial_amount = qty * partial_fraction
+    return {
+        "enabled": True,
+        "auto_close_enabled": settings["auto_close_enabled"],
+        "require_broken_setup_for_partial_close": settings["require_broken_setup_for_partial_close"],
+        "warning_r": settings["warning_r"],
+        "strong_warning_r": settings["strong_warning_r"],
+        "partial_close_r": partial_r,
+        "partial_close_fraction": partial_fraction,
+        "partial_close_price": partial_price,
+        "partial_close_amount": partial_amount,
+        "partial_close_pnl": _trade_execution_pnl_at(row, partial_price, partial_amount),
+        "risk_reward": risk_reward,
+    }
+
+def _trade_execution_profit_protection_levels(
+    row: dict[str, Any],
+    partial_config: dict[str, Any] | None = None,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     partial_config = partial_config if isinstance(partial_config, dict) else {}
     side = str(row.get("side") or "").lower()
     entry = _trade_execution_live_entry_price(row)
@@ -966,6 +1042,7 @@ def _trade_execution_profit_protection_levels(row: dict[str, Any], partial_confi
         "tp_steps": tp_steps,
         "sl_steps": sl_steps,
         "original_tp": {"price": original_tp, "pnl": _trade_execution_pnl_at(row, original_tp, qty)},
+        "loss_guard": _trade_execution_loss_guard(row, config or {}),
     }
 
 
@@ -1065,7 +1142,7 @@ def _trade_execution_summary(config: dict[str, Any]) -> dict[str, Any]:
                 "trailing_stop_atr": row.get("trailing_stop_atr"),
                 "tp_progress_pct": _trade_execution_progress(row),
                 "r_multiple": _trade_execution_r_multiple(row),
-                "profit_protection_levels": _trade_execution_profit_protection_levels(row, partial),
+                "profit_protection_levels": _trade_execution_profit_protection_levels(row, partial, config),
                 "trade_event_count": len(event_history),
                 "trade_event_history": event_history[-10:],
             }
@@ -2226,6 +2303,57 @@ def _refresh_trade_execution_in_payload(config: dict[str, Any], payload: dict[st
     return next_payload
 
 
+def _refresh_bunny_minimize_losses_in_payload(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    modules = payload.get("modules")
+    if not isinstance(modules, list):
+        return payload
+    try:
+        risk_state = refresh_trading_system_state(config)
+    except Exception:
+        return payload
+    slot_utilization = None
+    if _safe_int(risk_state.get("maxConcurrentPositions")) > 0:
+        slot_utilization = round(
+            _safe_int(risk_state.get("openPositionsCount")) / _safe_int(risk_state.get("maxConcurrentPositions")) * 100,
+            2,
+        )
+    paused_until = _parse_time(risk_state.get("pausedUntil"))
+    paused_minutes = (
+        max(0, round((paused_until - datetime.now(timezone.utc)).total_seconds() / 60, 2))
+        if paused_until is not None
+        else "-"
+    )
+    next_payload = dict(payload)
+    next_modules: list[dict[str, Any]] = []
+    for module in modules:
+        if not isinstance(module, dict):
+            next_modules.append(module)
+            continue
+        if int(module.get("number") or 0) != 2:
+            next_modules.append(module)
+            continue
+        next_module = dict(module)
+        next_module["recovery_mode"] = risk_state.get("recoveryMode")
+        next_module["status"] = "fail" if risk_state.get("isPaused") else "warn" if risk_state.get("isRecoveryMode") else "ok"
+        next_module["stats"] = [
+            _module_row("recoveryMode", risk_state.get("recoveryMode"), "Mode hiện tại của Bunny Minimize Losses.", attention=True),
+            _module_row("isRecoveryMode", _module_bool_percent(risk_state.get("isRecoveryMode")), "100 nghĩa là hệ thống đang ở recovery mode.", attention=True),
+            _module_row("isPaused", _module_bool_percent(risk_state.get("isPaused")), "100 nghĩa là hệ thống đang pause, không nên mở lệnh mới.", attention=True),
+            _module_row("globalLossStreak", risk_state.get("globalLossStreak"), "Chuỗi thua hiện tại của toàn hệ thống.", attention=True),
+            _module_row("globalLossStreakThreshold", risk_state.get("globalLossStreakThreshold"), "Ngưỡng chuỗi thua để bật recovery mode."),
+            _module_row("pauseTradingLossStreak", risk_state.get("pauseTradingLossStreak"), "Ngưỡng chuỗi thua để pause toàn hệ thống."),
+            _module_row("openPositionsCount", risk_state.get("openPositionsCount"), "Số vị thế đang mở tại thời điểm kiểm tra.", attention=True),
+            _module_row("maxConcurrentPositions", risk_state.get("maxConcurrentPositions"), "Số slot vị thế tối đa được phép chạy song song."),
+            _module_row("slotUtilizationPercent", slot_utilization, "Mức sử dụng slot vị thế hiện tại theo phần trăm."),
+            _module_row("pausedMinutesRemaining", paused_minutes, "Số phút còn lại trước khi trạng thái pause tự hết."),
+            _module_row("recoveryCyclePnlUsdt", risk_state.get("recoveryCyclePnlUsdt"), "PnL cycle dùng để phân biệt Soft Recovery và Normal.", attention=True),
+            _module_row("updatedAt", risk_state.get("updatedAt"), "Thời điểm trading system state được refresh gần nhất."),
+        ]
+        next_modules.append(next_module)
+    next_payload["modules"] = next_modules
+    return next_payload
+
+
 def system_checklist_payload(
     config: dict[str, Any],
     *,
@@ -2247,10 +2375,12 @@ def system_checklist_payload(
     if not force_refresh:
         snapshot = _preferred_system_checklist_snapshot(config, date_key)
         if snapshot is not None:
+            snapshot = _refresh_bunny_minimize_losses_in_payload(config, snapshot)
             snapshot = _refresh_trade_execution_in_payload(config, snapshot)
             return attach_previous_system_checklist_snapshot(config, snapshot)
         snapshot = _latest_system_checklist_snapshot(config)
         if isinstance(snapshot, dict) and str(snapshot.get("date") or "") == date_key:
+            snapshot = _refresh_bunny_minimize_losses_in_payload(config, snapshot)
             snapshot = _refresh_trade_execution_in_payload(config, snapshot)
             return attach_previous_system_checklist_snapshot(config, snapshot)
     return refresh_system_checklist_snapshot(config, automation=automation, ai_range=ai_range_key)
