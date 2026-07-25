@@ -187,6 +187,15 @@ def _position_r_multiple(side: str, entry: float, initial_stop: float, mark: flo
     open_profit = mark - entry if side == "long" else entry - mark
     return initial_r, open_profit / initial_r
 
+def _stop_loss_trigger_valid(side: str, stop_loss: float | None, mark: float | None) -> bool:
+    if stop_loss is None or mark is None:
+        return False
+    if side == "long":
+        return stop_loss < mark
+    if side == "short":
+        return stop_loss > mark
+    return False
+
 
 def _extract_position_algos(position: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not isinstance(position, dict):
@@ -626,6 +635,9 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
                 1,
                 float(partial_settings.get("tp_extension_fraction", partial_settings.get("close_fraction", 0.3)) or 0.0),
             )
+            invalid_protection_reason = None
+            if not _stop_loss_trigger_valid(side, new_sl, mark):
+                invalid_protection_reason = "proposed SL trigger is invalid for current mark price"
             partial_order = (
                 {
                     "source": "manual_partial_detected",
@@ -641,6 +653,13 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
             if algo is None:
                 protection_error = "OKX SL/TP algo order not found"
                 amend_result = {"error": protection_error}
+            elif invalid_protection_reason:
+                protection_error = invalid_protection_reason
+                amend_result = {
+                    "error": protection_error,
+                    "proposed_stop_loss": new_sl,
+                    "mark_price": mark,
+                }
             else:
                 amend_result = _amend_stop_loss(exchange, symbol, algo, new_sl, settings, new_tp=new_tp)
             updated_at = datetime.now(timezone.utc).isoformat()
@@ -765,6 +784,21 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
                     if new_tp is None:
                         skipped += 1
                         rows.append(_status_row(symbol, side, "skipped", "next TP unavailable"))
+                        continue
+                    if not _stop_loss_trigger_valid(side, new_sl, mark):
+                        skipped += 1
+                        rows.append(
+                            _status_row(
+                                symbol,
+                                side,
+                                "waiting",
+                                "proposed SL trigger is invalid for current mark price",
+                                mark_price=mark,
+                                proposed_stop_loss=round(new_sl, 8),
+                                current_stop_loss=current_sl,
+                                next_step=next_step,
+                            )
+                        )
                         continue
                     amend_result = _amend_stop_loss(exchange, symbol, algo, new_sl, settings, new_tp=new_tp)
                     updated_at = datetime.now(timezone.utc).isoformat()
@@ -904,6 +938,20 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
         if algo is None:
             skipped += 1
             rows.append(_status_row(symbol, side, "skipped", "OKX SL algo order not found"))
+            continue
+        if not _stop_loss_trigger_valid(side, new_sl, mark):
+            skipped += 1
+            rows.append(
+                _status_row(
+                    symbol,
+                    side,
+                    "waiting",
+                    "proposed SL trigger is invalid for current mark price",
+                    mark_price=mark,
+                    proposed_stop_loss=round(new_sl, 8),
+                    current_stop_loss=current_sl,
+                )
+            )
             continue
         amend_result = _amend_stop_loss(exchange, symbol, algo, new_sl, settings)
         updated_at = datetime.now(timezone.utc).isoformat()

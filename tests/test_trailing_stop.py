@@ -120,6 +120,38 @@ class FakeTrailingExchangeGenericAlgo(FakeTrailingExchange):
             return {"data": []}
         return super().privateGetTradeOrdersAlgoPending(request)
 
+class FakeShortTrailingExchange(FakeTrailingExchange):
+    def fetch_positions(self) -> list[dict]:
+        return [
+            {
+                "symbol": "BTC/USDT:USDT",
+                "side": "short",
+                "contracts": self.contracts,
+                "entry_price": 100.0,
+                "mark_price": self.mark,
+            }
+        ]
+
+    def fetch_ohlcv(self, symbol: str, timeframe: str = "1m", limit: int | None = None) -> list[list[float]]:
+        rows = []
+        close = self.mark
+        for index in range(limit or 15):
+            rows.append([index, close, close + 1.0, close - 1.0, close, 1.0])
+        return rows
+
+    def privateGetTradeOrdersAlgoPending(self, request: dict) -> dict:
+        return {
+            "data": [
+                {
+                    "algoId": "short-sl-algo-1",
+                    "instId": request.get("instId"),
+                    "posSide": "short",
+                    "slTriggerPx": str(self.current_sl),
+                    "slOrdPx": "-1",
+                }
+            ]
+        }
+
 
 class TrailingStopTest(TestCase):
     def _config(self) -> dict:
@@ -428,6 +460,46 @@ class TrailingStopTest(TestCase):
         self.assertEqual(result["amended"], 1)
         self.assertEqual(exchange.amend_requests[0]["algoId"], "sl-algo-1")
         self.assertIsNone(result["items"][0].get("protection_error"))
+
+    def test_profit_step_waits_when_short_sl_would_be_below_mark(self) -> None:
+        config = self._config()
+        config["trailing_stop"]["partial_take_profit"] = {
+            "enabled": True,
+            "trigger_tp_progress": 0.7,
+            "close_fraction": 0.3,
+            "remaining_sl_buffer_r": 0.1,
+            "tp_extension_fraction": 0.3,
+            "sl_buffer_r_by_step": [0.1, 0.5, 1.0],
+        }
+        insert_trade_execution_row(
+            config,
+            {
+                "created_at": "2026-07-19T00:00:00+00:00",
+                "updated_at": "2026-07-19T00:00:00+00:00",
+                "symbol": "BTC/USDT:USDT",
+                "side": "SHORT",
+                "status": "OPEN",
+                "entry_price": 100.0,
+                "stop_loss": 95.0,
+                "take_profit": 87.0,
+                "quantity": 1.0,
+                "initial_entry_price": 100.0,
+                "initial_stop_loss": 110.0,
+                "partial_take_profit_done": True,
+                "partial_take_profit_original_tp": 90.0,
+                "partial_take_profit_extended_tp": 87.0,
+                "profit_extension_step": 2,
+            },
+        )
+        exchange = FakeShortTrailingExchange(mark=90.5, current_sl=95.0)
+
+        with patch("crypto_trader.trailing_stop.create_exchange", return_value=exchange):
+            result = run_trailing_stop_cycle(config)
+
+        self.assertEqual(result["amended"], 0)
+        self.assertEqual(exchange.amend_requests, [])
+        self.assertEqual(result["items"][0]["status"], "waiting")
+        self.assertEqual(result["items"][0]["reason"], "proposed SL trigger is invalid for current mark price")
 
     def test_partial_take_profit_marks_manual_reduction_and_only_amends_targets(self) -> None:
         config = self._config()
