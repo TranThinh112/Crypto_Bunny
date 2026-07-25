@@ -587,12 +587,16 @@ def format_partial_take_profit_message(config: dict[str, Any], event: dict[str, 
     trade_id = event.get("trade_execution_id") or event.get("id") or "-"
     close_pct = (_float(event.get("close_fraction")) or 0.0) * 100
     manual_partial = bool(event.get("manual_partial_detected"))
+    manual_source = str(event.get("manual_partial_source") or "").strip()
+    history_confirmed = manual_partial and manual_source == "okx_fills"
     partial_action = (
-        f"\u2705 \u0110\u00e3 ghi nh\u1eadn ch\u1ed1t {fmt(close_pct, 0)}% v\u1ecb th\u1ebf"
+        f"\u2705 \u0110\u00e3 x\u00e1c nh\u1eadn b\u1ea1n ch\u1ed1t {fmt(close_pct, 0)}% v\u1ecb th\u1ebf"
+        if history_confirmed
+        else f"\u2705 Ph\u00e1t hi\u1ec7n v\u1ecb th\u1ebf \u0111\u00e3 gi\u1ea3m {fmt(close_pct, 0)}%"
         if manual_partial
         else f"\u2705 \u0110\u00e3 ch\u1ed1t {fmt(close_pct, 0)}% v\u1ecb th\u1ebf"
     )
-    partial_pnl = pnl_at(event.get("trigger_price"), event.get("partial_amount"))
+    partial_pnl = _float(event.get("manual_partial_pnl")) if history_confirmed else pnl_at(event.get("trigger_price"), event.get("partial_amount"))
     remaining_amount = _float(event.get("remaining_amount"))
     if remaining_amount is None:
         partial_amount = _float(event.get("partial_amount")) or 0.0
@@ -603,25 +607,32 @@ def format_partial_take_profit_message(config: dict[str, Any], event: dict[str, 
     trigger_progress = _float(((config.get("trailing_stop", {}) or {}).get("partial_take_profit", {}) or {}).get("trigger_tp_progress")) or 0.7
     next_step_trigger = trigger_price(event.get("entry"), event.get("new_take_profit") or event.get("old_take_profit"), trigger_progress)
     protection_error = str(event.get("protection_error") or "").strip()
+    price_label = "Gi\u00e1 ch\u1ed1t th\u1eadt" if history_confirmed else "Gi\u00e1 k\u00edch ho\u1ea1t"
     lines = [
         "\U0001f7e2 N\u1ea4C 1: PARTIAL TP + G\u1ed2NG L\u00c3I",
         "",
         f"{symbol} {side}",
         f"ID l\u1ec7nh: VT #{trade_id}",
         f"Entry: {fmt(event.get('entry'))}",
-        f"Gi\u00e1 k\u00edch ho\u1ea1t: {fmt(event.get('trigger_price'))}",
+        f"{price_label}: {fmt(event.get('trigger_price'))}",
         "",
         partial_action,
         f"Kh\u1ed1i l\u01b0\u1ee3ng: {fmt(event.get('partial_amount'))}",
         f"L\u00e3i \u0111\u00e3 \u0103n: {fmt_usdt(partial_pnl)}",
-        "",
     ]
+    if manual_partial:
+        closed_at = _parse_time(event.get("partial_closed_at"))
+        if closed_at:
+            lines.append(f"Th\u1eddi gian ch\u1ed1t th\u1eadt: {_date_time_seconds_label(closed_at)}")
+        else:
+            lines.append("Th\u1eddi gian: bot ch\u1ec9 m\u1edbi ph\u00e1t hi\u1ec7n qua thay \u0111\u1ed5i kh\u1ed1i l\u01b0\u1ee3ng.")
+    lines.append("")
     if protection_error:
         lines.extend(
             [
                 "\u26a0\ufe0f Ch\u01b0a d\u1eddi SL/TP",
                 f"L\u00fd do: {protection_error}",
-                "Bot \u0111\u00e3 ch\u1ed1t 30% tr\u01b0\u1edbc; ph\u1ea7n SL/TP s\u1ebd \u0111\u01b0\u1ee3c th\u1eed l\u1ea1i khi OKX tr\u1ea3 v\u1ec1 algo b\u1ea3o v\u1ec7.",
+                "Bot s\u1ebd th\u1eed l\u1ea1i ph\u1ea7n SL/TP khi OKX tr\u1ea3 v\u1ec1 algo b\u1ea3o v\u1ec7 v\u00e0 gi\u00e1 h\u1ee3p l\u1ec7.",
             ]
         )
     else:

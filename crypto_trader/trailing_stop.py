@@ -406,6 +406,111 @@ def _partial_already_reduced_amount(
         return reduced
     return None
 
+def _parse_exchange_time(value: Any) -> datetime | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)) or str(value).isdigit():
+        number = float(value)
+        if number > 10_000_000_000:
+            number /= 1000.0
+        return datetime.fromtimestamp(number, tz=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+def _trade_amount(value: Any) -> float | None:
+    number = _float(value)
+    return abs(number) if number is not None else None
+
+def _manual_partial_close_history(
+    exchange: Any,
+    *,
+    symbol: str,
+    side: str,
+    entry: float,
+    amount: float,
+    contract_size: float,
+    since: datetime | None,
+) -> dict[str, Any] | None:
+    if amount <= 0:
+        return None
+    close_side = "sell" if side == "long" else "buy"
+    since_ms = int(since.timestamp() * 1000) if since else None
+    trades: list[dict[str, Any]] = []
+    fetch_my_trades = getattr(exchange, "fetch_my_trades", None)
+    if callable(fetch_my_trades):
+        try:
+            rows = fetch_my_trades(symbol, since=since_ms, limit=100)
+            if isinstance(rows, list):
+                trades.extend(item for item in rows if isinstance(item, dict))
+        except Exception:
+            pass
+    fetch_raw = getattr(exchange, "private_get_trade_fills", None)
+    if not callable(fetch_raw):
+        fetch_raw = getattr(exchange, "privateGetTradeFills", None)
+    if callable(fetch_raw):
+        try:
+            market = exchange.market(symbol) if hasattr(exchange, "market") else {"id": symbol}
+            response = fetch_raw({"instId": str(market.get("id") or symbol), "limit": "100"})
+            rows = response.get("data") if isinstance(response, dict) else response
+            if isinstance(rows, list):
+                trades.extend(item for item in rows if isinstance(item, dict))
+        except Exception:
+            pass
+    if not trades:
+        return None
+    candidates: list[dict[str, Any]] = []
+    for trade in trades:
+        info = trade.get("info") if isinstance(trade.get("info"), dict) else {}
+        trade_side = str(trade.get("side") or info.get("side") or "").strip().lower()
+        pos_side = str(trade.get("posSide") or info.get("posSide") or "").strip().lower()
+        reduce_only = str(trade.get("reduceOnly") or info.get("reduceOnly") or "").strip().lower() in {"1", "true", "yes"}
+        if trade_side and trade_side != close_side:
+            continue
+        if pos_side and pos_side not in {side, "net"}:
+            continue
+        price = _float(trade.get("price") or info.get("fillPx") or info.get("px"))
+        qty = _trade_amount(trade.get("amount") or info.get("fillSz") or info.get("sz"))
+        closed_at = _parse_exchange_time(trade.get("timestamp") or trade.get("datetime") or info.get("ts") or info.get("uTime") or info.get("cTime"))
+        if price is None or qty is None or qty <= 0:
+            continue
+        if since and closed_at and closed_at < since:
+            continue
+        if not reduce_only and not pos_side:
+            continue
+        pnl = _float(trade.get("realizedPnl") or trade.get("pnl") or info.get("fillPnl") or info.get("realizedPnl") or info.get("pnl"))
+        if pnl is None:
+            gross = price - entry if side == "long" else entry - price
+            pnl = gross * qty * contract_size
+        candidates.append({"price": price, "amount": qty, "closed_at": closed_at, "pnl": pnl, "raw": trade})
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item["closed_at"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    selected: list[dict[str, Any]] = []
+    total_amount = 0.0
+    for candidate in candidates:
+        selected.append(candidate)
+        total_amount += float(candidate["amount"])
+        if total_amount + max(amount * 0.02, 1e-8) >= amount:
+            break
+    if not selected:
+        return None
+    weighted_price = sum(float(item["price"]) * float(item["amount"]) for item in selected) / max(total_amount, 1e-12)
+    pnl_total = sum(float(item["pnl"]) for item in selected)
+    closed_at_values = [item["closed_at"] for item in selected if item.get("closed_at") is not None]
+    return {
+        "source": "okx_fills",
+        "price": weighted_price,
+        "amount": total_amount,
+        "pnl": pnl_total,
+        "closed_at": min(closed_at_values).isoformat() if closed_at_values else None,
+        "fills": [item["raw"] for item in selected],
+    }
+
 
 def _evaluate_new_stop(
     *,
@@ -621,6 +726,21 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
                 skipped += 1
                 rows.append(_status_row(symbol, side, "skipped", "invalid partial close amount", contracts=contracts, live_contracts=live_contracts, partial_amount=partial_amount))
                 continue
+            manual_partial_history = None
+            if manually_reduced_amount is not None:
+                manual_partial_history = _manual_partial_close_history(
+                    exchange,
+                    symbol=symbol,
+                    side=side,
+                    entry=initial_entry,
+                    amount=partial_amount,
+                    contract_size=_position_contract_size(position),
+                    since=_parse_exchange_time(execution.get("created_at")),
+                )
+            partial_event_price = _float(manual_partial_history.get("price")) if isinstance(manual_partial_history, dict) else None
+            if partial_event_price is None:
+                partial_event_price = mark
+            partial_event_at = str(manual_partial_history.get("closed_at") or "") if isinstance(manual_partial_history, dict) else ""
             positive_sl = _positive_stop_from_entry(
                 side,
                 initial_entry,
@@ -644,6 +764,7 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
                     "stored_contracts": contracts,
                     "live_contracts": live_contracts,
                     "partial_amount": partial_amount,
+                    "history": manual_partial_history,
                 }
                 if not close_partial_on_exchange
                 else _close_partial_position(exchange, config, symbol=symbol, side=side, amount=partial_amount)
@@ -671,7 +792,7 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
                 "partial_take_profit_at": updated_at,
                 "partial_take_profit_fraction": float(partial_settings.get("close_fraction", 0.3) or 0.3),
                 "partial_take_profit_amount": partial_amount,
-                "partial_take_profit_price": mark,
+                "partial_take_profit_price": partial_event_price,
                 "partial_take_profit_order_json": json.dumps(partial_order, ensure_ascii=False),
                 "partial_take_profit_original_tp": take_profit,
                 "profit_extension_step": 0 if protection_error else 1,
@@ -698,10 +819,14 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
                     "symbol": symbol,
                     "side": side,
                     "mark_price": mark,
+                    "partial_price": partial_event_price,
+                    "partial_closed_at": partial_event_at or None,
                     "close_fraction": float(partial_settings.get("close_fraction", 0.3) or 0.3),
                     "partial_amount": partial_amount,
                     "remaining_amount": max(0.0, live_contracts if manually_reduced_amount is not None else active_contracts - partial_amount),
                     "manual_partial_detected": manually_reduced_amount is not None,
+                    "manual_partial_source": manual_partial_history.get("source") if isinstance(manual_partial_history, dict) else "position_size_delta",
+                    "manual_partial_history": manual_partial_history,
                     "contract_size": _position_contract_size(position),
                     "old_stop_loss": current_sl,
                     "new_stop_loss": None if protection_error else new_sl,
@@ -721,11 +846,16 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
                     "symbol": symbol,
                     "side": side,
                     "entry": initial_entry,
-                    "trigger_price": mark,
+                    "trigger_price": partial_event_price,
+                    "detected_price": mark,
+                    "partial_closed_at": partial_event_at or None,
                     "close_fraction": float(partial_settings.get("close_fraction", 0.3) or 0.3),
                     "partial_amount": partial_amount,
                     "remaining_amount": max(0.0, live_contracts if manually_reduced_amount is not None else active_contracts - partial_amount),
                     "contract_size": _position_contract_size(position),
+                    "manual_partial_detected": manually_reduced_amount is not None,
+                    "manual_partial_source": manual_partial_history.get("source") if isinstance(manual_partial_history, dict) else "position_size_delta",
+                    "manual_partial_pnl": manual_partial_history.get("pnl") if isinstance(manual_partial_history, dict) else None,
                     "old_stop_loss": current_sl,
                     "new_stop_loss": None if protection_error else new_sl,
                     "old_take_profit": take_profit,
@@ -746,6 +876,9 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
                     tp_progress=round(progress, 4),
                     partial_amount=round(partial_amount, 8),
                     manual_partial_detected=manually_reduced_amount is not None,
+                    manual_partial_source=manual_partial_history.get("source") if isinstance(manual_partial_history, dict) else "position_size_delta",
+                    partial_price=round(partial_event_price, 8) if partial_event_price is not None else None,
+                    partial_closed_at=partial_event_at or None,
                     new_stop_loss=None if protection_error else round(new_sl, 8),
                     new_take_profit=None if protection_error or new_tp is None else round(new_tp, 8),
                     protection_error=protection_error,

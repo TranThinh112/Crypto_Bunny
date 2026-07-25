@@ -152,6 +152,20 @@ class FakeShortTrailingExchange(FakeTrailingExchange):
             ]
         }
 
+class FakeTrailingExchangeWithManualFill(FakeTrailingExchange):
+    def fetch_my_trades(self, symbol: str, since: int | None = None, limit: int | None = None) -> list[dict]:
+        return [
+            {
+                "symbol": symbol,
+                "side": "sell",
+                "amount": 0.3,
+                "price": 64890.0,
+                "timestamp": 1784512800000,
+                "reduceOnly": True,
+                "info": {"posSide": "long"},
+            }
+        ]
+
 
 class TrailingStopTest(TestCase):
     def _config(self) -> dict:
@@ -331,7 +345,7 @@ class TrailingStopTest(TestCase):
         )
 
         self.assertIn("ID lệnh: VT #10", message)
-        self.assertIn("Đã ghi nhận chốt 30% vị thế", message)
+        self.assertIn("Phát hiện vị thế đã giảm 30%", message)
         self.assertNotIn("Đã chốt 30% vị thế", message)
         self.assertIn("Nấc tiếp theo kích hoạt khi giá chạm", message)
 
@@ -524,6 +538,34 @@ class TrailingStopTest(TestCase):
         row = list_trade_execution_rows(config, statuses=["OPEN"])[0]
         self.assertTrue(row["partial_take_profit_done"])
         self.assertAlmostEqual(row["partial_take_profit_amount"], 0.3)
+
+    def test_manual_reduction_uses_okx_fill_history_for_price_time_and_pnl(self) -> None:
+        config = self._config()
+        config["trailing_stop"]["partial_take_profit"] = {
+            "enabled": True,
+            "trigger_tp_progress": 0.7,
+            "close_fraction": 0.3,
+            "remaining_sl_buffer_r": 0.1,
+            "tp_extension_fraction": 0.3,
+        }
+        self._insert_open_execution(config)
+        exchange = FakeTrailingExchangeWithManualFill(mark=64700.0, current_sl=64407.0, contracts=0.7)
+
+        with (
+            patch("crypto_trader.trailing_stop.create_exchange", return_value=exchange),
+            patch("crypto_trader.notifier.send_telegram_message", return_value=True) as send_message,
+        ):
+            result = run_trailing_stop_cycle(config)
+
+        self.assertEqual(result["partial_closed"], 1)
+        self.assertEqual(result["items"][0]["manual_partial_source"], "okx_fills")
+        self.assertEqual(result["items"][0]["partial_price"], 64890.0)
+        row = list_trade_execution_rows(config, statuses=["OPEN"])[0]
+        self.assertAlmostEqual(row["partial_take_profit_price"], 64890.0)
+        message = send_message.call_args.args[1]
+        self.assertIn("Giá chốt thật: 64890.000000", message)
+        self.assertIn("Đã xác nhận bạn chốt 30% vị thế", message)
+        self.assertIn("+107.40 USDT", message)
 
     def test_manual_reduction_still_protects_when_price_falls_back_below_trigger(self) -> None:
         config = self._config()
