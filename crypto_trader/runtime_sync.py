@@ -735,6 +735,107 @@ def _pending_algo_targets(exchange: Any) -> dict[tuple[str, str], dict[str, floa
     return targets
 
 
+def _strategy_target_settings(config: dict[str, Any]) -> dict[str, float]:
+    strategy = config.get("strategy", {}) if isinstance(config.get("strategy"), dict) else {}
+    target = strategy.get("target", {}) if isinstance(strategy.get("target"), dict) else {}
+    leverage = max(1.0, _safe_float(config.get("exchange", {}).get("leverage"), 1.0))
+    stop_roi_pct = _safe_float(target.get("stop_loss_pct"), 50.0)
+    take_roi_pct = _safe_float(target.get("take_profit_pct"), 75.0)
+    rr = take_roi_pct / stop_roi_pct if stop_roi_pct > 0 else _safe_float(strategy.get("min_risk_reward"), 1.5)
+    return {
+        "stop_price_pct": stop_roi_pct / leverage,
+        "take_price_pct": take_roi_pct / leverage,
+        "risk_reward": max(0.01, rr or 1.5),
+    }
+
+def _manual_position_targets(
+    config: dict[str, Any],
+    *,
+    side: str,
+    entry: float | None,
+    stop_loss: float | None,
+    take_profit: float | None,
+) -> dict[str, float | None]:
+    if entry is None or entry <= 0:
+        return {"stop_loss": stop_loss, "take_profit": take_profit, "risk_reward": None}
+    settings = _strategy_target_settings(config)
+    rr = settings["risk_reward"]
+    if stop_loss is not None and take_profit is None:
+        risk = abs(entry - stop_loss)
+        take_profit = entry + risk * rr if side == "long" else entry - risk * rr
+    elif take_profit is not None and stop_loss is None:
+        reward = abs(take_profit - entry)
+        risk = reward / rr
+        stop_loss = entry - risk if side == "long" else entry + risk
+    elif stop_loss is None and take_profit is None:
+        stop_move = entry * max(0.0, settings["stop_price_pct"]) / 100.0
+        take_move = entry * max(0.0, settings["take_price_pct"]) / 100.0
+        stop_loss = entry - stop_move if side == "long" else entry + stop_move
+        take_profit = entry + take_move if side == "long" else entry - take_move
+    risk = abs(entry - stop_loss) if stop_loss is not None else None
+    reward = abs(take_profit - entry) if take_profit is not None else None
+    actual_rr = reward / risk if risk and reward is not None else None
+    return {
+        "stop_loss": None if stop_loss is None else round(stop_loss, 8),
+        "take_profit": None if take_profit is None else round(take_profit, 8),
+        "risk_reward": None if actual_rr is None else round(actual_rr, 6),
+    }
+
+def _price_to_precision(exchange: Any, symbol: str, price: float) -> str:
+    method = getattr(exchange, "price_to_precision", None)
+    if callable(method):
+        return str(method(symbol, price))
+    return f"{price:.8f}".rstrip("0").rstrip(".")
+
+def _amount_to_precision(exchange: Any, symbol: str, amount: float) -> str:
+    method = getattr(exchange, "amount_to_precision", None)
+    if callable(method):
+        return str(method(symbol, amount))
+    return f"{amount:.8f}".rstrip("0").rstrip(".")
+
+def _place_missing_position_targets(
+    exchange: Any,
+    config: dict[str, Any],
+    *,
+    symbol: str,
+    side: str,
+    contracts: float,
+    stop_loss: float | None,
+    take_profit: float | None,
+    existing_stop_loss: float | None,
+    existing_take_profit: float | None,
+) -> dict[str, Any]:
+    missing_sl = existing_stop_loss is None and stop_loss is not None
+    missing_tp = existing_take_profit is None and take_profit is not None
+    if not missing_sl and not missing_tp:
+        return {"submitted": False, "reason": "targets already present"}
+    place_algo = getattr(exchange, "privatePostTradeOrderAlgo", None)
+    if not callable(place_algo):
+        place_algo = getattr(exchange, "private_post_trade_order_algo", None)
+    if not callable(place_algo):
+        return {"submitted": False, "error": "OKX order algo endpoint is unavailable"}
+    market = exchange.market(symbol) if hasattr(exchange, "market") else {"id": symbol}
+    inst_id = str(market.get("id") or symbol)
+    trigger_type = str(config.get("trailing_stop", {}).get("trigger_price_type") or "last")
+    payload: dict[str, Any] = {
+        "instId": inst_id,
+        "tdMode": str(config.get("exchange", {}).get("td_mode", "isolated")),
+        "side": "sell" if side == "long" else "buy",
+        "ordType": "oco" if missing_sl and missing_tp else "conditional",
+        "sz": _amount_to_precision(exchange, symbol, contracts),
+    }
+    if config.get("exchange", {}).get("position_side_mode") == "long_short":
+        payload["posSide"] = side
+    if missing_sl and stop_loss is not None:
+        payload.update({"slTriggerPx": _price_to_precision(exchange, symbol, stop_loss), "slOrdPx": "-1", "slTriggerPxType": trigger_type})
+    if missing_tp and take_profit is not None:
+        payload.update({"tpTriggerPx": _price_to_precision(exchange, symbol, take_profit), "tpOrdPx": "-1", "tpTriggerPxType": trigger_type})
+    try:
+        response = place_algo(payload)
+    except Exception as exc:
+        return {"submitted": False, "request": payload, "error": str(exc)}
+    return {"submitted": True, "request": payload, "response": response}
+
 def _fetch_positions_history(exchange: Any, limit: int = 100) -> list[dict[str, Any]]:
     history: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -851,6 +952,7 @@ def _fetch_account_snapshot(config: dict[str, Any]) -> dict[str, Any]:
         "enabled": True,
         "mode": config.get("mode"),
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "_exchange": exchange,
         "positions": positions,
         "open_orders": open_orders,
         "position_targets": _pending_algo_targets(exchange),
@@ -919,6 +1021,7 @@ def sync_exchange_runtime_state(
     created_at = str(snapshot.get("created_at") or datetime.now(timezone.utc).isoformat())
     snapshot_time = _parse_time(created_at) or datetime.now(timezone.utc)
     positions_history = [item for item in (snapshot.get("positions_history") or []) if isinstance(item, dict)]
+    exchange = snapshot.get("_exchange")
     corrected_close_pnls = _correct_recent_exchange_closes_from_history(config, snapshot_time, positions_history)
     backfilled_close_notifications = _backfill_reconciled_exchange_close_notifications(config, snapshot_time, positions_history)
     retried_close_notifications = _retry_unnotified_exchange_closes(config, snapshot_time)
@@ -996,6 +1099,9 @@ def sync_exchange_runtime_state(
     active_position_keys: set[tuple[str, str]] = set()
     matched_execution_ids: set[int] = set()
     positions_synced = 0
+    manual_positions_imported = 0
+    position_targets_submitted = 0
+    position_target_errors = 0
     next_slot = 1
     for position in position_rows:
         info = position.get("info", {}) if isinstance(position.get("info"), dict) else {}
@@ -1018,11 +1124,8 @@ def sync_exchange_runtime_state(
             stop_loss = _float(algo_target.get("stop_loss"))
         if take_profit is None and isinstance(algo_target, dict):
             take_profit = _float(algo_target.get("take_profit"))
-        payload = {
-            "source": "okx_position_sync",
-            "position": to_jsonable(position),
-            "snapshot_created_at": created_at,
-        }
+        okx_stop_loss = stop_loss
+        okx_take_profit = take_profit
         matching_rows = executions_by_key.get(position_key, [])
         matched = matching_rows[0] if matching_rows else None
         if matched:
@@ -1030,6 +1133,39 @@ def sync_exchange_runtime_state(
                 stop_loss = _float(matched.get("stop_loss"))
             if take_profit is None:
                 take_profit = _float(matched.get("take_profit"))
+        target_plan = _manual_position_targets(
+            config,
+            side=side,
+            entry=entry_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+        )
+        stop_loss = _float(target_plan.get("stop_loss"))
+        take_profit = _float(target_plan.get("take_profit"))
+        target_attach_result: dict[str, Any] | None = None
+        if exchange is not None and (okx_stop_loss is None or okx_take_profit is None):
+            target_attach_result = _place_missing_position_targets(
+                exchange,
+                config,
+                symbol=symbol,
+                side=side,
+                contracts=contracts,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                existing_stop_loss=okx_stop_loss,
+                existing_take_profit=okx_take_profit,
+            )
+            if target_attach_result.get("submitted"):
+                position_targets_submitted += 1
+            elif target_attach_result.get("error"):
+                position_target_errors += 1
+        payload = {
+            "source": "okx_position_sync",
+            "position": to_jsonable(position),
+            "snapshot_created_at": created_at,
+            "manual_target_plan": to_jsonable(target_plan),
+            "target_attach_result": to_jsonable(target_attach_result),
+        }
         updates = {
             "updated_at": created_at,
             "status": "OPEN",
@@ -1073,7 +1209,7 @@ def sync_exchange_runtime_state(
                     "take_profit": take_profit,
                     "initial_entry_price": entry_price,
                     "initial_stop_loss": stop_loss,
-                    "risk_reward": None,
+                    "risk_reward": target_plan.get("risk_reward"),
                     "risk_percent": 0,
                     "rule_score": None,
                     "gpt_confidence": None,
@@ -1107,9 +1243,11 @@ def sync_exchange_runtime_state(
                     "latency_ms": None,
                     "snapshot_json": json.dumps(payload, ensure_ascii=False),
                     "entry_mode": config.get("mode"),
+                    "import_source": "manual_okx_position",
                     "exchange_leverage": leverage,
                 },
             )
+            manual_positions_imported += 1
             next_slot += 1
         positions_synced += 1
 
@@ -1148,6 +1286,9 @@ def sync_exchange_runtime_state(
         "open_orders_seen": len(open_orders),
         "positions_synced": positions_synced,
         "orders_synced": orders_synced,
+        "manual_positions_imported": manual_positions_imported,
+        "position_targets_submitted": position_targets_submitted,
+        "position_target_errors": position_target_errors,
         "executions_closed": executions_closed,
         "duplicate_executions_closed": duplicate_executions_closed,
         "reclassified_executions": reclassified_executions,

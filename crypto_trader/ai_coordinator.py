@@ -1251,6 +1251,65 @@ def _candidate_market_summary(
     }
 
 
+def _lc_row_market_summary(row: dict[str, Any], *, compact: bool = True) -> dict[str, Any]:
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    source = payload or row
+    higher_timeframes = source.get("higher_timeframes") if isinstance(source.get("higher_timeframes"), dict) else {}
+    candlestick_patterns = source.get("candlestick_patterns") if isinstance(source.get("candlestick_patterns"), dict) else {}
+    code_timeframe_analysis: list[dict[str, Any]] = []
+    mini_context_4h: dict[str, Any] | None = None
+
+    def frame_payload(frame_name: str, frame_data: dict[str, Any]) -> dict[str, Any]:
+        patterns = frame_data.get("candlestick_patterns") if isinstance(frame_data.get("candlestick_patterns"), dict) else frame_data
+        if not isinstance(patterns, dict):
+            patterns = {}
+        return {
+            "timeframe": str(frame_name),
+            "direction": patterns.get("direction"),
+            "trend_context": patterns.get("trend_context"),
+            "strongest_pattern": patterns.get("strongest_pattern"),
+            "signal_summary": patterns.get("signal_summary"),
+            "reversal_patterns": patterns.get("reversal_patterns"),
+            "pattern_details": list(patterns.get("pattern_details") or [])[:3],
+            "trend": frame_data.get("trend"),
+            "rsi": frame_data.get("rsi"),
+            "ema_gap_pct": frame_data.get("ema_gap_pct"),
+            "price_vs_ema_slow_pct": frame_data.get("price_vs_ema_slow_pct"),
+            "range_position": frame_data.get("range_position"),
+        }
+
+    for frame_name, frame_data in higher_timeframes.items():
+        if not isinstance(frame_data, dict):
+            continue
+        summary = frame_payload(str(frame_name), frame_data)
+        if str(frame_name).lower() == "4h":
+            mini_context_4h = summary
+        elif str(frame_name).lower() in {"5m", "15m", "1h"}:
+            code_timeframe_analysis.append(summary)
+    if not mini_context_4h and isinstance(candlestick_patterns.get("4h"), dict):
+        mini_context_4h = frame_payload("4h", candlestick_patterns["4h"])
+
+    return {
+        "symbol": source.get("symbol") or row.get("symbol"),
+        "side": source.get("side") or row.get("side"),
+        "confidence": source.get("confidence") or row.get("confidence"),
+        "win_probability_pct": source.get("win_probability_pct") or row.get("win_probability_pct"),
+        "risk_reward": source.get("risk_reward") or row.get("risk_reward"),
+        "entry": source.get("entry") or row.get("entry") or row.get("price"),
+        "stop_loss": source.get("stop_loss") or row.get("stop_loss"),
+        "take_profit": source.get("take_profit") or row.get("take_profit"),
+        "spread_pct": source.get("spread_pct") or row.get("spread_pct"),
+        "news_score": source.get("news_score") or row.get("news_score"),
+        "news_count": source.get("news_count") or row.get("news_count"),
+        "indicator_summary": _compact_indicator_summary(source.get("indicator_summary") or {}),
+        "code_timeframe_analysis": code_timeframe_analysis[:3] if compact else code_timeframe_analysis,
+        "mini_context_4h": mini_context_4h,
+        "rolling_scan_memory": {},
+        "reasons": list(source.get("reasons") or row.get("reasons") or [])[:3 if compact else 6],
+        "warnings": list(source.get("warnings") or row.get("warnings") or [])[:2 if compact else 4],
+    }
+
+
 def _local_market_scan_result(config: dict[str, Any], candidates: list[TradeCandidate], warnings: list[str]) -> dict[str, Any]:
     internal_config = ai_config(config).get("internal", {})
     threshold = float(
@@ -1486,69 +1545,26 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
                 "selected_symbols": [],
                 "approved_symbols": [],
             }
-    max_source_symbols = max(1, min(30, int(internal_config.get("market_scan_source_symbols", 30) or 30)))
     max_symbols = max(1, min(3, int(internal_config.get("market_scan_max_symbols", 3) or 3)))
     pending_limit = max(1, min(max_symbols, int(internal_config.get("market_scan_pending_limit", 1) or 1)))
     compact_payload = bool(internal_config.get("compact_ai_payload", True))
-    prefetched_market_data = prefetch_market_data(config, require_all_tickers=True)
-    base_source_symbols, source_warnings = fetch_top_volume_symbols(config, market_data=prefetched_market_data)
-    if base_source_symbols:
-        base_source_symbols = base_source_symbols[:max_source_symbols]
-        source = "okx_top_volume_24h"
-    else:
-        base_source_symbols = [str(symbol) for symbol in config.get("strategy", {}).get("symbols", []) if str(symbol)]
-        source = "configured_fallback"
-    latest_four_hour_symbols = lc_pipeline_four_hour_symbols(config)
-    source_symbols = _ordered_unique_symbols(base_source_symbols + latest_four_hour_symbols)
-    if latest_four_hour_symbols:
-        source = f"{source}+latest_lc_4h"
-
-    warnings: list[str] = list(source_warnings)
-    digest = collect_news(config)
-    snapshots, market_warnings = fetch_market_snapshots(config, source_symbols, market_data=prefetched_market_data)
-    apply_news_scores_to_snapshots(snapshots, digest)
-    warnings.extend(market_warnings)
-    market_layers: dict[str, dict[str, Any]] = {}
-    if config.get("market_guard", {}).get("use_memory_in_strategy", True):
-        try:
-            market_layers = market_guard_symbol_layers(config, source_symbols)
-        except Exception as exc:
-            warnings.append(f"Market guard memory unavailable: {exc}")
-    candidates = build_candidates(config, snapshots, digest, limit=None, market_layers=market_layers)
-    try:
-        apply_position_sizing(config, candidates)
-    except Exception as exc:
-        if not is_retryable_storage_error(exc):
-            raise
-        warnings.append(_storage_warning("Position sizing state", exc))
-        _block_candidates_for_storage_hold(
-            candidates,
-            "Position sizing state unavailable; mini scan is holding new entries until storage recovers",
-        )
-    warnings.extend(enrich_quantities(config, candidates))
-    snapshots_by_symbol = {snapshot.symbol: snapshot for snapshot in snapshots}
-    scan_memory = recent_market_scan_memory(
-        config,
-        symbols=source_symbols,
-        timeframes=["5m", "1h", "4h"] if compact_payload else ["1m", "5m", "15m", "1h", "4h"],
-        lookback_hours=12,
-        per_symbol_timeframe_limit=1 if compact_payload else 3,
-    )
-    ranked_candidates = lc_pipeline_mini_pool(config, candidates, limit=max_symbols)
-    market_pattern_result = analyze_market_pattern_snapshots(
-        config,
-        [snapshots_by_symbol[candidate.symbol] for candidate in ranked_candidates[:max_symbols] if candidate.symbol in snapshots_by_symbol],
-        correlation_id=f"mini_scan:{slot_id}",
-        source="internal_market_scan",
-    )
-    attach_market_pattern_features_to_candidates(ranked_candidates, market_pattern_result.get("by_symbol") or {})
-    warnings.extend(str(item) for item in (market_pattern_result.get("warnings") or [])[:5])
-    candidate_summaries = [
-        _candidate_market_summary(candidate, scan_memory_by_symbol=scan_memory, compact=compact_payload)
-        for candidate in ranked_candidates[:max_symbols]
-    ]
+    current_four_hour = _current_four_hour_event_for_market_scan(config, now)
+    four_hour_rows = [row for row in list((current_four_hour or {}).get("approved") or []) if isinstance(row, dict)]
+    four_hour_rows = four_hour_rows[:max_symbols]
+    source_symbols = _ordered_unique_symbols([row.get("symbol") for row in four_hour_rows])
+    warnings: list[str] = []
+    candidate_summaries = [_lc_row_market_summary(row, compact=compact_payload) for row in four_hour_rows]
     mini_candidate_symbols = [str(item.get("symbol")) for item in candidate_summaries if item.get("symbol")]
-    local_result = _local_market_scan_result(config, candidates, warnings)
+    local_result = {
+        "provider": "lc_4h_pool",
+        "decision": "direct_to_mini",
+        "selection_checks": ["lc_4h_approved"],
+        "qualified_symbols": list(mini_candidate_symbols),
+        "approved_symbols": list(mini_candidate_symbols),
+        "approved_count": len(mini_candidate_symbols),
+        "candidate_count": len(candidate_summaries),
+        "warnings": warnings,
+    }
     has_mini_pool = len(mini_candidate_symbols) > 0
     if mini_candidate_symbols:
         local_result = {
@@ -1572,30 +1588,26 @@ def run_internal_market_scan(config: dict[str, Any], *, force: bool = False) -> 
         "created_at": now.isoformat(),
         "slot_id": slot_id,
         "slot_start": slot_start.isoformat() if slot_start else None,
-        "status": "scanning",
+        "status": "calling_mini",
         "interval_seconds": internal_market_scan_interval(config),
         "provider": str(internal_config.get("provider", "local_policy") or "local_policy"),
         "model": str(internal_config.get("model", "gpt-5.4-mini")),
-        "source": source,
+        "source": "latest_lc_4h",
         "source_symbols": source_symbols,
-        "source_base_symbols": list(base_source_symbols),
-        "source_four_hour_symbols": list(latest_four_hour_symbols),
-        "candidate_count": len(candidates),
-        "market_pattern_engine": {
-            "enabled": market_pattern_result.get("enabled"),
-            "source": market_pattern_result.get("source"),
-            "analyzed": market_pattern_result.get("analyzed"),
-            "symbols": list((market_pattern_result.get("by_symbol") or {}).keys()),
-            "warnings": (market_pattern_result.get("warnings") or [])[:5],
-        },
+        "source_base_symbols": [],
+        "source_four_hour_symbols": list(source_symbols),
+        "candidate_count": len(candidate_summaries),
+        "market_pattern_engine": {},
         "local_policy": local_result,
         "pool_symbols": list(mini_candidate_symbols or []),
         "selected_symbols": list((local_result.get("approved_symbols") or [])[:pending_limit]),
         "approved_symbols": list((local_result.get("approved_symbols") or [])[:pending_limit]),
         "candidates": candidate_summaries[:max_symbols],
-        "scan_memory": scan_memory if not compact_payload else {},
+        "scan_memory": {},
         "compact_ai_payload": compact_payload,
         "warnings": warnings[:20],
+        "four_hour_slot": (current_four_hour or {}).get("slot") or (current_four_hour or {}).get("created_at"),
+        "four_hour_index": (current_four_hour or {}).get("index"),
     }
     result["decision_reason_vi"] = "Mini đang chờ hoàn tất bước chọn cuối cùng."
     saved_result = save_lc_pipeline_mini_scan(config, result)

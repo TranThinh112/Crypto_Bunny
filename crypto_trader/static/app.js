@@ -4615,10 +4615,12 @@ function renderTradeExecutionClosedList(items) {
       ${rows.map((item) => {
         const reason = String(item.close_reason || "-");
         const reasonTone = reason === "take_profit" ? "take-profit" : reason === "stop_loss" ? "stop-loss" : "neutral";
+        const status = String(item.status || "-").toUpperCase();
+        const rowTone = status === "WIN" ? "win" : status === "LOSS" ? "loss" : "neutral";
         return `
-          <div class="trade-execution-closed-row ${reasonTone}">
+          <div class="trade-execution-closed-row ${rowTone}">
             <span>${escapeHtml(item.symbol || "-")}</span>
-            <strong>${escapeHtml(item.status || "-")}</strong>
+            <strong>${escapeHtml(status)}</strong>
             <span class="trade-execution-close-reason ${reasonTone}">${escapeHtml(reason)}</span>
             <b>${escapeHtml(formatMarketRegimeNumber(item.pnl))}</b>
           </div>

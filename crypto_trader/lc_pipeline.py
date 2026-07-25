@@ -2033,6 +2033,8 @@ def _compact_local_policy(policy: dict[str, Any]) -> dict[str, Any]:
 def _compact_ai_review(review: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(review, dict):
         return {}
+    if not review:
+        return {}
     return {
         "approved_symbols": _symbol_list(review.get("approved_symbols"), limit=3),
         "decision": review.get("decision"),

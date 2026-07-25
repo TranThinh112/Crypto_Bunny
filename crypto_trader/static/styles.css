@@ -3286,12 +3286,12 @@ body.dark-mode .position-management-flow span {
   text-align: right;
 }
 
-.trade-execution-closed-row.take-profit {
+.trade-execution-closed-row.win {
   border-color: rgba(34, 197, 94, 0.35);
   background: rgba(34, 197, 94, 0.06);
 }
 
-.trade-execution-closed-row.stop-loss {
+.trade-execution-closed-row.loss {
   border-color: rgba(239, 68, 68, 0.35);
   background: rgba(239, 68, 68, 0.06);
 }
@@ -3315,6 +3315,11 @@ body.dark-mode .position-management-flow span {
 .trade-execution-close-reason.stop-loss {
   color: var(--red);
   background: rgba(239, 68, 68, 0.12);
+}
+
+.trade-execution-close-reason.neutral {
+  color: #c4b5fd;
+  background: rgba(167, 139, 250, 0.14);
 }
 
 .market-regime-legend-btn {

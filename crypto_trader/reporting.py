@@ -516,6 +516,7 @@ def format_partial_take_profit_message(config: dict[str, Any], event: dict[str, 
     extended_tp_pnl = pnl_at(event.get("new_take_profit"), remaining_amount)
     trigger_progress = _float(((config.get("trailing_stop", {}) or {}).get("partial_take_profit", {}) or {}).get("trigger_tp_progress")) or 0.7
     next_step_trigger = trigger_price(event.get("entry"), event.get("new_take_profit") or event.get("old_take_profit"), trigger_progress)
+    protection_error = str(event.get("protection_error") or "").strip()
     lines = [
         "\U0001f7e2 N\u1ea4C 1: PARTIAL TP + G\u1ed2NG L\u00c3I",
         "",
@@ -528,18 +529,31 @@ def format_partial_take_profit_message(config: dict[str, Any], event: dict[str, 
         f"Kh\u1ed1i l\u01b0\u1ee3ng: {fmt(event.get('partial_amount'))}",
         f"L\u00e3i \u0111\u00e3 \u0103n: {fmt_usdt(partial_pnl)}",
         "",
-        "\U0001f6e1\ufe0f SL \u0111\u00e3 k\u00e9o d\u01b0\u01a1ng",
-        f"{fmt(event.get('old_stop_loss'))} \u2192 {fmt(event.get('new_stop_loss'))}",
-        f"M\u1ee9c n\u00e0y b\u1ea3o v\u1ec7: {fmt_usdt(protected_sl_pnl)}",
-        "",
-        "\U0001f3af TP1 \u0111\u00e3 n\u00e2ng l\u00ean TP2",
-        f"{fmt(event.get('old_take_profit'))} \u2192 {fmt(event.get('new_take_profit'))}",
-        f"N\u1ebfu ch\u1ea1m TP m\u1edbi: {fmt_usdt(extended_tp_pnl)}",
-        f"N\u1ea5c ti\u1ebfp theo k\u00edch ho\u1ea1t khi gi\u00e1 ch\u1ea1m: {fmt(next_step_trigger)}",
-        "",
-        "Ph\u1ea7n c\u00f2n l\u1ea1i s\u1ebd \u0111\u01b0\u1ee3c g\u1ed3ng t\u1edbi TP m\u1edbi.",
-        "C\u00e1c n\u1ea5c sau bot kh\u00f4ng ch\u1ed1t th\u00eam, ch\u1ec9 n\u00e2ng TP/SL t\u1ed1i \u0111a 3 n\u1ea5c.",
     ]
+    if protection_error:
+        lines.extend(
+            [
+                "\u26a0\ufe0f Ch\u01b0a d\u1eddi SL/TP",
+                f"L\u00fd do: {protection_error}",
+                "Bot \u0111\u00e3 ch\u1ed1t 30% tr\u01b0\u1edbc; ph\u1ea7n SL/TP s\u1ebd \u0111\u01b0\u1ee3c th\u1eed l\u1ea1i khi OKX tr\u1ea3 v\u1ec1 algo b\u1ea3o v\u1ec7.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "\U0001f6e1\ufe0f SL \u0111\u00e3 k\u00e9o d\u01b0\u01a1ng",
+                f"{fmt(event.get('old_stop_loss'))} \u2192 {fmt(event.get('new_stop_loss'))}",
+                f"M\u1ee9c n\u00e0y b\u1ea3o v\u1ec7: {fmt_usdt(protected_sl_pnl)}",
+                "",
+                "\U0001f3af TP1 \u0111\u00e3 n\u00e2ng l\u00ean TP2",
+                f"{fmt(event.get('old_take_profit'))} \u2192 {fmt(event.get('new_take_profit'))}",
+                f"N\u1ebfu ch\u1ea1m TP m\u1edbi: {fmt_usdt(extended_tp_pnl)}",
+                f"N\u1ea5c ti\u1ebfp theo k\u00edch ho\u1ea1t khi gi\u00e1 ch\u1ea1m: {fmt(next_step_trigger)}",
+                "",
+                "Ph\u1ea7n c\u00f2n l\u1ea1i s\u1ebd \u0111\u01b0\u1ee3c g\u1ed3ng t\u1edbi TP m\u1edbi.",
+                "C\u00e1c n\u1ea5c sau bot kh\u00f4ng ch\u1ed1t th\u00eam, ch\u1ec9 n\u00e2ng TP/SL t\u1ed1i \u0111a 3 n\u1ea5c.",
+            ]
+        )
     return "\n".join(lines)
 
 def format_profit_extension_step_message(config: dict[str, Any], event: dict[str, Any]) -> str:

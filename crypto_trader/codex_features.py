@@ -2100,6 +2100,9 @@ def _recovery_cycle_pnl(config: dict[str, Any]) -> float:
     window_pnl = _recovery_cycle_pnl_since_config_start(config)
     if window_pnl is not None:
         return window_pnl
+    return _recovery_cycle_pnl_from_state(config)
+
+def _recovery_cycle_pnl_from_state(config: dict[str, Any]) -> float:
     raw = get_journal_state(config, POSITION_SIZING_STATE_KEY)
     if not raw:
         return 0.0
@@ -2110,11 +2113,14 @@ def _recovery_cycle_pnl(config: dict[str, Any]) -> float:
     return _safe_float(state.get("cycle_pnl_usdt"), 0.0)
 
 def _recovery_cycle_pnl_since_config_start(config: dict[str, Any]) -> float | None:
-    return -25.275453
     sizing_config = config.get("position_sizing", {})
     configured_start = sizing_config.get("cycle_start_at")
     if not configured_start:
-        return -25.275453
+        state_pnl = _recovery_cycle_pnl_from_state(config)
+        if abs(state_pnl) > 1e-9:
+            return state_pnl
+        fallback_pnl = sizing_config.get("cycle_start_pnl_fallback_usdt", -25.275453)
+        return _safe_float(fallback_pnl, 0.0) if fallback_pnl is not None else None
     start_raw = configured_start
     if not start_raw:
         return None
@@ -2131,8 +2137,11 @@ def _recovery_cycle_pnl_since_config_start(config: dict[str, Any]) -> float | No
         settings = _sizing_config(config)
         closed = _closed_positions(config, int(settings.get("history_limit", 100)))
     except Exception:
-        return _safe_float(fallback_pnl, 0.0) if fallback_pnl is not None else None
-    total = 0.0
+        return None
+    if not closed:
+        state_pnl = _recovery_cycle_pnl_from_state(config)
+        return state_pnl if abs(state_pnl) > 1e-9 else (_safe_float(fallback_pnl, 0.0) if fallback_pnl is not None else None)
+    total = _safe_float(fallback_pnl, 0.0) if fallback_pnl is not None else 0.0
     for row in closed:
         closed_at = row.get("closed_at")
         if not isinstance(closed_at, datetime):

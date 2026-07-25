@@ -740,7 +740,7 @@ class AiCoordinatorTest(TestCase):
     @patch("crypto_trader.ai_coordinator.fetch_market_snapshots")
     @patch("crypto_trader.ai_coordinator.fetch_top_volume_symbols")
     @patch("crypto_trader.ai_coordinator.collect_news")
-    def test_internal_market_scan_fetches_latest_four_hour_symbols_into_source_universe(
+    def test_internal_market_scan_sends_latest_four_hour_symbols_directly_to_mini(
         self,
         collect_news,
         fetch_top_volume_symbols,
@@ -753,41 +753,42 @@ class AiCoordinatorTest(TestCase):
         notify_mini_pool_summary,
     ) -> None:
         config = self._config()
+        now = datetime.now(timezone.utc)
+        slot_id = _internal_market_scan_slot_id(config, now)
         set_journal_state(
             config,
             "lc_internal_pipeline_state",
             json.dumps(
                 {
                     "state_version": 3,
-                    "day_key": "2026-07-06",
+                    "day_key": now.astimezone(timezone(timedelta(hours=7))).date().isoformat(),
                     "four_hour_history": [
                         {
                             "frame": "4h",
-                            "slot": "2026-07-06T08:00:00+07:00",
-                            "created_at": "2026-07-06T01:00:00+00:00",
+                            "slot": slot_id,
+                            "created_at": slot_id,
                             "index": 1,
-                            "approved": [{"symbol": "LIT/USDT:USDT"}],
+                            "approved": [{"symbol": "LIT/USDT:USDT", "side": "LONG", "win_probability_pct": 65.0}],
                         }
                     ],
                 },
                 ensure_ascii=False,
             ),
         )
-        collect_news.return_value = {}
-        fetch_top_volume_symbols.return_value = (["BTC/USDT:USDT"], [])
-        fetch_market_snapshots.return_value = ([], [])
-        market_guard_symbol_layers.return_value = {}
-        build_candidates.return_value = []
-        apply_position_sizing.return_value = None
-        enrich_quantities.return_value = []
-        recent_market_scan_memory_mock.return_value = {}
 
-        run_internal_market_scan(config, force=True)
+        result = run_internal_market_scan(config, force=True)
 
-        self.assertEqual(
-            fetch_market_snapshots.call_args.args[1],
-            ["BTC/USDT:USDT", "LIT/USDT:USDT"],
-        )
+        collect_news.assert_not_called()
+        fetch_top_volume_symbols.assert_not_called()
+        fetch_market_snapshots.assert_not_called()
+        market_guard_symbol_layers.assert_not_called()
+        build_candidates.assert_not_called()
+        apply_position_sizing.assert_not_called()
+        enrich_quantities.assert_not_called()
+        recent_market_scan_memory_mock.assert_not_called()
+        self.assertEqual(result["source"], "latest_lc_4h")
+        self.assertEqual(result["pool_symbols"], ["LIT/USDT:USDT"])
+        self.assertEqual(result["selected_symbols"], ["LIT/USDT:USDT"])
         notify_mini_pool_summary.assert_called_once()
 
     @patch("crypto_trader.ai_coordinator.notify_mini_pool_summary")
@@ -799,7 +800,7 @@ class AiCoordinatorTest(TestCase):
     @patch("crypto_trader.ai_coordinator.fetch_market_snapshots")
     @patch("crypto_trader.ai_coordinator.fetch_top_volume_symbols")
     @patch("crypto_trader.ai_coordinator.collect_news")
-    def test_internal_market_scan_holds_candidates_when_position_sizing_times_out(
+    def test_internal_market_scan_no_longer_runs_position_sizing_prefilter(
         self,
         collect_news,
         fetch_top_volume_symbols,
@@ -812,21 +813,42 @@ class AiCoordinatorTest(TestCase):
         notify_mini_pool_summary,
     ) -> None:
         config = self._config()
-        candidate = _candidate("BTC/USDT:USDT", win=88.0)
-        collect_news.return_value = {}
-        fetch_top_volume_symbols.return_value = (["BTC/USDT:USDT"], [])
-        fetch_market_snapshots.return_value = ([], [])
-        market_guard_symbol_layers.return_value = {}
-        build_candidates.return_value = [candidate]
+        now = datetime.now(timezone.utc)
+        slot_id = _internal_market_scan_slot_id(config, now)
+        set_journal_state(
+            config,
+            "lc_internal_pipeline_state",
+            json.dumps(
+                {
+                    "state_version": 3,
+                    "day_key": now.astimezone(timezone(timedelta(hours=7))).date().isoformat(),
+                    "four_hour_history": [
+                        {
+                            "frame": "4h",
+                            "slot": slot_id,
+                            "created_at": slot_id,
+                            "index": 1,
+                            "approved": [{"symbol": "BTC/USDT:USDT", "side": "LONG", "win_probability_pct": 88.0}],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        )
         apply_position_sizing.side_effect = RuntimeError("read operation timed out")
-        enrich_quantities.return_value = []
-        recent_market_scan_memory_mock.return_value = {}
 
         result = run_internal_market_scan(config, force=True)
 
-        self.assertTrue(any("Position sizing state unavailable" in item for item in result["warnings"]))
-        self.assertEqual(candidate.warnings[0], "Position sizing state unavailable; mini scan is holding new entries until storage recovers")
-        self.assertEqual(candidate.order_usdt, 0.0)
+        collect_news.assert_not_called()
+        fetch_top_volume_symbols.assert_not_called()
+        fetch_market_snapshots.assert_not_called()
+        market_guard_symbol_layers.assert_not_called()
+        build_candidates.assert_not_called()
+        apply_position_sizing.assert_not_called()
+        enrich_quantities.assert_not_called()
+        recent_market_scan_memory_mock.assert_not_called()
+        self.assertEqual(result["pool_symbols"], ["BTC/USDT:USDT"])
+        self.assertEqual(result["warnings"], [])
         notify_mini_pool_summary.assert_called_once()
 
     def test_candidate_summary_separates_4h_context_from_code_timeframes(self) -> None:

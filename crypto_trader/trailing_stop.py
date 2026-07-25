@@ -188,23 +188,61 @@ def _position_r_multiple(side: str, entry: float, initial_stop: float, mark: flo
     return initial_r, open_profit / initial_r
 
 
-def _find_stop_loss_algo(exchange: Any, symbol: str, side: str, current_sl: float | None, settings: dict[str, Any]) -> dict[str, Any] | None:
+def _extract_position_algos(position: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(position, dict):
+        return []
+    info = position.get("info") if isinstance(position.get("info"), dict) else {}
+    raw_values = (
+        position.get("closeOrderAlgo"),
+        position.get("close_order_algo"),
+        info.get("closeOrderAlgo"),
+        info.get("close_order_algo"),
+    )
+    rows: list[dict[str, Any]] = []
+    for raw in raw_values:
+        value = raw
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                continue
+        if isinstance(value, dict):
+            rows.append(value)
+        elif isinstance(value, list):
+            rows.extend(item for item in value if isinstance(item, dict))
+    return rows
+
+def _find_stop_loss_algo(
+    exchange: Any,
+    symbol: str,
+    side: str,
+    current_sl: float | None,
+    settings: dict[str, Any],
+    position: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     market = exchange.market(symbol) if hasattr(exchange, "market") else {"id": symbol}
     inst_id = str(market.get("id") or symbol)
     fetch_algos = getattr(exchange, "privateGetTradeOrdersAlgoPending", None)
     if not callable(fetch_algos):
         fetch_algos = getattr(exchange, "private_get_trade_orders_algo_pending", None)
-    if not callable(fetch_algos):
-        return None
-    rows: list[Any] = []
-    for ord_type in settings.get("algo_order_types") or ["oco", "conditional", "trigger"]:
-        try:
-            response = fetch_algos({"instId": inst_id, "ordType": str(ord_type)})
-        except Exception:
-            continue
-        chunk = response.get("data") if isinstance(response, dict) else response
-        if isinstance(chunk, list):
-            rows.extend(chunk)
+    rows: list[Any] = _extract_position_algos(position)
+    if callable(fetch_algos):
+        ord_types = [str(item) for item in (settings.get("algo_order_types") or ["oco", "conditional", "trigger"]) if str(item).strip()]
+        requests = [{"instId": inst_id, "ordType": ord_type} for ord_type in ord_types]
+        requests.append({"instId": inst_id})
+        seen_requests: set[tuple[tuple[str, str], ...]] = set()
+        for request in requests:
+            request_key = tuple(sorted((str(key), str(value)) for key, value in request.items()))
+            if request_key in seen_requests:
+                continue
+            seen_requests.add(request_key)
+            try:
+                response = fetch_algos(request)
+            except Exception:
+                continue
+            chunk = response.get("data") if isinstance(response, dict) else response
+            if isinstance(chunk, list):
+                rows.extend(chunk)
     if not rows:
         return None
     candidates: list[dict[str, Any]] = []
@@ -506,7 +544,7 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
         initial_entry = _initial_entry(execution, entry)
         initial_sl = _initial_stop_loss(execution)
         current_sl = _float(execution.get("stop_loss")) or initial_sl
-        algo = _find_stop_loss_algo(exchange, symbol, side, current_sl, settings)
+        algo = _find_stop_loss_algo(exchange, symbol, side, current_sl, settings, position)
         if algo is not None:
             algo_sl = _float(algo.get("slTriggerPx") or algo.get("slOrdPx"))
             if algo_sl is not None:
@@ -558,10 +596,6 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
                     )
                 )
                 continue
-            if algo is None:
-                skipped += 1
-                rows.append(_status_row(symbol, side, "skipped", "OKX SL/TP algo order not found"))
-                continue
             if live_position is None:
                 skipped += 1
                 rows.append(_status_row(symbol, side, "skipped", "position no longer open before partial close"))
@@ -602,30 +636,40 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
                 if not close_partial_on_exchange
                 else _close_partial_position(exchange, config, symbol=symbol, side=side, amount=partial_amount)
             )
-            amend_result = _amend_stop_loss(exchange, symbol, algo, new_sl, settings, new_tp=new_tp)
+            protection_error = None
+            amend_result: dict[str, Any] = {}
+            if algo is None:
+                protection_error = "OKX SL/TP algo order not found"
+                amend_result = {"error": protection_error}
+            else:
+                amend_result = _amend_stop_loss(exchange, symbol, algo, new_sl, settings, new_tp=new_tp)
             updated_at = datetime.now(timezone.utc).isoformat()
-            update_trade_execution(
-                config,
-                int(execution["id"]),
-                {
-                    "updated_at": updated_at,
-                    "stop_loss": new_sl,
-                    "take_profit": new_tp if new_tp is not None else take_profit,
-                    "initial_entry_price": initial_entry,
-                    "initial_stop_loss": initial_sl,
-                    "partial_take_profit_done": True,
-                    "partial_take_profit_at": updated_at,
-                    "partial_take_profit_fraction": float(partial_settings.get("close_fraction", 0.3) or 0.3),
-                    "partial_take_profit_amount": partial_amount,
-                    "partial_take_profit_price": mark,
-                    "partial_take_profit_order_json": json.dumps(partial_order, ensure_ascii=False),
-                    "partial_take_profit_original_tp": take_profit,
-                    "partial_take_profit_extended_tp": new_tp,
-                    "profit_extension_step": 1,
-                    "trailing_stop_updated_at": updated_at,
-                    "trailing_stop_r_multiple": round(r_multiple, 6),
-                },
-            )
+            updates = {
+                "updated_at": updated_at,
+                "initial_entry_price": initial_entry,
+                "initial_stop_loss": initial_sl,
+                "partial_take_profit_done": True,
+                "partial_take_profit_at": updated_at,
+                "partial_take_profit_fraction": float(partial_settings.get("close_fraction", 0.3) or 0.3),
+                "partial_take_profit_amount": partial_amount,
+                "partial_take_profit_price": mark,
+                "partial_take_profit_order_json": json.dumps(partial_order, ensure_ascii=False),
+                "partial_take_profit_original_tp": take_profit,
+                "profit_extension_step": 0 if protection_error else 1,
+                "trailing_stop_updated_at": updated_at,
+                "trailing_stop_r_multiple": round(r_multiple, 6),
+            }
+            if protection_error:
+                updates["partial_take_profit_protection_error"] = protection_error
+            else:
+                updates.update(
+                    {
+                        "stop_loss": new_sl,
+                        "take_profit": new_tp if new_tp is not None else take_profit,
+                        "partial_take_profit_extended_tp": new_tp,
+                    }
+                )
+            update_trade_execution(config, int(execution["id"]), updates)
             append_trade_execution_event(
                 config,
                 int(execution["id"]),
@@ -641,12 +685,14 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
                     "manual_partial_detected": manually_reduced_amount is not None,
                     "contract_size": _position_contract_size(position),
                     "old_stop_loss": current_sl,
-                    "new_stop_loss": new_sl,
+                    "new_stop_loss": None if protection_error else new_sl,
                     "old_take_profit": take_profit,
-                    "new_take_profit": new_tp,
+                    "new_take_profit": None if protection_error else new_tp,
+                    "protection_error": protection_error,
                     "r_multiple": round(r_multiple, 6),
                     "exchange_order": partial_order,
                     "amend_request": amend_result.get("request"),
+                    "amend_error": amend_result.get("error"),
                 },
             )
             notification_sent = _notify_partial_take_profit(
@@ -662,14 +708,16 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
                     "remaining_amount": max(0.0, live_contracts if manually_reduced_amount is not None else active_contracts - partial_amount),
                     "contract_size": _position_contract_size(position),
                     "old_stop_loss": current_sl,
-                    "new_stop_loss": new_sl,
+                    "new_stop_loss": None if protection_error else new_sl,
                     "old_take_profit": take_profit,
-                    "new_take_profit": new_tp,
+                    "new_take_profit": None if protection_error else new_tp,
+                    "protection_error": protection_error,
                     "partial_at": updated_at,
                 },
             )
             partial_closed += 1
-            amended += 1
+            if not protection_error:
+                amended += 1
             rows.append(
                 _status_row(
                     symbol,
@@ -679,15 +727,18 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
                     tp_progress=round(progress, 4),
                     partial_amount=round(partial_amount, 8),
                     manual_partial_detected=manually_reduced_amount is not None,
-                    new_stop_loss=round(new_sl, 8),
-                    new_take_profit=None if new_tp is None else round(new_tp, 8),
+                    new_stop_loss=None if protection_error else round(new_sl, 8),
+                    new_take_profit=None if protection_error or new_tp is None else round(new_tp, 8),
+                    protection_error=protection_error,
                     notification_sent=notification_sent,
                     amend_request=amend_result.get("request"),
+                    amend_error=amend_result.get("error"),
                 )
             )
             continue
         if partial_enabled and partial_done:
-            current_step = int(_float(execution.get("profit_extension_step")) or 1)
+            current_step_value = _float(execution.get("profit_extension_step"))
+            current_step = int(current_step_value) if current_step_value is not None else 1
             max_steps = int(partial_settings.get("max_extension_steps", 3) or 3)
             if current_step < max_steps:
                 progress = _tp_progress(side, initial_entry, take_profit, mark)

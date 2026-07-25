@@ -15,6 +15,7 @@ from unittest.mock import patch
 from crypto_trader.codex_features import (
     _ai_call_message,
     _compact_candidate_storage_payload,
+    _recovery_cycle_pnl,
     ai_call_decision_stats,
     ai_trade_decision_stats,
     call_openai_json,
@@ -802,6 +803,24 @@ class CodexFeaturesTest(TestCase):
         self.assertIn("Bunny Risk Mode: SOFT RECOVERY", message)
         self.assertIn("Chuyển từ: HARD RECOVERY → SOFT RECOVERY", message)
         self.assertIn("Cycle PnL: -4.8000 USDT", message)
+
+    def test_recovery_cycle_pnl_adds_closed_pnl_to_configured_start(self) -> None:
+        config = self._config()
+        config["position_sizing"] = {
+            "cycle_start_at": "2026-07-24T00:00:00+00:00",
+            "cycle_start_pnl_fallback_usdt": -25.275453,
+        }
+        closed = [
+            {"closed_at": datetime(2026, 7, 24, 23, 19, tzinfo=timezone.utc), "pnl_usdt": 1.574721},
+            {"closed_at": datetime(2026, 7, 24, 21, 26, tzinfo=timezone.utc), "pnl_usdt": 1.942538},
+            {"closed_at": datetime(2026, 7, 25, 3, 55, tzinfo=timezone.utc), "pnl_usdt": 0.04},
+            {"closed_at": datetime(2026, 7, 23, 23, 59, tzinfo=timezone.utc), "pnl_usdt": 99.0},
+        ]
+
+        with patch("crypto_trader.sizing._closed_positions", return_value=closed):
+            pnl = _recovery_cycle_pnl(config)
+
+        self.assertAlmostEqual(pnl, -21.718194, places=6)
 
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_recovery_mode_stays_soft_when_cycle_pnl_negative_and_loss_streak_below_hard(

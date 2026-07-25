@@ -92,6 +92,35 @@ class FakeTrailingExchangePosSideRetry(FakeTrailingExchange):
         return super().create_order(symbol, order_type, side, amount, price, params)
 
 
+class FakeTrailingExchangeNoAlgo(FakeTrailingExchange):
+    def privateGetTradeOrdersAlgoPending(self, request: dict) -> dict:
+        return {"data": []}
+
+
+class FakeTrailingExchangeSnapshotAlgo(FakeTrailingExchangeNoAlgo):
+    def fetch_positions(self) -> list[dict]:
+        rows = super().fetch_positions()
+        rows[0]["info"] = {
+            "closeOrderAlgo": [
+                {
+                    "algoId": "snapshot-sl-algo",
+                    "instId": "BTC-USDT-SWAP",
+                    "posSide": "long",
+                    "slTriggerPx": str(self.current_sl),
+                    "slOrdPx": "-1",
+                }
+            ]
+        }
+        return rows
+
+
+class FakeTrailingExchangeGenericAlgo(FakeTrailingExchange):
+    def privateGetTradeOrdersAlgoPending(self, request: dict) -> dict:
+        if request.get("ordType"):
+            return {"data": []}
+        return super().privateGetTradeOrdersAlgoPending(request)
+
+
 class TrailingStopTest(TestCase):
     def _config(self) -> dict:
         self.tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
@@ -294,6 +323,111 @@ class TrailingStopTest(TestCase):
         self.assertEqual(len(exchange.orders), 1)
         self.assertNotIn("posSide", exchange.orders[0]["params"])
         self.assertTrue(exchange.orders[0]["params"]["reduceOnly"])
+
+    def test_partial_take_profit_closes_even_when_okx_algo_is_missing(self) -> None:
+        config = self._config()
+        config["trailing_stop"]["partial_take_profit"] = {
+            "enabled": True,
+            "trigger_tp_progress": 0.7,
+            "close_fraction": 0.3,
+            "remaining_sl_buffer_r": 0.1,
+            "tp_extension_fraction": 0.3,
+        }
+        self._insert_open_execution(config)
+        exchange = FakeTrailingExchangeNoAlgo(mark=64882.0, current_sl=64407.0)
+
+        with (
+            patch("crypto_trader.trailing_stop.create_exchange", return_value=exchange),
+            patch("crypto_trader.notifier.send_telegram_message", return_value=True) as send_message,
+        ):
+            result = run_trailing_stop_cycle(config)
+
+        self.assertEqual(result["partial_closed"], 1)
+        self.assertEqual(exchange.orders[0]["amount"], "0.3")
+        self.assertEqual(exchange.amend_requests, [])
+        self.assertEqual(result["items"][0]["protection_error"], "OKX SL/TP algo order not found")
+        row = list_trade_execution_rows(config, statuses=["OPEN"])[0]
+        self.assertTrue(row["partial_take_profit_done"])
+        self.assertEqual(row["profit_extension_step"], 0)
+        self.assertAlmostEqual(row["stop_loss"], 64407.0)
+        self.assertAlmostEqual(row["take_profit"], 65032.0)
+        message = send_message.call_args.args[1]
+        self.assertIn("Chưa dời SL/TP", message)
+        self.assertIn("OKX SL/TP algo order not found", message)
+
+    def test_partial_take_profit_retries_step_one_protection_after_missing_algo(self) -> None:
+        config = self._config()
+        config["trailing_stop"]["partial_take_profit"] = {
+            "enabled": True,
+            "trigger_tp_progress": 0.7,
+            "close_fraction": 0.3,
+            "remaining_sl_buffer_r": 0.1,
+            "tp_extension_fraction": 0.3,
+        }
+        self._insert_open_execution(config)
+
+        with (
+            patch("crypto_trader.trailing_stop.create_exchange", return_value=FakeTrailingExchangeNoAlgo(mark=64882.0, current_sl=64407.0)),
+            patch("crypto_trader.notifier.send_telegram_message", return_value=True),
+        ):
+            first = run_trailing_stop_cycle(config)
+
+        self.assertEqual(first["partial_closed"], 1)
+        exchange = FakeTrailingExchange(mark=64882.0, current_sl=64407.0, contracts=0.7)
+        with patch("crypto_trader.trailing_stop.create_exchange", return_value=exchange):
+            second = run_trailing_stop_cycle(config)
+
+        self.assertEqual(second["amended"], 1)
+        self.assertEqual(second["items"][0]["status"], "profit_step_extended")
+        self.assertEqual(second["items"][0]["new_stop_loss"], 64544.5)
+        self.assertEqual(second["items"][0]["new_take_profit"], 65182.0)
+        self.assertEqual(exchange.orders, [])
+        self.assertEqual(exchange.amend_requests[0]["newSlTriggerPx"], "64544.5")
+        self.assertEqual(exchange.amend_requests[0]["newTpTriggerPx"], "65182.0")
+        row = list_trade_execution_rows(config, statuses=["OPEN"])[0]
+        self.assertEqual(row["profit_extension_step"], 1)
+        self.assertAlmostEqual(row["stop_loss"], 64544.5)
+        self.assertAlmostEqual(row["take_profit"], 65182.0)
+
+    def test_partial_take_profit_uses_position_snapshot_algo_when_pending_query_is_empty(self) -> None:
+        config = self._config()
+        config["trailing_stop"]["partial_take_profit"] = {
+            "enabled": True,
+            "trigger_tp_progress": 0.7,
+            "close_fraction": 0.3,
+            "remaining_sl_buffer_r": 0.1,
+            "tp_extension_fraction": 0.3,
+        }
+        self._insert_open_execution(config)
+        exchange = FakeTrailingExchangeSnapshotAlgo(mark=64882.0, current_sl=64407.0)
+
+        with patch("crypto_trader.trailing_stop.create_exchange", return_value=exchange):
+            result = run_trailing_stop_cycle(config)
+
+        self.assertEqual(result["partial_closed"], 1)
+        self.assertEqual(result["amended"], 1)
+        self.assertEqual(exchange.amend_requests[0]["algoId"], "snapshot-sl-algo")
+        self.assertIsNone(result["items"][0].get("protection_error"))
+
+    def test_partial_take_profit_queries_pending_algos_without_ord_type_as_fallback(self) -> None:
+        config = self._config()
+        config["trailing_stop"]["partial_take_profit"] = {
+            "enabled": True,
+            "trigger_tp_progress": 0.7,
+            "close_fraction": 0.3,
+            "remaining_sl_buffer_r": 0.1,
+            "tp_extension_fraction": 0.3,
+        }
+        self._insert_open_execution(config)
+        exchange = FakeTrailingExchangeGenericAlgo(mark=64882.0, current_sl=64407.0)
+
+        with patch("crypto_trader.trailing_stop.create_exchange", return_value=exchange):
+            result = run_trailing_stop_cycle(config)
+
+        self.assertEqual(result["partial_closed"], 1)
+        self.assertEqual(result["amended"], 1)
+        self.assertEqual(exchange.amend_requests[0]["algoId"], "sl-algo-1")
+        self.assertIsNone(result["items"][0].get("protection_error"))
 
     def test_partial_take_profit_marks_manual_reduction_and_only_amends_targets(self) -> None:
         config = self._config()

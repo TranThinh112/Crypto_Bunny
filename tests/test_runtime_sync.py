@@ -20,6 +20,26 @@ from crypto_trader.storage import (
 )
 
 
+class RuntimeSyncExchange:
+    def __init__(self) -> None:
+        self.algo_orders: list[dict] = []
+
+    def market(self, symbol: str) -> dict:
+        base, rest = symbol.split("/", 1)
+        quote = rest.split(":", 1)[0]
+        return {"id": f"{base}-{quote}-SWAP", "symbol": symbol}
+
+    def price_to_precision(self, symbol: str, price: float) -> str:
+        return f"{price:.4f}".rstrip("0").rstrip(".")
+
+    def amount_to_precision(self, symbol: str, amount: float) -> str:
+        return f"{amount:.4f}".rstrip("0").rstrip(".")
+
+    def privatePostTradeOrderAlgo(self, request: dict) -> dict:
+        self.algo_orders.append(dict(request))
+        return {"code": "0", "data": [{"algoId": f"algo-{len(self.algo_orders)}"}]}
+
+
 class RuntimeSyncTest(TestCase):
     def _config(self) -> dict:
         self.tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
@@ -233,6 +253,125 @@ class RuntimeSyncTest(TestCase):
         self.assertEqual(len(executions), 1)
         self.assertEqual(executions[0]["symbol"], "SOL/USDT:USDT")
         self.assertEqual(executions[0]["side"], "LONG")
+        self.assertAlmostEqual(executions[0]["stop_loss"], 77.4915)
+        self.assertAlmostEqual(executions[0]["take_profit"], 87.68775)
+        self.assertAlmostEqual(executions[0]["risk_reward"], 1.5)
+
+    def test_sync_runtime_state_sets_missing_targets_for_manual_position_on_okx(self) -> None:
+        config = self._config()
+        exchange = RuntimeSyncExchange()
+
+        result = sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-07-08T00:00:00+00:00",
+                "_exchange": exchange,
+                "positions": [
+                    {
+                        "symbol": "HYPE/USDT:USDT",
+                        "side": "short",
+                        "contracts": 29,
+                        "entry_price": 58.175,
+                        "mark_price": 57.9,
+                    }
+                ],
+                "open_orders": [],
+            },
+        )
+
+        executions = list_trade_execution_rows(config, statuses=["OPEN"], limit=20)
+        self.assertEqual(result["exchange"]["manual_positions_imported"], 1)
+        self.assertEqual(result["exchange"]["position_targets_submitted"], 1)
+        self.assertEqual(executions[0]["import_source"], "manual_okx_position")
+        self.assertAlmostEqual(executions[0]["stop_loss"], 61.08375)
+        self.assertAlmostEqual(executions[0]["take_profit"], 53.811875)
+        self.assertAlmostEqual(executions[0]["risk_reward"], 1.5)
+        self.assertEqual(exchange.algo_orders[0]["instId"], "HYPE-USDT-SWAP")
+        self.assertEqual(exchange.algo_orders[0]["side"], "buy")
+        self.assertEqual(exchange.algo_orders[0]["ordType"], "oco")
+        self.assertEqual(exchange.algo_orders[0]["slTriggerPx"], "61.0838")
+        self.assertEqual(exchange.algo_orders[0]["tpTriggerPx"], "53.8119")
+
+    def test_sync_runtime_state_derives_missing_tp_from_existing_manual_sl(self) -> None:
+        config = self._config()
+        exchange = RuntimeSyncExchange()
+
+        sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-07-08T00:00:00+00:00",
+                "_exchange": exchange,
+                "positions": [
+                    {
+                        "symbol": "XRP/USDT:USDT",
+                        "side": "long",
+                        "contracts": 100,
+                        "entry_price": 2.0,
+                        "mark_price": 2.01,
+                        "stop_loss": 1.9,
+                    }
+                ],
+                "open_orders": [],
+            },
+        )
+
+        executions = list_trade_execution_rows(config, statuses=["OPEN"], limit=20)
+        self.assertAlmostEqual(executions[0]["stop_loss"], 1.9)
+        self.assertAlmostEqual(executions[0]["take_profit"], 2.15)
+        self.assertEqual(exchange.algo_orders[0]["ordType"], "conditional")
+        self.assertNotIn("slTriggerPx", exchange.algo_orders[0])
+        self.assertEqual(exchange.algo_orders[0]["tpTriggerPx"], "2.15")
+
+    def test_sync_runtime_state_reattaches_stored_targets_when_okx_algo_is_missing(self) -> None:
+        config = self._config()
+        exchange = RuntimeSyncExchange()
+        insert_trade_execution_row(
+            config,
+            {
+                "created_at": "2026-07-07T23:50:00+00:00",
+                "updated_at": "2026-07-07T23:50:00+00:00",
+                "symbol": "BTC/USDT:USDT",
+                "side": "LONG",
+                "status": "OPEN",
+                "entry_price": 64532.0,
+                "stop_loss": 64407.0,
+                "take_profit": 65032.0,
+            },
+        )
+
+        result = sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-07-08T00:00:00+00:00",
+                "_exchange": exchange,
+                "positions": [
+                    {
+                        "symbol": "BTC/USDT:USDT",
+                        "side": "long",
+                        "contracts": 1,
+                        "entry_price": 64532.0,
+                        "mark_price": 64600.0,
+                        "stop_loss": None,
+                        "take_profit": None,
+                    },
+                ],
+                "open_orders": [],
+            },
+        )
+
+        row = list_trade_execution_rows(config, statuses=["OPEN"])[0]
+        self.assertEqual(row["stop_loss"], 64407.0)
+        self.assertEqual(row["take_profit"], 65032.0)
+        self.assertEqual(result["exchange"]["manual_positions_imported"], 0)
+        self.assertEqual(result["exchange"]["position_targets_submitted"], 1)
+        self.assertEqual(exchange.algo_orders[0]["slTriggerPx"], "64407")
+        self.assertEqual(exchange.algo_orders[0]["tpTriggerPx"], "65032")
 
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_sync_closes_open_execution_when_position_disappears(self, send_message) -> None:

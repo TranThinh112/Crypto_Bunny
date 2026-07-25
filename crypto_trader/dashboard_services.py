@@ -115,6 +115,25 @@ def _parse_time(value: Any) -> datetime | None:
     except ValueError:
         return None
 
+def _parse_exchange_time(value: Any) -> datetime | None:
+    if value is None or value == "":
+        return None
+    parsed = _parse_time(value)
+    if parsed is not None:
+        return parsed
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric <= 0:
+        return None
+    if numeric > 1_000_000_000_000:
+        numeric /= 1000.0
+    try:
+        return datetime.fromtimestamp(numeric, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+
 
 def _iso_or_none(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
@@ -978,6 +997,16 @@ def _trade_execution_closed_pnl(row: dict[str, Any]) -> float | None:
             adjusted = True
     return round(pnl + adjustments, 6) if adjusted else pnl
 
+def _trade_execution_exchange_closed_at(row: dict[str, Any]) -> str | None:
+    history = _json_payload(row.get("exchange_close_history_json"))
+    info = history.get("info") if isinstance(history.get("info"), dict) else {}
+    for payload in (history, info):
+        for key in ("timestamp", "lastUpdateTimestamp", "updatedAt", "closed_at", "closedAt", "uTime", "cTime", "closeTime"):
+            parsed = _parse_exchange_time(payload.get(key))
+            if parsed is not None:
+                return parsed.isoformat()
+    return None
+
 def _trade_execution_event_history(row: dict[str, Any]) -> list[dict[str, Any]]:
     raw = row.get("trade_event_history_json")
     if not raw:
@@ -1049,6 +1078,7 @@ def _trade_execution_summary(config: dict[str, Any]) -> dict[str, Any]:
             "status": row.get("status"),
             "close_reason": row.get("close_reason"),
             "closed_at": row.get("closed_at"),
+            "exchange_closed_at": _trade_execution_exchange_closed_at(row),
             "entry_price": row.get("entry_price"),
             "stop_loss": row.get("stop_loss"),
             "take_profit": row.get("take_profit"),
@@ -1061,6 +1091,13 @@ def _trade_execution_summary(config: dict[str, Any]) -> dict[str, Any]:
         }
         for row in closed_rows
     ]
+    closed_items.sort(
+        key=lambda item: (
+            _parse_time(item.get("exchange_closed_at")) or _parse_time(item.get("closed_at")) or datetime.min.replace(tzinfo=timezone.utc),
+            _safe_int(item.get("id"), 0),
+        ),
+        reverse=True,
+    )
     return {
         "ok": error is None,
         "error": error,

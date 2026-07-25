@@ -334,6 +334,35 @@ class SystemChecklistPayloadTests(unittest.TestCase):
 
         self.assertEqual(payload["pending_total"], 4)
 
+    def test_trade_execution_summary_sorts_recent_closed_by_okx_close_time(self) -> None:
+        closed_rows = [
+            {
+                "id": 2,
+                "symbol": "TAO/USDT:USDT",
+                "status": "LOSS",
+                "closed_at": "2026-07-24T13:13:03+00:00",
+                "exchange_close_history_json": json.dumps({"timestamp": 1_774_343_220_000}),
+            },
+            {
+                "id": 9,
+                "symbol": "HYPE/USDT:USDT",
+                "status": "WIN",
+                "closed_at": "2026-07-24T13:08:40+00:00",
+                "exchange_close_history_json": json.dumps({"timestamp": 1_774_362_380_000}),
+            },
+        ]
+
+        def fake_rows(_config, *, statuses=None, **_kwargs):
+            return [] if statuses == ["OPEN"] else closed_rows
+
+        with patch("crypto_trader.dashboard_services.list_trade_execution_rows", side_effect=fake_rows), patch(
+            "crypto_trader.dashboard_services.count_pending_orders", return_value=0
+        ):
+            payload = _trade_execution_summary({})
+
+        self.assertEqual([row["symbol"] for row in payload["recent_closed"][:2]], ["HYPE/USDT:USDT", "TAO/USDT:USDT"])
+        self.assertIsNotNone(payload["recent_closed"][0]["exchange_closed_at"])
+
     def test_profit_protection_prefers_okx_live_sl_tp_over_stored_values(self) -> None:
         row = {
             "side": "long",
