@@ -524,6 +524,32 @@ class SystemChecklistPayloadTests(unittest.TestCase):
         self.assertEqual(levels["remaining_amount"], 17.1)
         self.assertAlmostEqual(levels["tp2"]["pnl"], 1.5561)
 
+    def test_loss_guard_uses_initial_sl_after_stop_has_moved_positive(self) -> None:
+        row = {
+            "side": "short",
+            "created_at": "2026-07-26T00:24:02+00:00",
+            "entry_price": 0.1544,
+            "initial_stop_loss": 0.159,
+            "stop_loss": 0.1498,
+            "take_profit": 0.1411,
+            "quantity": 17.1,
+            "contract_size": 10,
+        }
+        config = {
+            "loss_guard": {
+                "enabled": True,
+                "effective_from": "2026-07-25T12:13:57+00:00",
+                "apply_to_existing_positions": False,
+                "partial_close_r": -0.8,
+                "partial_close_fraction": 0.25,
+            }
+        }
+
+        levels = _trade_execution_profit_protection_levels(row, config=config)
+
+        self.assertIsNotNone(levels["loss_guard"])
+        self.assertAlmostEqual(levels["loss_guard"]["partial_close_price"], 0.15808)
+
     def test_market_pattern_dashboard_uses_app_atlas_database(self) -> None:
         class FakeRepository:
             def __init__(self, *, db, config) -> None:

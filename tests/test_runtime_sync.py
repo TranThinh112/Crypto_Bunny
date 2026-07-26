@@ -336,6 +336,115 @@ class RuntimeSyncTest(TestCase):
         self.assertIn("Khối lượng dự kiến chốt: 8.7", message)
 
     @patch("crypto_trader.notifier.send_telegram_message", return_value=True)
+    def test_sync_runtime_state_uses_position_close_algo_before_reattaching_targets(self, send_message) -> None:
+        config = self._config()
+        exchange = RuntimeSyncExchange()
+
+        result = sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-07-08T00:00:00+00:00",
+                "_exchange": exchange,
+                "positions": [
+                    {
+                        "symbol": "BEAT/USDT:USDT",
+                        "side": "short",
+                        "contracts": 0.7,
+                        "entry_price": 3.3013,
+                        "leverage": 6,
+                        "info": {
+                            "closeOrderAlgo": [
+                                {
+                                    "slTriggerPx": "3.6314",
+                                    "tpTriggerPx": "2.8061",
+                                }
+                            ]
+                        },
+                    }
+                ],
+                "open_orders": [],
+                "position_targets": {},
+            },
+        )
+
+        executions = list_trade_execution_rows(config, statuses=["OPEN"], limit=20)
+        self.assertEqual(result["exchange"]["position_targets_submitted"], 0)
+        self.assertEqual(exchange.algo_orders, [])
+        self.assertEqual(send_message.call_count, 0)
+        self.assertAlmostEqual(executions[0]["stop_loss"], 3.6314)
+        self.assertAlmostEqual(executions[0]["take_profit"], 2.8061)
+
+    def test_sync_imports_reopened_same_symbol_position_as_new_execution(self) -> None:
+        config = self._config()
+        insert_trade_execution_row(
+            config,
+            {
+                "created_at": "2026-07-25T09:42:03+00:00",
+                "updated_at": "2026-07-25T13:27:02+00:00",
+                "symbol": "BEAT/USDT:USDT",
+                "side": "SHORT",
+                "status": "OPEN",
+                "entry_price": 3.3013,
+                "quantity": 0.7,
+                "max_contracts_seen": 0.9,
+                "stop_loss": 3.6314,
+                "take_profit": 2.8061,
+            },
+        )
+
+        result = sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-07-26T06:40:00+00:00",
+                "positions": [
+                    {
+                        "symbol": "BEAT/USDT:USDT",
+                        "side": "short",
+                        "contracts": 2.4,
+                        "entry_price": 3.6107875,
+                        "unrealized_pnl": -0.06,
+                        "info": {
+                            "cTime": "1785047792995",
+                            "pos": "2.4",
+                            "avgPx": "3.6107875",
+                            "closeOrderAlgo": [
+                                {"slTriggerPx": "3.8816", "tpTriggerPx": "3.2046"}
+                            ],
+                        },
+                    }
+                ],
+                "open_orders": [],
+                "position_targets": {},
+                "positions_history": [
+                    {
+                        "instId": "BEAT-USDT-SWAP",
+                        "direction": "short",
+                        "realizedPnl": "-2.7630083471369007",
+                        "pnlRatio": "-0.5579637005900505",
+                        "closeAvgPx": "3.5961222222222222",
+                        "uTime": "1785047740407",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(result["exchange"]["manual_positions_imported"], 1)
+        self.assertEqual(result["exchange"]["executions_closed"], 1)
+        open_rows = list_trade_execution_rows(config, statuses=["OPEN"], limit=20)
+        losses = list_trade_execution_rows(config, statuses=["LOSS"], limit=20)
+        self.assertEqual(len(open_rows), 1)
+        self.assertEqual(len(losses), 1)
+        self.assertAlmostEqual(open_rows[0]["entry_price"], 3.6107875)
+        self.assertAlmostEqual(open_rows[0]["quantity"], 2.4)
+        self.assertAlmostEqual(open_rows[0]["stop_loss"], 3.8816)
+        self.assertAlmostEqual(open_rows[0]["take_profit"], 3.2046)
+        self.assertAlmostEqual(losses[0]["pnl"], -2.7630083471369007)
+
+    @patch("crypto_trader.notifier.send_telegram_message", return_value=True)
     def test_sync_runtime_state_uses_wider_targets_for_high_atr_manual_position(self, _send_message) -> None:
         config = self._config()
         config["exchange"]["leverage"] = 10

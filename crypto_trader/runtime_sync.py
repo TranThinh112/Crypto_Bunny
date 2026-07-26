@@ -72,6 +72,39 @@ def _execution_key(row: dict[str, Any]) -> tuple[str, str]:
     )
 
 
+def _position_opened_at(position: dict[str, Any]) -> datetime | None:
+    info = _payload_info(position)
+    for key in ("timestamp", "created_at", "createdAt"):
+        parsed = _parse_time(position.get(key))
+        if parsed is not None:
+            return parsed
+    for key in ("cTime", "openTime"):
+        parsed = _parse_time(info.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+def _position_matches_execution(row: dict[str, Any], position: dict[str, Any], entry_price: float | None) -> bool:
+    opened_at = _position_opened_at(position)
+    row_created = _parse_time(row.get("created_at"))
+    if opened_at is None or row_created is None:
+        return True
+    if opened_at <= row_created + timedelta(seconds=90):
+        return True
+    row_entry = _float(row.get("entry_price") or row.get("initial_entry_price"))
+    if row_entry is None or entry_price is None or row_entry <= 0:
+        return False
+    entry_diff_pct = abs(entry_price - row_entry) / row_entry * 100.0
+    row_quantity = _float(row.get("quantity") or row.get("max_contracts_seen") or row.get("initial_quantity"))
+    info = _payload_info(position)
+    contracts = abs(_safe_float(position.get("contracts") or info.get("pos"), 0.0))
+    quantity_diff_pct = (
+        abs(contracts - row_quantity) / row_quantity * 100.0
+        if row_quantity is not None and row_quantity > 0
+        else 100.0
+    )
+    return entry_diff_pct < 0.25 and quantity_diff_pct < 25.0
+
 def _status_from_realized_pnl(pnl: float | None) -> str:
     if pnl is None:
         return "CLOSED"
@@ -731,6 +764,28 @@ def _target_from_algo_payload(payload: dict[str, Any]) -> dict[str, float | None
     }
 
 
+def _target_from_position_close_algo(info: dict[str, Any]) -> dict[str, float | None]:
+    close_orders = info.get("closeOrderAlgo") if isinstance(info, dict) else None
+    if isinstance(close_orders, str):
+        try:
+            close_orders = json.loads(close_orders)
+        except json.JSONDecodeError:
+            close_orders = []
+    target = {"stop_loss": None, "take_profit": None}
+    if not isinstance(close_orders, list):
+        return target
+    for item in close_orders:
+        if not isinstance(item, dict):
+            continue
+        item_target = _target_from_algo_payload(item)
+        if target["stop_loss"] is None:
+            target["stop_loss"] = item_target.get("stop_loss")
+        if target["take_profit"] is None:
+            target["take_profit"] = item_target.get("take_profit")
+        if target["stop_loss"] is not None and target["take_profit"] is not None:
+            break
+    return target
+
 def _pending_algo_targets(exchange: Any) -> dict[tuple[str, str], dict[str, float | None]]:
     fetch_algos = getattr(exchange, "privateGetTradeOrdersAlgoPending", None)
     if not callable(fetch_algos):
@@ -1264,6 +1319,7 @@ def sync_exchange_runtime_state(
 
     active_position_keys: set[tuple[str, str]] = set()
     matched_execution_ids: set[int] = set()
+    reopened_execution_ids: set[int] = set()
     positions_synced = 0
     manual_positions_imported = 0
     position_targets_submitted = 0
@@ -1285,6 +1341,11 @@ def sync_exchange_runtime_state(
         leverage = _safe_float(position.get("leverage") or info.get("lever"), _strategy_target_settings(config).get("leverage", 1.0))
         stop_loss = _float(position.get("stop_loss"))
         take_profit = _float(position.get("take_profit"))
+        position_close_target = _target_from_position_close_algo(info)
+        if stop_loss is None:
+            stop_loss = _float(position_close_target.get("stop_loss"))
+        if take_profit is None:
+            take_profit = _float(position_close_target.get("take_profit"))
         algo_target = position_targets.get(position_key, {}) if isinstance(position_targets, dict) else {}
         if stop_loss is None and isinstance(algo_target, dict):
             stop_loss = _float(algo_target.get("stop_loss"))
@@ -1294,6 +1355,9 @@ def sync_exchange_runtime_state(
         okx_take_profit = take_profit
         matching_rows = executions_by_key.get(position_key, [])
         matched = matching_rows[0] if matching_rows else None
+        if matched and not _position_matches_execution(matched, position, entry_price):
+            reopened_execution_ids.add(int(matched["id"]))
+            matched = None
         if matched:
             if stop_loss is None:
                 stop_loss = _float(matched.get("stop_loss"))
@@ -1470,6 +1534,11 @@ def sync_exchange_runtime_state(
             continue
         created_time = _parse_time(row.get("created_at"))
         age_seconds = (snapshot_time - created_time).total_seconds() if created_time else grace_seconds + 1
+        if row_id in reopened_execution_ids:
+            history = _matching_position_history(row, positions_history, snapshot_time)
+            _close_missing_exchange_execution(config, row, closed_at=created_at, history=history)
+            executions_closed += 1
+            continue
         if key not in active_position_keys and age_seconds < grace_seconds:
             continue
         if key in active_position_keys:

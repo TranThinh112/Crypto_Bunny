@@ -46,6 +46,43 @@ def _settings(config: dict[str, Any]) -> dict[str, Any]:
         },
     }
 
+def _loss_guard_settings(config: dict[str, Any]) -> dict[str, Any]:
+    raw = config.get("loss_guard", {}) if isinstance(config.get("loss_guard"), dict) else {}
+    return {
+        "enabled": bool(raw.get("enabled", True)),
+        "effective_from": str(raw.get("effective_from") or ""),
+        "apply_to_existing_positions": bool(raw.get("apply_to_existing_positions", False)),
+        "auto_close_enabled": bool(raw.get("auto_close_enabled", False)),
+        "partial_close_r": float(raw.get("partial_close_r", -0.8) or -0.8),
+        "partial_close_fraction": min(0.9, max(0.01, float(raw.get("partial_close_fraction", 0.25) or 0.25))),
+    }
+
+def _loss_guard_applies(row: dict[str, Any], settings: dict[str, Any]) -> bool:
+    if settings.get("apply_to_existing_positions"):
+        return True
+    effective_raw = str(settings.get("effective_from") or "").strip()
+    if not effective_raw:
+        return False
+    created_raw = row.get("created_at")
+    if not created_raw:
+        return False
+    try:
+        effective_at = datetime.fromisoformat(effective_raw.replace("Z", "+00:00"))
+        created_at = datetime.fromisoformat(str(created_raw).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if effective_at.tzinfo is None:
+        effective_at = effective_at.replace(tzinfo=timezone.utc)
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    return created_at >= effective_at
+
+def _loss_guard_trigger_price(side: str, entry: float, initial_r: float, partial_close_r: float) -> float:
+    return entry + initial_r * partial_close_r if side == "long" else entry - initial_r * partial_close_r
+
+def _loss_guard_trigger_reached(side: str, mark: float, trigger_price: float) -> bool:
+    return mark <= trigger_price if side == "long" else mark >= trigger_price
+
 
 def _position_side(position: dict[str, Any]) -> str:
     info = position.get("info", {}) if isinstance(position.get("info"), dict) else {}
@@ -713,6 +750,80 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
             skipped += 1
             rows.append(_status_row(symbol, side, "skipped", "invalid initial R", entry=initial_entry, initial_stop_loss=initial_sl))
             continue
+        loss_settings = _loss_guard_settings(config)
+        if (
+            loss_settings["enabled"]
+            and loss_settings["auto_close_enabled"]
+            and _loss_guard_applies(execution, loss_settings)
+            and not bool(execution.get("loss_guard_partial_done"))
+        ):
+            loss_trigger_price = _loss_guard_trigger_price(side, initial_entry, initial_r, float(loss_settings["partial_close_r"]))
+            if _loss_guard_trigger_reached(side, mark, loss_trigger_price):
+                live_position = _live_position_for_symbol(exchange, symbol, side)
+                live_contracts = _position_contracts(live_position) if live_position is not None else _position_contracts(position)
+                loss_amount = live_contracts * float(loss_settings["partial_close_fraction"])
+                if live_position is None or live_contracts <= 0 or loss_amount <= 0 or loss_amount >= live_contracts:
+                    skipped += 1
+                    rows.append(
+                        _status_row(
+                            symbol,
+                            side,
+                            "skipped",
+                            "invalid loss guard partial close amount",
+                            live_contracts=live_contracts,
+                            partial_amount=loss_amount,
+                        )
+                    )
+                    continue
+                loss_order = _close_partial_position(exchange, config, symbol=symbol, side=side, amount=loss_amount, position=live_position)
+                updated_at = datetime.now(timezone.utc).isoformat()
+                update_trade_execution(
+                    config,
+                    int(execution["id"]),
+                    {
+                        "updated_at": updated_at,
+                        "loss_guard_partial_done": True,
+                        "loss_guard_partial_at": updated_at,
+                        "loss_guard_partial_fraction": float(loss_settings["partial_close_fraction"]),
+                        "loss_guard_partial_amount": loss_amount,
+                        "loss_guard_partial_price": mark,
+                        "loss_guard_partial_trigger_price": loss_trigger_price,
+                        "loss_guard_partial_r": float(loss_settings["partial_close_r"]),
+                        "loss_guard_partial_order_json": json.dumps(loss_order, ensure_ascii=False),
+                    },
+                )
+                append_trade_execution_event(
+                    config,
+                    int(execution["id"]),
+                    {
+                        "type": "loss_guard_partial_close",
+                        "created_at": updated_at,
+                        "symbol": symbol,
+                        "side": side,
+                        "mark_price": mark,
+                        "trigger_price": loss_trigger_price,
+                        "partial_close_r": float(loss_settings["partial_close_r"]),
+                        "partial_fraction": float(loss_settings["partial_close_fraction"]),
+                        "partial_amount": loss_amount,
+                        "remaining_amount": max(0.0, live_contracts - loss_amount),
+                        "contract_size": _position_contract_size(live_position or position),
+                        "exchange_order": loss_order,
+                    },
+                )
+                partial_closed += 1
+                rows.append(
+                    _status_row(
+                        symbol,
+                        side,
+                        "loss_guard_partial_closed",
+                        "loss guard partial close executed",
+                        r_multiple=round(r_multiple, 4),
+                        trigger_price=round(loss_trigger_price, 8),
+                        mark_price=mark,
+                        partial_amount=round(loss_amount, 8),
+                    )
+                )
+                continue
         take_profit = _float(execution.get("take_profit"))
         partial_settings = settings.get("partial_take_profit", {}) if isinstance(settings.get("partial_take_profit"), dict) else {}
         partial_enabled = bool(partial_settings.get("enabled"))

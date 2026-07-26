@@ -4376,6 +4376,23 @@ function renderProfitProtectionLevel(label, level, tone = "", options = {}) {
   `;
 }
 
+function renderLossGuardLevel(lossGuard) {
+  if (!lossGuard || typeof lossGuard !== "object") return "";
+  const closePct = Math.round((Number(lossGuard.partial_close_fraction) || 0) * 100);
+  const rrValue = nullableNumber(lossGuard.partial_close_r);
+  const rrText = rrValue === null ? "-" : `${Number(rrValue).toFixed(2)}R`;
+  return renderProfitProtectionLevel(`Chốt lỗ ${closePct}%`, {
+    price: lossGuard.partial_close_price,
+    pnl: lossGuard.partial_close_pnl,
+    trigger_price: lossGuard.partial_close_price,
+  }, "loss", {
+    extraRows: [
+      `Tỉ lệ RR: ${rrText}`,
+      `Lỗ dự kiến: ${formatTradeExecutionPnl(lossGuard.partial_close_pnl)}`,
+    ],
+  });
+}
+
 function renderProfitProtectionPositionPanel(item) {
   const levels = item?.profit_protection_levels || {};
   const tpSteps = Array.isArray(levels.tp_steps) ? levels.tp_steps : [];
@@ -4387,11 +4404,6 @@ function renderProfitProtectionPositionPanel(item) {
   const achievedStep = partialDone && Number.isFinite(extensionStep) ? Math.max(0, Math.min(3, extensionStep)) : 0;
   const stepAchieved = (step) => achievedStep >= step;
   const lossGuard = levels.loss_guard && typeof levels.loss_guard === "object" ? levels.loss_guard : null;
-  const lossGuardRows = lossGuard ? [
-    `RR hiện tại: ${nullableNumber(lossGuard.risk_reward) === null ? "-" : `${Number(lossGuard.risk_reward).toFixed(2)}R`}`,
-    `Đóng lỗ ${Math.round((Number(lossGuard.partial_close_fraction) || 0) * 100)}%: ${formatMarketRegimeNumber(lossGuard.partial_close_price)}`,
-    `Lỗ dự kiến: ${formatTradeExecutionPnl(lossGuard.partial_close_pnl)}`,
-  ] : [];
   return `
     <article class="trade-execution-position profit-protection-position">
       <header>
@@ -4402,10 +4414,11 @@ function renderProfitProtectionPositionPanel(item) {
         <span class="market-regime-badge ${partialDone ? "bull" : "unknown"}">${partialDone ? "Partial done" : "Waiting partial"}</span>
       </header>
       <div class="profit-protection-level-grid">
-        ${renderProfitProtectionLevel("SL1 ban đầu", levelByStep(slSteps, 1) || levels.current_sl, "base", { extraRows: lossGuardRows })}
+        ${renderProfitProtectionLevel("SL1 ban đầu", levelByStep(slSteps, 1) || levels.current_sl, "base")}
         ${renderProfitProtectionLevel("TP1 ban đầu", levelByStep(tpSteps, 1) || levels.current_tp, "base")}
         ${renderProfitProtectionLevel("PnL hiện tại", currentPnlLevel, "current")}
         ${renderProfitProtectionLevel("Chốt 30%", levels.partial_30, "partial", { achieved: partialDone })}
+        ${renderLossGuardLevel(lossGuard)}
         ${renderProfitProtectionLevel("SL2", levelByStep(slSteps, 2) || levels.sl2, "step2", { achieved: stepAchieved(1) })}
         ${renderProfitProtectionLevel("TP2", levelByStep(tpSteps, 2) || levels.tp2, "step2", { showTrigger: false, achieved: stepAchieved(1) })}
         ${renderProfitProtectionLevel("SL3", levelByStep(slSteps, 3) || levels.sl3, "step3", { achieved: stepAchieved(2) })}

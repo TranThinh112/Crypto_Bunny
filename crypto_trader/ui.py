@@ -48,7 +48,7 @@ from .config import (
     runtime_config_override_payload,
     runtime_config_overrides_should_attempt,
 )
-from .ai_coordinator import candidate_okx_review, next_internal_market_scan_at, run_internal_market_scan_if_due
+from .ai_coordinator import candidate_okx_review, next_internal_market_scan_at
 from .codex_features import (
     activate_strategy_version,
     ai_trade_decision_stats,
@@ -1269,32 +1269,22 @@ def _run_lc_pipeline_slot_cycle(app: FastAPI) -> None:
         if _app_is_stopping(app):
             return
         pipeline = update_lc_internal_pipeline(notification_config, candidates, now=now)
-        if _app_is_stopping(app):
-            return
-        mini_scan = run_internal_market_scan_if_due(notification_config)
         current_status = getattr(app.state, "lc_pipeline_status", {}).copy()
         current_status.update(
             {
                 "last_slot_check_at": now.isoformat(),
                 "slot_cache_created_at": created_at.isoformat(),
+                "last_result": "pool_updated",
                 "created_hourly": bool(pipeline.get("created_hourly")),
                 "created_two_hour": bool(pipeline.get("created_two_hour")),
                 "created_four_hour": bool(pipeline.get("created_four_hour")),
                 "hourly_slot": pipeline.get("hourly_slot"),
                 "two_hour_slot": pipeline.get("two_hour_slot"),
                 "four_hour_slot": pipeline.get("four_hour_slot"),
+                "mini_scan_status": "deferred_to_automation",
+                "mini_scan_skip_reason": "Mini -> 5.5 is handled only by the main automation pipeline",
             }
         )
-        if isinstance(mini_scan, dict):
-            current_status.update(
-                {
-                    "mini_scan_created_at": mini_scan.get("created_at"),
-                    "mini_scan_slot_id": mini_scan.get("slot_id"),
-                    "mini_scan_status": mini_scan.get("status"),
-                    "mini_scan_skipped": bool(mini_scan.get("skipped")),
-                    "mini_scan_skip_reason": mini_scan.get("skip_reason"),
-                }
-            )
         app.state.lc_pipeline_status = current_status
     except Exception as exc:
         current_status = getattr(app.state, "lc_pipeline_status", {}).copy()

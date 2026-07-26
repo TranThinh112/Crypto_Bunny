@@ -751,7 +751,7 @@ def _trade_execution_progress(row: dict[str, Any]) -> float | None:
 def _trade_execution_r_multiple(row: dict[str, Any]) -> float | None:
     side = str(row.get("side") or "").lower()
     entry = _trade_execution_live_entry_price(row)
-    initial_sl = _trade_execution_effective_stop_loss(row) or _trade_execution_price(row, "initial_stop_loss")
+    initial_sl = _trade_execution_price(row, "initial_stop_loss") or _trade_execution_effective_stop_loss(row)
     mark = _trade_execution_mark_price(row)
     if entry is None or initial_sl is None or mark != mark:
         return None
@@ -901,7 +901,7 @@ def _trade_execution_loss_guard(row: dict[str, Any], config: dict[str, Any]) -> 
         return None
     side = str(row.get("side") or "").lower()
     entry = _trade_execution_live_entry_price(row)
-    initial_sl = _trade_execution_effective_stop_loss(row) or _trade_execution_price(row, "initial_stop_loss")
+    initial_sl = _trade_execution_price(row, "initial_stop_loss") or _trade_execution_effective_stop_loss(row)
     take_profit = _trade_execution_effective_take_profit(row)
     qty = _trade_execution_quantity(row)
     if side not in {"long", "short"} or entry is None or initial_sl is None or qty is None:

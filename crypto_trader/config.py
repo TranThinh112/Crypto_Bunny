@@ -245,7 +245,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enabled": True,
         "effective_from": "2026-07-25T12:13:57+00:00",
         "apply_to_existing_positions": False,
-        "auto_close_enabled": False,
+        "auto_close_enabled": True,
         "warning_r": -0.5,
         "strong_warning_r": -0.7,
         "partial_close_r": -0.8,

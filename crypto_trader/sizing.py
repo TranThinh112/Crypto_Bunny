@@ -85,6 +85,10 @@ def _position_side(row: dict[str, Any]) -> str:
 
 def _position_pnl(row: dict[str, Any]) -> float | None:
     info = row.get("info", {}) if isinstance(row.get("info"), dict) else {}
+    for payload in (row, info):
+        value = _float(payload.get("pnl"))
+        if value is not None:
+            return value
     for key in ("realizedPnl", "realisedPnl", "netPnl", "netProfit"):
         value = _float(row.get(key))
         if value is not None:
@@ -93,9 +97,7 @@ def _position_pnl(row: dict[str, Any]) -> float | None:
         value = _float(info.get(key))
         if value is not None:
             return value
-    pnl = _float(row.get("pnl"))
-    if pnl is None:
-        pnl = _float(info.get("pnl") or row.get("upl"))
+    pnl = _float(row.get("upl") or info.get("upl"))
     if pnl is None:
         return None
     adjustments = 0.0

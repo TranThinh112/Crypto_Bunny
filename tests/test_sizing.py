@@ -154,7 +154,7 @@ class SizingTest(TestCase):
         self.assertEqual(result["recovery_step"], 0)
         self.assertEqual(result["margin_usdt"], 2.0)
 
-    def test_recovery_cycle_uses_okx_net_pnl_with_fees_and_funding(self) -> None:
+    def test_recovery_cycle_uses_okx_display_pnl_like_okx_history(self) -> None:
         config = self._config()
         config["position_sizing"]["target_profit_usdt"] = 10.0
         row = {
@@ -171,10 +171,10 @@ class SizingTest(TestCase):
         with patch("crypto_trader.sizing.create_exchange", return_value=FakeExchange([row])):
             result = apply_position_sizing(config, candidates)
 
-        self.assertAlmostEqual(result["cycle_pnl_usdt"], 3.2916, places=4)
-        self.assertAlmostEqual(result["last_realized_net_pnl"], 3.2916, places=4)
+        self.assertAlmostEqual(result["cycle_pnl_usdt"], 3.77, places=4)
+        self.assertAlmostEqual(result["last_realized_net_pnl"], 3.77, places=4)
 
-    def test_rebuild_recovery_cycle_uses_raw_okx_realized_pnl_for_tao(self) -> None:
+    def test_rebuild_recovery_cycle_uses_okx_display_pnl_for_tao(self) -> None:
         config = self._config()
         config["position_sizing"]["target_profit_usdt"] = 30.0
         raw_tao = {
@@ -192,7 +192,7 @@ class SizingTest(TestCase):
             result = rebuild_recovery_cycle_state(config)
 
         self.assertEqual(result["closed_count"], 1)
-        self.assertAlmostEqual(result["state"]["cycle_pnl_usdt"], -13.736128, places=6)
+        self.assertAlmostEqual(result["state"]["cycle_pnl_usdt"], -13.24, places=6)
         self.assertIn("TAO/USDT:USDT:3740224303088656384", result["state"]["processed_keys"])
         state = get_journal_state(config, "position_sizing:recovery_cycle")
         self.assertIn("TAO/USDT:USDT:3740224303088656384", state or "")

@@ -203,6 +203,7 @@ class TrailingStopTest(TestCase):
             "trigger_price_type": "last",
             "symbol_overrides": {"BTC": {"min_improvement_points": 2000, "point_value": 0.01}},
         }
+        config["loss_guard"] = {"enabled": False}
         return config
 
     def tearDown(self) -> None:
@@ -267,6 +268,37 @@ class TrailingStopTest(TestCase):
         self.assertEqual(result["amended"], 0)
         self.assertEqual(exchange.amend_requests, [])
         self.assertEqual(result["items"][0]["reason"], "minimum improvement not reached")
+
+    def test_loss_guard_closes_twenty_five_percent_once_at_negative_r(self) -> None:
+        config = self._config()
+        config["loss_guard"] = {
+            "enabled": True,
+            "effective_from": "2026-07-18T00:00:00+00:00",
+            "auto_close_enabled": True,
+            "partial_close_r": -0.8,
+            "partial_close_fraction": 0.25,
+        }
+        self._insert_open_execution(config)
+        exchange = FakeTrailingExchange(mark=64432.0, current_sl=64407.0, contracts=1.0)
+
+        with patch("crypto_trader.trailing_stop.create_exchange", return_value=exchange):
+            result = run_trailing_stop_cycle(config)
+
+        self.assertEqual(result["partial_closed"], 1)
+        self.assertEqual(result["items"][0]["status"], "loss_guard_partial_closed")
+        self.assertEqual(exchange.orders[0]["side"], "sell")
+        self.assertEqual(exchange.orders[0]["amount"], "0.25")
+        self.assertTrue(exchange.orders[0]["params"]["reduceOnly"])
+        row = list_trade_execution_rows(config, statuses=["OPEN"])[0]
+        self.assertTrue(row["loss_guard_partial_done"])
+        self.assertAlmostEqual(row["loss_guard_partial_amount"], 0.25)
+
+        exchange_again = FakeTrailingExchange(mark=64420.0, current_sl=64407.0, contracts=0.75)
+        with patch("crypto_trader.trailing_stop.create_exchange", return_value=exchange_again):
+            second = run_trailing_stop_cycle(config)
+
+        self.assertEqual(second["partial_closed"], 0)
+        self.assertEqual(exchange_again.orders, [])
 
     def test_uses_okx_algo_sl_as_initial_stop_for_existing_rows(self) -> None:
         config = self._config()

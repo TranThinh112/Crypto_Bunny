@@ -27,6 +27,7 @@ from crypto_trader.ui import (
     _periodic_scan_notification_due,
     _remember_periodic_scan_notification,
     _run_automation_cycle,
+    _run_lc_pipeline_slot_cycle,
     _run_lc_pipeline_worker_cycle,
     _telegram_action_response,
     create_app,
@@ -948,6 +949,49 @@ class UiTest(TestCase):
 
         notify_error.assert_not_called()
         self.assertEqual(app.state.lc_pipeline_status["last_result"], "error")
+
+    @patch("crypto_trader.ui.update_lc_internal_pipeline")
+    def test_lc_pipeline_slot_cycle_updates_pool_without_calling_mini(self, update_pipeline) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text(
+                "mode: dry_run\n"
+                "runtime_config_overrides:\n"
+                "  enabled: false\n"
+                "automation:\n"
+                "  enabled: true\n"
+                "ai:\n"
+                "  internal:\n"
+                "    lc_pipeline_enabled: true\n",
+                encoding="utf-8",
+            )
+            update_pipeline.return_value = {
+                "created_hourly": False,
+                "created_two_hour": False,
+                "created_four_hour": True,
+                "hourly_slot": "2026-07-26T04:00:00+07:00",
+                "two_hour_slot": "2026-07-26T04:00:00+07:00",
+                "four_hour_slot": "2026-07-26T04:00:00+07:00",
+            }
+            app = SimpleNamespace(
+                state=SimpleNamespace(
+                    config_path=config_path,
+                    automation_stop=threading.Event(),
+                    shutdown_started=False,
+                    lc_pipeline_slot_lock=threading.Lock(),
+                    lc_pipeline_candidate_cache={
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "candidates": [{"symbol": "LAB/USDT:USDT", "side": "short"}],
+                    },
+                    lc_pipeline_status={},
+                )
+            )
+
+            _run_lc_pipeline_slot_cycle(app)
+
+        update_pipeline.assert_called_once()
+        self.assertEqual(app.state.lc_pipeline_status["last_result"], "pool_updated")
+        self.assertEqual(app.state.lc_pipeline_status["mini_scan_status"], "deferred_to_automation")
 
     def test_healthz_includes_runtime_build_metadata(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:

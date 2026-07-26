@@ -3171,9 +3171,13 @@ body.dark-mode .position-management-flow span {
 }
 
 .profit-protection-level.level-partial {
-  grid-column: 1 / -1;
   border-color: rgba(249, 115, 22, 0.62);
   background: rgba(249, 115, 22, 0.16);
+}
+
+.profit-protection-level.level-loss {
+  border-color: rgba(239, 68, 68, 0.62);
+  background: rgba(239, 68, 68, 0.12);
 }
 
 .profit-protection-level.level-step2 {
