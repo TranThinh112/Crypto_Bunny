@@ -373,6 +373,9 @@ def _close_partial_position(
     with_pos_side = dict(base_params)
     with_pos_side["posSide"] = side
     variants.append(with_pos_side)
+    with_net_pos_side = dict(base_params)
+    with_net_pos_side["posSide"] = "net"
+    variants.append(with_net_pos_side)
 
     seen: set[tuple[tuple[str, str], ...]] = set()
     last_exc: Exception | None = None

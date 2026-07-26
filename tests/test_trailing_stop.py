@@ -103,6 +103,12 @@ class FakeTrailingExchangeRequiresPosSide(FakeTrailingExchange):
             raise RuntimeError('okx {"code":"1","data":[{"sCode":"51000","sMsg":"Parameter posSide error"}]}')
         return super().create_order(symbol, order_type, side, amount, price, params)
 
+class FakeTrailingExchangeRequiresNetPosSide(FakeTrailingExchange):
+    def create_order(self, symbol: str, order_type: str, side: str, amount: str, price: float | None, params: dict) -> dict:
+        if params.get("posSide") != "net":
+            raise RuntimeError('okx {"code":"1","data":[{"sCode":"51000","sMsg":"Parameter posSide error"}]}')
+        return super().create_order(symbol, order_type, side, amount, price, params)
+
 class FakeTrailingExchangeSnapshotAlgo(FakeTrailingExchangeNoAlgo):
     def fetch_positions(self) -> list[dict]:
         rows = super().fetch_positions()
@@ -395,6 +401,27 @@ class TrailingStopTest(TestCase):
         self.assertEqual(result["partial_closed"], 1)
         self.assertEqual(len(exchange.orders), 1)
         self.assertEqual(exchange.orders[0]["params"]["posSide"], "long")
+        self.assertTrue(exchange.orders[0]["params"]["reduceOnly"])
+
+    def test_partial_take_profit_retries_with_net_pos_side_when_okx_requires_net(self) -> None:
+        config = self._config()
+        config["exchange"]["position_side_mode"] = "long_short"
+        config["trailing_stop"]["partial_take_profit"] = {
+            "enabled": True,
+            "trigger_tp_progress": 0.7,
+            "close_fraction": 0.3,
+            "remaining_sl_buffer_r": 0.1,
+            "tp_extension_fraction": 0.3,
+        }
+        self._insert_open_execution(config)
+        exchange = FakeTrailingExchangeRequiresNetPosSide(mark=64882.0, current_sl=64407.0)
+
+        with patch("crypto_trader.trailing_stop.create_exchange", return_value=exchange):
+            result = run_trailing_stop_cycle(config)
+
+        self.assertEqual(result["partial_closed"], 1)
+        self.assertEqual(len(exchange.orders), 1)
+        self.assertEqual(exchange.orders[0]["params"]["posSide"], "net")
         self.assertTrue(exchange.orders[0]["params"]["reduceOnly"])
 
     def test_partial_take_profit_closes_even_when_okx_algo_is_missing(self) -> None:
