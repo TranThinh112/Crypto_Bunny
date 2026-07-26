@@ -472,6 +472,70 @@ class SystemChecklistPayloadTests(unittest.TestCase):
         self.assertEqual([row["symbol"] for row in payload["recent_closed"][:2]], ["HYPE/USDT:USDT", "TAO/USDT:USDT"])
         self.assertIsNotNone(payload["recent_closed"][0]["exchange_closed_at"])
 
+    def test_trade_execution_summary_dedupes_same_okx_close_history(self) -> None:
+        duplicate_history = {
+            "info": {
+                "instId": "BEAT-USDT-SWAP",
+                "posId": "3772320754283175936",
+                "uTime": "1785047740407",
+                "closeTotalPos": "0.9",
+                "closeAvgPx": "3.5961222222222222",
+                "realizedPnl": "-2.7630083471369007",
+            },
+            "symbol": "BEAT/USDT:USDT",
+            "side": "short",
+        }
+        closed_rows = [
+            {
+                "id": 16,
+                "symbol": "BEAT/USDT:USDT",
+                "side": "SHORT",
+                "status": "LOSS",
+                "closed_at": "2026-07-25T09:40:02.533000+00:00",
+                "exchange_close_history_json": json.dumps(duplicate_history),
+            },
+            {
+                "id": 11,
+                "symbol": "BEAT/USDT:USDT",
+                "side": "SHORT",
+                "status": "LOSS",
+                "closed_at": "2026-07-25T09:40:02.533000+00:00",
+                "exchange_close_history_json": json.dumps(duplicate_history),
+            },
+            {
+                "id": 9,
+                "symbol": "HYPE/USDT:USDT",
+                "side": "SHORT",
+                "status": "WIN",
+                "closed_at": "2026-07-24T13:08:40.717000+00:00",
+                "exchange_close_history_json": json.dumps(
+                    {
+                        "info": {
+                            "posId": "3771387989693947904",
+                            "uTime": "1784928363323",
+                            "closeTotalPos": "29",
+                            "closeAvgPx": "57.4579",
+                            "realizedPnl": "1.942538",
+                        }
+                    }
+                ),
+            },
+        ]
+
+        def fake_rows(_config, *, statuses=None, **_kwargs):
+            return [] if statuses == ["OPEN"] else closed_rows
+
+        with patch("crypto_trader.dashboard_services.list_trade_execution_rows", side_effect=fake_rows), patch(
+            "crypto_trader.dashboard_services.count_pending_orders", return_value=0
+        ):
+            payload = _trade_execution_summary({})
+
+        beat_items = [item for item in payload["recent_closed"] if item["symbol"] == "BEAT/USDT:USDT"]
+        total = sum(float(item["pnl"] or 0) for item in payload["recent_closed"])
+        self.assertEqual(len(beat_items), 1)
+        self.assertEqual(beat_items[0]["id"], 16)
+        self.assertAlmostEqual(total, -0.82047)
+
     def test_profit_protection_prefers_okx_live_sl_tp_over_stored_values(self) -> None:
         row = {
             "side": "long",

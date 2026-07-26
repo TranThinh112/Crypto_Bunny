@@ -1084,6 +1084,38 @@ def _trade_execution_exchange_closed_at(row: dict[str, Any]) -> str | None:
                 return parsed.isoformat()
     return None
 
+def _trade_execution_close_dedupe_key(item: dict[str, Any]) -> tuple[Any, ...] | None:
+    history = _json_payload(item.get("exchange_close_history_json"))
+    info = history.get("info") if isinstance(history.get("info"), dict) else {}
+    pos_id = str(history.get("posId") or info.get("posId") or "").strip()
+    exchange_closed_at = item.get("exchange_closed_at")
+    pnl = _safe_float(item.get("pnl"), float("nan"))
+    if not pos_id or not exchange_closed_at or pnl != pnl:
+        return None
+    close_size = str(history.get("closeTotalPos") or info.get("closeTotalPos") or "").strip()
+    close_price = str(history.get("closeAvgPx") or info.get("closeAvgPx") or "").strip()
+    return (
+        str(item.get("symbol") or "").strip(),
+        str(item.get("side") or "").strip().upper(),
+        pos_id,
+        exchange_closed_at,
+        round(pnl, 6),
+        close_size,
+        close_price,
+    )
+
+def _dedupe_trade_execution_closed_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[Any, ...]] = set()
+    deduped: list[dict[str, Any]] = []
+    for item in items:
+        key = _trade_execution_close_dedupe_key(item)
+        if key is not None:
+            if key in seen:
+                continue
+            seen.add(key)
+        deduped.append(item)
+    return deduped
+
 def _trade_execution_event_history(row: dict[str, Any]) -> list[dict[str, Any]]:
     raw = row.get("trade_event_history_json")
     if not raw:
@@ -1158,6 +1190,7 @@ def _trade_execution_summary(config: dict[str, Any]) -> dict[str, Any]:
             "close_reason": row.get("close_reason"),
             "closed_at": row.get("closed_at"),
             "exchange_closed_at": _trade_execution_exchange_closed_at(row),
+            "exchange_close_history_json": row.get("exchange_close_history_json"),
             "entry_price": row.get("entry_price"),
             "stop_loss": row.get("stop_loss"),
             "take_profit": row.get("take_profit"),
@@ -1177,6 +1210,9 @@ def _trade_execution_summary(config: dict[str, Any]) -> dict[str, Any]:
         ),
         reverse=True,
     )
+    closed_items = _dedupe_trade_execution_closed_items(closed_items)
+    for item in closed_items:
+        item.pop("exchange_close_history_json", None)
     return {
         "ok": error is None,
         "error": error,

@@ -2129,6 +2129,36 @@ def _recovery_cycle_pnl_from_trade_executions(start_at: datetime, config: dict[s
             seen = True
     return round(total, 6) if seen else None
 
+def _recovery_cycle_okx_close_key(row: dict[str, Any]) -> tuple[Any, ...] | None:
+    try:
+        from .sizing import _position_key, _position_time
+    except Exception:
+        return None
+    closed_at = _position_time(row)
+    if closed_at is None:
+        return None
+    if closed_at.tzinfo is None:
+        closed_at = closed_at.replace(tzinfo=timezone.utc)
+    key = str(_position_key(row) or "").strip()
+    if not key:
+        return None
+    return (key, closed_at.isoformat())
+
+def _recovery_cycle_trade_execution_close_key(row: dict[str, Any]) -> tuple[Any, ...] | None:
+    history = _json_loads(row.get("exchange_close_history_json"), {})
+    if not history:
+        return None
+    return _recovery_cycle_okx_close_key(history)
+
+def _recovery_cycle_trade_execution_fingerprint(row: dict[str, Any]) -> tuple[Any, ...]:
+    closed_at = _parse_time(row.get("closed_at") or row.get("updated_at") or row.get("created_at"))
+    return (
+        str(row.get("symbol") or "").strip(),
+        str(row.get("side") or "").strip().upper(),
+        closed_at.isoformat() if closed_at else "",
+        round(_safe_float(row.get("pnl"), 0.0), 6),
+    )
+
 def _recovery_cycle_display_pnl_from_okx(start_at: datetime, config: dict[str, Any]) -> float | None:
     try:
         from .market import create_exchange
@@ -2143,6 +2173,7 @@ def _recovery_cycle_display_pnl_from_okx(start_at: datetime, config: dict[str, A
     total = 0.0
     seen_any = False
     seen_keys: set[str] = set()
+    okx_close_keys: set[tuple[Any, ...]] = set()
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -2158,6 +2189,9 @@ def _recovery_cycle_display_pnl_from_okx(start_at: datetime, config: dict[str, A
             continue
         if key:
             seen_keys.add(key)
+        close_key = _recovery_cycle_okx_close_key(row)
+        if close_key is not None:
+            okx_close_keys.add(close_key)
         info = row.get("info", {}) if isinstance(row.get("info"), dict) else {}
         pnl = None
         for payload in (row, info):
@@ -2176,6 +2210,25 @@ def _recovery_cycle_display_pnl_from_okx(start_at: datetime, config: dict[str, A
             continue
         total += pnl
         seen_any = True
+    try:
+        closed = _closed_trade_executions(config)
+    except Exception:
+        closed = []
+    seen_trade_fingerprints: set[tuple[Any, ...]] = set()
+    for row in closed:
+        closed_at = _parse_time(row.get("closed_at") or row.get("updated_at") or row.get("created_at"))
+        if closed_at is None:
+            continue
+        if closed_at >= start_at:
+            trade_close_key = _recovery_cycle_trade_execution_close_key(row)
+            if trade_close_key is not None and trade_close_key in okx_close_keys:
+                continue
+            fingerprint = _recovery_cycle_trade_execution_fingerprint(row)
+            if fingerprint in seen_trade_fingerprints:
+                continue
+            seen_trade_fingerprints.add(fingerprint)
+            total += _safe_float(row.get("pnl"), 0.0)
+            seen_any = True
     return round(total, 6) if seen_any else None
 
 def _recovery_cycle_pnl_since_config_start(config: dict[str, Any]) -> float | None:

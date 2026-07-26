@@ -858,6 +858,59 @@ class CodexFeaturesTest(TestCase):
 
         self.assertAlmostEqual(pnl, -10.45, places=6)
 
+    def test_recovery_cycle_pnl_adds_bot_only_closes_and_dedupes_okx_matches(self) -> None:
+        config = self._config()
+        config["position_sizing"] = {
+            "cycle_start_at": "2026-07-05T00:00:00+07:00",
+            "history_limit": 100,
+        }
+        okx_rows = [
+            {
+                "symbol": "TAO/USDT:USDT",
+                "id": "tao-loss-1",
+                "pnl": "-13.74",
+                "timestamp": int(datetime(2026, 7, 24, 13, 7, tzinfo=timezone.utc).timestamp() * 1000),
+            },
+            {
+                "symbol": "BEAT/USDT:USDT",
+                "id": "beat-close-1",
+                "pnl": "-2.76",
+                "timestamp": int(datetime(2026, 7, 25, 9, 40, tzinfo=timezone.utc).timestamp() * 1000),
+            },
+        ]
+        bot_rows = [
+            {
+                "id": 18,
+                "symbol": "LAB/USDT:USDT",
+                "side": "SHORT",
+                "pnl": 1.1457,
+                "closed_at": "2026-07-26T07:38:02+00:00",
+            },
+            {
+                "id": 13,
+                "symbol": "BICO/USDT:USDT",
+                "side": "LONG",
+                "pnl": 0.13468,
+                "closed_at": "2026-07-26T07:38:02+00:00",
+            },
+            {
+                "id": 16,
+                "symbol": "BEAT/USDT:USDT",
+                "side": "SHORT",
+                "pnl": -2.763008,
+                "closed_at": "2026-07-25T09:40:00+00:00",
+                "exchange_close_history_json": json.dumps(okx_rows[1]),
+            },
+        ]
+
+        with patch("crypto_trader.market.create_exchange", return_value=SimpleNamespace(load_markets=lambda: {})), patch(
+            "crypto_trader.sizing._fetch_positions_history_rows",
+            return_value=okx_rows,
+        ), patch("crypto_trader.codex_features._closed_trade_executions", return_value=bot_rows):
+            pnl = _recovery_cycle_pnl(config)
+
+        self.assertAlmostEqual(pnl, -15.21962, places=6)
+
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_recovery_mode_stays_soft_when_cycle_pnl_negative_and_loss_streak_below_hard(
         self,
