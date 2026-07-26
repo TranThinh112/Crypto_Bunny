@@ -861,6 +861,20 @@ def _trade_execution_trigger_price(side: str, entry: float | None, target: float
     return entry + reward * progress if side == "long" else entry - reward * progress
 
 
+def _trade_execution_is_profitable_close(side: str, entry: float | None, price: Any, pnl: Any = None) -> bool:
+    pnl_number = _safe_float(pnl, float("nan"))
+    if pnl_number == pnl_number:
+        return pnl_number > 0
+    close_price = _safe_float(price, float("nan"))
+    if entry is None or close_price != close_price:
+        return False
+    if side == "long":
+        return close_price > entry
+    if side == "short":
+        return close_price < entry
+    return False
+
+
 def _loss_guard_settings(config: dict[str, Any]) -> dict[str, Any]:
     raw = config.get("loss_guard", {}) if isinstance(config.get("loss_guard"), dict) else {}
     return {
@@ -897,8 +911,9 @@ def _loss_guard_applies_to_row(row: dict[str, Any], settings: dict[str, Any]) ->
 
 def _trade_execution_loss_guard(row: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:
     settings = _loss_guard_settings(config)
-    if not settings["enabled"] or not _loss_guard_applies_to_row(row, settings):
+    if not settings["enabled"]:
         return None
+    applies_to_row = _loss_guard_applies_to_row(row, settings)
     side = str(row.get("side") or "").lower()
     entry = _trade_execution_live_entry_price(row)
     initial_sl = _trade_execution_price(row, "initial_stop_loss") or _trade_execution_effective_stop_loss(row)
@@ -918,8 +933,30 @@ def _trade_execution_loss_guard(row: dict[str, Any], config: dict[str, Any]) -> 
     partial_price = entry + risk * partial_r if side == "long" else entry - risk * partial_r
     partial_fraction = float(settings["partial_close_fraction"])
     partial_amount = qty * partial_fraction
+    executed = bool(row.get("loss_guard_partial_done"))
+    actual_price = _safe_float(row.get("loss_guard_partial_price"), float("nan"))
+    actual_amount = _safe_float(row.get("loss_guard_partial_amount"), float("nan"))
+    actual_pnl = _safe_float(row.get("loss_guard_partial_pnl"), float("nan"))
+    try:
+        partial_order = json.loads(str(row.get("partial_take_profit_order_json") or "{}"))
+    except json.JSONDecodeError:
+        partial_order = {}
+    partial_history = partial_order.get("history") if isinstance(partial_order, dict) and isinstance(partial_order.get("history"), dict) else {}
+    if executed and partial_history:
+        history_price = _safe_float(partial_history.get("price"), float("nan"))
+        history_amount = _safe_float(partial_history.get("amount"), float("nan"))
+        history_pnl = _safe_float(partial_history.get("pnl"), float("nan"))
+        if history_price == history_price:
+            actual_price = history_price
+        if history_amount == history_amount:
+            actual_amount = history_amount
+        if history_pnl == history_pnl:
+            actual_pnl = history_pnl
+    if actual_pnl != actual_pnl and actual_price == actual_price and actual_amount == actual_amount:
+        actual_pnl = _trade_execution_pnl_at(row, actual_price, actual_amount)
     return {
         "enabled": True,
+        "applies": applies_to_row,
         "auto_close_enabled": settings["auto_close_enabled"],
         "require_broken_setup_for_partial_close": settings["require_broken_setup_for_partial_close"],
         "warning_r": settings["warning_r"],
@@ -929,6 +966,12 @@ def _trade_execution_loss_guard(row: dict[str, Any], config: dict[str, Any]) -> 
         "partial_close_price": partial_price,
         "partial_close_amount": partial_amount,
         "partial_close_pnl": _trade_execution_pnl_at(row, partial_price, partial_amount),
+        "executed": executed,
+        "executed_at": row.get("loss_guard_partial_at"),
+        "actual_partial_price": actual_price if actual_price == actual_price else None,
+        "actual_partial_amount": actual_amount if actual_amount == actual_amount else None,
+        "actual_partial_pnl": actual_pnl if actual_pnl == actual_pnl else None,
+        "actual_partial_trigger_price": row.get("loss_guard_partial_trigger_price"),
         "risk_reward": risk_reward,
     }
 
@@ -962,6 +1005,13 @@ def _trade_execution_profit_protection_levels(
     current_sl = _trade_execution_effective_stop_loss(row)
     current_tp = _trade_execution_effective_take_profit(row)
     partial_price = row.get("partial_take_profit_price")
+    partial_pnl_value = _safe_float(row.get("partial_take_profit_pnl"), float("nan"))
+    partial_is_profitable = partial_done and _trade_execution_is_profitable_close(
+        side,
+        entry,
+        partial_price,
+        partial_pnl_value if partial_pnl_value == partial_pnl_value else None,
+    )
     original_tp = row.get("partial_take_profit_original_tp") or current_tp
     extended_tp = row.get("partial_take_profit_extended_tp")
     if partial_price is None and entry is not None and take_profit is not None:
@@ -998,7 +1048,13 @@ def _trade_execution_profit_protection_levels(
     if entry is not None and initial_sl is not None:
         initial_r = entry - initial_sl if side == "long" else initial_sl - entry
         buffers = partial_config.get("sl_buffer_r_by_step") if isinstance(partial_config.get("sl_buffer_r_by_step"), list) else [0.1, 0.5, 1.0]
-        sl_steps.append({"step": 1, "price": initial_sl, "pnl": _trade_execution_pnl_at(row, initial_sl, qty), "trigger_price": None})
+        sl_steps.append({
+            "step": 1,
+            "price": initial_sl,
+            "pnl": _trade_execution_pnl_at(row, initial_sl, qty),
+            "trigger_price": None,
+            "initial_amount": base_qty,
+        })
         if initial_r > 0:
             trigger_progress = _safe_float(partial_config.get("trigger_tp_progress"), float("nan"))
             if trigger_progress != trigger_progress:
@@ -1028,16 +1084,33 @@ def _trade_execution_profit_protection_levels(
             projected_sl2 = max(current_sl_number, protected_sl) if side == "long" and current_sl_number == current_sl_number else protected_sl
             if side == "short" and current_sl_number == current_sl_number:
                 projected_sl2 = min(current_sl_number, protected_sl)
+    planned_partial_price = partial_price
+    if not partial_is_profitable and entry is not None and take_profit is not None:
+        progress = _safe_float(partial_config.get("trigger_tp_progress"), float("nan"))
+        if progress != progress:
+            progress = 0.7
+        planned_partial_price = _trade_execution_trigger_price(side, entry, take_profit, progress)
+    displayed_partial_price = partial_price if partial_is_profitable else planned_partial_price
     return {
         "quantity": qty,
         "contract_size": _trade_execution_contract_size(row),
         "current_amount": current_amount,
         "remaining_amount": remaining_amount,
-        "current_sl": {"price": current_sl, "pnl": _trade_execution_pnl_at(row, current_sl, current_amount)},
+        "current_sl": {
+            "price": current_sl,
+            "pnl": _trade_execution_pnl_at(row, current_sl, current_amount),
+            "initial_amount": base_qty,
+        },
         "current_tp": {"price": current_tp, "pnl": _trade_execution_pnl_at(row, current_tp, current_amount)},
-        "partial_30": {"price": partial_price, "pnl": _trade_execution_pnl_at(row, partial_price, partial_amount), "trigger_price": partial_price},
-        "tp2": {"price": extended_tp, "pnl": _trade_execution_pnl_at(row, extended_tp, remaining_amount), "trigger_price": partial_price},
-        "sl2": {"price": projected_sl2, "pnl": _trade_execution_pnl_at(row, projected_sl2, remaining_amount), "trigger_price": partial_price},
+        "partial_30": {
+            "price": displayed_partial_price,
+            "pnl": _trade_execution_pnl_at(row, displayed_partial_price, partial_amount),
+            "trigger_price": displayed_partial_price,
+            "executed": partial_is_profitable,
+            "misclassified_loss_close": bool(partial_done and not partial_is_profitable),
+        },
+        "tp2": {"price": extended_tp, "pnl": _trade_execution_pnl_at(row, extended_tp, remaining_amount), "trigger_price": displayed_partial_price},
+        "sl2": {"price": projected_sl2, "pnl": _trade_execution_pnl_at(row, projected_sl2, remaining_amount), "trigger_price": displayed_partial_price},
         "sl3": {"price": None, "pnl": None},
         "tp_steps": tp_steps,
         "sl_steps": sl_steps,
@@ -1843,6 +1916,14 @@ def system_modules_payload(
             "name": "Capital Sync",
             "purpose": "Dong bo von thuc tu OKX va tinh realized capital, khong dung PnL tha noi de tang von giao dich.",
             "status": "ok" if capital_snapshot_ok else "warn",
+            "capital_management": {
+                "section": "capital_sync",
+                "snapshot": capital_snapshot,
+                "reserve_state": capital_reserve_state,
+                "allocation_check": capital_allocation_check,
+                "position_size": capital_position_size,
+                "configuration_impact": config_impact,
+            },
             "update_event": "Sau nap/rut, sau lenh dong",
             "update_schedule": "60 giay/lan hoac khi bam sync",
             "update_interval": "60 giay",
@@ -1863,6 +1944,14 @@ def system_modules_payload(
             "name": "Capital Reserve",
             "purpose": "Tach realized capital thanh reserve capital va trading capital de khong dung toan bo von tai khoan.",
             "status": "ok" if capital_reserve_ok and capital_allocation_check.get("allowed") else "warn",
+            "capital_management": {
+                "section": "capital_reserve",
+                "snapshot": capital_snapshot,
+                "reserve_state": capital_reserve_state,
+                "allocation_check": capital_allocation_check,
+                "position_size": capital_position_size,
+                "configuration_impact": config_impact,
+            },
             "update_event": "Sau nap/rut, sau lenh dong, khi health/recovery doi mode",
             "update_schedule": "5 phut/lan doi chieu",
             "update_interval": "5 phut",
@@ -1884,6 +1973,14 @@ def system_modules_payload(
             "name": "Position Sizing",
             "purpose": "Tinh khoi luong vi the theo trading capital, reserve, risk percent, SL/TP, leverage va slot dang dung.",
             "status": "ok" if capital_position_ok else "warn",
+            "capital_management": {
+                "section": "position_sizing",
+                "snapshot": capital_snapshot,
+                "reserve_state": capital_reserve_state,
+                "allocation_check": capital_allocation_check,
+                "position_size": capital_position_size,
+                "configuration_impact": config_impact,
+            },
             "update_event": "Khi chuan bi mo lenh hoac khi capital reserve thay doi",
             "update_schedule": "Theo tung setup duoc duyet",
             "update_interval": "event-driven",
@@ -1954,6 +2051,14 @@ def system_modules_payload(
             "name": "Configuration Impact",
             "purpose": "Phan tich tac dong truoc khi ap dung thay doi cau hinh von, slot, sizing, recovery, SL/TP va leverage.",
             "status": "ok" if config_impact_safe else "warn",
+            "capital_management": {
+                "section": "configuration_impact",
+                "snapshot": capital_snapshot,
+                "reserve_state": capital_reserve_state,
+                "allocation_check": capital_allocation_check,
+                "position_size": capital_position_size,
+                "configuration_impact": config_impact,
+            },
             "update_event": "Khi nguoi dung de xuat doi cau hinh",
             "update_schedule": "Chay truoc khi apply config",
             "update_interval": "event-driven",
@@ -2365,6 +2470,98 @@ def _refresh_trade_execution_in_payload(config: dict[str, Any], payload: dict[st
     return next_payload
 
 
+def _capital_management_runtime_payload(config: dict[str, Any]) -> dict[str, Any]:
+    try:
+        health = get_bunny_health_state(config)
+    except Exception:
+        health = {}
+    try:
+        risk_state = get_trading_system_state(config)
+    except Exception:
+        risk_state = {}
+    sizing_state = _load_sizing_runtime_state(config) or {}
+    try:
+        snapshot = latest_capital_snapshot(config) or build_capital_snapshot(config, use_cache=True)
+    except Exception as exc:
+        snapshot = {"ok": False, "error": str(exc)}
+    mode = infer_capital_mode(health=health, risk_state=risk_state, sizing_state=sizing_state)
+    try:
+        reserve_state = latest_capital_reserve_state(config) or calculate_capital_reserve_state(
+            config,
+            mode=mode,
+            snapshot=snapshot if isinstance(snapshot, dict) else None,
+        )
+    except Exception as exc:
+        reserve_state = {"ok": False, "mode": mode, "reason": str(exc)}
+    try:
+        allocation_check = check_capital_allocation(
+            config,
+            config.get("position_sizing", {}).get("base_margin_usdt", 0),
+            mode=mode,
+        )
+    except Exception as exc:
+        allocation_check = {"allowed": False, "reason": str(exc)}
+    try:
+        position_size = calculate_position_size(
+            config,
+            {
+                "symbol": "CHECK/USDT:USDT",
+                "side": "LONG",
+                "mode": mode,
+                "leverage": config.get("exchange", {}).get("leverage", 1),
+            },
+        )
+    except Exception as exc:
+        position_size = {"allowed": False, "reason": str(exc)}
+    try:
+        configuration_impact = analyze_configuration_change(config, {})
+    except Exception as exc:
+        configuration_impact = {
+            "risk_level": "UNKNOWN",
+            "is_safe": False,
+            "summary": str(exc),
+            "warnings": [str(exc)],
+        }
+    return {
+        "snapshot": snapshot,
+        "reserve_state": reserve_state,
+        "allocation_check": allocation_check,
+        "position_size": position_size,
+        "configuration_impact": configuration_impact,
+    }
+
+
+def _refresh_capital_management_in_payload(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    modules = payload.get("modules")
+    if not isinstance(modules, list):
+        return payload
+    section_by_number = {
+        10: "capital_sync",
+        12: "capital_reserve",
+        13: "position_sizing",
+        9: "configuration_impact",
+    }
+    if not any(isinstance(module, dict) and int(module.get("number") or 0) in section_by_number for module in modules):
+        return payload
+    runtime = _capital_management_runtime_payload(config)
+    next_payload = dict(payload)
+    next_modules: list[dict[str, Any]] = []
+    for module in modules:
+        if not isinstance(module, dict):
+            next_modules.append(module)
+            continue
+        number = int(module.get("number") or 0)
+        section = section_by_number.get(number)
+        if not section:
+            next_modules.append(module)
+            continue
+        next_module = dict(module)
+        next_module["capital_management"] = {"section": section, **runtime}
+        next_modules.append(next_module)
+    next_payload["modules"] = next_modules
+    return next_payload
+
+
 def _bunny_minimize_realtime_rows(risk_state: dict[str, Any], slot_utilization: Any, paused_minutes: Any) -> list[dict[str, Any]]:
     return [
         _module_row("recoveryMode", risk_state.get("recoveryMode"), "Current Bunny Minimize Losses mode.", attention=True),
@@ -2473,6 +2670,7 @@ def system_checklist_payload(
             payload = _build_system_checklist_payload(config, automation=automation, ai_range=ai_range_key)
         payload = _refresh_bunny_minimize_losses_in_payload(config, payload)
         payload = _refresh_trade_execution_in_payload(config, payload)
+        payload = _refresh_capital_management_in_payload(config, payload)
         return attach_previous_system_checklist_snapshot(config, payload)
     date_key = _system_report_date(config)
     if not force_refresh:
@@ -2480,11 +2678,13 @@ def system_checklist_payload(
         if snapshot is not None:
             snapshot = _refresh_bunny_minimize_losses_in_payload(config, snapshot)
             snapshot = _refresh_trade_execution_in_payload(config, snapshot)
+            snapshot = _refresh_capital_management_in_payload(config, snapshot)
             return attach_previous_system_checklist_snapshot(config, snapshot)
         snapshot = _latest_system_checklist_snapshot(config)
         if isinstance(snapshot, dict) and str(snapshot.get("date") or "") == date_key:
             snapshot = _refresh_bunny_minimize_losses_in_payload(config, snapshot)
             snapshot = _refresh_trade_execution_in_payload(config, snapshot)
+            snapshot = _refresh_capital_management_in_payload(config, snapshot)
             return attach_previous_system_checklist_snapshot(config, snapshot)
     return refresh_system_checklist_snapshot(config, automation=automation, ai_range=ai_range_key)
 

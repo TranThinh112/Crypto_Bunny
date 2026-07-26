@@ -175,6 +175,33 @@ class SystemChecklistPayloadTests(unittest.TestCase):
         ]:
             self.assertIn(key, indicators)
 
+    def test_profit_protection_does_not_mark_loss_close_as_partial_tp(self) -> None:
+        levels = _trade_execution_profit_protection_levels(
+            {
+                "symbol": "BOME/USDT:USDT",
+                "side": "SHORT",
+                "entry_price": 0.0004989028037384,
+                "initial_entry_price": 0.0004989028037384,
+                "initial_stop_loss": 0.00051886,
+                "stop_loss": 0.0005362,
+                "take_profit": 0.0004592,
+                "quantity": 81.0,
+                "initial_quantity": 107.0,
+                "partial_take_profit_done": True,
+                "partial_take_profit_price": 0.0005171,
+                "partial_take_profit_amount": 26.0,
+                "partial_take_profit_pnl": -0.473127,
+            },
+            {"trigger_tp_progress": 0.7, "close_fraction": 0.3, "tp_extension_fraction": 0.3},
+            {},
+        )
+
+        self.assertFalse(levels["partial_30"]["executed"])
+        self.assertTrue(levels["partial_30"]["misclassified_loss_close"])
+        self.assertLess(levels["partial_30"]["price"], 0.0004989028037384)
+        self.assertEqual(levels["current_amount"], 81.0)
+        self.assertEqual(levels["remaining_amount"], 81.0)
+
     def test_returns_current_snapshot_for_today_without_rebuilding(self) -> None:
         snapshot = {
             "date": "2026-07-10",

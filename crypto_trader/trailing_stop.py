@@ -610,6 +610,16 @@ def _tp_progress(side: str, entry: float, take_profit: float | None, mark: float
     return gained / reward
 
 
+def _is_profitable_close(side: str, entry: float | None, price: float | None) -> bool:
+    if entry is None or price is None:
+        return False
+    if side == "long":
+        return price > entry
+    if side == "short":
+        return price < entry
+    return False
+
+
 def _positive_stop_from_entry(side: str, entry: float, initial_r: float, buffer_r: float) -> float:
     buffer = max(0.0, initial_r * buffer_r)
     return entry + buffer if side == "long" else entry - buffer
@@ -891,6 +901,26 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
             if partial_event_price is None:
                 partial_event_price = mark
             partial_event_at = str(manual_partial_history.get("closed_at") or "") if isinstance(manual_partial_history, dict) else ""
+            manual_partial_pnl = _float(manual_partial_history.get("pnl")) if isinstance(manual_partial_history, dict) else None
+            if manually_reduced_amount is not None and not (
+                (manual_partial_pnl is not None and manual_partial_pnl > 0)
+                or _is_profitable_close(side, initial_entry, partial_event_price)
+            ):
+                skipped += 1
+                rows.append(
+                    _status_row(
+                        symbol,
+                        side,
+                        "waiting",
+                        "manual reduction is not profitable partial TP",
+                        manual_partial_detected=True,
+                        partial_price=round(partial_event_price, 8) if partial_event_price is not None else None,
+                        manual_partial_pnl=manual_partial_pnl,
+                        tp_progress=round(progress, 4),
+                        trigger_tp_progress=trigger_progress,
+                    )
+                )
+                continue
             positive_sl = _positive_stop_from_entry(
                 side,
                 initial_entry,

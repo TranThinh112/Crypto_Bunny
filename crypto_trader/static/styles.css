@@ -1410,6 +1410,14 @@ tr:last-child td {
   color: #bd3f32;
 }
 
+.module-card-status-group {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
 .module-item strong {
   display: block;
   font-size: 12px;
@@ -2326,12 +2334,16 @@ body.dark-mode .position-management-flow span {
 .module-chart-empty {
   color: var(--muted);
   font-weight: 800;
-  padding: 14px;
+  padding: 14px 14px 22px;
 }
 
 .module-localized-name {
   color: var(--teal) !important;
   font-weight: 800 !important;
+}
+
+.module-localized-name.module-secondary-label {
+  color: var(--ink) !important;
 }
 
 .market-regime-detail {
@@ -2393,7 +2405,7 @@ body.dark-mode .position-management-flow span {
 .market-regime-view-btn strong,
 .market-regime-view-btn span {
   display: block;
-  overflow: hidden;
+  overflow: visible !important;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -3073,6 +3085,23 @@ body.dark-mode .position-management-flow span {
   margin-bottom: 12px;
 }
 
+.position-management-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+}
+
+.position-management-title-row h3 {
+  margin: 0;
+}
+
+.position-management-detail-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .trade-execution-tab {
   min-height: 34px;
   border: 1px solid var(--line);
@@ -3222,6 +3251,22 @@ body.dark-mode .position-management-flow span {
 
 .profit-protection-level.level-achieved {
   box-shadow: inset 0 0 0 1px rgba(34, 197, 94, 0.35);
+}
+
+.profit-protection-level.level-disabled {
+  position: relative;
+  opacity: 0.56;
+}
+
+.profit-protection-level.level-disabled::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  top: 50%;
+  border-top: 2px solid rgba(239, 68, 68, 0.72);
+  transform: rotate(-8deg);
+  pointer-events: none;
 }
 
 .profit-protection-level strong {
@@ -3873,6 +3918,13 @@ body.dark-mode .market-regime-indicator {
   color: #a15c00;
 }
 
+.module-card .module-row-attention {
+  align-self: start;
+  margin-top: 4px;
+  margin-bottom: 0;
+  max-width: 100%;
+}
+
 .module-status-chip.fail {
   background: #ffe0dc;
   color: #b42318;
@@ -3950,7 +4002,7 @@ body.dark-mode .market-regime-indicator {
   background: #fff;
   text-align: left;
   cursor: pointer;
-  overflow: visible !important;
+  overflow: hidden;
   position: relative;
   isolation: isolate;
 }

@@ -2289,16 +2289,20 @@ def _recovery_cycle_pnl_since_config_start(config: dict[str, Any]) -> float | No
     display_pnl = _recovery_cycle_display_pnl_from_okx(start_at, config)
     if display_pnl is not None:
         return display_pnl
+    trade_execution_pnl = _recovery_cycle_pnl_from_trade_executions(start_at, config)
+    if trade_execution_pnl is not None:
+        return trade_execution_pnl
     try:
         from .sizing import _closed_positions, _sizing_config
 
         settings = _sizing_config(config)
         closed = _closed_positions(config, int(settings.get("history_limit", 100)))
     except Exception:
-        return None
+        fallback = _safe_float(sizing_config.get("cycle_start_pnl_fallback_usdt"), None)
+        return round(fallback, 6) if fallback is not None else None
     if not closed:
-        state_pnl = _recovery_cycle_pnl_from_state(config)
-        return state_pnl if abs(state_pnl) > 1e-9 else 0.0
+        fallback = _safe_float(sizing_config.get("cycle_start_pnl_fallback_usdt"), None)
+        return round(fallback, 6) if fallback is not None else 0.0
     total = 0.0
     for row in closed:
         closed_at = row.get("closed_at")
