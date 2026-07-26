@@ -133,16 +133,23 @@ class FakeTrailingExchangeGenericAlgo(FakeTrailingExchange):
         return super().privateGetTradeOrdersAlgoPending(request)
 
 class FakeShortTrailingExchange(FakeTrailingExchange):
+    def __init__(self, *, mark: float, current_sl: float, contracts: float = 1.0, margin_mode: str | None = None) -> None:
+        super().__init__(mark=mark, current_sl=current_sl, contracts=contracts)
+        self.margin_mode = margin_mode
+
     def fetch_positions(self) -> list[dict]:
-        return [
-            {
-                "symbol": "BTC/USDT:USDT",
-                "side": "short",
-                "contracts": self.contracts,
-                "entry_price": 100.0,
-                "mark_price": self.mark,
-            }
-        ]
+        row = {
+            "symbol": "BTC/USDT:USDT",
+            "side": "short",
+            "contracts": self.contracts,
+            "entry_price": 100.0,
+            "mark_price": self.mark,
+            "info": {"posSide": "short"},
+        }
+        if self.margin_mode:
+            row["marginMode"] = self.margin_mode
+            row["info"]["mgnMode"] = self.margin_mode
+        return [row]
 
     def fetch_ohlcv(self, symbol: str, timeframe: str = "1m", limit: int | None = None) -> list[list[float]]:
         rows = []
@@ -423,6 +430,42 @@ class TrailingStopTest(TestCase):
         self.assertEqual(len(exchange.orders), 1)
         self.assertEqual(exchange.orders[0]["params"]["posSide"], "net")
         self.assertTrue(exchange.orders[0]["params"]["reduceOnly"])
+
+    def test_partial_take_profit_uses_live_position_margin_mode_and_pos_side(self) -> None:
+        config = self._config()
+        config["exchange"]["td_mode"] = "isolated"
+        config["exchange"]["position_side_mode"] = "net"
+        config["trailing_stop"]["partial_take_profit"] = {
+            "enabled": True,
+            "trigger_tp_progress": 0.7,
+            "close_fraction": 0.3,
+            "remaining_sl_buffer_r": 0.1,
+            "tp_extension_fraction": 0.3,
+        }
+        insert_trade_execution_row(
+            config,
+            {
+                "created_at": "2026-07-19T00:00:00+00:00",
+                "updated_at": "2026-07-19T00:00:00+00:00",
+                "symbol": "BTC/USDT:USDT",
+                "side": "SHORT",
+                "status": "OPEN",
+                "entry_price": 100.0,
+                "stop_loss": 110.0,
+                "take_profit": 80.0,
+                "quantity": 1.0,
+                "initial_entry_price": 100.0,
+                "initial_stop_loss": 110.0,
+            },
+        )
+        exchange = FakeShortTrailingExchange(mark=85.0, current_sl=110.0, margin_mode="cross")
+
+        with patch("crypto_trader.trailing_stop.create_exchange", return_value=exchange):
+            result = run_trailing_stop_cycle(config)
+
+        self.assertEqual(result["partial_closed"], 1)
+        self.assertEqual(exchange.orders[0]["params"]["tdMode"], "cross")
+        self.assertEqual(exchange.orders[0]["params"]["posSide"], "short")
 
     def test_partial_take_profit_closes_even_when_okx_algo_is_missing(self) -> None:
         config = self._config()

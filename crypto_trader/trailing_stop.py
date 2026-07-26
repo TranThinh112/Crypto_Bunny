@@ -347,13 +347,24 @@ def _close_partial_position(
     symbol: str,
     side: str,
     amount: float,
+    position: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     close_side = "sell" if side == "long" else "buy"
+    info = position.get("info") if isinstance(position, dict) and isinstance(position.get("info"), dict) else {}
+    position_td_mode = (
+        (position or {}).get("marginMode")
+        or (position or {}).get("margin_mode")
+        or info.get("mgnMode")
+        or info.get("tdMode")
+    )
+    position_pos_side = str((position or {}).get("side") or info.get("posSide") or side).strip().lower()
     base_params: dict[str, Any] = {
-        "tdMode": config.get("exchange", {}).get("td_mode", "isolated"),
+        "tdMode": position_td_mode or config.get("exchange", {}).get("td_mode", "isolated"),
         "reduceOnly": True,
     }
-    if config.get("exchange", {}).get("position_side_mode") == "long_short":
+    if position_pos_side in {"long", "short"}:
+        base_params["posSide"] = position_pos_side
+    elif config.get("exchange", {}).get("position_side_mode") == "long_short":
         base_params["posSide"] = side
 
     def submit(params: dict[str, Any]) -> dict[str, Any]:
@@ -795,7 +806,7 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
                     "history": manual_partial_history,
                 }
                 if not close_partial_on_exchange
-                else _close_partial_position(exchange, config, symbol=symbol, side=side, amount=partial_amount)
+                else _close_partial_position(exchange, config, symbol=symbol, side=side, amount=partial_amount, position=live_position)
             )
             protection_error = None
             amend_result: dict[str, Any] = {}
