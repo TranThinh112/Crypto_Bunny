@@ -292,6 +292,16 @@ def _amount_to_precision(exchange: Any, symbol: str, amount: float) -> str:
     return f"{amount:.8f}".rstrip("0").rstrip(".")
 
 
+def _is_pos_side_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "posside" in message
+        or "pos side" in message
+        or "position side" in message
+        or "don't have any positions in this direction" in message
+        or "no positions in this direction" in message
+    )
+
 def _amend_stop_loss(
     exchange: Any,
     symbol: str,
@@ -356,20 +366,35 @@ def _close_partial_position(
             params,
         )
 
-    try:
-        return submit(base_params)
-    except Exception as exc:
-        message = str(exc).lower()
-        pos_side = str(base_params.get("posSide") or "").strip().lower()
-        if pos_side and (
-            "don't have any positions in this direction" in message
-            or "no positions in this direction" in message
-            or "posside" in message
-        ):
-            retry_params = dict(base_params)
-            retry_params.pop("posSide", None)
-            return submit(retry_params)
-        raise
+    variants: list[dict[str, Any]] = [dict(base_params)]
+    without_pos_side = dict(base_params)
+    without_pos_side.pop("posSide", None)
+    variants.append(without_pos_side)
+    with_pos_side = dict(base_params)
+    with_pos_side["posSide"] = side
+    variants.append(with_pos_side)
+
+    seen: set[tuple[tuple[str, str], ...]] = set()
+    last_exc: Exception | None = None
+    for params in variants:
+        key = tuple(sorted((str(item_key), str(item_value)) for item_key, item_value in params.items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            result = submit(params)
+        except Exception as exc:
+            last_exc = exc
+            if _is_pos_side_error(exc):
+                continue
+            raise
+        if params != base_params and isinstance(result, dict):
+            result = dict(result)
+            result["pos_side_retry"] = {"original": base_params, "used": params}
+        return result
+    if last_exc is not None:
+        raise last_exc
+    return submit(base_params)
 
 
 def _live_position_for_symbol(exchange: Any, symbol: str, side: str) -> dict[str, Any] | None:
