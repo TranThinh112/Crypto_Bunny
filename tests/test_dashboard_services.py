@@ -500,6 +500,30 @@ class SystemChecklistPayloadTests(unittest.TestCase):
         self.assertEqual(levels["tp_steps"][0]["price"], 1.28)
         self.assertEqual(levels["current_tp"]["price"], 1.28)
 
+    def test_profit_protection_uses_live_remaining_quantity_after_partial(self) -> None:
+        row = {
+            "side": "short",
+            "entry_price": 0.1544,
+            "initial_stop_loss": 0.159,
+            "stop_loss": 0.1539,
+            "take_profit": 0.1453,
+            "partial_take_profit_done": True,
+            "partial_take_profit_fraction": 0.3,
+            "partial_take_profit_amount": 7.32,
+            "partial_take_profit_price": 0.1486,
+            "partial_take_profit_original_tp": 0.1474,
+            "partial_take_profit_extended_tp": 0.1453,
+            "quantity": 24.4,
+            "contract_size": 10,
+            "payload_json": json.dumps({"position": {"contracts": 17.1, "contractSize": 10}}),
+        }
+
+        levels = _trade_execution_profit_protection_levels(row)
+
+        self.assertEqual(levels["current_amount"], 17.1)
+        self.assertEqual(levels["remaining_amount"], 17.1)
+        self.assertAlmostEqual(levels["tp2"]["pnl"], 1.5561)
+
     def test_market_pattern_dashboard_uses_app_atlas_database(self) -> None:
         class FakeRepository:
             def __init__(self, *, db, config) -> None:

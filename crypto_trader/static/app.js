@@ -4383,7 +4383,8 @@ function renderProfitProtectionPositionPanel(item) {
   const levelByStep = (rows, step) => rows.find((level) => Number(level?.step) === step) || null;
   const currentPnlLevel = { price: item?.mark_price, pnl: item?.pnl };
   const partialDone = Boolean(item?.partial_take_profit_done);
-  const achievedStep = partialDone ? Math.max(1, Math.min(3, Number(item?.profit_extension_step) || 1)) : 0;
+  const extensionStep = Number(item?.profit_extension_step);
+  const achievedStep = partialDone && Number.isFinite(extensionStep) ? Math.max(0, Math.min(3, extensionStep)) : 0;
   const stepAchieved = (step) => achievedStep >= step;
   const lossGuard = levels.loss_guard && typeof levels.loss_guard === "object" ? levels.loss_guard : null;
   const lossGuardRows = lossGuard ? [

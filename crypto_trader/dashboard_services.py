@@ -780,12 +780,12 @@ def _trade_execution_quantity(row: dict[str, Any]) -> float | None:
     payload = _trade_execution_payload(row)
     position, info = _trade_execution_position_payload(row)
     for value in (
-        row.get("quantity"),
-        row.get("contracts"),
-        payload.get("quantity"),
-        payload.get("contracts"),
         position.get("contracts"),
         info.get("pos"),
+        payload.get("quantity"),
+        payload.get("contracts"),
+        row.get("quantity"),
+        row.get("contracts"),
     ):
         number = _safe_float(value, float("nan"))
         if number == number and number > 0:
@@ -1137,6 +1137,8 @@ def _trade_execution_summary(config: dict[str, Any]) -> dict[str, Any]:
                 "partial_take_profit_amount": row.get("partial_take_profit_amount"),
                 "partial_take_profit_original_tp": row.get("partial_take_profit_original_tp"),
                 "partial_take_profit_extended_tp": row.get("partial_take_profit_extended_tp"),
+                "partial_take_profit_protection_error": row.get("partial_take_profit_protection_error"),
+                "profit_extension_step": row.get("profit_extension_step"),
                 "trailing_stop_updated_at": row.get("trailing_stop_updated_at"),
                 "trailing_stop_r_multiple": row.get("trailing_stop_r_multiple"),
                 "trailing_stop_atr": row.get("trailing_stop_atr"),
