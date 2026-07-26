@@ -2097,10 +2097,12 @@ def _stored_bool(value: Any) -> bool | None:
     return None
 
 
-def _recovery_cycle_pnl(config: dict[str, Any]) -> float:
+def _recovery_cycle_pnl(config: dict[str, Any]) -> float | None:
     window_pnl = _recovery_cycle_pnl_since_config_start(config)
     if window_pnl is not None:
         return window_pnl
+    if config.get("position_sizing", {}).get("cycle_start_at"):
+        return None
     return _recovery_cycle_pnl_from_state(config)
 
 def _recovery_cycle_pnl_from_state(config: dict[str, Any]) -> float:
@@ -2190,82 +2192,72 @@ def _recovery_cycle_has_okx_symbol_side_match(
 def _recovery_cycle_display_pnl_from_okx(start_at: datetime, config: dict[str, Any]) -> float | None:
     try:
         from .market import create_exchange
-        from .sizing import _fetch_positions_history_rows, _position_key, _position_time
-
-        limit = int(config.get("position_sizing", {}).get("history_limit", 100) or 100)
         exchange = create_exchange(config, authenticated=True)
         exchange.load_markets()
-        rows = _fetch_positions_history_rows(exchange, limit)
     except Exception:
         return None
+    fills_pnl = _recovery_cycle_closed_pnl_from_okx_fills(exchange, start_at, config)
+    if fills_pnl is not None:
+        return fills_pnl
+    return None
+
+def _recovery_cycle_closed_pnl_from_okx_fills(
+    exchange: Any,
+    start_at: datetime,
+    config: dict[str, Any],
+) -> float | None:
+    fetch_fills = getattr(exchange, "privateGetTradeFillsHistory", None)
+    if not callable(fetch_fills):
+        fetch_fills = getattr(exchange, "private_get_trade_fills_history", None)
+    if not callable(fetch_fills):
+        return None
+    if start_at.tzinfo is None:
+        start_at = start_at.replace(tzinfo=timezone.utc)
+    start_ms = int(start_at.timestamp() * 1000)
+    limit = max(1, min(int(config.get("position_sizing", {}).get("history_limit", 100) or 100), 100))
     total = 0.0
     seen_any = False
-    seen_keys: set[str] = set()
-    okx_close_keys: set[tuple[Any, ...]] = set()
-    okx_symbol_side_items: list[tuple[str, str, datetime | None]] = []
-    latest_okx_closed_at: datetime | None = None
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        closed_at = _position_time(row)
-        if closed_at is None:
-            continue
-        if closed_at.tzinfo is None:
-            closed_at = closed_at.replace(tzinfo=timezone.utc)
-        if closed_at < start_at:
-            continue
-        if latest_okx_closed_at is None or closed_at > latest_okx_closed_at:
-            latest_okx_closed_at = closed_at
-        key = str(_position_key(row) or "")
-        if key and key in seen_keys:
-            continue
-        if key:
-            seen_keys.add(key)
-        close_key = _recovery_cycle_okx_close_key(row)
-        if close_key is not None:
-            okx_close_keys.add(close_key)
-        okx_symbol_side_items.append(_recovery_cycle_symbol_side_time(row))
-        info = row.get("info", {}) if isinstance(row.get("info"), dict) else {}
-        pnl = None
-        for payload in (row, info):
-            pnl = _safe_float(payload.get("pnl"), None)
-            if pnl is not None:
-                break
-        if pnl is None:
-            for payload in (row, info):
-                for name in ("realizedPnl", "realisedPnl", "netPnl", "netProfit"):
-                    pnl = _safe_float(payload.get(name), None)
-                    if pnl is not None:
-                        break
-                if pnl is not None:
-                    break
-        if pnl is None:
-            continue
-        total += pnl
-        seen_any = True
-    try:
-        closed = _closed_trade_executions(config)
-    except Exception:
-        closed = []
-    seen_trade_fingerprints: set[tuple[Any, ...]] = set()
-    for row in closed:
-        closed_at = _parse_time(row.get("closed_at") or row.get("updated_at") or row.get("created_at"))
-        if closed_at is None:
-            continue
-        if closed_at >= start_at:
-            if latest_okx_closed_at is not None and closed_at <= latest_okx_closed_at:
+    seen_fill_keys: set[str] = set()
+    cursor: str | None = None
+    for _ in range(20):
+        params: dict[str, Any] = {"instType": "SWAP", "limit": str(limit)}
+        if cursor:
+            params["after"] = cursor
+        try:
+            response = fetch_fills(params)
+        except Exception:
+            return round(total, 6) if seen_any else None
+        rows = response.get("data") if isinstance(response, dict) else response
+        if not isinstance(rows, list) or not rows:
+            break
+        oldest_ms: float | None = None
+        next_cursor = ""
+        for row in rows:
+            if not isinstance(row, dict):
                 continue
-            trade_close_key = _recovery_cycle_trade_execution_close_key(row)
-            if trade_close_key is not None and trade_close_key in okx_close_keys:
+            timestamp_ms = _safe_float(row.get("fillTime") or row.get("ts"), None)
+            if timestamp_ms is None:
                 continue
-            if _recovery_cycle_has_okx_symbol_side_match(okx_symbol_side_items, row):
+            if timestamp_ms > 0 and (oldest_ms is None or timestamp_ms < oldest_ms):
+                oldest_ms = timestamp_ms
+            next_cursor = str(row.get("billId") or row.get("tradeId") or next_cursor or "")
+            if timestamp_ms < start_ms:
                 continue
-            fingerprint = _recovery_cycle_trade_execution_fingerprint(row)
-            if fingerprint in seen_trade_fingerprints:
+            pnl = _safe_float(row.get("fillPnl"), None)
+            if pnl is None or abs(pnl) < 1e-12:
                 continue
-            seen_trade_fingerprints.add(fingerprint)
-            total += _safe_float(row.get("pnl"), 0.0)
+            fill_key = str(row.get("tradeId") or row.get("billId") or "")
+            if fill_key and fill_key in seen_fill_keys:
+                continue
+            if fill_key:
+                seen_fill_keys.add(fill_key)
+            total += pnl
             seen_any = True
+        if not next_cursor or next_cursor == cursor:
+            break
+        cursor = next_cursor
+        if oldest_ms is not None and oldest_ms < start_ms:
+            break
     return round(total, 6) if seen_any else None
 
 def _recovery_cycle_pnl_since_config_start(config: dict[str, Any]) -> float | None:
@@ -2289,30 +2281,7 @@ def _recovery_cycle_pnl_since_config_start(config: dict[str, Any]) -> float | No
     display_pnl = _recovery_cycle_display_pnl_from_okx(start_at, config)
     if display_pnl is not None:
         return display_pnl
-    trade_execution_pnl = _recovery_cycle_pnl_from_trade_executions(start_at, config)
-    if trade_execution_pnl is not None:
-        return trade_execution_pnl
-    try:
-        from .sizing import _closed_positions, _sizing_config
-
-        settings = _sizing_config(config)
-        closed = _closed_positions(config, int(settings.get("history_limit", 100)))
-    except Exception:
-        fallback = _safe_float(sizing_config.get("cycle_start_pnl_fallback_usdt"), None)
-        return round(fallback, 6) if fallback is not None else None
-    if not closed:
-        fallback = _safe_float(sizing_config.get("cycle_start_pnl_fallback_usdt"), None)
-        return round(fallback, 6) if fallback is not None else 0.0
-    total = 0.0
-    for row in closed:
-        closed_at = row.get("closed_at")
-        if not isinstance(closed_at, datetime):
-            continue
-        if closed_at.tzinfo is None:
-            closed_at = closed_at.replace(tzinfo=timezone.utc)
-        if closed_at >= start_at:
-            total += _safe_float(row.get("pnl_usdt"), 0.0)
-    return round(total, 6)
+    return None
 
 
 def _previous_recovery_mode(existing: dict[str, Any] | None) -> str | None:
@@ -2386,7 +2355,9 @@ def _notify_recovery_mode_transition(
         "previous_mode": previous_mode,
         "current_mode": current_mode,
         "global_loss_streak": _safe_int(payload.get("globalLossStreak"), 0),
-        "cycle_pnl": round(_safe_float(payload.get("recoveryCyclePnlUsdt"), 0.0), 4),
+        "cycle_pnl": None
+        if payload.get("recoveryCyclePnlUsdt") is None
+        else round(_safe_float(payload.get("recoveryCyclePnlUsdt"), 0.0), 4),
         "hard_entry_cycle_pnl": round(_safe_float(payload.get("hardRecoveryEntryCyclePnlUsdt"), 0.0), 4),
         "soft_exit_threshold": round(_safe_float(payload.get("hardRecoverySoftExitThresholdUsdt"), 0.0), 4),
     }
@@ -2403,7 +2374,9 @@ def _notify_recovery_mode_transition(
         f"🕒 Thời gian: {time_label}",
         f"↔️ Chuyển từ: {_recovery_mode_label(previous_mode)} → {_recovery_mode_label(current_mode)}",
         f"🔁 Chuỗi thua hệ thống: {payload.get('globalLossStreak', 0)}",
-        f"📉 Cycle PnL: {_safe_float(payload.get('recoveryCyclePnlUsdt'), 0.0):+.4f} USDT",
+        "📉 Cycle PnL: -"
+        if payload.get("recoveryCyclePnlUsdt") is None
+        else f"📉 Cycle PnL: {_safe_float(payload.get('recoveryCyclePnlUsdt'), 0.0):+.4f} USDT",
         f"🛡 Rule áp dụng: score ≥ {score:g}, GPT ≥ {confidence:g}, R:R ≥ {risk_reward:g}",
         f"💰 Risk/lệnh: {risk_percent:g}%",
     ]
@@ -2427,6 +2400,7 @@ def refresh_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
     global_loss_streak = get_global_loss_streak(config)
     current_rule_score, current_confidence = _adaptive_thresholds(config)
     cycle_pnl = _recovery_cycle_pnl(config)
+    cycle_pnl_for_mode = _safe_float(cycle_pnl, 0.0)
     paused_until: datetime | None = None
     existing = get_trading_system_state_row(config)
     previous_recovery_mode = _previous_recovery_mode(existing)
@@ -2444,15 +2418,15 @@ def refresh_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
     hard_threshold = _safe_int(settings.get("global_loss_streak_threshold"), 2)
     hard_entry_cycle_pnl = _safe_float(previous_payload.get("hardRecoveryEntryCyclePnlUsdt"), 0.0)
     if global_loss_streak >= hard_threshold and previous_recovery_mode != "HARD_RECOVERY":
-        hard_entry_cycle_pnl = cycle_pnl
+        hard_entry_cycle_pnl = cycle_pnl_for_mode
     if global_loss_streak < hard_threshold:
         hard_entry_cycle_pnl = 0.0
     soft_exit_threshold = hard_entry_cycle_pnl * 0.5 if hard_entry_cycle_pnl < 0 else 0.0
-    hard_recovery = global_loss_streak >= hard_threshold and cycle_pnl < soft_exit_threshold
+    hard_recovery = global_loss_streak >= hard_threshold and cycle_pnl_for_mode < soft_exit_threshold
     soft_recovery = (
         not hard_recovery
         and bool(settings.get("enable_soft_recovery_mode", True))
-        and cycle_pnl < -1e-9
+        and cycle_pnl_for_mode < -1e-9
     )
     recovery_mode = "HARD_RECOVERY" if hard_recovery else "SOFT_RECOVERY" if soft_recovery else "NORMAL"
     is_recovery_mode = recovery_mode != "NORMAL"
@@ -2464,7 +2438,7 @@ def refresh_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
         "isSoftRecoveryMode": soft_recovery,
         "isHardRecoveryMode": hard_recovery,
         "globalLossStreak": global_loss_streak,
-        "recoveryCyclePnlUsdt": round(cycle_pnl, 6),
+        "recoveryCyclePnlUsdt": None if cycle_pnl is None else round(cycle_pnl, 6),
         "hardRecoveryEntryCyclePnlUsdt": round(hard_entry_cycle_pnl, 6),
         "hardRecoverySoftExitThresholdUsdt": round(soft_exit_threshold, 6),
         "isPaused": bool(paused_until and paused_until > _utcnow()),

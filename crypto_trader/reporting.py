@@ -548,6 +548,116 @@ def format_manual_position_target_message(config: dict[str, Any], event: dict[st
     ]
     return "\n".join(lines)
 
+def format_position_quantity_change_message(config: dict[str, Any], event: dict[str, Any]) -> str:
+    def fmt(value: Any, digits: int = 6) -> str:
+        number = _float(value)
+        if number is None:
+            return "-"
+        text = f"{number:.{digits}f}"
+        return text if digits <= 0 else text.rstrip("0").rstrip(".")
+
+    def fmt_usdt(value: Any) -> str:
+        number = _float(value)
+        if number is None:
+            return "-"
+        return f"{number:.2f} USDT"
+
+    symbol = str(event.get("symbol") or "-")
+    side = str(event.get("side") or "-").upper()
+    trade_id = event.get("trade_execution_id") or event.get("id") or "-"
+    old_qty = _float(event.get("old_quantity"))
+    new_qty = _float(event.get("new_quantity"))
+    entry = _float(event.get("entry"))
+    old_entry = _float(event.get("old_entry"))
+    contract_size = _float(event.get("contract_size")) or 1.0
+    leverage = _float(event.get("leverage"))
+    changed_at = _parse_time(event.get("changed_at"))
+    old_notional = old_qty * (old_entry or entry) * contract_size if old_qty is not None and (old_entry or entry) is not None else None
+    new_notional = new_qty * entry * contract_size if new_qty is not None and entry is not None else None
+    lines = [
+        "📌 BOT ĐÃ CẬP NHẬT KHỐI LƯỢNG",
+        "",
+        f"Cặp: {symbol} {side}",
+        f"ID lệnh: VT #{trade_id}",
+        f"Khối lượng: {fmt(old_qty)} → {fmt(new_qty)}",
+        f"Giá vào: {fmt(old_entry)} → {fmt(entry)}" if old_entry is not None and entry is not None and abs(old_entry - entry) > 1e-9 else f"Giá vào: {fmt(entry)}",
+        f"Giá trị vị thế: {fmt_usdt(old_notional)} → {fmt_usdt(new_notional)}",
+        f"Đòn bẩy: {fmt(leverage, 0)}x" if leverage is not None else "Đòn bẩy: -",
+        f"Thời gian: {_date_time_seconds_label(changed_at) if changed_at else '-'}",
+        "",
+        "Nguồn: OKX live position.",
+    ]
+    return "\n".join(lines)
+
+def format_position_target_change_message(config: dict[str, Any], event: dict[str, Any]) -> str:
+    def fmt(value: Any, digits: int = 6) -> str:
+        number = _float(value)
+        if number is None:
+            return "-"
+        text = f"{number:.{digits}f}"
+        return text if digits <= 0 else text.rstrip("0").rstrip(".")
+
+    def pnl_at(price: Any) -> float | None:
+        entry = _float(event.get("entry"))
+        target = _float(price)
+        qty = _float(event.get("quantity"))
+        contract_size = _float(event.get("contract_size")) or 1.0
+        if entry is None or target is None or qty is None:
+            return None
+        gross = (target - entry) if str(event.get("side") or "").lower() == "long" else (entry - target)
+        return gross * qty * contract_size
+
+    def fmt_usdt(value: Any) -> str:
+        number = _float(value)
+        if number is None:
+            return "-"
+        return f"{number:+.2f} USDT"
+
+    symbol = str(event.get("symbol") or "-")
+    side = str(event.get("side") or "-").upper()
+    trade_id = event.get("trade_execution_id") or event.get("id") or "-"
+    old_sl = _float(event.get("old_stop_loss"))
+    new_sl = _float(event.get("new_stop_loss"))
+    old_tp = _float(event.get("old_take_profit"))
+    new_tp = _float(event.get("new_take_profit"))
+    stop_loss_changed = bool(event.get("stop_loss_changed"))
+    take_profit_changed = bool(event.get("take_profit_changed"))
+    if not stop_loss_changed and not take_profit_changed:
+        stop_loss_changed = old_sl is not None or new_sl is not None
+        take_profit_changed = old_tp is not None or new_tp is not None
+    changed_at = _parse_time(event.get("changed_at"))
+    lines = [
+        "🛡️ BOT ĐÃ CẬP NHẬT TP/SL",
+        "",
+        f"Cặp: {symbol} {side}",
+        f"ID lệnh: VT #{trade_id}",
+        f"Entry hiện tại: {fmt(event.get('entry'))}",
+    ]
+    if stop_loss_changed:
+        lines.extend(
+            [
+                "",
+                f"SL: {fmt(old_sl)} → {fmt(new_sl)}",
+                f"Nếu chạm SL mới: {fmt_usdt(pnl_at(new_sl))}",
+            ]
+        )
+    if take_profit_changed:
+        lines.extend(
+            [
+                "",
+                f"TP: {fmt(old_tp)} → {fmt(new_tp)}",
+                f"Nếu chạm TP mới: {fmt_usdt(pnl_at(new_tp))}",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            f"Thời gian: {_date_time_seconds_label(changed_at) if changed_at else '-'}",
+            "Nguồn: OKX live TP/SL.",
+        ]
+    )
+    return "\n".join(lines)
+
 def format_partial_take_profit_message(config: dict[str, Any], event: dict[str, Any]) -> str:
     def fmt(value: Any, digits: int = 6) -> str:
         number = _float(value)

@@ -33,6 +33,8 @@ from .storage import (
 
 EXCHANGE_CLOSE_NOTIFICATION_PREFIX = "runtime_sync_exchange_close_notified"
 MANUAL_POSITION_TARGET_NOTIFICATION_PREFIX = "runtime_sync_manual_position_target_notified"
+POSITION_QUANTITY_CHANGE_NOTIFICATION_PREFIX = "runtime_sync_position_quantity_change_notified"
+POSITION_TARGET_CHANGE_NOTIFICATION_PREFIX = "runtime_sync_position_target_change_notified"
 
 
 def _float(value: Any) -> float | None:
@@ -521,6 +523,76 @@ def _notify_manual_position_targets(config: dict[str, Any], event: dict[str, Any
         sent = send_telegram_message(
             config,
             format_manual_position_target_message(config, event),
+            with_buttons=False,
+            replace_previous=False,
+            allow_during_startup_quiet=True,
+        )
+        if sent:
+            set_journal_state(config, key, datetime.now(timezone.utc).isoformat())
+        return bool(sent)
+    except Exception:
+        return False
+
+def _value_changed(previous: float | None, current: float | None, *, tolerance: float = 1e-9) -> bool:
+    if previous is None or current is None:
+        return False
+    return abs(previous - current) > tolerance
+
+def _position_change_notification_key(prefix: str, event: dict[str, Any], *fields: str) -> str:
+    parts = [
+        prefix,
+        str(event.get("trade_execution_id") or "-"),
+        str(event.get("symbol") or "-"),
+        str(event.get("side") or "-").upper(),
+    ]
+    parts.extend(str(event.get(field) if event.get(field) is not None else "-") for field in fields)
+    return ":".join(parts)
+
+def _notify_position_quantity_changed(config: dict[str, Any], event: dict[str, Any]) -> bool:
+    key = _position_change_notification_key(
+        POSITION_QUANTITY_CHANGE_NOTIFICATION_PREFIX,
+        event,
+        "old_quantity",
+        "new_quantity",
+        "entry",
+    )
+    if get_journal_state(config, key):
+        return False
+    try:
+        from .notifier import send_telegram_message
+        from .reporting import format_position_quantity_change_message
+
+        sent = send_telegram_message(
+            config,
+            format_position_quantity_change_message(config, event),
+            with_buttons=False,
+            replace_previous=False,
+            allow_during_startup_quiet=True,
+        )
+        if sent:
+            set_journal_state(config, key, datetime.now(timezone.utc).isoformat())
+        return bool(sent)
+    except Exception:
+        return False
+
+def _notify_position_targets_changed(config: dict[str, Any], event: dict[str, Any]) -> bool:
+    key = _position_change_notification_key(
+        POSITION_TARGET_CHANGE_NOTIFICATION_PREFIX,
+        event,
+        "old_stop_loss",
+        "new_stop_loss",
+        "old_take_profit",
+        "new_take_profit",
+    )
+    if get_journal_state(config, key):
+        return False
+    try:
+        from .notifier import send_telegram_message
+        from .reporting import format_position_target_change_message
+
+        sent = send_telegram_message(
+            config,
+            format_position_target_change_message(config, event),
             with_buttons=False,
             replace_previous=False,
             allow_during_startup_quiet=True,
@@ -1502,6 +1574,50 @@ def sync_exchange_runtime_state(
             update_trade_execution(config, int(matched["id"]), updates)
             trade_execution_id = int(matched["id"])
             matched_execution_ids.add(int(matched["id"]))
+            previous_stop_loss = _float(matched.get("stop_loss"))
+            previous_take_profit = _float(matched.get("take_profit"))
+            previous_entry = _float(matched.get("entry_price") or matched.get("initial_entry_price"))
+            contract_size = _safe_float(position.get("contractSize") or info.get("ctVal"), 1.0)
+            quantity_changed = _value_changed(previous_quantity, contracts)
+            stop_loss_changed = _value_changed(previous_stop_loss, stop_loss)
+            take_profit_changed = _value_changed(previous_take_profit, take_profit)
+            targets_changed = stop_loss_changed or take_profit_changed
+            if quantity_changed:
+                _notify_position_quantity_changed(
+                    config,
+                    {
+                        "trade_execution_id": trade_execution_id,
+                        "symbol": symbol,
+                        "side": side,
+                        "old_quantity": previous_quantity,
+                        "new_quantity": contracts,
+                        "old_entry": previous_entry,
+                        "entry": entry_price,
+                        "contract_size": contract_size,
+                        "leverage": leverage,
+                        "changed_at": created_at,
+                    },
+                )
+            if targets_changed:
+                _notify_position_targets_changed(
+                    config,
+                    {
+                        "trade_execution_id": trade_execution_id,
+                        "symbol": symbol,
+                        "side": side,
+                        "quantity": contracts,
+                        "contract_size": contract_size,
+                        "entry": entry_price,
+                        "leverage": leverage,
+                        "old_stop_loss": previous_stop_loss,
+                        "new_stop_loss": stop_loss,
+                        "old_take_profit": previous_take_profit,
+                        "new_take_profit": take_profit,
+                        "stop_loss_changed": stop_loss_changed,
+                        "take_profit_changed": take_profit_changed,
+                        "changed_at": created_at,
+                    },
+                )
         else:
             prompt_row = ensure_prompt_version(config)
             inserted = insert_trade_execution_row(

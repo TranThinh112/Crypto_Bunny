@@ -4179,7 +4179,7 @@ function positionManagementStats(baseModule, sectionKey) {
     overview: [
       { label: "Vị thế mở", value: common.openCount },
       { label: "Lệnh đóng gần đây", value: common.closedCount },
-      { label: "Đang chờ partial", value: common.waitingPartial },
+      { label: "Đang chờ chốt 1 phần", value: common.waitingPartial },
       { label: "Trailing Stop", value: trailingEnabled ? "Bật" : "Tắt" },
     ],
     pending_orders: [
@@ -4278,18 +4278,36 @@ function positionManagementSections(baseModule) {
   });
 }
 
+function tradeExecutionPartialBadge(item) {
+  const levels = item?.profit_protection_levels && typeof item.profit_protection_levels === "object"
+    ? item.profit_protection_levels
+    : {};
+  const lossGuard = levels.loss_guard && typeof levels.loss_guard === "object" ? levels.loss_guard : null;
+  const lossGuardDone = Boolean(lossGuard?.executed || item?.loss_guard_partial_done);
+  if (lossGuardDone) {
+    return { label: "Đã chốt lỗ 25%", tone: "bear" };
+  }
+  const profitPartialDone = Boolean(levels.partial_30?.executed || item?.partial_take_profit_done);
+  if (profitPartialDone) {
+    return { label: "Đã chốt lời 30%", tone: "bull" };
+  }
+  return { label: "Chờ chốt 1 phần", tone: "unknown" };
+}
+
 function renderTradeExecutionPositionCard(item) {
   const symbol = item.symbol || "-";
   const side = String(item.side || "-").toUpperCase();
-  const partialDone = Boolean(item.partial_take_profit_done);
+  const badge = tradeExecutionPartialBadge(item);
+  const entry = item?.initial_entry_price ?? item?.entry_price;
   return `
     <article class="trade-execution-position">
       <header>
         <div>
           <span>${escapeHtml(side)}</span>
           <strong>${escapeHtml(symbol)}</strong>
+          <small>Entry: ${escapeHtml(formatMarketRegimeNumber(entry))}</small>
         </div>
-        <span class="market-regime-badge ${partialDone ? "bull" : "unknown"}">${partialDone ? "Partial done" : "Waiting partial"}</span>
+        <span class="market-regime-badge ${badge.tone}">${escapeHtml(badge.label)}</span>
       </header>
     </article>
   `;
@@ -4317,6 +4335,22 @@ function tradeExecutionPositionTabLabel(item, index) {
   const symbol = String(item?.symbol || `#${index + 1}`);
   const side = String(item?.side || "").toUpperCase();
   return side ? `${symbol} ${side}` : symbol;
+}
+
+function tradeExecutionCloseBadges(item) {
+  const events = Array.isArray(item?.trade_event_history) ? item.trade_event_history : [];
+  const hasLossGuard = Boolean(item?.loss_guard_partial_done)
+    || events.some((event) => String(event?.type || "") === "loss_guard_partial_close");
+  const hasProfitPartial = Boolean(item?.partial_take_profit_done)
+    || events.some((event) => {
+      if (String(event?.type || "") !== "partial_close") return false;
+      const pnl = nullableNumber(event?.manual_partial_history?.pnl ?? event?.partial_pnl ?? event?.pnl);
+      return pnl === null || pnl > 0;
+    });
+  const badges = [];
+  if (hasProfitPartial && !hasLossGuard) badges.push({ label: "Chốt lời 30%", tone: "take-profit" });
+  if (hasLossGuard) badges.push({ label: "Chốt lỗ 25%", tone: "stop-loss" });
+  return badges;
 }
 
 function tradeExecutionChartRowsForItem(item) {
@@ -4367,15 +4401,27 @@ function formatTradeExecutionPnl(value) {
   return `${sign}${numeric.toFixed(2)} USDT`;
 }
 
+function formatPositionQuantityUsdt(contracts, price, contractSize) {
+  const contractCount = nullableNumber(contracts);
+  const priceValue = nullableNumber(price);
+  const sizeValue = nullableNumber(contractSize) ?? 1;
+  if (contractCount === null) return "-";
+  const contractText = `${formatMarketRegimeNumber(contractCount)} contract`;
+  if (priceValue === null || sizeValue <= 0) return contractText;
+  const usdtValue = contractCount * sizeValue * priceValue;
+  return `${formatMarketRegimeNumber(usdtValue, 2)} USDT (${contractText})`;
+}
+
 function renderProfitProtectionLevel(label, level, tone = "", options = {}) {
   const price = level && typeof level === "object" ? level.price : null;
   const pnl = level && typeof level === "object" ? level.pnl : null;
   const triggerPrice = level && typeof level === "object" ? level.trigger_price : null;
   const extraRows = Array.isArray(options.extraRows) ? options.extraRows : [];
   const initialAmount = level && typeof level === "object" ? nullableNumber(level.initial_amount) : null;
-  const displayExtraRows = initialAmount === null
+  const showInitialAmount = options.showInitialAmount !== false;
+  const displayExtraRows = !showInitialAmount || initialAmount === null
     ? extraRows
-    : [...extraRows, `Khối lượng ban đầu: ${formatMarketRegimeNumber(initialAmount)}`];
+    : [...extraRows, `Khối lượng ban đầu: ${formatMarketRegimeNumber(initialAmount)} contract`];
   const showTrigger = options.showTrigger !== false;
   const achieved = Boolean(options.achieved);
   const disabled = Boolean(options.disabled);
@@ -4422,6 +4468,7 @@ function renderLossGuardLevelActual(lossGuard, levels = {}) {
   const displayAmount = executed && nullableNumber(lossGuard.actual_partial_amount) !== null
     ? lossGuard.actual_partial_amount
     : lossGuard.partial_close_amount;
+  const contractSize = nullableNumber(levels?.contract_size) ?? nullableNumber(levels?.current_sl?.contract_size) ?? 1;
   const initialAmount = nullableNumber(levels?.current_sl?.initial_amount);
   const remainingAfterLoss = executed && initialAmount !== null && nullableNumber(displayAmount) !== null
     ? Math.max(0, initialAmount - Number(displayAmount))
@@ -4435,8 +4482,8 @@ function renderLossGuardLevelActual(lossGuard, levels = {}) {
     achieved: executed,
     disabled: disabledByProfitProtection,
     extraRows: [
-      `${executed ? "Khối lượng đã chốt" : "Khối lượng chốt"} ${closePct}%: ${formatMarketRegimeNumber(displayAmount)}`,
-      `KL còn lại: ${formatMarketRegimeNumber(remainingAfterLoss)}`,
+      `${executed ? "Khối lượng đã chốt" : "Khối lượng chốt"} ${closePct}%: ${formatPositionQuantityUsdt(displayAmount, displayPrice, contractSize)}`,
+      `KL còn lại: ${formatPositionQuantityUsdt(remainingAfterLoss, displayPrice, contractSize)}`,
       lossGuard.applies === false ? "Áp dụng: hiển thị mốc, chưa tự động đóng" : "",
       `Thời gian: ${executed && lossGuard.executed_at ? timeLabel(lossGuard.executed_at) : "-"}`,
     ].filter(Boolean),
@@ -4462,12 +4509,17 @@ function renderProfitProtectionPositionPanel(item) {
   const achievedStep = partialDone && Number.isFinite(extensionStep) ? Math.max(0, Math.min(3, extensionStep)) : 0;
   const stepAchieved = (step) => achievedStep >= step;
   const lossGuard = levels.loss_guard && typeof levels.loss_guard === "object" ? levels.loss_guard : null;
+  const contractSize = nullableNumber(levels.contract_size ?? item?.contract_size) ?? 1;
+  const currentSlLevel = levelByStep(slSteps, 1) || levels.current_sl;
+  const currentTpLevel = levelByStep(tpSteps, 1) || levels.current_tp;
+  const currentSlPrice = currentSlLevel?.price ?? item?.stop_loss;
+  const partialPrice = levels.partial_30?.price ?? item?.partial_take_profit_price;
   const initialExtraRows = profitProtectionExtraRows([
-    { label: "Khối lượng ban đầu", value: formatMarketRegimeNumber(levels.current_sl?.initial_amount ?? item?.initial_quantity) },
+    { label: "Khối lượng ban đầu", value: formatPositionQuantityUsdt(levels.current_sl?.initial_amount ?? item?.initial_quantity, currentSlPrice, contractSize) },
   ]);
   const currentExtraRows = profitProtectionExtraRows([
     { label: "Mark", value: formatMarketRegimeNumber(item?.mark_price) },
-    { label: "KL hi\u1ec7n t\u1ea1i", value: formatMarketRegimeNumber(levels.current_amount ?? item?.quantity) },
+    { label: "KL hi\u1ec7n t\u1ea1i", value: formatPositionQuantityUsdt(levels.current_amount ?? item?.quantity, item?.mark_price, contractSize) },
   ]);
   const initialAmountForPartial = nullableNumber(levels.current_sl?.initial_amount ?? item?.initial_quantity ?? levels.current_amount ?? item?.quantity);
   const partialAmount = nullableNumber(item?.partial_take_profit_amount);
@@ -4480,10 +4532,11 @@ function renderProfitProtectionPositionPanel(item) {
       ? nullableNumber(levels.current_amount ?? item?.quantity)
       : Math.max(0, initialAmountForPartial - plannedPartialAmount);
   const partialTimeLabel = levels.partial_30?.executed_at ? timeLabel(levels.partial_30.executed_at) : "-";
+  const badge = tradeExecutionPartialBadge(item);
   const partialExtraRows = [
     ...profitProtectionExtraRows([
-    { label: "Khối lượng chốt 30%", value: formatMarketRegimeNumber(partialDone && partialAmount !== null ? partialAmount : plannedPartialAmount) },
-    { label: "KL sau khi chốt lời 30%", value: formatMarketRegimeNumber(afterProfitPartialAmount) },
+    { label: "Khối lượng chốt 30%", value: formatPositionQuantityUsdt(partialDone && partialAmount !== null ? partialAmount : plannedPartialAmount, partialPrice, contractSize) },
+    { label: "KL sau khi chốt lời 30%", value: formatPositionQuantityUsdt(afterProfitPartialAmount, partialPrice, contractSize) },
     ]),
     `Thời gian: ${partialTimeLabel}`,
   ];
@@ -4493,12 +4546,13 @@ function renderProfitProtectionPositionPanel(item) {
         <div>
           <span>${escapeHtml(String(item?.side || "-").toUpperCase())}</span>
           <strong>${escapeHtml(item?.symbol || "-")}</strong>
+          <small>Entry: ${escapeHtml(formatMarketRegimeNumber(item?.initial_entry_price ?? item?.entry_price))}</small>
         </div>
-        <span class="market-regime-badge ${partialDone ? "bull" : "unknown"}">${partialDone ? "Partial done" : "Waiting partial"}</span>
+        <span class="market-regime-badge ${badge.tone}">${escapeHtml(badge.label)}</span>
       </header>
       <div class="profit-protection-level-grid">
-        ${renderProfitProtectionLevel("SL1 ban đầu", levelByStep(slSteps, 1) || levels.current_sl, "base")}
-        ${renderProfitProtectionLevel("TP1 ban đầu", levelByStep(tpSteps, 1) || levels.current_tp, "base")}
+        ${renderProfitProtectionLevel("SL1 ban đầu", currentSlLevel, "base", { extraRows: initialExtraRows, showInitialAmount: false })}
+        ${renderProfitProtectionLevel("TP1 ban đầu", currentTpLevel, "base")}
         ${renderProfitProtectionLevel("PnL hi\u1ec7n t\u1ea1i", currentPnlLevel, "current", { extraRows: currentExtraRows })}
         ${renderProfitProtectionLevel("Ch\u1ed1t 30%", levels.partial_30, "partial", { achieved: partialDone, extraRows: partialExtraRows })}
         ${renderLossGuardLevelActual(lossGuard, levels)}
@@ -4711,10 +4765,6 @@ function renderPositionManagementSectionDetail(module, options = {}) {
         </div>
         <div data-position-detail-panel="sync_journal" hidden>
           <section class="market-regime-section">
-            <div class="market-regime-section-head"><div><strong>Đồng bộ OKX</strong><small>Bot lấy OKX làm nguồn sự thật cho fill/close thực tế</small></div></div>
-            <div class="market-regime-empty compact">Chưa tạo collection mới. Màn hình này đang đọc nguồn close từ trade_executions và exchange_close_history_json nếu có.</div>
-          </section>
-          <section class="market-regime-section">
             <div class="market-regime-section-head"><div><strong>Nhật ký close gần đây</strong><small>TP, SL, trailing stop hoặc reconciled close</small></div></div>
             ${renderTradeExecutionClosedList(closedItems)}
           </section>
@@ -4739,10 +4789,6 @@ function renderPositionManagementSectionDetail(module, options = {}) {
       ` : ""}
       ${section === "sync_journal" ? `
         <section class="market-regime-section">
-          <div class="market-regime-section-head"><div><strong>Đồng bộ OKX</strong><small>Bot lấy OKX làm nguồn sự thật cho fill/close thực tế</small></div></div>
-          <div class="market-regime-empty compact">Chưa tạo collection mới. Màn hình này đang đọc nguồn close từ trade_executions và exchange_close_history_json nếu có.</div>
-        </section>
-        <section class="market-regime-section">
           <div class="market-regime-section-head"><div><strong>Nhật ký close gần đây</strong><small>TP, SL, trailing stop hoặc reconciled close</small></div></div>
           ${renderTradeExecutionClosedList(closedItems)}
         </section>
@@ -4752,6 +4798,7 @@ function renderPositionManagementSectionDetail(module, options = {}) {
   refs.systemModuleDetail.querySelector(".module-close")?.addEventListener("click", closeSystemModuleDetail);
   bindPositionManagementDetailTabs();
   bindTradeExecutionTabs();
+  bindTradeExecutionClosedPagination();
   if (Number.isFinite(Number(options.scrollTop))) {
     const scrollNode = refs.systemModuleDetail.querySelector(".module-chart-scroll");
     if (scrollNode) requestAnimationFrame(() => {
@@ -4761,26 +4808,66 @@ function renderPositionManagementSectionDetail(module, options = {}) {
 }
 
 function renderTradeExecutionClosedList(items) {
-  const rows = Array.isArray(items) ? items.slice(0, 8) : [];
+  const rows = Array.isArray(items) ? items : [];
   if (!rows.length) return `<div class="market-regime-empty compact">Chưa có lệnh đóng gần đây.</div>`;
+  const pageSize = 10;
+  const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
   return `
-    <div class="trade-execution-closed-list">
-      ${rows.map((item) => {
+    <div class="trade-execution-closed-list" data-closed-list>
+      ${rows.map((item, index) => {
         const reason = String(item.close_reason || "-");
         const reasonTone = reason === "take_profit" ? "take-profit" : reason === "stop_loss" ? "stop-loss" : "neutral";
         const status = String(item.status || "-").toUpperCase();
         const rowTone = status === "WIN" ? "win" : status === "LOSS" ? "loss" : "neutral";
+        const badges = tradeExecutionCloseBadges(item);
+        const page = Math.floor(index / pageSize);
         return `
-          <div class="trade-execution-closed-row ${rowTone}">
+          <div class="trade-execution-closed-row ${rowTone}" data-closed-page="${page}" ${page === 0 ? "" : "hidden"}>
             <span>${escapeHtml(item.symbol || "-")}</span>
             <strong>${escapeHtml(status)}</strong>
-            <span class="trade-execution-close-reason ${reasonTone}">${escapeHtml(reason)}</span>
+            <span class="trade-execution-close-badges">
+              <i class="trade-execution-close-reason ${reasonTone}">${escapeHtml(reason)}</i>
+              ${badges.map((badge) => `<i class="trade-execution-close-reason ${badge.tone}">${escapeHtml(badge.label)}</i>`).join("")}
+            </span>
             <b>${escapeHtml(formatMarketRegimeNumber(item.pnl))}</b>
           </div>
         `;
       }).join("")}
+      ${pageCount > 1 ? `
+        <div class="trade-execution-pager" data-closed-pager data-page="0" data-page-count="${pageCount}">
+          <button type="button" data-closed-page-prev disabled>Trước</button>
+          <span>Trang <b data-closed-page-current>1</b>/${pageCount}</span>
+          <button type="button" data-closed-page-next>Sau</button>
+        </div>
+      ` : ""}
     </div>
   `;
+}
+
+function bindTradeExecutionClosedPagination() {
+  const root = refs.systemModuleDetail;
+  if (!root) return;
+  root.querySelectorAll("[data-closed-list]").forEach((list) => {
+    const pager = list.querySelector("[data-closed-pager]");
+    if (!pager) return;
+    const pageCount = Number(pager.getAttribute("data-page-count")) || 1;
+    const currentLabel = pager.querySelector("[data-closed-page-current]");
+    const prev = pager.querySelector("[data-closed-page-prev]");
+    const next = pager.querySelector("[data-closed-page-next]");
+    const showPage = (page) => {
+      const normalized = Math.max(0, Math.min(pageCount - 1, Number(page) || 0));
+      pager.setAttribute("data-page", String(normalized));
+      list.querySelectorAll("[data-closed-page]").forEach((row) => {
+        row.hidden = Number(row.getAttribute("data-closed-page")) !== normalized;
+      });
+      if (currentLabel) currentLabel.textContent = String(normalized + 1);
+      if (prev) prev.disabled = normalized <= 0;
+      if (next) next.disabled = normalized >= pageCount - 1;
+    };
+    prev?.addEventListener("click", () => showPage((Number(pager.getAttribute("data-page")) || 0) - 1));
+    next?.addEventListener("click", () => showPage((Number(pager.getAttribute("data-page")) || 0) + 1));
+    showPage(0);
+  });
 }
 
 function tradeExecutionChartRowsForItem(item) {
@@ -4852,7 +4939,7 @@ function renderTradeExecutionDetail(module, options = {}) {
         <div class="market-pattern-summary-grid">
           <article class="market-pattern-summary-card"><span>Vị thế mở</span><strong>${escapeHtml(payload.open_count ?? 0)}</strong><small>trade_executions OPEN</small></article>
           <article class="market-pattern-summary-card"><span>Đã chốt 30%</span><strong>${escapeHtml(payload.partial_done_count ?? 0)}</strong><small>partial_take_profit_done</small></article>
-          <article class="market-pattern-summary-card"><span>Đang chờ partial</span><strong>${escapeHtml(payload.waiting_partial_count ?? 0)}</strong><small>${escapeHtml(formatMarketRegimeNumber((Number(config.partial_trigger_tp_progress) || 0) * 100))}% tới TP</small></article>
+          <article class="market-pattern-summary-card"><span>Đang chờ chốt 1 phần</span><strong>${escapeHtml(payload.waiting_partial_count ?? 0)}</strong><small>${escapeHtml(formatMarketRegimeNumber((Number(config.partial_trigger_tp_progress) || 0) * 100))}% tới TP</small></article>
           <article class="market-pattern-summary-card"><span>Trailing</span><strong>${config.enabled ? "Bật" : "Tắt"}</strong><small>ATR ${escapeHtml(config.atr_timeframe || "-")} × ${escapeHtml(config.atr_multiplier ?? "-")}</small></article>
         </div>
       </section>
@@ -4876,6 +4963,7 @@ function renderTradeExecutionDetail(module, options = {}) {
   `;
   refs.systemModuleDetail.querySelector(".module-close")?.addEventListener("click", closeSystemModuleDetail);
   bindTradeExecutionTabs();
+  bindTradeExecutionClosedPagination();
   if (Number.isFinite(Number(options.scrollTop))) {
     const scrollNode = refs.systemModuleDetail.querySelector(".module-chart-scroll");
     if (scrollNode) requestAnimationFrame(() => {

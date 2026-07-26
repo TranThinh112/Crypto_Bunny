@@ -669,10 +669,10 @@ def _trade_execution_position_payload(row: dict[str, Any]) -> tuple[dict[str, An
 def _trade_execution_live_entry_price(row: dict[str, Any]) -> float | None:
     position, info = _trade_execution_position_payload(row)
     for value in (
-        row.get("entry_price"),
         position.get("entryPrice"),
         position.get("entry_price"),
         info.get("avgPx"),
+        row.get("entry_price"),
         row.get("initial_entry_price"),
         row.get("entry"),
     ):
@@ -996,12 +996,14 @@ def _trade_execution_profit_protection_levels(
     if partial_fraction != partial_fraction:
         partial_fraction = 0.3
     partial_amount = _safe_float(row.get("partial_take_profit_amount"), float("nan"))
-    if partial_amount != partial_amount and base_qty:
-        partial_amount = base_qty * partial_fraction
-    current_amount = qty if row.get("partial_take_profit_done") and qty else base_qty
+    loss_guard = _trade_execution_loss_guard(row, config or {})
+    partial_base_qty = qty
+    if partial_amount != partial_amount and partial_base_qty:
+        partial_amount = partial_base_qty * partial_fraction
+    current_amount = qty
     remaining_amount = current_amount
-    if not row.get("partial_take_profit_done") and base_qty is not None:
-        remaining_amount = max(0.0, base_qty - (partial_amount if partial_amount == partial_amount else 0.0))
+    if not row.get("partial_take_profit_done") and partial_base_qty is not None:
+        remaining_amount = max(0.0, partial_base_qty - (partial_amount if partial_amount == partial_amount else 0.0))
     current_sl = _trade_execution_effective_stop_loss(row)
     current_tp = _trade_execution_effective_take_profit(row)
     partial_price = row.get("partial_take_profit_price")
@@ -1012,6 +1014,10 @@ def _trade_execution_profit_protection_levels(
         partial_price,
         partial_pnl_value if partial_pnl_value == partial_pnl_value else None,
     )
+    if not partial_is_profitable and partial_base_qty is not None:
+        partial_amount = partial_base_qty * partial_fraction
+    if not partial_is_profitable and partial_base_qty is not None:
+        remaining_amount = max(0.0, partial_base_qty - (partial_amount if partial_amount == partial_amount else 0.0))
     original_tp = row.get("partial_take_profit_original_tp") or current_tp
     extended_tp = row.get("partial_take_profit_extended_tp")
     if partial_price is None and entry is not None and take_profit is not None:
@@ -1115,7 +1121,7 @@ def _trade_execution_profit_protection_levels(
         "tp_steps": tp_steps,
         "sl_steps": sl_steps,
         "original_tp": {"price": original_tp, "pnl": _trade_execution_pnl_at(row, original_tp, qty)},
-        "loss_guard": _trade_execution_loss_guard(row, config or {}),
+        "loss_guard": loss_guard,
     }
 
 
@@ -1218,6 +1224,7 @@ def _trade_execution_summary(config: dict[str, Any]) -> dict[str, Any]:
     open_items: list[dict[str, Any]] = []
     for row in open_rows:
         event_history = _trade_execution_event_history(row)
+        row_with_events = {**row, "trade_event_history": event_history}
         open_items.append(
             {
                 "id": row.get("id"),
@@ -1228,11 +1235,11 @@ def _trade_execution_summary(config: dict[str, Any]) -> dict[str, Any]:
                 "entry_price": row.get("entry_price"),
                 "initial_entry_price": row.get("initial_entry_price"),
                 "initial_stop_loss": row.get("initial_stop_loss"),
-                "stop_loss": _trade_execution_effective_stop_loss(row),
-                "take_profit": _trade_execution_effective_take_profit(row),
-                "quantity": _trade_execution_quantity(row),
-                "contract_size": _trade_execution_contract_size(row),
-                "mark_price": _trade_execution_mark_price(row),
+                "stop_loss": _trade_execution_effective_stop_loss(row_with_events),
+                "take_profit": _trade_execution_effective_take_profit(row_with_events),
+                "quantity": _trade_execution_quantity(row_with_events),
+                "contract_size": _trade_execution_contract_size(row_with_events),
+                "mark_price": _trade_execution_mark_price(row_with_events),
                 "pnl": row.get("pnl"),
                 "pnl_pct": row.get("pnl_pct"),
                 "partial_take_profit_done": bool(row.get("partial_take_profit_done")),
@@ -1247,9 +1254,9 @@ def _trade_execution_summary(config: dict[str, Any]) -> dict[str, Any]:
                 "trailing_stop_updated_at": row.get("trailing_stop_updated_at"),
                 "trailing_stop_r_multiple": row.get("trailing_stop_r_multiple"),
                 "trailing_stop_atr": row.get("trailing_stop_atr"),
-                "tp_progress_pct": _trade_execution_progress(row),
-                "r_multiple": _trade_execution_r_multiple(row),
-                "profit_protection_levels": _trade_execution_profit_protection_levels(row, partial, config),
+                "tp_progress_pct": _trade_execution_progress(row_with_events),
+                "r_multiple": _trade_execution_r_multiple(row_with_events),
+                "profit_protection_levels": _trade_execution_profit_protection_levels(row_with_events, partial, config),
                 "trade_event_count": len(event_history),
                 "trade_event_history": event_history[-10:],
             }

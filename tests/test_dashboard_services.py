@@ -200,7 +200,7 @@ class SystemChecklistPayloadTests(unittest.TestCase):
         self.assertTrue(levels["partial_30"]["misclassified_loss_close"])
         self.assertLess(levels["partial_30"]["price"], 0.0004989028037384)
         self.assertEqual(levels["current_amount"], 81.0)
-        self.assertEqual(levels["remaining_amount"], 81.0)
+        self.assertAlmostEqual(levels["remaining_amount"], 56.7)
 
     def test_returns_current_snapshot_for_today_without_rebuilding(self) -> None:
         snapshot = {

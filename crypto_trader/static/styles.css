@@ -3335,6 +3335,14 @@ body.dark-mode .position-management-flow span {
   text-align: right;
 }
 
+.trade-execution-close-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
 .trade-execution-closed-row.win {
   border-color: rgba(34, 197, 94, 0.35);
   background: rgba(34, 197, 94, 0.06);
@@ -3350,15 +3358,17 @@ body.dark-mode .position-management-flow span {
   align-items: center;
   justify-content: center;
   width: fit-content;
-  min-width: 86px;
   border-radius: 999px;
   padding: 2px 9px;
   font-weight: 900;
+  font-style: normal;
+  white-space: nowrap;
 }
 
 .trade-execution-close-reason.take-profit {
-  color: var(--green);
-  background: rgba(34, 197, 94, 0.12);
+  color: #86efac;
+  background: rgba(21, 128, 61, 0.42);
+  border: 1px solid rgba(34, 197, 94, 0.38);
 }
 
 .trade-execution-close-reason.stop-loss {
@@ -3369,6 +3379,38 @@ body.dark-mode .position-management-flow span {
 .trade-execution-close-reason.neutral {
   color: #c4b5fd;
   background: rgba(167, 139, 250, 0.14);
+}
+
+.trade-execution-pager {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.trade-execution-pager span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.trade-execution-pager button {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.72);
+  color: var(--ink);
+  min-height: 28px;
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.trade-execution-pager button:disabled {
+  cursor: default;
+  opacity: 0.45;
 }
 
 .market-regime-legend-btn {

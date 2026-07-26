@@ -806,76 +806,100 @@ class CodexFeaturesTest(TestCase):
         self.assertIn("Chuyển từ: HARD RECOVERY → SOFT RECOVERY", message)
         self.assertIn("Cycle PnL: -4.8000 USDT", message)
 
-    def test_recovery_cycle_pnl_sums_closed_pnl_since_configured_start(self) -> None:
+    def test_recovery_cycle_pnl_returns_none_when_okx_unavailable_with_configured_start(self) -> None:
         config = self._config()
         config["position_sizing"] = {
             "cycle_start_at": "2026-07-24T00:00:00+00:00",
             "cycle_start_pnl_fallback_usdt": -25.275453,
         }
-        closed = [
-            {"closed_at": datetime(2026, 7, 24, 23, 19, tzinfo=timezone.utc), "pnl_usdt": 1.574721},
-            {"closed_at": datetime(2026, 7, 24, 21, 26, tzinfo=timezone.utc), "pnl_usdt": 1.942538},
-            {"closed_at": datetime(2026, 7, 25, 3, 55, tzinfo=timezone.utc), "pnl_usdt": 0.04},
-            {"closed_at": datetime(2026, 7, 23, 23, 59, tzinfo=timezone.utc), "pnl_usdt": 99.0},
-        ]
 
-        with patch("crypto_trader.sizing._closed_positions", return_value=closed):
+        with patch("crypto_trader.market.create_exchange", side_effect=RuntimeError("okx unavailable")), patch(
+            "crypto_trader.codex_features.get_journal_state",
+            return_value=json.dumps({"cycle_pnl_usdt": -58.658771}),
+        ), patch("crypto_trader.codex_features._closed_trade_executions") as closed_trade_executions:
             pnl = _recovery_cycle_pnl(config)
 
-        self.assertAlmostEqual(pnl, 3.557259, places=6)
+        self.assertIsNone(pnl)
+        closed_trade_executions.assert_not_called()
 
-    def test_recovery_cycle_pnl_uses_okx_display_pnl_without_fee_adjustments(self) -> None:
+    def test_recovery_cycle_pnl_uses_okx_closed_fill_pnl(self) -> None:
         config = self._config()
         config["position_sizing"] = {
             "cycle_start_at": "2026-07-05T00:00:00+07:00",
             "history_limit": 100,
         }
-        rows = [
+        fills = [
             {
-                "symbol": "XAU/USDT:USDT",
-                "id": "xau-win-1",
-                "pnl": "3.29",
-                "fee": "-0.15387955",
-                "fundingFee": "-0.32453",
-                "timestamp": int(datetime(2026, 7, 14, tzinfo=timezone.utc).timestamp() * 1000),
+                "instId": "SHIB-USDT-SWAP",
+                "tradeId": "shib-1",
+                "billId": "b3",
+                "fillPnl": "3.8448",
+                "fillTime": str(int(datetime(2026, 7, 26, tzinfo=timezone.utc).timestamp() * 1000)),
             },
             {
-                "symbol": "TAO/USDT:USDT",
-                "id": "tao-loss-1",
-                "realizedPnl": "-13.7361275492279702",
-                "pnl": "-13.74",
-                "fee": "-0.281165",
-                "fundingFee": "-0.21497",
-                "timestamp": int(datetime(2026, 7, 14, 2, 9, tzinfo=timezone.utc).timestamp() * 1000),
+                "instId": "SHIB-USDT-SWAP",
+                "tradeId": "shib-2",
+                "billId": "b2",
+                "fillPnl": "1.9274",
+                "fillTime": str(int(datetime(2026, 7, 26, tzinfo=timezone.utc).timestamp() * 1000)),
+            },
+            {
+                "instId": "ETH-USDT-SWAP",
+                "tradeId": "eth-loss",
+                "billId": "b1",
+                "fillPnl": "-0.70518",
+                "fillTime": str(int(datetime(2026, 7, 26, tzinfo=timezone.utc).timestamp() * 1000)),
+            },
+            {
+                "instId": "OLD-USDT-SWAP",
+                "tradeId": "old",
+                "billId": "b0",
+                "fillPnl": "-99",
+                "fillTime": str(int(datetime(2026, 7, 4, tzinfo=timezone.utc).timestamp() * 1000)),
             },
         ]
+        exchange = SimpleNamespace(
+            load_markets=lambda: {},
+            privateGetTradeFillsHistory=lambda params: {"data": fills},
+        )
 
-        with patch("crypto_trader.market.create_exchange", return_value=SimpleNamespace(load_markets=lambda: {})), patch(
-            "crypto_trader.sizing._fetch_positions_history_rows",
-            return_value=rows,
-        ):
+        with patch("crypto_trader.market.create_exchange", return_value=exchange):
             pnl = _recovery_cycle_pnl(config)
 
-        self.assertAlmostEqual(pnl, -10.45, places=6)
+        self.assertAlmostEqual(pnl, 5.06702, places=6)
 
-    def test_recovery_cycle_pnl_adds_bot_only_closes_and_dedupes_okx_matches(self) -> None:
+    def test_recovery_cycle_pnl_paginates_okx_closed_fills_and_ignores_bot_rows(self) -> None:
         config = self._config()
         config["position_sizing"] = {
             "cycle_start_at": "2026-07-05T00:00:00+07:00",
             "history_limit": 100,
         }
-        okx_rows = [
+        first_page = [
             {
-                "symbol": "TAO/USDT:USDT",
-                "id": "tao-loss-1",
-                "pnl": "-13.74",
-                "timestamp": int(datetime(2026, 7, 24, 13, 7, tzinfo=timezone.utc).timestamp() * 1000),
+                "tradeId": "new-win",
+                "billId": "200",
+                "fillPnl": "1.25",
+                "fillTime": str(int(datetime(2026, 7, 26, tzinfo=timezone.utc).timestamp() * 1000)),
             },
             {
-                "symbol": "BEAT/USDT:USDT",
-                "id": "beat-close-1",
-                "pnl": "-2.76",
-                "timestamp": int(datetime(2026, 7, 25, 9, 40, tzinfo=timezone.utc).timestamp() * 1000),
+                "tradeId": "cursor",
+                "billId": "100",
+                "fillPnl": "0",
+                "fillTime": str(int(datetime(2026, 7, 25, tzinfo=timezone.utc).timestamp() * 1000)),
+            },
+        ]
+        second_page = [
+            {
+                "tradeId": "old-loss",
+                "billId": "99",
+                "fillPnl": "-3.5",
+                "fillTime": str(int(datetime(2026, 7, 24, tzinfo=timezone.utc).timestamp() * 1000)),
+            },
+            {
+                "tradeId": "before-cycle",
+                "billId": "98",
+                "fillPnl": "99",
+                "fillTime": str(int(datetime(2026, 7, 4, tzinfo=timezone.utc).timestamp() * 1000)),
             },
         ]
         bot_rows = [
@@ -899,7 +923,7 @@ class CodexFeaturesTest(TestCase):
                 "side": "SHORT",
                 "pnl": -2.763008,
                 "closed_at": "2026-07-25T09:40:00+00:00",
-                "exchange_close_history_json": json.dumps(okx_rows[1]),
+                "exchange_close_history_json": json.dumps({"source": "old-position-history"}),
             },
             {
                 "id": 2,
@@ -910,13 +934,18 @@ class CodexFeaturesTest(TestCase):
             },
         ]
 
-        with patch("crypto_trader.market.create_exchange", return_value=SimpleNamespace(load_markets=lambda: {})), patch(
-            "crypto_trader.sizing._fetch_positions_history_rows",
-            return_value=okx_rows,
-        ), patch("crypto_trader.codex_features._closed_trade_executions", return_value=bot_rows):
+        def fetch_fills(params):
+            return {"data": second_page if params.get("after") == "100" else first_page}
+
+        exchange = SimpleNamespace(load_markets=lambda: {}, privateGetTradeFillsHistory=fetch_fills)
+
+        with patch("crypto_trader.market.create_exchange", return_value=exchange), patch(
+            "crypto_trader.codex_features._closed_trade_executions", return_value=bot_rows
+        ) as closed_trade_executions:
             pnl = _recovery_cycle_pnl(config)
 
-        self.assertAlmostEqual(pnl, -15.21962, places=6)
+        self.assertAlmostEqual(pnl, -2.25, places=6)
+        closed_trade_executions.assert_not_called()
 
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_recovery_mode_stays_soft_when_cycle_pnl_negative_and_loss_streak_below_hard(
