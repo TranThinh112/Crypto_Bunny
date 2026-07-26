@@ -444,6 +444,105 @@ class RuntimeSyncTest(TestCase):
         self.assertAlmostEqual(open_rows[0]["take_profit"], 3.2046)
         self.assertAlmostEqual(losses[0]["pnl"], -2.7630083471369007)
 
+    def test_sync_imports_new_execution_when_okx_reuses_position_id(self) -> None:
+        config = self._config()
+        insert_trade_execution_row(
+            config,
+            {
+                "created_at": "2026-07-25T09:42:03+00:00",
+                "updated_at": "2026-07-26T07:58:02+00:00",
+                "symbol": "BEAT/USDT:USDT",
+                "side": "SHORT",
+                "status": "OPEN",
+                "entry_price": 3.6107875,
+                "initial_entry_price": 3.3013,
+                "initial_stop_loss": 3.37632955,
+                "quantity": 2.4,
+                "initial_quantity": 0.9,
+                "max_contracts_seen": 2.4,
+                "stop_loss": 4.5,
+                "take_profit": 3.2046,
+                "partial_take_profit_done": True,
+                "partial_take_profit_at": "2026-07-25T13:27:02+00:00",
+                "partial_take_profit_price": 3.3955,
+                "partial_take_profit_amount": 0.2,
+                "partial_take_profit_original_tp": 3.0149,
+                "profit_extension_step": 0,
+                "trailing_stop_updated_at": "2026-07-25T13:27:02+00:00",
+                "trade_event_history_json": json.dumps(
+                    [
+                        {
+                            "type": "open",
+                            "created_at": "2026-07-25T09:42:03+00:00",
+                            "entry_price": 3.3013,
+                            "stop_loss": 3.37632955,
+                            "take_profit": 3.18875568,
+                        },
+                        {
+                            "type": "partial_close",
+                            "created_at": "2026-07-25T13:27:02+00:00",
+                            "mark_price": 3.3955,
+                            "partial_amount": 0.2,
+                        },
+                    ],
+                    ensure_ascii=False,
+                ),
+            },
+        )
+
+        sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-07-26T08:05:00+00:00",
+                "positions": [
+                    {
+                        "symbol": "BEAT/USDT:USDT",
+                        "side": "short",
+                        "contracts": 2.4,
+                        "entry_price": 3.6107875,
+                        "unrealized_pnl": 0.62,
+                        "info": {
+                            "cTime": "1785047792995",
+                            "pos": "2.4",
+                            "avgPx": "3.6107875",
+                            "closeOrderAlgo": [
+                                {"slTriggerPx": "4.5", "tpTriggerPx": "3.2046"}
+                            ],
+                        },
+                    }
+                ],
+                "open_orders": [],
+                "position_targets": {},
+            },
+        )
+
+        open_rows = list_trade_execution_rows(config, statuses=["OPEN"], limit=20)
+        closed_rows = list_trade_execution_rows(
+            config,
+            statuses=["WIN", "LOSS", "BREAKEVEN", "CLOSED", "RECONCILED"],
+            limit=20,
+        )
+        self.assertEqual(len(open_rows), 1)
+        self.assertEqual(len(closed_rows), 1)
+        self.assertNotEqual(open_rows[0]["id"], closed_rows[0]["id"])
+        row = open_rows[0]
+        self.assertAlmostEqual(row["entry_price"], 3.6107875)
+        self.assertAlmostEqual(row["initial_entry_price"], 3.6107875)
+        self.assertAlmostEqual(row["initial_stop_loss"], 4.5)
+        self.assertAlmostEqual(row["quantity"], 2.4)
+        self.assertAlmostEqual(row["initial_quantity"], 2.4)
+        self.assertFalse(bool(row.get("partial_take_profit_done")))
+        self.assertIsNone(row.get("partial_take_profit_at"))
+        self.assertIsNone(row.get("partial_take_profit_price"))
+        self.assertIsNone(row.get("partial_take_profit_original_tp"))
+        events = json.loads(row["trade_event_history_json"])
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["type"], "open")
+        self.assertAlmostEqual(events[0]["entry_price"], 3.6107875)
+        self.assertEqual(closed_rows[0]["close_reason"], "exchange_position_no_longer_open")
+
     @patch("crypto_trader.notifier.send_telegram_message", return_value=True)
     def test_sync_runtime_state_uses_wider_targets_for_high_atr_manual_position(self, _send_message) -> None:
         config = self._config()

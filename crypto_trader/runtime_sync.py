@@ -105,6 +105,62 @@ def _position_matches_execution(row: dict[str, Any], position: dict[str, Any], e
     )
     return entry_diff_pct < 0.25 and quantity_diff_pct < 25.0
 
+def _trade_event_history(row: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = row.get("trade_event_history_json")
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(str(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [item for item in parsed if isinstance(item, dict)]
+
+def _position_protection_state_is_stale(
+    row: dict[str, Any],
+    position: dict[str, Any],
+    *,
+    entry_price: float | None,
+    contracts: float | None,
+) -> bool:
+    opened_at = _position_opened_at(position)
+    if opened_at is None:
+        return False
+    partial_at = _parse_time(row.get("partial_take_profit_at"))
+    trailing_at = _parse_time(row.get("trailing_stop_updated_at"))
+    event_times = [
+        parsed
+        for parsed in (
+            _parse_time(event.get("created_at"))
+            for event in _trade_event_history(row)
+            if str(event.get("type") or "") in {"open", "partial_close", "trailing_stop_update"}
+        )
+        if parsed is not None
+    ]
+    stale_event_seen = any(
+        event_time < opened_at - timedelta(seconds=90)
+        for event_time in ([partial_at, trailing_at] + event_times)
+        if event_time is not None
+    )
+    if not stale_event_seen:
+        return False
+    initial_entry = _float(row.get("initial_entry_price"))
+    initial_quantity = _float(row.get("initial_quantity"))
+    entry_changed = (
+        initial_entry is not None
+        and entry_price is not None
+        and initial_entry > 0
+        and abs(entry_price - initial_entry) / initial_entry * 100.0 >= 0.25
+    )
+    quantity_changed = (
+        initial_quantity is not None
+        and contracts is not None
+        and initial_quantity > 0
+        and abs(contracts - initial_quantity) / initial_quantity * 100.0 >= 25.0
+    )
+    return entry_changed or quantity_changed
+
 def _status_from_realized_pnl(pnl: float | None) -> str:
     if pnl is None:
         return "CLOSED"
@@ -1356,6 +1412,14 @@ def sync_exchange_runtime_state(
         matching_rows = executions_by_key.get(position_key, [])
         matched = matching_rows[0] if matching_rows else None
         if matched and not _position_matches_execution(matched, position, entry_price):
+            reopened_execution_ids.add(int(matched["id"]))
+            matched = None
+        if matched and _position_protection_state_is_stale(
+            matched,
+            position,
+            entry_price=entry_price,
+            contracts=contracts,
+        ):
             reopened_execution_ids.add(int(matched["id"]))
             matched = None
         if matched:
