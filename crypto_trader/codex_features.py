@@ -2203,6 +2203,7 @@ def _recovery_cycle_display_pnl_from_okx(start_at: datetime, config: dict[str, A
     seen_keys: set[str] = set()
     okx_close_keys: set[tuple[Any, ...]] = set()
     okx_symbol_side_items: list[tuple[str, str, datetime | None]] = []
+    latest_okx_closed_at: datetime | None = None
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -2213,6 +2214,8 @@ def _recovery_cycle_display_pnl_from_okx(start_at: datetime, config: dict[str, A
             closed_at = closed_at.replace(tzinfo=timezone.utc)
         if closed_at < start_at:
             continue
+        if latest_okx_closed_at is None or closed_at > latest_okx_closed_at:
+            latest_okx_closed_at = closed_at
         key = str(_position_key(row) or "")
         if key and key in seen_keys:
             continue
@@ -2250,6 +2253,8 @@ def _recovery_cycle_display_pnl_from_okx(start_at: datetime, config: dict[str, A
         if closed_at is None:
             continue
         if closed_at >= start_at:
+            if latest_okx_closed_at is not None and closed_at <= latest_okx_closed_at:
+                continue
             trade_close_key = _recovery_cycle_trade_execution_close_key(row)
             if trade_close_key is not None and trade_close_key in okx_close_keys:
                 continue
