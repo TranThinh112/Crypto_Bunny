@@ -2144,6 +2144,14 @@ def _recovery_cycle_okx_close_key(row: dict[str, Any]) -> tuple[Any, ...] | None
         return None
     return (key, closed_at.isoformat())
 
+def _recovery_cycle_symbol_side_time(row: dict[str, Any]) -> tuple[str, str, datetime | None]:
+    try:
+        from .sizing import _position_side, _position_symbol, _position_time
+
+        return (_position_symbol(row), _position_side(row).upper(), _position_time(row))
+    except Exception:
+        return ("", "", None)
+
 def _recovery_cycle_trade_execution_close_key(row: dict[str, Any]) -> tuple[Any, ...] | None:
     history = _json_loads(row.get("exchange_close_history_json"), {})
     if not history:
@@ -2158,6 +2166,26 @@ def _recovery_cycle_trade_execution_fingerprint(row: dict[str, Any]) -> tuple[An
         closed_at.isoformat() if closed_at else "",
         round(_safe_float(row.get("pnl"), 0.0), 6),
     )
+
+def _recovery_cycle_has_okx_symbol_side_match(
+    okx_items: list[tuple[str, str, datetime | None]],
+    row: dict[str, Any],
+) -> bool:
+    symbol = str(row.get("symbol") or "").strip()
+    side = str(row.get("side") or "").strip().upper()
+    closed_at = _parse_time(row.get("closed_at") or row.get("updated_at") or row.get("created_at"))
+    if not symbol or not side or closed_at is None:
+        return False
+    for okx_symbol, okx_side, okx_closed_at in okx_items:
+        if okx_symbol != symbol:
+            continue
+        if okx_side and okx_side != side:
+            continue
+        if okx_closed_at is None:
+            return True
+        if abs((closed_at - okx_closed_at).total_seconds()) <= 24 * 60 * 60:
+            return True
+    return False
 
 def _recovery_cycle_display_pnl_from_okx(start_at: datetime, config: dict[str, Any]) -> float | None:
     try:
@@ -2174,6 +2202,7 @@ def _recovery_cycle_display_pnl_from_okx(start_at: datetime, config: dict[str, A
     seen_any = False
     seen_keys: set[str] = set()
     okx_close_keys: set[tuple[Any, ...]] = set()
+    okx_symbol_side_items: list[tuple[str, str, datetime | None]] = []
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -2192,6 +2221,7 @@ def _recovery_cycle_display_pnl_from_okx(start_at: datetime, config: dict[str, A
         close_key = _recovery_cycle_okx_close_key(row)
         if close_key is not None:
             okx_close_keys.add(close_key)
+        okx_symbol_side_items.append(_recovery_cycle_symbol_side_time(row))
         info = row.get("info", {}) if isinstance(row.get("info"), dict) else {}
         pnl = None
         for payload in (row, info):
@@ -2222,6 +2252,8 @@ def _recovery_cycle_display_pnl_from_okx(start_at: datetime, config: dict[str, A
         if closed_at >= start_at:
             trade_close_key = _recovery_cycle_trade_execution_close_key(row)
             if trade_close_key is not None and trade_close_key in okx_close_keys:
+                continue
+            if _recovery_cycle_has_okx_symbol_side_match(okx_symbol_side_items, row):
                 continue
             fingerprint = _recovery_cycle_trade_execution_fingerprint(row)
             if fingerprint in seen_trade_fingerprints:

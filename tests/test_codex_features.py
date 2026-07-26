@@ -901,6 +901,13 @@ class CodexFeaturesTest(TestCase):
                 "closed_at": "2026-07-25T09:40:00+00:00",
                 "exchange_close_history_json": json.dumps(okx_rows[1]),
             },
+            {
+                "id": 2,
+                "symbol": "TAO/USDT:USDT",
+                "side": "LONG",
+                "pnl": -13.736128,
+                "closed_at": "2026-07-24T13:13:00+00:00",
+            },
         ]
 
         with patch("crypto_trader.market.create_exchange", return_value=SimpleNamespace(load_markets=lambda: {})), patch(
