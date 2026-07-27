@@ -105,6 +105,53 @@ class TradeCandidate:
         stop_pct = abs(self.entry - self.stop_loss) / self.entry
         return self.order_usdt * stop_pct
 
+@dataclass(frozen=True)
+class MarketContext:
+    symbol: str
+    side_hint: Side | None
+    market_regime: str
+    regime_confidence: float | None
+    trend_4h: str | None
+    trend_1h: str | None
+    trend_15m: str | None
+    trend_score: float
+    continuation_score: float
+    entry_quality: float
+    breakout_probability: float
+    pullback_quality: float
+    volatility: str
+    news_risk: str
+    evidence: list[str] = field(default_factory=list)
+    source: str = "shadow"
+
+@dataclass(frozen=True)
+class AnalysisResult:
+    symbol: str
+    market_regime: str
+    trend_score: float
+    continuation_score: float
+    entry_quality: float
+    setup_grade: str
+    expected_speed: str
+    evidence: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    source: str = "shadow_rule_analysis"
+
+@dataclass(frozen=True)
+class TradeIntent:
+    symbol: str
+    side: Side
+    strategy: str
+    setup_grade: str
+    holding_profile: str
+    risk_profile: str
+    entry_quality: float
+    continuation_score: float
+    status: str = "shadow"
+    immutable_fields: tuple[str, ...] = ("symbol", "side", "strategy", "setup_grade")
+    reason: str | None = None
+    source: str = "shadow_strategy_selector"
+
 
 @dataclass
 class RiskCheck:

@@ -6,6 +6,7 @@ const state = {
   okxPositionsTimer: null,
   okxPositionsInFlight: null,
   systemChecklistTimer: null,
+  realtimeModuleTimer: null,
   systemChecklistInFlight: null,
   lcPipelineInFlight: null,
   pricesInFlight: null,
@@ -28,6 +29,8 @@ const state = {
   systemChecklistRefreshInFlight: false,
   lastSystemChecklistRefreshMs: 0,
   selectedSystemModuleKey: null,
+  selectedPositionManagementDetailTab: null,
+  selectedTradeExecutionTabKey: null,
   selectedMarketRegimeView: null,
   systemModuleAiRange: "current",
   running: false,
@@ -41,6 +44,7 @@ const SYSTEM_CHECKLIST_REFRESH_MS = 5 * 60 * 1000;
 const LC_PIPELINE_REFRESH_MS = 3 * 60 * 1000;
 const PRICE_REFRESH_MS = 30 * 1000;
 const OKX_POSITIONS_REFRESH_MS = 15 * 1000;
+const REALTIME_MODULE_REFRESH_MS = 60 * 1000;
 
 function dashboardIsVisible() {
   return document.visibilityState !== "hidden";
@@ -2902,6 +2906,32 @@ function isPositionManagementSection(module) {
   return Boolean(module?.position_management_section);
 }
 
+function isRealtimeSystemModule(module) {
+  if (!module) return false;
+  const moduleNumber = Number(module.number || 0);
+  if (moduleNumber === 2 || moduleNumber === 5 || moduleNumber === 8) return true;
+  return isPositionManagementSection(module) || isTradeExecutionModule(module);
+}
+
+function positionManagementDetailTabGroup(section) {
+  if (section === "overview") return ["overview", "pending_orders"];
+  if (section === "profit_protection") return ["profit_protection", "sync_journal"];
+  return [];
+}
+
+function positionManagementActiveDetailTab(section) {
+  const tabs = positionManagementDetailTabGroup(section);
+  if (!tabs.length) return null;
+  return tabs.includes(state.selectedPositionManagementDetailTab)
+    ? state.selectedPositionManagementDetailTab
+    : tabs[0];
+}
+
+function renderPositionManagementDetailTabButton(key, label, activeKey) {
+  const active = key === activeKey;
+  return `<button class="trade-execution-tab ${active ? "active" : ""}" type="button" role="tab" aria-selected="${active ? "true" : "false"}" data-position-detail-tab="${escapeHtml(key)}">${escapeHtml(label)}</button>`;
+}
+
 function marketRegimeModuleName(module) {
   if (isPositionManagementSection(module)) return String(module.display_name || module.name || "-");
   return isMarketRegimeModule(module) ? "Market Regime Detector" : String(module?.name || "-");
@@ -4393,6 +4423,12 @@ function tradeExecutionPositionTabLabel(item, index) {
   return side ? `${symbol} ${side}` : symbol;
 }
 
+function tradeExecutionPositionTabKey(item, index) {
+  const symbol = String(item?.symbol || `#${index + 1}`);
+  const side = String(item?.side || "").toUpperCase();
+  return `${symbol}|${side}`;
+}
+
 function tradeExecutionCloseBadges(item) {
   const events = Array.isArray(item?.trade_event_history) ? item.trade_event_history : [];
   const hasLossGuard = Boolean(item?.loss_guard_partial_done)
@@ -4627,20 +4663,30 @@ function renderProfitProtectionPositionPanel(item) {
 
 function renderProfitProtectionPositionTabs(items) {
   const rows = Array.isArray(items) ? items.map(tradeItemWithLiveOkxPosition) : [];
-  if (!rows.length) return `<div class="market-regime-empty compact">Chưa có vị thế đang gồng.</div>`;
+  if (!rows.length) return `<div class="market-regime-empty compact">Ch\u01b0a c\u00f3 v\u1ecb th\u1ebf \u0111ang g\u1ed3ng.</div>`;
+  const activeKey = rows.some((item, index) => tradeExecutionPositionTabKey(item, index) === state.selectedTradeExecutionTabKey)
+    ? state.selectedTradeExecutionTabKey
+    : tradeExecutionPositionTabKey(rows[0], 0);
   return `
     <div class="trade-execution-tabs" role="tablist">
-      ${rows.map((item, index) => `
-        <button class="trade-execution-tab ${index === 0 ? "active" : ""}" type="button" role="tab" aria-selected="${index === 0 ? "true" : "false"}" data-trade-tab="${index}">
+      ${rows.map((item, index) => {
+        const tabKey = tradeExecutionPositionTabKey(item, index);
+        const active = tabKey === activeKey;
+        return `
+        <button class="trade-execution-tab ${active ? "active" : ""}" type="button" role="tab" aria-selected="${active ? "true" : "false"}" data-trade-tab="${index}" data-trade-tab-key="${escapeHtml(tabKey)}">
           ${escapeHtml(tradeExecutionPositionTabLabel(item, index))}
         </button>
-      `).join("")}
+      `;
+      }).join("")}
     </div>
-    ${rows.map((item, index) => `
-      <div class="trade-execution-tab-panel" role="tabpanel" data-trade-panel="${index}" ${index === 0 ? "" : "hidden"}>
+    ${rows.map((item, index) => {
+      const active = tradeExecutionPositionTabKey(item, index) === activeKey;
+      return `
+      <div class="trade-execution-tab-panel" role="tabpanel" data-trade-panel="${index}" ${active ? "" : "hidden"}>
         ${renderProfitProtectionPositionPanel(item)}
       </div>
-    `).join("")}
+    `;
+    }).join("")}
   `;
 }
 
@@ -4671,6 +4717,7 @@ function bindTradeExecutionTabs() {
   tabs.forEach((tab) => {
     tab.addEventListener("click", () => {
       const selected = tab.getAttribute("data-trade-tab");
+      state.selectedTradeExecutionTabKey = tab.getAttribute("data-trade-tab-key") || selected;
       tabs.forEach((node) => {
         const active = node.getAttribute("data-trade-tab") === selected;
         node.classList.toggle("active", active);
@@ -4691,6 +4738,7 @@ function bindPositionManagementDetailTabs() {
   tabs.forEach((tab) => {
     tab.addEventListener("click", () => {
       const selected = tab.getAttribute("data-position-detail-tab");
+      state.selectedPositionManagementDetailTab = selected;
       tabs.forEach((node) => {
         const active = node.getAttribute("data-position-detail-tab") === selected;
         node.classList.toggle("active", active);
@@ -4758,6 +4806,7 @@ function renderPositionManagementSectionDetail(module, options = {}) {
     { label: "Tỷ lệ đóng", value: config.partial_close_fraction === null || config.partial_close_fraction === undefined ? "-" : `${formatMarketRegimeNumber(Number(config.partial_close_fraction) * 100)}%` },
     { label: "Closed PnL", value: formatMarketRegimeNumber(stats.closedPnl) },
   ];
+  const activeDetailTab = positionManagementActiveDetailTab(section);
   state.selectedSystemModuleKey = systemModuleKey(module);
   refs.systemModuleOverlay.hidden = false;
   refs.systemModuleDetail.classList.add("module-detail-chart-scroll", "market-regime-detail");
@@ -4770,14 +4819,14 @@ function renderPositionManagementSectionDetail(module, options = {}) {
           ${["overview", "profit_protection"].includes(section) ? "" : `<h3 id="systemModuleTitle">${escapeHtml(heading.title)}</h3>`}
           ${section === "overview" ? `
             <div class="position-management-detail-tabs" role="tablist" aria-label="Tổng quan vị thế và pending orders">
-              <button class="trade-execution-tab active" type="button" role="tab" aria-selected="true" data-position-detail-tab="overview">Tổng quan vị thế</button>
-              <button class="trade-execution-tab" type="button" role="tab" aria-selected="false" data-position-detail-tab="pending_orders">Pending & Orders</button>
+              ${renderPositionManagementDetailTabButton("overview", "Tổng quan vị thế", activeDetailTab)}
+              ${renderPositionManagementDetailTabButton("pending_orders", "Pending & Orders", activeDetailTab)}
             </div>
           ` : ""}
           ${section === "profit_protection" ? `
             <div class="position-management-detail-tabs" role="tablist" aria-label="Chốt lời và nhật ký">
-              <button class="trade-execution-tab active" type="button" role="tab" aria-selected="true" data-position-detail-tab="profit_protection">Chốt lời & Bảo vệ</button>
-              <button class="trade-execution-tab" type="button" role="tab" aria-selected="false" data-position-detail-tab="sync_journal">Nhật ký</button>
+              ${renderPositionManagementDetailTabButton("profit_protection", "Chốt lời & Bảo vệ", activeDetailTab)}
+              ${renderPositionManagementDetailTabButton("sync_journal", "Nhật ký", activeDetailTab)}
             </div>
           ` : ""}
         </div>
@@ -4794,14 +4843,14 @@ function renderPositionManagementSectionDetail(module, options = {}) {
         <div class="market-pattern-summary-grid">${summaryCards}</div>
       </section>` : ""}
       ${section === "overview" ? `
-        <div data-position-detail-panel="overview">
+        <div data-position-detail-panel="overview" ${activeDetailTab === "overview" ? "" : "hidden"}>
         <section class="market-regime-section">
           <div class="market-regime-section-head"><div><strong>Biểu đồ vị thế</strong><small>Tiến độ tới TP và các mốc giá đang quản lý</small></div></div>
           ${renderTradeExecutionPositionTabs(items)}
         </section>
         ${items.length ? `<section class="market-regime-section"><div class="market-regime-section-head"><div><strong>Vị thế đang mở</strong><small>Partial chỉ chạy một lần, sau đó trailing SL</small></div></div><div class="trade-execution-position-grid">${items.map(renderTradeExecutionPositionCard).join("")}</div></section>` : `<div class="market-regime-empty">Chưa có vị thế live đang mở.</div>`}
         </div>
-        <div data-position-detail-panel="pending_orders" hidden>
+        <div data-position-detail-panel="pending_orders" ${activeDetailTab === "pending_orders" ? "" : "hidden"}>
           <section class="market-regime-section">
             <div class="market-regime-section-head"><div><strong>Lu\u1ed3ng l\u1ec7nh</strong><small>AI candidate -> pending setup -> pending order -> OKX order -> position</small></div></div>
             <div class="position-management-flow">
@@ -4821,7 +4870,7 @@ function renderPositionManagementSectionDetail(module, options = {}) {
         </section>
       ` : ""}
       ${section === "profit_protection" ? `
-        <div data-position-detail-panel="profit_protection">
+        <div data-position-detail-panel="profit_protection" ${activeDetailTab === "profit_protection" ? "" : "hidden"}>
           <section class="market-regime-section position-management-rule-section">
             <div class="position-management-split position-management-split-compact">
               <article class="position-management-half">
@@ -4841,7 +4890,7 @@ function renderPositionManagementSectionDetail(module, options = {}) {
             ${renderProfitProtectionPositionTabs(items)}
           </section>
         </div>
-        <div data-position-detail-panel="sync_journal" hidden>
+        <div data-position-detail-panel="sync_journal" ${activeDetailTab === "sync_journal" ? "" : "hidden"}>
           <section class="market-regime-section">
             <div class="market-regime-section-head"><div><strong>Nhật ký close gần đây</strong><small>TP, SL, trailing stop hoặc reconciled close</small></div></div>
             ${renderTradeExecutionClosedList(closedItems)}
@@ -5374,6 +5423,7 @@ function groupedSystemModules(modules) {
   const dataUpdateSchedule = systemDataUpdateScheduleText();
   const eventScheduleByName = {
     "Bộ nhớ quyết định AI": { event: "Ghi nhớ sau mỗi quyết định", schedule: "Sau mỗi lệnh đóng", interval: "lệnh đóng" },
+    "Trade Intent Shadow Architecture": { event: "Shadow sau khi co candidate/context", schedule: "Chi quan sat, khong execution", interval: "shadow" },
     "Market Regime": { event: "Theo snapshot data hệ thống", schedule: dataUpdateSchedule, interval: dataUpdateInterval },
     "Market Structure & Pattern Engine": { event: "Khi scanner hoặc final re-check gửi OHLCV", schedule: "Theo request analyze/recheck", interval: "sự kiện" },
     "Strategy Versioning": { event: "Ghi nhớ sau mỗi quyết định", schedule: "6h sáng", interval: "6h sáng" },
@@ -5418,6 +5468,7 @@ function groupedSystemModules(modules) {
       schedule_text: `Market Regime ${dataUpdateInterval}, Replay & Strategy lúc 6h sáng`,
       items: [
         realModules.get("Bộ nhớ quyết định AI"),
+        realModules.get("Trade Intent Shadow Architecture"),
         realModules.get("Market Regime"),
         realModules.get("Strategy Versioning"),
         realModules.get("Replay Engine"),
@@ -6296,6 +6347,17 @@ function startSystemChecklistRefresh() {
   }, SYSTEM_CHECKLIST_REFRESH_MS);
 }
 
+function startRealtimeModuleRefresh() {
+  if (state.realtimeModuleTimer) clearInterval(state.realtimeModuleTimer);
+  state.realtimeModuleTimer = setInterval(() => {
+    if (!dashboardIsVisible()) return;
+    if (!state.selectedSystemModuleKey || !refs.systemModuleOverlay || refs.systemModuleOverlay.hidden) return;
+    const module = findSystemModuleByKey(state.selectedSystemModuleKey);
+    if (!isRealtimeSystemModule(module)) return;
+    loadSystemChecklist("", { forceRefresh: true, aiRange: "current" }).catch((err) => setStatus(`Loi realtime module: ${err.message}`));
+  }, REALTIME_MODULE_REFRESH_MS);
+}
+
 async function loadLcPipeline() {
   if (state.lcPipelineInFlight) return state.lcPipelineInFlight;
   state.lcPipelineInFlight = (async () => {
@@ -6899,6 +6961,7 @@ loadConfigSummary().catch((err) => {
 startLcPipelineRefresh();
 loadSystemChecklist().catch((err) => setStatus(`Lỗi system health: ${err.message}`));
 startSystemChecklistRefresh();
+startRealtimeModuleRefresh();
 loadDecision()
   .then((exists) => {
     if (!exists) runAnalysis();
