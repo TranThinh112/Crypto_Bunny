@@ -171,6 +171,7 @@ def _sizing_config(config: dict[str, Any]) -> dict[str, Any]:
     leverage = float(config.get("exchange", {}).get("leverage", 1) or 1)
     return {
         "enabled": bool(raw.get("enabled", False)),
+        "cycle_start_at": raw.get("cycle_start_at"),
         "base_margin_usdt": float(raw.get("base_margin_usdt", 2.0) or 2.0),
         "target_profit_usdt": float(raw.get("target_profit_usdt", 0.30) or 0.30),
         "tp_roi": float(raw.get("tp_roi", 0.75) or 0.75),
@@ -195,6 +196,7 @@ def _sizing_config(config: dict[str, Any]) -> dict[str, Any]:
 
 def _default_state(base_margin: float) -> dict[str, Any]:
     return {
+        "cycle_start_at": None,
         "cycle_pnl_usdt": 0.0,
         "recovery_step": 0,
         "recovery_band": "normal",
@@ -247,6 +249,16 @@ def _normalize_idle_state(state: dict[str, Any], base_margin: float) -> None:
     state["soft_return_pnl_usdt"] = None
     state["hard_soft_recovered_at"] = None
 
+def _configured_cycle_start(settings: dict[str, Any]) -> datetime | None:
+    value = settings.get("cycle_start_at")
+    if not value:
+        return None
+    return _event_time(value)
+
+def _cycle_start_state_value(settings: dict[str, Any]) -> str | None:
+    start_at = _configured_cycle_start(settings)
+    return start_at.isoformat() if start_at else None
+
 
 def _has_runtime_trade_records(config: dict[str, Any]) -> bool:
     try:
@@ -281,20 +293,33 @@ def _reset_orphaned_blocked_state(
     return clean, True
 
 
-def _load_state(config: dict[str, Any], base_margin: float) -> dict[str, Any]:
+def _load_state(config: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
+    base_margin = float(settings["base_margin_usdt"])
+    cycle_start_value = _cycle_start_state_value(settings)
     raw = get_journal_state(config, STATE_KEY)
     if not raw:
         state = _default_state(base_margin)
+        state["cycle_start_at"] = cycle_start_value
         state["_is_new"] = True
+        state["_bootstrap_configured_history"] = bool(cycle_start_value)
         return state
     try:
         state = json.loads(raw)
     except json.JSONDecodeError:
         state = _default_state(base_margin)
+        state["cycle_start_at"] = cycle_start_value
         state["_is_new"] = True
+        state["_bootstrap_configured_history"] = bool(cycle_start_value)
         return state
     default = _default_state(base_margin)
     default.update({key: value for key, value in state.items() if key in default})
+    if cycle_start_value and default.get("cycle_start_at") != cycle_start_value:
+        default = _default_state(base_margin)
+        default["cycle_start_at"] = cycle_start_value
+        default["_is_new"] = True
+        default["_bootstrap_configured_history"] = True
+        return default
+    default["cycle_start_at"] = cycle_start_value
     if not isinstance(default.get("processed_keys"), list):
         default["processed_keys"] = []
     if not isinstance(default.get("processed_pnl_by_key"), dict):
@@ -312,15 +337,17 @@ def _save_state(config: dict[str, Any], state: dict[str, Any]) -> None:
     if isinstance(processed, dict):
         keep = set(state["processed_keys"])
         state["processed_pnl_by_key"] = {str(key): value for key, value in processed.items() if str(key) in keep}
-    clean_state = {key: value for key, value in state.items() if key != "_is_new"}
+    clean_state = {key: value for key, value in state.items() if not str(key).startswith("_")}
     set_journal_state(config, STATE_KEY, json.dumps(clean_state, ensure_ascii=False))
 
 
-def _closed_positions(config: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+def _closed_positions(config: dict[str, Any], settings: dict[str, Any]) -> list[dict[str, Any]]:
     if config.get("mode") == "dry_run":
         return []
     exchange = create_exchange(config, authenticated=True)
     exchange.load_markets()
+    limit = int(settings["history_limit"])
+    cycle_start_at = _configured_cycle_start(settings)
     rows = _fetch_positions_history_rows(exchange, limit)
     closed: list[dict[str, Any]] = []
     for row in rows:
@@ -329,7 +356,10 @@ def _closed_positions(config: dict[str, Any], limit: int) -> list[dict[str, Any]
         key = _position_key(row)
         symbol = _position_symbol(row)
         pnl = _position_pnl(row)
+        closed_at = _position_time(row)
         if not key or not symbol or pnl is None:
+            continue
+        if cycle_start_at is not None and (closed_at is None or closed_at < cycle_start_at):
             continue
         closed.append(
             {
@@ -337,7 +367,7 @@ def _closed_positions(config: dict[str, Any], limit: int) -> list[dict[str, Any]
                 "symbol": symbol,
                 "side": _position_side(row),
                 "pnl_usdt": pnl,
-                "closed_at": _position_time(row),
+                "closed_at": closed_at,
             }
         )
     closed.sort(key=lambda item: item.get("closed_at") or datetime.min.replace(tzinfo=timezone.utc))
@@ -470,15 +500,20 @@ def _apply_realized_pnl(
 
 
 def _update_cycle_state(config: dict[str, Any], settings: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
-    state = _load_state(config, float(settings["base_margin_usdt"]))
+    state = _load_state(config, settings)
     notes: list[str] = []
     try:
-        closed = _closed_positions(config, int(settings["history_limit"]))
+        closed = _closed_positions(config, settings)
     except Exception as exc:
         notes.append(f"Recovery history unavailable: {exc}")
         return state, notes
 
-    if state.get("_is_new") and not config.get("position_sizing", {}).get("bootstrap_existing_history", False):
+    bootstrap_configured_history = bool(state.get("_bootstrap_configured_history"))
+    if (
+        state.get("_is_new")
+        and not bootstrap_configured_history
+        and not config.get("position_sizing", {}).get("bootstrap_existing_history", False)
+    ):
         state["processed_keys"] = [str(row["key"]) for row in closed]
         notes.append("Recovery cycle initialized; existing closed positions marked as processed")
         _save_state(config, state)
@@ -510,9 +545,10 @@ def rebuild_recovery_cycle_state(config: dict[str, Any]) -> dict[str, Any]:
     settings = _sizing_config(config)
     base_margin = float(settings["base_margin_usdt"])
     state = _default_state(base_margin)
+    state["cycle_start_at"] = _cycle_start_state_value(settings)
     notes: list[str] = []
     try:
-        closed = _closed_positions(config, int(settings["history_limit"]))
+        closed = _closed_positions(config, settings)
     except Exception as exc:
         state["rebuild_error"] = str(exc)
         return {"state": state, "notes": [f"Recovery history unavailable: {exc}"], "closed_count": 0}
@@ -663,6 +699,7 @@ def apply_position_sizing(config: dict[str, Any], candidates: list[TradeCandidat
         "block_reason": block_reason if blocked else None,
         "recovery_guard_active": guard_active,
         "blocked_candidates": blocked_candidates,
+        "cycle_start_at": state.get("cycle_start_at"),
         "cycle_pnl_usdt": round(float(state.get("cycle_pnl_usdt") or 0), 6),
         "last_realized_net_pnl": state.get("last_realized_net_pnl"),
         "target_profit_usdt": round(float(settings["target_profit_usdt"]), 4),

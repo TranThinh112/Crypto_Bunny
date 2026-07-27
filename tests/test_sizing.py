@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -252,6 +252,47 @@ class SizingTest(TestCase):
         self.assertEqual(result["recovery_band"], "soft")
         self.assertAlmostEqual(result["cycle_pnl_usdt"], -9.2, places=6)
         self.assertAlmostEqual(result["hard_peak_loss_usdt"], -20.0, places=6)
+
+    def test_configured_cycle_start_rebuilds_legacy_blocked_state_from_okx_history(self) -> None:
+        config = self._config()
+        start_at = datetime(2026, 7, 5, tzinfo=timezone.utc)
+        config["position_sizing"]["cycle_start_at"] = start_at.isoformat()
+        config["position_sizing"]["target_profit_usdt"] = 30.0
+        set_journal_state(
+            config,
+            "position_sizing:recovery_cycle",
+            (
+                '{"cycle_pnl_usdt": -117.324218, "recovery_step": 4, '
+                '"next_margin_usdt": 0.0, "processed_keys": ["legacy"], '
+                '"processed_pnl_by_key": {}, "blocked": true, '
+                '"block_reason": "Recovery step limit reached: 4/4"}'
+            ),
+        )
+        old_row = {
+            "symbol": "SOL/USDT:USDT",
+            "id": "before-cycle",
+            "pnl": -100.0,
+            "timestamp": int((start_at - timedelta(days=1)).timestamp() * 1000),
+        }
+        cycle_row = {
+            "symbol": "HYPE/USDT:USDT",
+            "id": "inside-cycle",
+            "side": "short",
+            "realizedPnl": "-17.822675",
+            "timestamp": int((start_at + timedelta(days=1)).timestamp() * 1000),
+        }
+        candidates = [_candidate("ETH/USDT:USDT", "long")]
+
+        with patch("crypto_trader.sizing.create_exchange", return_value=FakeExchange([old_row, cycle_row])):
+            result = apply_position_sizing(config, candidates)
+
+        self.assertFalse(result["blocked"])
+        self.assertAlmostEqual(result["cycle_pnl_usdt"], -17.822675, places=6)
+        self.assertEqual(result["cycle_start_at"], start_at.isoformat())
+        state_raw = get_journal_state(config, "position_sizing:recovery_cycle") or "{}"
+        self.assertIn(start_at.isoformat(), state_raw)
+        self.assertNotIn("before-cycle", state_raw)
+        self.assertNotIn("_bootstrap_configured_history", state_raw)
 
     def test_recovery_cycle_uses_okx_realized_pnl_after_fees_and_funding(self) -> None:
         config = self._config()
