@@ -912,6 +912,42 @@ class CodexFeaturesTest(TestCase):
         self.assertEqual(normal["recoveryBand"], "normal")
         self.assertAlmostEqual(normal["needToNormalUsdt"], 0.0)
 
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_bunny_minimize_losses_uses_current_sizing_hard_band(self, _send_telegram_message) -> None:
+        config = self._config()
+        config["position_sizing"] = {
+            "cycle_start_at": "2026-07-05T00:00:00+07:00",
+            "target_profit_usdt": 0.30,
+        }
+        sizing_state = {
+            "cycle_start_at": "2026-07-04T17:00:00+00:00",
+            "cycle_pnl_usdt": -22.361896,
+            "recovery_band": "hard",
+            "hard_started_at": "2026-07-20T00:00:00+00:00",
+            "hard_start_pnl_usdt": -29.814672,
+            "hard_peak_loss_usdt": -29.814672,
+            "soft_return_pnl_usdt": -14.907336,
+        }
+        config["trading_risk"] = {"global_loss_streak_threshold": 2}
+
+        with patch("crypto_trader.codex_features.get_global_loss_streak", return_value=0), patch(
+            "crypto_trader.codex_features._recovery_cycle_pnl",
+            return_value=-17.822675,
+        ), patch(
+            "crypto_trader.codex_features.get_journal_state",
+            return_value=json.dumps(sizing_state),
+        ), patch("crypto_trader.codex_features.get_trading_system_state_row", return_value=None), patch(
+            "crypto_trader.codex_features.upsert_trading_system_state_row"
+        ):
+            state = refresh_trading_system_state(config)
+
+        self.assertEqual(state["recoveryMode"], "HARD_RECOVERY")
+        self.assertEqual(state["recoveryBand"], "hard")
+        self.assertAlmostEqual(state["recoveryCyclePnlUsdt"], -22.361896)
+        self.assertAlmostEqual(state["hardRecoveryPeakLossUsdt"], -29.814672)
+        self.assertAlmostEqual(state["hardRecoverySoftExitThresholdUsdt"], -14.907336)
+        self.assertAlmostEqual(state["needToSoftUsdt"], 7.45456, places=5)
+
     def test_recovery_cycle_pnl_returns_none_when_okx_unavailable_with_configured_start(self) -> None:
         config = self._config()
         config["position_sizing"] = {

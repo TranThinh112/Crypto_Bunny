@@ -2115,6 +2115,31 @@ def _recovery_cycle_pnl_from_state(config: dict[str, Any]) -> float:
         return 0.0
     return _safe_float(state.get("cycle_pnl_usdt"), 0.0)
 
+def _position_sizing_recovery_state(config: dict[str, Any]) -> dict[str, Any]:
+    raw = get_journal_state(config, POSITION_SIZING_STATE_KEY)
+    if not raw:
+        return {}
+    try:
+        state = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+def _configured_sizing_cycle_start_value(config: dict[str, Any]) -> str | None:
+    try:
+        from .sizing import _sizing_config, _cycle_start_state_value
+
+        return _cycle_start_state_value(_sizing_config(config))
+    except Exception:
+        return None
+
+def _sizing_state_matches_configured_cycle(config: dict[str, Any], state: dict[str, Any]) -> bool:
+    configured = _configured_sizing_cycle_start_value(config)
+    stored = state.get("cycle_start_at")
+    if configured:
+        return stored == configured
+    return not stored
+
 def _recovery_cycle_pnl_from_trade_executions(start_at: datetime, config: dict[str, Any]) -> float | None:
     try:
         closed = _closed_trade_executions(config)
@@ -2512,6 +2537,10 @@ def refresh_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
     global_loss_streak = get_global_loss_streak(config)
     current_rule_score, current_confidence = _adaptive_thresholds(config)
     cycle_pnl = _recovery_cycle_pnl(config)
+    sizing_recovery_state = _position_sizing_recovery_state(config)
+    sizing_state_is_current = _sizing_state_matches_configured_cycle(config, sizing_recovery_state)
+    if sizing_state_is_current and sizing_recovery_state.get("cycle_pnl_usdt") is not None:
+        cycle_pnl = _safe_float(sizing_recovery_state.get("cycle_pnl_usdt"), 0.0)
     cycle_pnl_for_mode = _safe_float(cycle_pnl, 0.0)
     paused_until: datetime | None = None
     existing = get_trading_system_state_row(config)
@@ -2531,9 +2560,17 @@ def refresh_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
     target_profit = _safe_float(config.get("position_sizing", {}).get("target_profit_usdt"), 0.30)
     now_iso = _iso_now()
     previous_band = str(previous_payload.get("recoveryBand") or "").strip().lower()
+    sizing_band = str(sizing_recovery_state.get("recovery_band") or "").strip().lower()
     hard_started_at = previous_payload.get("hardRecoveryStartedAt")
     hard_entry_cycle_pnl = _safe_float(previous_payload.get("hardRecoveryEntryCyclePnlUsdt"), 0.0)
     hard_peak_loss = _safe_float(previous_payload.get("hardRecoveryPeakLossUsdt"), hard_entry_cycle_pnl)
+    if sizing_state_is_current and sizing_band in {"soft", "hard"}:
+        hard_started_at = sizing_recovery_state.get("hard_started_at") or hard_started_at
+        hard_entry_cycle_pnl = _safe_float(
+            sizing_recovery_state.get("hard_start_pnl_usdt"),
+            hard_entry_cycle_pnl,
+        )
+        hard_peak_loss = _safe_float(sizing_recovery_state.get("hard_peak_loss_usdt"), hard_peak_loss)
     if global_loss_streak >= hard_threshold and previous_recovery_mode != "HARD_RECOVERY" and previous_band != "hard":
         hard_started_at = now_iso
         hard_entry_cycle_pnl = cycle_pnl_for_mode
@@ -2543,6 +2580,8 @@ def refresh_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
             hard_peak_loss = cycle_pnl_for_mode
     soft_exit_threshold = hard_peak_loss * 0.5 if hard_peak_loss < 0 else 0.0
     hard_recovery = global_loss_streak >= hard_threshold and cycle_pnl_for_mode < soft_exit_threshold
+    if sizing_state_is_current and sizing_band == "hard":
+        hard_recovery = cycle_pnl_for_mode < soft_exit_threshold
     soft_recovery = (
         not hard_recovery
         and bool(settings.get("enable_soft_recovery_mode", True))
