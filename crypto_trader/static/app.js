@@ -580,6 +580,53 @@ function normalizedPositionSide(side) {
   return "";
 }
 
+function liveOkxPositionForTradeItem(item) {
+  const symbol = String(item?.symbol || "");
+  const side = normalizedPositionSide(item?.side);
+  if (!symbol || !Array.isArray(state.currentPositions)) return null;
+  return state.currentPositions.find((position) => {
+    if (String(position?.symbol || "") !== symbol) return false;
+    const positionSide = normalizedPositionSide(position?.side);
+    return !side || !positionSide || positionSide === side;
+  }) || null;
+}
+
+function tradeItemWithLiveOkxPosition(item) {
+  const position = liveOkxPositionForTradeItem(item);
+  if (!position) return item;
+  const contracts = nullableNumber(position.contracts);
+  const markPrice = nullableNumber(position.mark_price);
+  const entryPrice = nullableNumber(position.entry_price);
+  const unrealizedPnl = nullableNumber(position.unrealized_pnl);
+  const stopLoss = nullableNumber(position.stop_loss);
+  const takeProfit = nullableNumber(position.take_profit);
+  const levels = item?.profit_protection_levels && typeof item.profit_protection_levels === "object"
+    ? item.profit_protection_levels
+    : {};
+  return {
+    ...item,
+    quantity: contracts ?? item?.quantity,
+    entry_price: entryPrice ?? item?.entry_price,
+    mark_price: markPrice ?? item?.mark_price,
+    pnl: unrealizedPnl ?? item?.pnl,
+    stop_loss: stopLoss ?? item?.stop_loss,
+    take_profit: takeProfit ?? item?.take_profit,
+    profit_protection_levels: {
+      ...levels,
+      quantity: contracts ?? levels.quantity,
+      current_amount: contracts ?? levels.current_amount,
+      current_sl: {
+        ...(levels.current_sl || {}),
+        price: stopLoss ?? levels.current_sl?.price,
+      },
+      current_tp: {
+        ...(levels.current_tp || {}),
+        price: takeProfit ?? levels.current_tp?.price,
+      },
+    },
+  };
+}
+
 function positionAsCandidate(position, fallback = null) {
   const entry = nullableNumber(position.entry_price) ?? nullableNumber(fallback?.entry);
   const mark = nullableNumber(position.mark_price);
@@ -4509,6 +4556,7 @@ function profitProtectionExtraRows(rows) {
 }
 
 function renderProfitProtectionPositionPanel(item) {
+  item = tradeItemWithLiveOkxPosition(item);
   const levels = item?.profit_protection_levels || {};
   const tpSteps = Array.isArray(levels.tp_steps) ? levels.tp_steps : [];
   const slSteps = Array.isArray(levels.sl_steps) ? levels.sl_steps : [];
@@ -4578,7 +4626,7 @@ function renderProfitProtectionPositionPanel(item) {
 }
 
 function renderProfitProtectionPositionTabs(items) {
-  const rows = Array.isArray(items) ? items : [];
+  const rows = Array.isArray(items) ? items.map(tradeItemWithLiveOkxPosition) : [];
   if (!rows.length) return `<div class="market-regime-empty compact">Chưa có vị thế đang gồng.</div>`;
   return `
     <div class="trade-execution-tabs" role="tablist">
@@ -4594,6 +4642,25 @@ function renderProfitProtectionPositionTabs(items) {
       </div>
     `).join("")}
   `;
+}
+
+function findSystemModuleByKey(targetKey) {
+  const modules = Array.isArray(state.lastSystemChecklistPayload?.modules)
+    ? state.lastSystemChecklistPayload.modules
+    : [];
+  return groupedSystemModules(modules)
+    .flatMap((group) => Array.isArray(group.items) ? group.items : [])
+    .find((module) => systemModuleKey(module) === targetKey) || null;
+}
+
+function refreshOpenPositionManagementDetailFromLiveOkx() {
+  if (!state.selectedSystemModuleKey || !refs.systemModuleOverlay || refs.systemModuleOverlay.hidden) return;
+  const module = findSystemModuleByKey(state.selectedSystemModuleKey);
+  if (!module || !isPositionManagementSection(module)) return;
+  renderModuleDetail(module, {
+    scrollTop: moduleDetailScrollTop(),
+    activeChartIndex: moduleDetailActiveChartIndex(),
+  });
 }
 
 function bindTradeExecutionTabs() {
@@ -6380,6 +6447,7 @@ function renderOkxPositions(payload) {
     renderSelected(state.currentDecision);
     renderCandidates(state.currentDecision);
   }
+  refreshOpenPositionManagementDetailFromLiveOkx();
 }
 
 function renderOkxDemoStatus(status) {
