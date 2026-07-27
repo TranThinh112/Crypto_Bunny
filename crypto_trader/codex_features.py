@@ -2196,10 +2196,117 @@ def _recovery_cycle_display_pnl_from_okx(start_at: datetime, config: dict[str, A
         exchange.load_markets()
     except Exception:
         return None
-    fills_pnl = _recovery_cycle_closed_pnl_from_okx_fills(exchange, start_at, config)
-    if fills_pnl is not None:
-        return fills_pnl
+    closed_position_pnl = _recovery_cycle_closed_pnl_from_okx_positions_history(exchange, start_at, config)
+    if closed_position_pnl is not None:
+        return closed_position_pnl
     return None
+
+def _recovery_cycle_history_closed_at(row: dict[str, Any]) -> datetime | None:
+    def parse_history_time(value: Any) -> datetime | None:
+        numeric = _safe_float(value, None)
+        if numeric is not None and numeric > 10_000:
+            try:
+                seconds = numeric / 1000 if numeric > 10_000_000_000 else numeric
+                return datetime.fromtimestamp(seconds, tz=timezone.utc)
+            except (OSError, ValueError):
+                return None
+        return _parse_time(value)
+
+    info = row.get("info", {}) if isinstance(row.get("info"), dict) else {}
+    for payload, keys in (
+        (row, ("lastUpdateTimestamp", "updatedAt", "closed_at", "closedAt", "uTime", "closeTime")),
+        (info, ("uTime", "closeTime", "lastUpdateTimestamp")),
+        (row, ("timestamp", "cTime")),
+        (info, ("cTime",)),
+    ):
+        for key in keys:
+            parsed = parse_history_time(payload.get(key))
+            if parsed is not None:
+                return parsed
+    return None
+
+def _recovery_cycle_history_pnl(row: dict[str, Any]) -> float | None:
+    info = row.get("info", {}) if isinstance(row.get("info"), dict) else {}
+    for payload in (row, info):
+        for key in ("realizedPnl", "realisedPnl", "netPnl", "netProfit"):
+            value = _safe_float(payload.get(key), None)
+            if value is not None:
+                return value
+    pnl = None
+    for payload in (row, info):
+        pnl = _safe_float(payload.get("pnl"), None)
+        if pnl is not None:
+            break
+    if pnl is None:
+        return None
+    adjustments = 0.0
+    adjusted = False
+    for payload in (row, info):
+        for key in ("fee", "fundingFee", "funding", "settledPnl"):
+            value = _safe_float(payload.get(key), None)
+            if value is None:
+                continue
+            adjustments += value
+            adjusted = True
+    return round(pnl + adjustments, 6) if adjusted else pnl
+
+def _recovery_cycle_closed_pnl_from_okx_positions_history(
+    exchange: Any,
+    start_at: datetime,
+    config: dict[str, Any],
+) -> float | None:
+    fetch_history = getattr(exchange, "privateGetAccountPositionsHistory", None)
+    if not callable(fetch_history):
+        fetch_history = getattr(exchange, "private_get_account_positions_history", None)
+    if not callable(fetch_history):
+        fetch_history = getattr(exchange, "fetch_positions_history", None)
+    if not callable(fetch_history):
+        return None
+    if start_at.tzinfo is None:
+        start_at = start_at.replace(tzinfo=timezone.utc)
+    limit = max(1, min(int(config.get("position_sizing", {}).get("history_limit", 100) or 100), 100))
+    total = 0.0
+    seen_any = False
+    seen_keys: set[str] = set()
+
+    try:
+        if getattr(fetch_history, "__name__", "") == "fetch_positions_history":
+            rows = fetch_history(None, None, limit)
+        else:
+            response = fetch_history({"instType": "SWAP", "limit": str(limit)})
+            rows = response.get("data") if isinstance(response, dict) else response
+    except Exception:
+        return None
+    if not isinstance(rows, list):
+        return None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        closed_at = _recovery_cycle_history_closed_at(row)
+        if closed_at is None:
+            continue
+        if closed_at.tzinfo is None:
+            closed_at = closed_at.replace(tzinfo=timezone.utc)
+        if closed_at < start_at:
+            continue
+        pnl = _recovery_cycle_history_pnl(row)
+        if pnl is None:
+            continue
+        info = row.get("info", {}) if isinstance(row.get("info"), dict) else {}
+        key = "|".join(
+            [
+                str(row.get("instId") or info.get("instId") or row.get("symbol") or ""),
+                str(row.get("id") or row.get("posId") or info.get("posId") or ""),
+                str(row.get("uTime") or info.get("uTime") or row.get("lastUpdateTimestamp") or ""),
+                closed_at.isoformat(),
+            ]
+        )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        total += pnl
+        seen_any = True
+    return round(total, 6) if seen_any else None
 
 def _recovery_cycle_closed_pnl_from_okx_fills(
     exchange: Any,
@@ -2359,6 +2466,7 @@ def _notify_recovery_mode_transition(
         if payload.get("recoveryCyclePnlUsdt") is None
         else round(_safe_float(payload.get("recoveryCyclePnlUsdt"), 0.0), 4),
         "hard_entry_cycle_pnl": round(_safe_float(payload.get("hardRecoveryEntryCyclePnlUsdt"), 0.0), 4),
+        "hard_peak_loss": round(_safe_float(payload.get("hardRecoveryPeakLossUsdt"), 0.0), 4),
         "soft_exit_threshold": round(_safe_float(payload.get("hardRecoverySoftExitThresholdUsdt"), 0.0), 4),
     }
     signature = hashlib.sha256(
@@ -2377,6 +2485,10 @@ def _notify_recovery_mode_transition(
         "📉 Cycle PnL: -"
         if payload.get("recoveryCyclePnlUsdt") is None
         else f"📉 Cycle PnL: {_safe_float(payload.get('recoveryCyclePnlUsdt'), 0.0):+.4f} USDT",
+        f"📍 Đáy Hard: {_safe_float(payload.get('hardRecoveryPeakLossUsdt'), 0.0):+.4f} USDT",
+        f"🟡 Mốc về Soft: {_safe_float(payload.get('hardRecoverySoftExitThresholdUsdt'), 0.0):+.4f} USDT",
+        f"↗️ Cần gỡ về Soft: {_safe_float(payload.get('needToSoftUsdt'), 0.0):.4f} USDT",
+        f"🟢 Cần gỡ về Normal: {_safe_float(payload.get('needToNormalUsdt'), 0.0):.4f} USDT",
         f"🛡 Rule áp dụng: score ≥ {score:g}, GPT ≥ {confidence:g}, R:R ≥ {risk_reward:g}",
         f"💰 Risk/lệnh: {risk_percent:g}%",
     ]
@@ -2416,19 +2528,41 @@ def refresh_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
     if global_loss_streak >= _safe_int(settings.get("pause_trading_loss_streak"), 4):
         paused_until = _utcnow() + timedelta(hours=_safe_int(settings.get("pause_trading_hours"), 24))
     hard_threshold = _safe_int(settings.get("global_loss_streak_threshold"), 2)
+    target_profit = _safe_float(config.get("position_sizing", {}).get("target_profit_usdt"), 0.30)
+    now_iso = _iso_now()
+    previous_band = str(previous_payload.get("recoveryBand") or "").strip().lower()
+    hard_started_at = previous_payload.get("hardRecoveryStartedAt")
     hard_entry_cycle_pnl = _safe_float(previous_payload.get("hardRecoveryEntryCyclePnlUsdt"), 0.0)
-    if global_loss_streak >= hard_threshold and previous_recovery_mode != "HARD_RECOVERY":
+    hard_peak_loss = _safe_float(previous_payload.get("hardRecoveryPeakLossUsdt"), hard_entry_cycle_pnl)
+    if global_loss_streak >= hard_threshold and previous_recovery_mode != "HARD_RECOVERY" and previous_band != "hard":
+        hard_started_at = now_iso
         hard_entry_cycle_pnl = cycle_pnl_for_mode
-    if global_loss_streak < hard_threshold:
-        hard_entry_cycle_pnl = 0.0
-    soft_exit_threshold = hard_entry_cycle_pnl * 0.5 if hard_entry_cycle_pnl < 0 else 0.0
+        hard_peak_loss = cycle_pnl_for_mode
+    if previous_recovery_mode == "HARD_RECOVERY" or previous_band == "hard":
+        if hard_peak_loss >= 0 or cycle_pnl_for_mode < hard_peak_loss:
+            hard_peak_loss = cycle_pnl_for_mode
+    soft_exit_threshold = hard_peak_loss * 0.5 if hard_peak_loss < 0 else 0.0
     hard_recovery = global_loss_streak >= hard_threshold and cycle_pnl_for_mode < soft_exit_threshold
     soft_recovery = (
         not hard_recovery
         and bool(settings.get("enable_soft_recovery_mode", True))
-        and cycle_pnl_for_mode < -1e-9
+        and (
+            cycle_pnl_for_mode < -1e-9
+            or (
+                previous_recovery_mode in {"SOFT_RECOVERY", "HARD_RECOVERY"}
+                and cycle_pnl_for_mode < target_profit
+            )
+        )
     )
     recovery_mode = "HARD_RECOVERY" if hard_recovery else "SOFT_RECOVERY" if soft_recovery else "NORMAL"
+    if recovery_mode == "NORMAL":
+        hard_started_at = None
+        hard_entry_cycle_pnl = 0.0
+        hard_peak_loss = 0.0
+        soft_exit_threshold = 0.0
+    recovery_band = "hard" if hard_recovery else "soft" if soft_recovery else "normal"
+    need_to_soft = max(0.0, soft_exit_threshold - cycle_pnl_for_mode) if hard_recovery else 0.0
+    need_to_normal = max(0.0, target_profit - cycle_pnl_for_mode) if recovery_mode != "NORMAL" else 0.0
     is_recovery_mode = recovery_mode != "NORMAL"
     payload = {
         "id": 1,
@@ -2437,15 +2571,21 @@ def refresh_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
         "recoveryMode": recovery_mode,
         "isSoftRecoveryMode": soft_recovery,
         "isHardRecoveryMode": hard_recovery,
+        "recoveryBand": recovery_band,
         "globalLossStreak": global_loss_streak,
         "recoveryCyclePnlUsdt": None if cycle_pnl is None else round(cycle_pnl, 6),
+        "recoveryTargetProfitUsdt": round(target_profit, 6),
+        "hardRecoveryStartedAt": hard_started_at,
         "hardRecoveryEntryCyclePnlUsdt": round(hard_entry_cycle_pnl, 6),
+        "hardRecoveryPeakLossUsdt": round(hard_peak_loss, 6),
         "hardRecoverySoftExitThresholdUsdt": round(soft_exit_threshold, 6),
+        "needToSoftUsdt": round(need_to_soft, 6),
+        "needToNormalUsdt": round(need_to_normal, 6),
         "isPaused": bool(paused_until and paused_until > _utcnow()),
         "pausedUntil": paused_until.isoformat() if paused_until else None,
         "currentNormalMinRuleScore": current_rule_score,
         "currentNormalMinGptConfidence": current_confidence,
-        "updatedAt": _iso_now(),
+        "updatedAt": now_iso,
     }
     upsert_trading_system_state_row(
         config,

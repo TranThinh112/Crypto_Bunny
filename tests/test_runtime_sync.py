@@ -877,6 +877,58 @@ class RuntimeSyncTest(TestCase):
         self.assertAlmostEqual(row["pnl"], 3.2916, places=4)
         self.assertEqual(row["pnl_pct"], 54.18)
 
+    def test_sync_prefers_position_history_update_time_over_open_time(self) -> None:
+        config = self._config()
+        insert_trade_execution_row(
+            config,
+            {
+                "created_at": "2026-07-25T16:33:09+00:00",
+                "updated_at": "2026-07-27T04:22:09+00:00",
+                "closed_at": "2026-07-27T04:22:09+00:00",
+                "symbol": "ETH/USDT:USDT",
+                "side": "SHORT",
+                "status": "LOSS",
+                "pnl": -3.135284,
+                "close_reason": "manual",
+            },
+        )
+
+        result = sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-07-27T04:52:33+00:00",
+                "positions": [],
+                "open_orders": [],
+                "positions_history": [
+                    {
+                        "symbol": "ETH/USDT:USDT",
+                        "side": "short",
+                        "timestamp": 1784996777072,
+                        "lastUpdateTimestamp": 1785125917130,
+                        "info": {
+                            "instId": "ETH-USDT-SWAP",
+                            "posSide": "short",
+                            "cTime": "1784996777072",
+                            "uTime": "1785125917130",
+                            "openAvgPx": "1873.7728985507246377",
+                            "closeAvgPx": "1943.5931884057971014",
+                            "realizedPnl": "-4.9321185217422643",
+                            "pnlRatio": "-0.5722143166169811",
+                        },
+                        "realizedPnl": -4.9321185217422645,
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(result["exchange"]["corrected_close_pnls"], 1)
+        row = list_trade_execution_rows(config, statuses=["LOSS"])[0]
+        self.assertAlmostEqual(row["pnl"], -4.9321185217422645)
+        self.assertEqual(row["pnl_pct"], -57.221432)
+        self.assertEqual(row["exchange_close_source"], "okx_positions_history")
+
     def test_sync_collapses_duplicate_open_executions_for_same_position(self) -> None:
         config = self._config()
         for row_id in range(2):

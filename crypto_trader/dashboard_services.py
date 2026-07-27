@@ -620,6 +620,34 @@ def _module_bool_percent(value: Any) -> float:
     return 100.0 if bool(value) else 0.0
 
 
+def _recovery_need_amounts(
+    config: dict[str, Any],
+    risk_state: dict[str, Any],
+    sizing_state: dict[str, Any] | None = None,
+) -> dict[str, float | None]:
+    sizing_state = sizing_state if isinstance(sizing_state, dict) else {}
+    cycle_source = risk_state.get("recoveryCyclePnlUsdt")
+    if cycle_source is None:
+        cycle_source = sizing_state.get("cycle_pnl_usdt")
+    if cycle_source is None:
+        return {"soft": None, "normal": None}
+    cycle_pnl = _safe_float(cycle_source)
+    target_profit = _safe_float(config.get("position_sizing", {}).get("target_profit_usdt"), 0.30)
+    normal_needed = max(0.0, target_profit - cycle_pnl)
+    sizing_band = str(sizing_state.get("recovery_band") or "").lower()
+    mode = str(risk_state.get("recoveryMode") or "").upper()
+    soft_threshold = _safe_float(risk_state.get("hardRecoverySoftExitThresholdUsdt"), 0.0)
+    is_hard = sizing_band == "hard" or mode == "HARD_RECOVERY"
+    soft_needed_raw = risk_state.get("needToSoftUsdt")
+    soft_needed = None if soft_needed_raw is None else _safe_float(soft_needed_raw)
+    if soft_needed is None:
+        soft_needed = max(0.0, soft_threshold - cycle_pnl) if is_hard else 0.0
+    normal_needed_raw = risk_state.get("needToNormalUsdt")
+    if normal_needed_raw is not None:
+        normal_needed = _safe_float(normal_needed_raw)
+    return {"soft": round(soft_needed, 6), "normal": round(normal_needed, 6)}
+
+
 def _module_percent(part: Any, total: Any) -> float | None:
     whole = _safe_float(total)
     if whole <= 0:
@@ -1671,6 +1699,7 @@ def system_modules_payload(
     max_positions = _safe_int(risk_state.get("maxConcurrentPositions"))
     slot_utilization = _module_percent(open_count, max_positions)
     paused_minutes = _module_minutes_until(risk_state.get("pausedUntil"))
+    recovery_need = _recovery_need_amounts(config, risk_state, sizing_state)
     prompt_updated_at = prompt_metrics.get("updated_at") if prompt_metrics else None
     processed_keys = sizing_state.get("processed_keys") if isinstance(sizing_state, dict) else []
     row_counts = row_counts or {}
@@ -1772,6 +1801,7 @@ def system_modules_payload(
             "recovery_mode": risk_state.get("recoveryMode") or ("HARD_RECOVERY" if risk_state.get("isRecoveryMode") else "NORMAL"),
             "stats": [
                 _module_row("recoveryMode", risk_state.get("recoveryMode") or ("HARD_RECOVERY" if risk_state.get("isRecoveryMode") else "NORMAL"), "Mode hiện tại của Bunny Minimize Losses.", attention=True),
+                _module_row("recoveryBand", risk_state.get("recoveryBand"), "Dải recovery nội bộ: normal, soft hoặc hard.", attention=True),
                 _module_row("isRecoveryMode", _module_bool_percent(risk_state.get("isRecoveryMode")), "100 nghĩa là hệ thống đang ở recovery mode.", attention=True),
                 _module_row("isPaused", _module_bool_percent(risk_state.get("isPaused")), "100 nghĩa là hệ thống đang pause, không nên mở lệnh mới.", attention=True),
                 _module_row("globalLossStreak", risk_state.get("globalLossStreak"), "Chuỗi thua hiện tại của toàn hệ thống.", attention=True),
@@ -1802,6 +1832,11 @@ def system_modules_payload(
                 _module_row("adaptiveScoreStep", risk_state.get("adaptiveScoreStep"), "Mức tăng/giảm rule score khi adaptive threshold điều chỉnh."),
                 _module_row("adaptiveConfidenceStep", risk_state.get("adaptiveConfidenceStep"), "Mức tăng/giảm GPT confidence khi adaptive threshold điều chỉnh."),
                 _module_row("recoveryCyclePnlUsdt", risk_state.get("recoveryCyclePnlUsdt"), "PnL cycle dùng để phân biệt Soft Recovery và Normal.", attention=True),
+                _module_row("recoveryTargetProfitUsdt", risk_state.get("recoveryTargetProfitUsdt"), "Mốc Cycle PnL cần đạt để quay về Normal.", attention=True),
+                _module_row("hardRecoveryPeakLossUsdt", risk_state.get("hardRecoveryPeakLossUsdt"), "Đáy âm sâu nhất kể từ khi vào Hard Recovery.", attention=True),
+                _module_row("hardRecoverySoftExitThresholdUsdt", risk_state.get("hardRecoverySoftExitThresholdUsdt"), "Mốc hồi 50% của đáy Hard để quay về Soft Recovery.", attention=True),
+                _module_row("needToSoftUsdt", recovery_need.get("soft"), "Số USDT cần gỡ thêm để từ Hard Recovery quay về Soft Recovery theo mốc soft exit hiện tại.", attention=True),
+                _module_row("needToNormalUsdt", recovery_need.get("normal"), "Số USDT cần gỡ thêm để Cycle PnL đạt mục tiêu normal hiện tại.", attention=True),
                 _module_row("updatedAt", risk_state.get("updatedAt"), "Thời điểm trading system state được refresh gần nhất."),
             ],
         },
@@ -1904,7 +1939,10 @@ def system_modules_payload(
             "status": recovery_status,
             "stats": [
                 _module_row("recovery_step", sizing_state.get("recovery_step") if sizing_state else None, "Bước hiện tại của chuỗi gỡ lỗ.", attention=True),
+                _module_row("recovery_band", sizing_state.get("recovery_band") if sizing_state else None, "Band hiện tại của recovery sizing: normal, soft hoặc hard.", attention=True),
                 _module_row("cycle_pnl_usdt", sizing_state.get("cycle_pnl_usdt") if sizing_state else None, "PnL lũy kế thực tế của chu kỳ recovery hiện tại.", attention=True),
+                _module_row("hard_peak_loss_usdt", sizing_state.get("hard_peak_loss_usdt") if sizing_state else None, "Đáy âm sâu nhất kể từ khi vào hard recovery.", attention=True),
+                _module_row("soft_return_pnl_usdt", sizing_state.get("soft_return_pnl_usdt") if sizing_state else None, "Mốc Cycle PnL cần hồi về để hard recovery chuyển xuống soft.", attention=True),
                 _module_row("next_margin_usdt", sizing_state.get("next_margin_usdt") if sizing_state else None, "Margin thực tế hệ thống sẽ dùng cho bước recovery tiếp theo.", attention=True),
                 _module_row("blocked", _module_bool_percent(sizing_state.get("blocked")) if sizing_state else None, "100 nghĩa là chuỗi recovery hiện đang bị chặn.", attention=True),
                 _module_row("processed_keys_count", len(processed_keys) if isinstance(processed_keys, list) else None, "Số khóa lệnh đã được recovery chain manager xử lý."),

@@ -44,8 +44,8 @@ def _position_key(row: dict[str, Any]) -> str:
     info = row.get("info", {}) if isinstance(row.get("info"), dict) else {}
     symbol = _canonical_position_symbol(row.get("symbol") or row.get("instId") or info.get("instId") or "")
     pos_id = row.get("id") or row.get("posId") or info.get("posId")
-    updated = row.get("timestamp") or info.get("uTime") or info.get("cTime") or info.get("closeTime")
-    return f"{symbol}:{pos_id or updated or 'unknown'}"
+    updated = row.get("lastUpdateTimestamp") or row.get("uTime") or info.get("uTime") or info.get("closeTime") or row.get("timestamp") or info.get("cTime")
+    return f"{symbol}:{pos_id or 'unknown'}:{updated or 'unknown'}"
 
 
 def _position_symbol(row: dict[str, Any]) -> str:
@@ -85,10 +85,6 @@ def _position_side(row: dict[str, Any]) -> str:
 
 def _position_pnl(row: dict[str, Any]) -> float | None:
     info = row.get("info", {}) if isinstance(row.get("info"), dict) else {}
-    for payload in (row, info):
-        value = _float(payload.get("pnl"))
-        if value is not None:
-            return value
     for key in ("realizedPnl", "realisedPnl", "netPnl", "netProfit"):
         value = _float(row.get(key))
         if value is not None:
@@ -97,6 +93,19 @@ def _position_pnl(row: dict[str, Any]) -> float | None:
         value = _float(info.get(key))
         if value is not None:
             return value
+    for payload in (row, info):
+        value = _float(payload.get("pnl"))
+        if value is not None:
+            adjustments = 0.0
+            adjusted = False
+            for adjust_payload in (row, info):
+                for key in ("fee", "fundingFee", "funding", "settledPnl"):
+                    adjustment = _float(adjust_payload.get(key))
+                    if adjustment is None:
+                        continue
+                    adjustments += adjustment
+                    adjusted = True
+            return round(value + adjustments, 6) if adjusted else value
     pnl = _float(row.get("upl") or info.get("upl"))
     if pnl is None:
         return None
@@ -114,7 +123,7 @@ def _position_pnl(row: dict[str, Any]) -> float | None:
 
 def _position_time(row: dict[str, Any]) -> datetime | None:
     info = row.get("info", {}) if isinstance(row.get("info"), dict) else {}
-    timestamp = row.get("timestamp") or info.get("uTime") or info.get("cTime") or info.get("closeTime")
+    timestamp = row.get("lastUpdateTimestamp") or row.get("uTime") or info.get("uTime") or info.get("closeTime") or row.get("timestamp") or info.get("cTime")
     numeric = _float(timestamp)
     if numeric is not None:
         if numeric > 10_000_000_000:
@@ -188,11 +197,17 @@ def _default_state(base_margin: float) -> dict[str, Any]:
     return {
         "cycle_pnl_usdt": 0.0,
         "recovery_step": 0,
+        "recovery_band": "normal",
         "next_margin_usdt": base_margin,
         "processed_keys": [],
         "processed_pnl_by_key": {},
         "blocked": False,
         "block_reason": None,
+        "hard_started_at": None,
+        "hard_start_pnl_usdt": None,
+        "hard_peak_loss_usdt": None,
+        "soft_return_pnl_usdt": None,
+        "hard_soft_recovered_at": None,
         "last_processed_key": None,
         "last_realized_net_pnl": None,
         "last_loss_symbol": None,
@@ -223,8 +238,14 @@ def _state_is_idle(state: dict[str, Any]) -> bool:
 def _normalize_idle_state(state: dict[str, Any], base_margin: float) -> None:
     if not _state_is_idle(state):
         return
+    state["recovery_band"] = "normal"
     state["next_margin_usdt"] = round(base_margin, 4)
     state["block_reason"] = None
+    state["hard_started_at"] = None
+    state["hard_start_pnl_usdt"] = None
+    state["hard_peak_loss_usdt"] = None
+    state["soft_return_pnl_usdt"] = None
+    state["hard_soft_recovered_at"] = None
 
 
 def _has_runtime_trade_records(config: dict[str, Any]) -> bool:
@@ -341,6 +362,50 @@ def _stop_state(state: dict[str, Any], reason: str) -> None:
     state["next_margin_usdt"] = 0.0
 
 
+def _clear_hard_recovery_state(state: dict[str, Any]) -> None:
+    state["recovery_band"] = "normal"
+    state["hard_started_at"] = None
+    state["hard_start_pnl_usdt"] = None
+    state["hard_peak_loss_usdt"] = None
+    state["soft_return_pnl_usdt"] = None
+    state["hard_soft_recovered_at"] = None
+
+
+def _enter_hard_recovery(state: dict[str, Any], cycle_pnl: float) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    if state.get("recovery_band") == "soft" and state.get("hard_soft_recovered_at"):
+        return
+    if state.get("recovery_band") != "hard":
+        state["hard_started_at"] = now
+        state["hard_start_pnl_usdt"] = round(cycle_pnl, 6)
+        state["hard_soft_recovered_at"] = None
+    previous_peak = _float(state.get("hard_peak_loss_usdt"))
+    peak = cycle_pnl if previous_peak is None or previous_peak >= 0 or cycle_pnl < previous_peak else previous_peak
+    state["recovery_band"] = "hard"
+    state["hard_peak_loss_usdt"] = round(peak, 6)
+    state["soft_return_pnl_usdt"] = round(peak * 0.5, 6) if peak < 0 else 0.0
+
+
+def _hard_recovery_returned_to_soft(state: dict[str, Any], cycle_pnl: float) -> bool:
+    if state.get("recovery_band") != "hard":
+        return False
+    previous_peak = _float(state.get("hard_peak_loss_usdt"))
+    if previous_peak is None or previous_peak >= 0:
+        return False
+    if cycle_pnl < previous_peak:
+        state["hard_peak_loss_usdt"] = round(cycle_pnl, 6)
+        state["soft_return_pnl_usdt"] = round(cycle_pnl * 0.5, 6)
+        return False
+    soft_return = _float(state.get("soft_return_pnl_usdt"))
+    if soft_return is not None and cycle_pnl >= soft_return:
+        state["recovery_band"] = "soft"
+        state["hard_soft_recovered_at"] = datetime.now(timezone.utc).isoformat()
+        state["blocked"] = False
+        state["block_reason"] = None
+        return True
+    return False
+
+
 def _apply_realized_pnl(
     state: dict[str, Any],
     settings: dict[str, Any],
@@ -368,15 +433,22 @@ def _apply_realized_pnl(
         state["cycle_pnl_usdt"] = 0.0
         state["recovery_step"] = 0
         state["next_margin_usdt"] = base_margin
+        _clear_hard_recovery_state(state)
         state["last_loss_symbol"] = None
         state["last_loss_side"] = None
         state["last_loss_key"] = None
         return f"Cycle target reached: pnl {cycle_pnl:.4f} >= {target_profit:.4f}; reset to base size"
 
     recovery_step = int(state.get("recovery_step") or 0)
+    returned_to_soft = _hard_recovery_returned_to_soft(state, cycle_pnl)
+    if returned_to_soft:
+        recovery_step = min(recovery_step, max(0, max_step - 1))
+        state["recovery_step"] = recovery_step
     if recovery_step >= max_step:
-        _stop_state(state, f"Recovery step limit reached: {recovery_step}/{max_step}")
-        return str(state["block_reason"])
+        _enter_hard_recovery(state, cycle_pnl)
+        if state.get("recovery_band") == "hard":
+            _stop_state(state, f"Recovery step limit reached: {recovery_step}/{max_step}")
+            return str(state["block_reason"])
 
     expected_net_tp = _expected_net_tp(settings)
     if expected_net_tp <= 0:
@@ -386,7 +458,11 @@ def _apply_realized_pnl(
     required_profit = target_profit - cycle_pnl
     next_margin = max(base_margin, required_profit / expected_net_tp)
     state["next_margin_usdt"] = round(next_margin, 4)
-    state["recovery_step"] = recovery_step + 1
+    state["recovery_step"] = recovery_step if returned_to_soft else recovery_step + 1
+    if state["recovery_step"] >= max_step:
+        _enter_hard_recovery(state, cycle_pnl)
+    elif cycle_pnl < 0:
+        state["recovery_band"] = "soft"
     return (
         f"Cycle pnl {cycle_pnl:.4f}; required {required_profit:.4f}; "
         f"next margin {next_margin:.4f} USDT; step {state['recovery_step']}/{max_step}"
@@ -591,7 +667,11 @@ def apply_position_sizing(config: dict[str, Any], candidates: list[TradeCandidat
         "last_realized_net_pnl": state.get("last_realized_net_pnl"),
         "target_profit_usdt": round(float(settings["target_profit_usdt"]), 4),
         "recovery_step": int(state.get("recovery_step") or 0),
+        "recovery_band": state.get("recovery_band") or "normal",
         "max_recovery_step": int(settings["max_recovery_step"]),
+        "hard_start_pnl_usdt": state.get("hard_start_pnl_usdt"),
+        "hard_peak_loss_usdt": state.get("hard_peak_loss_usdt"),
+        "soft_return_pnl_usdt": state.get("soft_return_pnl_usdt"),
         "base_margin_usdt": round(base_margin, 4),
         "recovery_margin_usdt": round(recovery_amount, 4),
         "margin_usdt": round(margin, 4),

@@ -806,6 +806,112 @@ class CodexFeaturesTest(TestCase):
         self.assertIn("Chuyển từ: HARD RECOVERY → SOFT RECOVERY", message)
         self.assertIn("Cycle PnL: -4.8000 USDT", message)
 
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_bunny_minimize_losses_tracks_hard_peak_and_soft_threshold(self, _send_telegram_message) -> None:
+        config = self._config()
+        config["position_sizing"] = {"target_profit_usdt": 0.30}
+        config["trading_risk"] = {"global_loss_streak_threshold": 2}
+
+        with patch("crypto_trader.codex_features.get_global_loss_streak", return_value=2), patch(
+            "crypto_trader.codex_features._recovery_cycle_pnl",
+            return_value=-20.0,
+        ), patch("crypto_trader.codex_features.get_trading_system_state_row", return_value=None), patch(
+            "crypto_trader.codex_features.upsert_trading_system_state_row"
+        ):
+            state = refresh_trading_system_state(config)
+
+        self.assertEqual(state["recoveryMode"], "HARD_RECOVERY")
+        self.assertEqual(state["recoveryBand"], "hard")
+        self.assertAlmostEqual(state["hardRecoveryEntryCyclePnlUsdt"], -20.0)
+        self.assertAlmostEqual(state["hardRecoveryPeakLossUsdt"], -20.0)
+        self.assertAlmostEqual(state["hardRecoverySoftExitThresholdUsdt"], -10.0)
+        self.assertAlmostEqual(state["needToSoftUsdt"], 10.0)
+        self.assertAlmostEqual(state["needToNormalUsdt"], 20.3)
+
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_bunny_minimize_losses_updates_hard_peak_when_loss_deepens(self, _send_telegram_message) -> None:
+        config = self._config()
+        config["position_sizing"] = {"target_profit_usdt": 0.30}
+        config["trading_risk"] = {"global_loss_streak_threshold": 2}
+        previous = {
+            "recoveryMode": "HARD_RECOVERY",
+            "recoveryBand": "hard",
+            "hardRecoveryStartedAt": "2026-07-20T00:00:00+00:00",
+            "hardRecoveryEntryCyclePnlUsdt": -20.0,
+            "hardRecoveryPeakLossUsdt": -20.0,
+        }
+
+        with patch("crypto_trader.codex_features.get_global_loss_streak", return_value=2), patch(
+            "crypto_trader.codex_features._recovery_cycle_pnl",
+            return_value=-30.0,
+        ), patch(
+            "crypto_trader.codex_features.get_trading_system_state_row",
+            return_value={"is_recovery_mode": 1, "payload_json": json.dumps(previous)},
+        ), patch("crypto_trader.codex_features.upsert_trading_system_state_row"):
+            state = refresh_trading_system_state(config)
+
+        self.assertEqual(state["recoveryMode"], "HARD_RECOVERY")
+        self.assertAlmostEqual(state["hardRecoveryPeakLossUsdt"], -30.0)
+        self.assertAlmostEqual(state["hardRecoverySoftExitThresholdUsdt"], -15.0)
+        self.assertAlmostEqual(state["needToSoftUsdt"], 15.0)
+
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_bunny_minimize_losses_returns_to_soft_after_half_recovery_and_waits_for_normal_target(
+        self,
+        _send_telegram_message,
+    ) -> None:
+        config = self._config()
+        config["position_sizing"] = {"target_profit_usdt": 0.30}
+        config["trading_risk"] = {"global_loss_streak_threshold": 2}
+        previous = {
+            "recoveryMode": "HARD_RECOVERY",
+            "recoveryBand": "hard",
+            "hardRecoveryStartedAt": "2026-07-20T00:00:00+00:00",
+            "hardRecoveryEntryCyclePnlUsdt": -20.0,
+            "hardRecoveryPeakLossUsdt": -20.0,
+            "hardRecoverySoftExitThresholdUsdt": -10.0,
+        }
+
+        with patch("crypto_trader.codex_features.get_global_loss_streak", return_value=2), patch(
+            "crypto_trader.codex_features._recovery_cycle_pnl",
+            return_value=-9.0,
+        ), patch(
+            "crypto_trader.codex_features.get_trading_system_state_row",
+            return_value={"is_recovery_mode": 1, "payload_json": json.dumps(previous)},
+        ), patch("crypto_trader.codex_features.upsert_trading_system_state_row"):
+            state = refresh_trading_system_state(config)
+
+        self.assertEqual(state["recoveryMode"], "SOFT_RECOVERY")
+        self.assertEqual(state["recoveryBand"], "soft")
+        self.assertAlmostEqual(state["needToSoftUsdt"], 0.0)
+        self.assertAlmostEqual(state["needToNormalUsdt"], 9.3)
+
+        previous_soft = dict(previous, recoveryMode="SOFT_RECOVERY", recoveryBand="soft")
+        with patch("crypto_trader.codex_features.get_global_loss_streak", return_value=0), patch(
+            "crypto_trader.codex_features._recovery_cycle_pnl",
+            return_value=0.29,
+        ), patch(
+            "crypto_trader.codex_features.get_trading_system_state_row",
+            return_value={"is_recovery_mode": 1, "payload_json": json.dumps(previous_soft)},
+        ), patch("crypto_trader.codex_features.upsert_trading_system_state_row"):
+            nearly_normal = refresh_trading_system_state(config)
+
+        self.assertEqual(nearly_normal["recoveryMode"], "SOFT_RECOVERY")
+        self.assertAlmostEqual(nearly_normal["needToNormalUsdt"], 0.01)
+
+        with patch("crypto_trader.codex_features.get_global_loss_streak", return_value=0), patch(
+            "crypto_trader.codex_features._recovery_cycle_pnl",
+            return_value=0.30,
+        ), patch(
+            "crypto_trader.codex_features.get_trading_system_state_row",
+            return_value={"is_recovery_mode": 1, "payload_json": json.dumps(previous_soft)},
+        ), patch("crypto_trader.codex_features.upsert_trading_system_state_row"):
+            normal = refresh_trading_system_state(config)
+
+        self.assertEqual(normal["recoveryMode"], "NORMAL")
+        self.assertEqual(normal["recoveryBand"], "normal")
+        self.assertAlmostEqual(normal["needToNormalUsdt"], 0.0)
+
     def test_recovery_cycle_pnl_returns_none_when_okx_unavailable_with_configured_start(self) -> None:
         config = self._config()
         config["position_sizing"] = {
@@ -822,84 +928,60 @@ class CodexFeaturesTest(TestCase):
         self.assertIsNone(pnl)
         closed_trade_executions.assert_not_called()
 
-    def test_recovery_cycle_pnl_uses_okx_closed_fill_pnl(self) -> None:
+    def test_recovery_cycle_pnl_uses_okx_closed_position_realized_pnl(self) -> None:
         config = self._config()
         config["position_sizing"] = {
             "cycle_start_at": "2026-07-05T00:00:00+07:00",
             "history_limit": 100,
         }
-        fills = [
+        rows = [
             {
                 "instId": "SHIB-USDT-SWAP",
-                "tradeId": "shib-1",
-                "billId": "b3",
-                "fillPnl": "3.8448",
-                "fillTime": str(int(datetime(2026, 7, 26, tzinfo=timezone.utc).timestamp() * 1000)),
-            },
-            {
-                "instId": "SHIB-USDT-SWAP",
-                "tradeId": "shib-2",
-                "billId": "b2",
-                "fillPnl": "1.9274",
-                "fillTime": str(int(datetime(2026, 7, 26, tzinfo=timezone.utc).timestamp() * 1000)),
+                "posId": "shib",
+                "realizedPnl": "5.689893",
+                "uTime": str(int(datetime(2026, 7, 26, tzinfo=timezone.utc).timestamp() * 1000)),
             },
             {
                 "instId": "ETH-USDT-SWAP",
-                "tradeId": "eth-loss",
-                "billId": "b1",
-                "fillPnl": "-0.70518",
-                "fillTime": str(int(datetime(2026, 7, 26, tzinfo=timezone.utc).timestamp() * 1000)),
+                "posId": "eth",
+                "realizedPnl": "-4.932118",
+                "uTime": str(int(datetime(2026, 7, 27, tzinfo=timezone.utc).timestamp() * 1000)),
             },
             {
                 "instId": "OLD-USDT-SWAP",
-                "tradeId": "old",
-                "billId": "b0",
-                "fillPnl": "-99",
-                "fillTime": str(int(datetime(2026, 7, 4, tzinfo=timezone.utc).timestamp() * 1000)),
+                "posId": "old",
+                "realizedPnl": "-99",
+                "uTime": str(int(datetime(2026, 7, 4, tzinfo=timezone.utc).timestamp() * 1000)),
             },
         ]
         exchange = SimpleNamespace(
             load_markets=lambda: {},
-            privateGetTradeFillsHistory=lambda params: {"data": fills},
+            privateGetAccountPositionsHistory=lambda params: {"data": rows},
         )
 
         with patch("crypto_trader.market.create_exchange", return_value=exchange):
             pnl = _recovery_cycle_pnl(config)
 
-        self.assertAlmostEqual(pnl, 5.06702, places=6)
+        self.assertAlmostEqual(pnl, 0.757775, places=6)
 
-    def test_recovery_cycle_pnl_paginates_okx_closed_fills_and_ignores_bot_rows(self) -> None:
+    def test_recovery_cycle_pnl_ignores_partial_fills_and_bot_rows(self) -> None:
         config = self._config()
         config["position_sizing"] = {
             "cycle_start_at": "2026-07-05T00:00:00+07:00",
             "history_limit": 100,
         }
-        first_page = [
+        partial_fills = [
             {
-                "tradeId": "new-win",
+                "tradeId": "partial-profit",
                 "billId": "200",
                 "fillPnl": "1.25",
                 "fillTime": str(int(datetime(2026, 7, 26, tzinfo=timezone.utc).timestamp() * 1000)),
             },
             {
-                "tradeId": "cursor",
+                "tradeId": "partial-loss",
                 "billId": "100",
-                "fillPnl": "0",
-                "fillTime": str(int(datetime(2026, 7, 25, tzinfo=timezone.utc).timestamp() * 1000)),
-            },
-        ]
-        second_page = [
-            {
-                "tradeId": "old-loss",
-                "billId": "99",
                 "fillPnl": "-3.5",
-                "fillTime": str(int(datetime(2026, 7, 24, tzinfo=timezone.utc).timestamp() * 1000)),
-            },
-            {
-                "tradeId": "before-cycle",
-                "billId": "98",
-                "fillPnl": "99",
-                "fillTime": str(int(datetime(2026, 7, 4, tzinfo=timezone.utc).timestamp() * 1000)),
+                "fillTime": str(int(datetime(2026, 7, 25, tzinfo=timezone.utc).timestamp() * 1000)),
             },
         ]
         bot_rows = [
@@ -934,18 +1016,55 @@ class CodexFeaturesTest(TestCase):
             },
         ]
 
-        def fetch_fills(params):
-            return {"data": second_page if params.get("after") == "100" else first_page}
-
-        exchange = SimpleNamespace(load_markets=lambda: {}, privateGetTradeFillsHistory=fetch_fills)
+        exchange = SimpleNamespace(
+            load_markets=lambda: {},
+            privateGetAccountPositionsHistory=lambda params: {"data": []},
+            privateGetTradeFillsHistory=lambda params: {"data": partial_fills},
+        )
 
         with patch("crypto_trader.market.create_exchange", return_value=exchange), patch(
             "crypto_trader.codex_features._closed_trade_executions", return_value=bot_rows
         ) as closed_trade_executions:
             pnl = _recovery_cycle_pnl(config)
 
-        self.assertAlmostEqual(pnl, -2.25, places=6)
+        self.assertIsNone(pnl)
         closed_trade_executions.assert_not_called()
+
+    def test_recovery_cycle_pnl_counts_okx_rows_with_same_pos_id_different_close_time(self) -> None:
+        config = self._config()
+        config["position_sizing"] = {
+            "cycle_start_at": "2026-07-05T00:00:00+07:00",
+            "history_limit": 100,
+        }
+        rows = [
+            {
+                "instId": "ETH-USDT-SWAP",
+                "posId": "same-pos",
+                "realizedPnl": "-4.94",
+                "uTime": str(int(datetime(2026, 7, 27, 4, 18, tzinfo=timezone.utc).timestamp() * 1000)),
+            },
+            {
+                "instId": "ETH-USDT-SWAP",
+                "posId": "same-pos",
+                "realizedPnl": "3.76",
+                "uTime": str(int(datetime(2026, 7, 7, 4, 30, tzinfo=timezone.utc).timestamp() * 1000)),
+            },
+            {
+                "instId": "ETH-USDT-SWAP",
+                "posId": "same-pos",
+                "realizedPnl": "-2.75",
+                "uTime": str(int(datetime(2026, 7, 6, 13, 20, tzinfo=timezone.utc).timestamp() * 1000)),
+            },
+        ]
+        exchange = SimpleNamespace(
+            load_markets=lambda: {},
+            privateGetAccountPositionsHistory=lambda params: {"data": rows},
+        )
+
+        with patch("crypto_trader.market.create_exchange", return_value=exchange):
+            pnl = _recovery_cycle_pnl(config)
+
+        self.assertAlmostEqual(pnl, -3.93, places=6)
 
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_recovery_mode_stays_soft_when_cycle_pnl_negative_and_loss_streak_below_hard(

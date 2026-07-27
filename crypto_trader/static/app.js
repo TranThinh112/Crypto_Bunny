@@ -2163,6 +2163,7 @@ function renderAiDecisionModuleChart(module, rows) {
 
 const BUNNY_MINIMIZE_ROW_CONFIG = [
   ["recoveryMode", "Recovery mode", "trạng thái", "Mode vận hành hiện tại của Bunny Minimize Losses.", "Mode đang siết hơn bình thường.", "Mode đang nới hoặc về normal."],
+  ["recoveryBand", "Dải recovery", "trạng thái", "Dải recovery nội bộ đang dùng để tính mốc hard/soft/normal.", "Dải recovery đang siết hơn.", "Dải recovery đang nới hơn."],
   ["isRecoveryMode", "Recovery mode", "trạng thái", "Bật khi chuỗi thua toàn hệ thống chạm ngưỡng recovery.", "Recovery vừa bật hoặc đang tác động mạnh hơn.", "Recovery đã tắt hoặc giảm tác động."],
   ["isPaused", "Tạm dừng giao dịch", "trạng thái", "Bật khi chuỗi thua chạm ngưỡng pause, bot không mở lệnh mới.", "Bot đang bị pause, cần chú ý.", "Bot đã thoát pause hoặc ít bị chặn hơn."],
   ["globalLossStreak", "Chuỗi thua toàn hệ thống", "lần", "Số lệnh LOSS liên tiếp gần nhất trên toàn hệ thống.", "Chuỗi thua tăng, rủi ro hệ thống cao hơn.", "Chuỗi thua giảm hoặc đã reset."],
@@ -2193,6 +2194,11 @@ const BUNNY_MINIMIZE_ROW_CONFIG = [
   ["adaptiveScoreStep", "Bước chỉnh rule score", "điểm", "Mức tăng/giảm rule score khi adaptive threshold điều chỉnh.", "Adaptive chỉnh rule score mạnh hơn.", "Adaptive chỉnh rule score nhẹ hơn."],
   ["adaptiveConfidenceStep", "Bước chỉnh confidence", "điểm", "Mức tăng/giảm GPT confidence khi adaptive threshold điều chỉnh.", "Adaptive chỉnh confidence mạnh hơn.", "Adaptive chỉnh confidence nhẹ hơn."],
   ["recoveryCyclePnlUsdt", "Cycle PnL", "u", "Cycle PnL dung de phan biet Soft Recovery va Normal.", "Cycle PnL tang.", "Cycle PnL giam."],
+  ["recoveryTargetProfitUsdt", "Mốc Normal", "u", "Cycle PnL cần đạt để quay về Normal.", "Mốc Normal cao hơn.", "Mốc Normal thấp hơn."],
+  ["hardRecoveryPeakLossUsdt", "Đáy Hard", "u", "Đáy âm sâu nhất kể từ khi vào Hard Recovery.", "Đáy Hard âm sâu hơn.", "Đáy Hard đã cải thiện."],
+  ["hardRecoverySoftExitThresholdUsdt", "Mốc về Soft", "u", "Mốc hồi 50% từ đáy Hard để quay về Soft Recovery.", "Mốc về Soft cao hơn.", "Mốc về Soft thấp hơn."],
+  ["needToSoftUsdt", "Cần về Soft", "u", "Số USDT cần gỡ thêm để từ Hard Recovery quay về Soft Recovery theo mốc soft exit hiện tại.", "Cần gỡ nhiều hơn.", "Cần gỡ ít hơn."],
+  ["needToNormalUsdt", "Cần về Normal", "u", "Số USDT cần gỡ thêm để Cycle PnL đạt mục tiêu normal hiện tại.", "Cần gỡ nhiều hơn.", "Cần gỡ ít hơn."],
 ].map(([key, label, unit, meaning, up, down], index) => ({
   key,
   label,
@@ -2308,6 +2314,8 @@ function renderBunnyRiskKpis(module, rows) {
     bunnyRiskRow(rows, "slotUtilizationPercent"),
     bunnyRiskRow(rows, "openPositionsCount"),
     bunnyRiskRow(rows, "maxConcurrentPositions"),
+    bunnyRiskRow(rows, "needToSoftUsdt"),
+    bunnyRiskRow(rows, "needToNormalUsdt"),
   ].filter(Boolean);
   if (!items.length) return "";
   return `
@@ -2316,7 +2324,8 @@ function renderBunnyRiskKpis(module, rows) {
         const label = row.unit ? `${row.label} (${row.unit})` : row.label;
         const tone = bunnyRiskKpiTone(row);
         const rowKey = String(row?.riskKey || row?.label || "");
-        const hideDelta = Number(module?.number || 0) === 2 && (rowKey === "recoveryMode" || rowKey === "isPaused");
+        const hideDelta = Number(module?.number || 0) === 2
+          && ["recoveryMode", "isPaused", "needToSoftUsdt", "needToNormalUsdt"].includes(rowKey);
         const isRecoveryMode = rowKey === "recoveryMode";
         const cyclePnlValue = moduleSignedNumericValue(cyclePnlRow?.value);
         const valueHtml = isRecoveryMode && cyclePnlRow
@@ -2491,7 +2500,7 @@ function renderBunnyRiskVariableRows(module, rows) {
   const chartMeta = new Map(BUNNY_RISK_CHART_ORDER);
   const chartOrder = new Map(BUNNY_RISK_CHART_ORDER.map(([key], index) => [key, index]));
   const hiddenKeys = Number(module?.number || 0) === 2
-    ? new Set(["recoveryMode", "isRecoveryMode", "isPaused", "globalLossStreak", "recoveryCyclePnlUsdt", "openPositionsCount", "maxConcurrentPositions", "slotUtilizationPercent"])
+    ? new Set(["recoveryMode", "isRecoveryMode", "isPaused", "globalLossStreak", "recoveryCyclePnlUsdt", "openPositionsCount", "maxConcurrentPositions", "slotUtilizationPercent", "needToSoftUsdt", "needToNormalUsdt"])
     : null;
   const chartRows = (Array.isArray(rows) ? rows : [])
     .filter((row) => !hiddenKeys || !hiddenKeys.has(String(row?.riskKey || "")))
@@ -6043,7 +6052,7 @@ function moduleDisplayRows(module, rows) {
     return sourceRows.filter((row) => keep.has(viLabel(row?.label || "")));
   }
   if (moduleNumber === 8) {
-    const keep = new Set(["recovery_step", "cycle_pnl_usdt", "next_margin_usdt", "blocked", "processed_keys_count", "last_realized_net_pnl", "last_loss_recorded"]);
+    const keep = new Set(["recovery_step", "recovery_band", "cycle_pnl_usdt", "hard_peak_loss_usdt", "soft_return_pnl_usdt", "next_margin_usdt", "blocked", "processed_keys_count", "last_realized_net_pnl", "last_loss_recorded"]);
     return sourceRows.filter((row) => keep.has(viLabel(row?.label || "")));
   }
   if (moduleNumber !== 1) return sourceRows;

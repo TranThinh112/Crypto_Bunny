@@ -325,7 +325,7 @@ def _history_pnl_pct(row: dict[str, Any]) -> float | None:
 
 def _history_closed_at(row: dict[str, Any]) -> datetime | None:
     info = _payload_info(row)
-    for key in ("timestamp", "lastUpdateTimestamp", "updatedAt", "closed_at", "closedAt"):
+    for key in ("lastUpdateTimestamp", "updatedAt", "closed_at", "closedAt"):
         parsed = _parse_time(row.get(key))
         if parsed is not None:
             return parsed
@@ -333,10 +333,17 @@ def _history_closed_at(row: dict[str, Any]) -> datetime | None:
         parsed = _parse_time(row.get(key))
         if parsed is not None:
             return parsed
-    for key in ("uTime", "cTime", "closeTime"):
+    for key in ("uTime", "closeTime", "lastUpdateTimestamp"):
         parsed = _parse_time(info.get(key))
         if parsed is not None:
             return parsed
+    for key in ("timestamp", "cTime"):
+        parsed = _parse_time(row.get(key))
+        if parsed is not None:
+            return parsed
+    parsed = _parse_time(info.get("cTime"))
+    if parsed is not None:
+        return parsed
     return None
 
 

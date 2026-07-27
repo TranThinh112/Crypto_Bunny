@@ -154,7 +154,106 @@ class SizingTest(TestCase):
         self.assertEqual(result["recovery_step"], 0)
         self.assertEqual(result["margin_usdt"], 2.0)
 
-    def test_recovery_cycle_uses_okx_display_pnl_like_okx_history(self) -> None:
+    def test_hard_recovery_returns_to_soft_after_recovering_half_peak_loss(self) -> None:
+        config = self._config()
+        config["position_sizing"]["reset_orphaned_blocked_state"] = False
+        set_journal_state(
+            config,
+            "position_sizing:recovery_cycle",
+            (
+                '{"cycle_pnl_usdt": -20.0, "recovery_step": 4, '
+                '"recovery_band": "hard", "next_margin_usdt": 0.0, '
+                '"processed_keys": ["old"], "processed_pnl_by_key": {}, '
+                '"blocked": true, "block_reason": "Recovery step limit reached: 4/4", '
+                '"hard_start_pnl_usdt": -20.0, "hard_peak_loss_usdt": -20.0, '
+                '"soft_return_pnl_usdt": -10.0}'
+            ),
+        )
+        row = {
+            "symbol": "ETH/USDT:USDT",
+            "id": "half-recovered",
+            "side": "long",
+            "pnl": 11.0,
+            "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
+        }
+        candidates = [_candidate("SOL/USDT:USDT", "long")]
+
+        with patch("crypto_trader.sizing.create_exchange", return_value=FakeExchange([row])):
+            result = apply_position_sizing(config, candidates)
+
+        self.assertFalse(result["blocked"])
+        self.assertEqual(result["recovery_band"], "soft")
+        self.assertEqual(result["recovery_step"], 3)
+        self.assertAlmostEqual(result["cycle_pnl_usdt"], -9.0, places=6)
+        self.assertAlmostEqual(result["soft_return_pnl_usdt"], -10.0, places=6)
+
+    def test_hard_recovery_updates_peak_loss_when_drawdown_gets_deeper(self) -> None:
+        config = self._config()
+        config["position_sizing"]["reset_orphaned_blocked_state"] = False
+        set_journal_state(
+            config,
+            "position_sizing:recovery_cycle",
+            (
+                '{"cycle_pnl_usdt": -20.0, "recovery_step": 4, '
+                '"recovery_band": "hard", "next_margin_usdt": 0.0, '
+                '"processed_keys": ["old"], "processed_pnl_by_key": {}, '
+                '"blocked": true, "block_reason": "Recovery step limit reached: 4/4", '
+                '"hard_start_pnl_usdt": -20.0, "hard_peak_loss_usdt": -20.0, '
+                '"soft_return_pnl_usdt": -10.0}'
+            ),
+        )
+        row = {
+            "symbol": "ETH/USDT:USDT",
+            "id": "deeper-loss",
+            "side": "long",
+            "pnl": -10.0,
+            "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
+        }
+        candidates = [_candidate("SOL/USDT:USDT", "long")]
+
+        with patch("crypto_trader.sizing.create_exchange", return_value=FakeExchange([row])):
+            result = apply_position_sizing(config, candidates)
+
+        self.assertTrue(result["blocked"])
+        self.assertEqual(result["recovery_band"], "hard")
+        self.assertAlmostEqual(result["cycle_pnl_usdt"], -30.0, places=6)
+        self.assertAlmostEqual(result["hard_peak_loss_usdt"], -30.0, places=6)
+        self.assertAlmostEqual(result["soft_return_pnl_usdt"], -15.0, places=6)
+
+    def test_soft_recovery_after_half_recovery_does_not_reblock_at_step_limit(self) -> None:
+        config = self._config()
+        config["position_sizing"]["reset_orphaned_blocked_state"] = False
+        set_journal_state(
+            config,
+            "position_sizing:recovery_cycle",
+            (
+                '{"cycle_pnl_usdt": -9.0, "recovery_step": 4, '
+                '"recovery_band": "soft", "next_margin_usdt": 0.0, '
+                '"processed_keys": ["old"], "processed_pnl_by_key": {}, '
+                '"blocked": false, "block_reason": null, '
+                '"hard_start_pnl_usdt": -20.0, "hard_peak_loss_usdt": -20.0, '
+                '"soft_return_pnl_usdt": -10.0, '
+                '"hard_soft_recovered_at": "2026-07-20T01:00:00+00:00"}'
+            ),
+        )
+        row = {
+            "symbol": "ETH/USDT:USDT",
+            "id": "soft-small-loss",
+            "side": "long",
+            "pnl": -0.2,
+            "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
+        }
+        candidates = [_candidate("SOL/USDT:USDT", "long")]
+
+        with patch("crypto_trader.sizing.create_exchange", return_value=FakeExchange([row])):
+            result = apply_position_sizing(config, candidates)
+
+        self.assertFalse(result["blocked"])
+        self.assertEqual(result["recovery_band"], "soft")
+        self.assertAlmostEqual(result["cycle_pnl_usdt"], -9.2, places=6)
+        self.assertAlmostEqual(result["hard_peak_loss_usdt"], -20.0, places=6)
+
+    def test_recovery_cycle_uses_okx_realized_pnl_after_fees_and_funding(self) -> None:
         config = self._config()
         config["position_sizing"]["target_profit_usdt"] = 10.0
         row = {
@@ -162,6 +261,7 @@ class SizingTest(TestCase):
             "id": "xau-win-1",
             "side": "long",
             "pnl": "3.77",
+            "realizedPnl": "3.29160045",
             "fundingFee": "-0.32452",
             "fee": "-0.15387955",
             "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
@@ -171,10 +271,10 @@ class SizingTest(TestCase):
         with patch("crypto_trader.sizing.create_exchange", return_value=FakeExchange([row])):
             result = apply_position_sizing(config, candidates)
 
-        self.assertAlmostEqual(result["cycle_pnl_usdt"], 3.77, places=4)
-        self.assertAlmostEqual(result["last_realized_net_pnl"], 3.77, places=4)
+        self.assertAlmostEqual(result["cycle_pnl_usdt"], 3.29160045, places=6)
+        self.assertAlmostEqual(result["last_realized_net_pnl"], 3.29160045, places=6)
 
-    def test_rebuild_recovery_cycle_uses_okx_display_pnl_for_tao(self) -> None:
+    def test_rebuild_recovery_cycle_uses_okx_realized_pnl_for_tao(self) -> None:
         config = self._config()
         config["position_sizing"]["target_profit_usdt"] = 30.0
         raw_tao = {
@@ -192,10 +292,10 @@ class SizingTest(TestCase):
             result = rebuild_recovery_cycle_state(config)
 
         self.assertEqual(result["closed_count"], 1)
-        self.assertAlmostEqual(result["state"]["cycle_pnl_usdt"], -13.24, places=6)
-        self.assertIn("TAO/USDT:USDT:3740224303088656384", result["state"]["processed_keys"])
+        self.assertAlmostEqual(result["state"]["cycle_pnl_usdt"], -13.7361275492279702, places=6)
+        self.assertTrue(any(key.startswith("TAO/USDT:USDT:3740224303088656384:") for key in result["state"]["processed_keys"]))
         state = get_journal_state(config, "position_sizing:recovery_cycle")
-        self.assertIn("TAO/USDT:USDT:3740224303088656384", state or "")
+        self.assertIn("TAO/USDT:USDT:3740224303088656384:", state or "")
 
     def test_recovery_cycle_ignores_cycle_loss_and_max_margin_caps(self) -> None:
         config = self._config()

@@ -3321,6 +3321,10 @@ body.dark-mode .position-management-flow span {
   font-size: 12px;
 }
 
+.trade-execution-closed-row[hidden] {
+  display: none;
+}
+
 .trade-execution-closed-row span {
   min-width: 0;
   overflow-wrap: anywhere;
@@ -3482,6 +3486,10 @@ body.dark-mode .position-management-flow span {
   font-size: 12px;
   font-weight: 800;
   line-height: 1.5;
+}
+
+.market-regime-empty[hidden] {
+  display: none;
 }
 
 .market-regime-empty.compact {
