@@ -4490,6 +4490,7 @@ function renderLossGuardLevelActual(lossGuard, levels = {}) {
   }, "loss", {
     achieved: executed,
     disabled: disabledByProfitProtection,
+    showTrigger: false,
     extraRows: [
       `${executed ? "Khối lượng đã chốt" : "Khối lượng chốt"} ${closePct}%: ${formatPositionQuantityUsdt(displayAmount, displayPrice, contractSize)}`,
       `KL còn lại: ${formatPositionQuantityUsdt(remainingAfterLoss, displayPrice, contractSize)}`,
@@ -4563,7 +4564,7 @@ function renderProfitProtectionPositionPanel(item) {
         ${renderProfitProtectionLevel("SL1 ban đầu", currentSlLevel, "base", { extraRows: initialExtraRows, showInitialAmount: false })}
         ${renderProfitProtectionLevel("TP1 ban đầu", currentTpLevel, "base")}
         ${renderProfitProtectionLevel("PnL hi\u1ec7n t\u1ea1i", currentPnlLevel, "current", { extraRows: currentExtraRows })}
-        ${renderProfitProtectionLevel("Ch\u1ed1t 30%", levels.partial_30, "partial", { achieved: partialDone, extraRows: partialExtraRows })}
+        ${renderProfitProtectionLevel("Ch\u1ed1t l\u1eddi 30%", levels.partial_30, "partial", { achieved: partialDone, extraRows: partialExtraRows, showTrigger: false })}
         ${renderLossGuardLevelActual(lossGuard, levels)}
         ${renderProfitProtectionLevel("SL2", levelByStep(slSteps, 2) || levels.sl2, "step2", { achieved: stepAchieved(1) })}
         ${renderProfitProtectionLevel("TP2", levelByStep(tpSteps, 2) || levels.tp2, "step2", { showTrigger: false, achieved: stepAchieved(1) })}
@@ -4677,6 +4678,7 @@ function renderPositionManagementSectionDetail(module, options = {}) {
       ${row.detail || module.display_subtitle ? `<small>${escapeHtml(row.detail || module.display_subtitle)}</small>` : ""}
     </article>
   `).join("");
+  const showTopSummary = section !== "profit_protection";
   const protectionRows = [
     { label: "Trailing Stop", value: config.enabled ? "Bật" : "Tắt" },
     { label: "ATR timeframe", value: config.atr_timeframe || "-" },
@@ -4720,10 +4722,10 @@ function renderPositionManagementSectionDetail(module, options = {}) {
     </div>
     <div class="module-chart-scroll market-regime-scroll">
       ${payload.error ? `<div class="market-regime-load-error" role="alert"><strong>Quản lý vị thế đang lỗi.</strong><span>${escapeHtml(payload.error)}</span></div>` : ""}
-      <section class="market-regime-section">
+      ${showTopSummary ? `<section class="market-regime-section">
         <div class="market-regime-section-head"><div><strong>Tóm tắt</strong>${module.display_subtitle ? `<small>${escapeHtml(module.display_subtitle)}</small>` : ""}</div></div>
         <div class="market-pattern-summary-grid">${summaryCards}</div>
-      </section>
+      </section>` : ""}
       ${section === "overview" ? `
         <div data-position-detail-panel="overview">
         <section class="market-regime-section">
@@ -4753,8 +4755,8 @@ function renderPositionManagementSectionDetail(module, options = {}) {
       ` : ""}
       ${section === "profit_protection" ? `
         <div data-position-detail-panel="profit_protection">
-          <section class="market-regime-section">
-            <div class="position-management-split">
+          <section class="market-regime-section position-management-rule-section">
+            <div class="position-management-split position-management-split-compact">
               <article class="position-management-half">
                 <div class="market-regime-section-head"><div><strong>Ch\u1ed1t l\u1eddi</strong><small>Partial TP, TP m\u1edbi v\u00e0 PnL \u0111\u00e3 \u0111\u00f3ng</small></div></div>
                 <div class="market-regime-status-meta">${profitRows.map((row) => renderMarketPatternMetric(row.label, row.value)).join("")}</div>
@@ -4819,7 +4821,7 @@ function renderPositionManagementSectionDetail(module, options = {}) {
 function renderTradeExecutionClosedList(items) {
   const rows = Array.isArray(items) ? items : [];
   if (!rows.length) return `<div class="market-regime-empty compact">Chưa có lệnh đóng gần đây.</div>`;
-  const pageSize = 10;
+  const pageSize = 5;
   const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
   return `
     <div class="trade-execution-closed-list" data-closed-list>

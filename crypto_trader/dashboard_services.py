@@ -762,6 +762,23 @@ def _trade_execution_mark_price(row: dict[str, Any]) -> float | None:
     return None
 
 
+def _trade_execution_live_pnl(row: dict[str, Any]) -> float | None:
+    position, info = _trade_execution_position_payload(row)
+    for value in (
+        position.get("unrealized_pnl"),
+        position.get("unrealizedPnl"),
+        position.get("upl"),
+        info.get("upl"),
+        info.get("uplLastPx"),
+        row.get("pnl"),
+    ):
+        number = _safe_float(value, float("nan"))
+        if number == number:
+            return round(number, 6)
+    mark = _trade_execution_mark_price(row)
+    return _trade_execution_pnl_at(row, mark)
+
+
 def _trade_execution_progress(row: dict[str, Any]) -> float | None:
     side = str(row.get("side") or "").lower()
     entry = _trade_execution_live_entry_price(row)
@@ -1184,12 +1201,13 @@ def _trade_execution_closed_pnl(row: dict[str, Any]) -> float | None:
 def _trade_execution_exchange_closed_at(row: dict[str, Any]) -> str | None:
     history = _json_payload(row.get("exchange_close_history_json"))
     info = history.get("info") if isinstance(history.get("info"), dict) else {}
+    timestamps: list[datetime] = []
     for payload in (history, info):
         for key in ("timestamp", "lastUpdateTimestamp", "updatedAt", "closed_at", "closedAt", "uTime", "cTime", "closeTime"):
             parsed = _parse_exchange_time(payload.get(key))
             if parsed is not None:
-                return parsed.isoformat()
-    return None
+                timestamps.append(parsed)
+    return max(timestamps).isoformat() if timestamps else None
 
 def _trade_execution_close_dedupe_key(item: dict[str, Any]) -> tuple[Any, ...] | None:
     history = _json_payload(item.get("exchange_close_history_json"))
@@ -1268,7 +1286,7 @@ def _trade_execution_summary(config: dict[str, Any]) -> dict[str, Any]:
                 "quantity": _trade_execution_quantity(row_with_events),
                 "contract_size": _trade_execution_contract_size(row_with_events),
                 "mark_price": _trade_execution_mark_price(row_with_events),
-                "pnl": row.get("pnl"),
+                "pnl": _trade_execution_live_pnl(row_with_events),
                 "pnl_pct": row.get("pnl_pct"),
                 "partial_take_profit_done": bool(row.get("partial_take_profit_done")),
                 "partial_take_profit_at": row.get("partial_take_profit_at"),

@@ -81,6 +81,7 @@ AI_CALL_STATUS_STATS_STATE_KEY = "ai_call_status_stats"
 VIETNAM_TZ = timezone(timedelta(hours=7))
 POSITION_SIZING_STATE_KEY = "position_sizing:recovery_cycle"
 RISK_MODE_NOTIFICATION_STATE_KEY = "trading_risk:last_mode_notification"
+RISK_MODE_NOTIFICATION_REPEAT_SUPPRESS_SECONDS = 6 * 60 * 60
 
 
 def _utcnow() -> datetime:
@@ -2497,7 +2498,21 @@ def _notify_recovery_mode_transition(
     signature = hashlib.sha256(
         json.dumps(signature_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()[:24]
-    if get_journal_state(config, RISK_MODE_NOTIFICATION_STATE_KEY) == signature:
+    existing_marker_raw = get_journal_state(config, RISK_MODE_NOTIFICATION_STATE_KEY)
+    existing_marker: dict[str, Any] = {}
+    if existing_marker_raw == signature:
+        return
+    try:
+        parsed_marker = json.loads(existing_marker_raw or "{}")
+        existing_marker = parsed_marker if isinstance(parsed_marker, dict) else {}
+    except (TypeError, json.JSONDecodeError):
+        existing_marker = {}
+    notified_at = _parse_time(existing_marker.get("notified_at"))
+    if (
+        str(existing_marker.get("current_mode") or "").upper() == current_mode
+        and notified_at is not None
+        and (_utcnow() - notified_at).total_seconds() < RISK_MODE_NOTIFICATION_REPEAT_SUPPRESS_SECONDS
+    ):
         return
     icon = "🔴" if current_mode == "HARD_RECOVERY" else "🟡" if current_mode == "SOFT_RECOVERY" else "🟢"
     score, confidence, risk_reward, risk_percent = _mode_thresholds(current_mode, payload, settings)
@@ -2526,7 +2541,20 @@ def _notify_recovery_mode_transition(
     try:
         from .notifier import send_telegram_message
 
-        set_journal_state(config, RISK_MODE_NOTIFICATION_STATE_KEY, signature)
+        set_journal_state(
+            config,
+            RISK_MODE_NOTIFICATION_STATE_KEY,
+            json.dumps(
+                {
+                    "signature": signature,
+                    "previous_mode": previous_mode,
+                    "current_mode": current_mode,
+                    "notified_at": _iso_now(),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
         send_telegram_message(config, "\n".join(lines), with_buttons=False, replace_previous=False)
     except Exception:
         return

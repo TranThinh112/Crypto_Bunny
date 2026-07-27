@@ -15,6 +15,7 @@ from unittest.mock import patch
 from crypto_trader.codex_features import (
     _ai_call_message,
     _compact_candidate_storage_payload,
+    _notify_recovery_mode_transition,
     _recovery_cycle_pnl,
     ai_call_decision_stats,
     ai_trade_decision_stats,
@@ -68,6 +69,42 @@ class CodexFeaturesTest(TestCase):
 
     def _role_config(self) -> dict:
         return {"api_key_env": "OPENAI_API_KEY_TEST", "timeout_seconds": 1}
+
+    def test_recovery_mode_notification_dedupes_repeated_hard_mode(self) -> None:
+        config = self._config()
+        payload = {
+            "recoveryMode": "HARD_RECOVERY",
+            "globalLossStreak": 1,
+            "recoveryCyclePnlUsdt": -29.7575,
+            "hardRecoveryEntryCyclePnlUsdt": -34.2967,
+            "hardRecoveryPeakLossUsdt": -34.2967,
+            "hardRecoverySoftExitThresholdUsdt": -17.1484,
+            "needToSoftUsdt": 12.6091,
+            "needToNormalUsdt": 30.0575,
+            "updatedAt": "2026-07-27T14:55:25+00:00",
+        }
+        settings = {
+            "recovery_min_rule_score": 90,
+            "recovery_min_gpt_confidence": 92,
+            "recovery_min_risk_reward": 2.5,
+            "recovery_mode_risk_percent": 0.5,
+        }
+
+        with patch("crypto_trader.notifier.send_telegram_message") as send_message:
+            _notify_recovery_mode_transition(
+                config,
+                previous_mode="SOFT_RECOVERY",
+                payload=payload,
+                settings=settings,
+            )
+            _notify_recovery_mode_transition(
+                config,
+                previous_mode="SOFT_RECOVERY",
+                payload={**payload, "updatedAt": "2026-07-27T14:56:25+00:00"},
+                settings=settings,
+            )
+
+        send_message.assert_called_once()
 
     def test_compact_candidate_storage_payload_preserves_market_pattern_context(self) -> None:
         candidate = TradeCandidate(

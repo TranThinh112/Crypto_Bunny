@@ -470,6 +470,45 @@ class SystemChecklistPayloadTests(unittest.TestCase):
 
         self.assertEqual(payload["pending_total"], 4)
 
+    def test_trade_execution_summary_prefers_okx_runtime_pnl(self) -> None:
+        open_rows = [
+            {
+                "id": 7,
+                "symbol": "ETH/USDT:USDT",
+                "side": "SHORT",
+                "entry_price": 1957.78,
+                "stop_loss": 2031.2,
+                "take_profit": 1869.68,
+                "quantity": 1.2,
+                "contract_size": 0.1,
+                "pnl": 1.0,
+                "snapshot_json": json.dumps(
+                    {
+                        "position": {
+                            "contracts": 1.2,
+                            "entryPrice": 1957.78,
+                            "markPrice": 1934.3,
+                            "unrealizedPnl": 2.8176,
+                            "info": {"upl": "2.8176"},
+                        }
+                    }
+                ),
+            }
+        ]
+
+        def fake_rows(_config, *, statuses=None, **_kwargs):
+            return open_rows if statuses == ["OPEN"] else []
+
+        with patch("crypto_trader.dashboard_services.list_trade_execution_rows", side_effect=fake_rows), patch(
+            "crypto_trader.dashboard_services.count_pending_orders", return_value=0
+        ):
+            payload = _trade_execution_summary({})
+
+        item = payload["open_items"][0]
+        self.assertEqual(item["quantity"], 1.2)
+        self.assertEqual(item["mark_price"], 1934.3)
+        self.assertEqual(item["pnl"], 2.8176)
+
     def test_trade_execution_summary_sorts_recent_closed_by_okx_close_time(self) -> None:
         closed_rows = [
             {

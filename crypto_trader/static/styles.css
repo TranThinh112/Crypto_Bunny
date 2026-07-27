@@ -3059,6 +3059,31 @@ body.dark-mode .position-management-flow span {
   padding: 14px;
 }
 
+.position-management-rule-section {
+  margin-top: 0;
+}
+
+.position-management-split-compact {
+  gap: 20px;
+}
+
+.position-management-split-compact .position-management-half {
+  gap: 8px;
+  padding: 12px 14px;
+}
+
+.position-management-split-compact .market-regime-section-head {
+  margin-bottom: 2px;
+}
+
+.position-management-split-compact .market-regime-status-meta {
+  gap: 0 10px;
+}
+
+.position-management-split-compact .position-management-note {
+  padding-top: 8px;
+}
+
 .position-management-note {
   border-top: 1px solid var(--line);
   padding-top: 10px;
