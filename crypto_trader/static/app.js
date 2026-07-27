@@ -5423,7 +5423,6 @@ function groupedSystemModules(modules) {
   const dataUpdateSchedule = systemDataUpdateScheduleText();
   const eventScheduleByName = {
     "Bộ nhớ quyết định AI": { event: "Ghi nhớ sau mỗi quyết định", schedule: "Sau mỗi lệnh đóng", interval: "lệnh đóng" },
-    "Trade Intent Shadow Architecture": { event: "Shadow sau khi co candidate/context", schedule: "Chi quan sat, khong execution", interval: "shadow" },
     "Market Regime": { event: "Theo snapshot data hệ thống", schedule: dataUpdateSchedule, interval: dataUpdateInterval },
     "Market Structure & Pattern Engine": { event: "Khi scanner hoặc final re-check gửi OHLCV", schedule: "Theo request analyze/recheck", interval: "sự kiện" },
     "Strategy Versioning": { event: "Ghi nhớ sau mỗi quyết định", schedule: "6h sáng", interval: "6h sáng" },
@@ -5468,7 +5467,6 @@ function groupedSystemModules(modules) {
       schedule_text: `Market Regime ${dataUpdateInterval}, Replay & Strategy lúc 6h sáng`,
       items: [
         realModules.get("Bộ nhớ quyết định AI"),
-        realModules.get("Trade Intent Shadow Architecture"),
         realModules.get("Market Regime"),
         realModules.get("Strategy Versioning"),
         realModules.get("Replay Engine"),

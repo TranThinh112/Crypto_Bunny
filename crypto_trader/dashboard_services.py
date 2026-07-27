@@ -64,6 +64,56 @@ SYSTEM_CHECKLIST_PREVIOUS_KEY = "system_checklist_previous"
 SYSTEM_CHECKLIST_DEFAULT_TTL_SECONDS = 300
 DASHBOARD_SNAPSHOT_PREFIX = "dashboard_snapshot"
 DASHBOARD_DEFAULT_TTL_SECONDS = 300
+TRADE_INTENT_SHADOW_LOG_PREFIX = "trade_intent_shadow_log"
+TRADE_INTENT_SHADOW_LAST_SOURCE_KEY = "trade_intent_shadow_last_source"
+
+def _safe_log_token(value: Any) -> str:
+    token = re.sub(r"[^0-9A-Za-z_.:-]+", "_", str(value or "").strip())
+    return token[:120] or "unknown"
+
+def _persist_trade_intent_shadow_log(config: dict[str, Any], payload: dict[str, Any]) -> None:
+    source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+    source_key = "|".join(
+        [
+            str(source.get("slot_id") or "unknown-slot"),
+            str(source.get("latest_scan_at") or payload.get("created_at") or "unknown-time"),
+            str(source.get("candidate_count") or payload.get("candidate_count") or 0),
+            str(payload.get("intent_count") or 0),
+        ]
+    )
+    try:
+        if get_journal_state(config, TRADE_INTENT_SHADOW_LAST_SOURCE_KEY) == source_key:
+            return
+    except Exception as exc:
+        LOGGER.warning("Skipping shadow intent last-source read after storage error: %s", exc)
+    log_payload = to_jsonable(
+        {
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "source_key": source_key,
+            "shadow_mode": bool(payload.get("shadow_mode", True)),
+            "enabled_for_execution": False,
+            "phase_completion": payload.get("phase_completion"),
+            "source": source,
+            "candidate_count": payload.get("candidate_count"),
+            "intent_count": payload.get("intent_count"),
+            "strategy_counts": payload.get("strategy_counts"),
+            "items": payload.get("items"),
+        }
+    )
+    body = json.dumps(log_payload, ensure_ascii=False, separators=(",", ":"))
+    try:
+        key = f"{TRADE_INTENT_SHADOW_LOG_PREFIX}:{_safe_log_token(source.get('latest_scan_at') or payload.get('created_at'))}:{_safe_log_token(source.get('slot_id'))}"
+        set_journal_state(config, key, body)
+        set_journal_state(config, TRADE_INTENT_SHADOW_LAST_SOURCE_KEY, source_key)
+    except Exception as exc:
+        LOGGER.warning("Skipping shadow intent journal log after storage error: %s", exc)
+    try:
+        log_path = project_path(config, "logs/trade_intent_shadow.jsonl")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(body + "\n")
+    except Exception as exc:
+        LOGGER.warning("Skipping shadow intent file log after filesystem error: %s", exc)
 
 
 def _market_pattern_engine_dashboard(config: dict[str, Any]) -> dict[str, Any]:
@@ -96,6 +146,7 @@ def _trade_intent_shadow_dashboard(config: dict[str, Any], regime: dict[str, Any
             "candidate_count": latest_scan.get("candidate_count") or len(candidates),
         }
         payload["ok"] = True
+        _persist_trade_intent_shadow_log(config, payload)
         return payload
     except Exception as exc:
         return {
@@ -1815,14 +1866,7 @@ def system_modules_payload(
     market_pattern_feature = market_pattern_latest.get("feature_vector") if isinstance(market_pattern_latest, dict) else {}
     trade_execution = _trade_execution_summary(config)
     trade_config = trade_execution.get("trailing_config") or {}
-    trade_intent_shadow = _trade_intent_shadow_dashboard(config, regime)
-    trade_intent_phase = trade_intent_shadow.get("phase_completion") if isinstance(trade_intent_shadow.get("phase_completion"), dict) else {}
-    trade_intent_strategy_counts = trade_intent_shadow.get("strategy_counts") if isinstance(trade_intent_shadow.get("strategy_counts"), dict) else {}
-    trade_intent_items = trade_intent_shadow.get("items") if isinstance(trade_intent_shadow.get("items"), list) else []
-    trade_intent_latest = trade_intent_items[0] if trade_intent_items else {}
-    trade_intent_latest_intent = trade_intent_latest.get("trade_intent") if isinstance(trade_intent_latest.get("trade_intent"), dict) else {}
-    trade_intent_latest_analysis = trade_intent_latest.get("analysis_result") if isinstance(trade_intent_latest.get("analysis_result"), dict) else {}
-    trade_intent_latest_context = trade_intent_latest.get("market_context") if isinstance(trade_intent_latest.get("market_context"), dict) else {}
+    _trade_intent_shadow_dashboard(config, regime)
 
     definitions = [
         {
@@ -1902,39 +1946,6 @@ def system_modules_payload(
                 _module_row("needToSoftUsdt", recovery_need.get("soft"), "Số USDT cần gỡ thêm để từ Hard Recovery quay về Soft Recovery theo mốc soft exit hiện tại.", attention=True),
                 _module_row("needToNormalUsdt", recovery_need.get("normal"), "Số USDT cần gỡ thêm để Cycle PnL đạt mục tiêu normal hiện tại.", attention=True),
                 _module_row("updatedAt", risk_state.get("updatedAt"), "Thời điểm trading system state được refresh gần nhất."),
-            ],
-        },
-        {
-            "number": 16,
-            "name": "Trade Intent Shadow Architecture",
-            "purpose": "Shadow mode cho kiến trúc mới: Market Context -> Analysis Result + Evidence -> Strategy Selector -> Trade Intent. Không ảnh hưởng vào lệnh thật.",
-            "status": "ok" if trade_intent_shadow.get("ok") else "warn",
-            "shadow_mode": True,
-            "trade_intent_shadow": trade_intent_shadow,
-            "stats": [
-                _module_row("phase_1_schema_percent", trade_intent_phase.get("phase_1_schema"), "Phase 1: schema MarketContext, AnalysisResult và TradeIntent đã sẵn sàng.", attention=True),
-                _module_row("phase_2_context_builder_percent", trade_intent_phase.get("phase_2_context_builder"), "Phase 2: Market Context Builder shadow gom feature/context từ candidate hiện có.", attention=True),
-                _module_row("phase_3_analysis_result_percent", trade_intent_phase.get("phase_3_analysis_result"), "Phase 3: Analysis Result + Evidence được tạo ở shadow mode, không gọi AI mới.", attention=True),
-                _module_row("phase_4_strategy_selector_percent", trade_intent_phase.get("phase_4_strategy_selector"), "Phase 4: Strategy Selector rule-based tạo Trade Intent shadow.", attention=True),
-                _module_row("shadowMode", _module_bool_percent(trade_intent_shadow.get("shadow_mode")), "100 nghĩa là kiến trúc mới chỉ quan sát/log, chưa được phép execution.", attention=True),
-                _module_row("enabledForExecution", _module_bool_percent(False), "Luôn 0 ở giai đoạn này để đảm bảo không thay đổi hành vi vào lệnh thật.", attention=True),
-                _module_row("sourceCandidateCount", trade_intent_shadow.get("candidate_count"), "Số candidate nguồn được dashboard đưa vào shadow builder."),
-                _module_row("shadowIntentCount", trade_intent_shadow.get("intent_count"), "Số Trade Intent shadow tạo được."),
-                _module_row("trendFollowingCount", trade_intent_strategy_counts.get("TrendFollowing"), "Số intent shadow được Strategy Selector gắn TrendFollowing."),
-                _module_row("counterTrendCount", trade_intent_strategy_counts.get("CounterTrend"), "Số intent shadow được Strategy Selector gắn CounterTrend."),
-                _module_row("breakoutCount", trade_intent_strategy_counts.get("Breakout"), "Số intent shadow được Strategy Selector gắn Breakout."),
-                _module_row("rangeTradingCount", trade_intent_strategy_counts.get("RangeTrading"), "Số intent shadow được Strategy Selector gắn RangeTrading."),
-                _module_row("noTradeCount", trade_intent_strategy_counts.get("NoTrade"), "Số candidate shadow không match rule strategy đủ tốt."),
-                _module_row("latestIntentSymbol", trade_intent_latest_intent.get("symbol"), "Symbol của Trade Intent shadow mới nhất."),
-                _module_row("latestIntentSide", trade_intent_latest_intent.get("side"), "Side do candidate hiện có cung cấp; shadow không sửa side."),
-                _module_row("latestIntentStrategy", trade_intent_latest_intent.get("strategy"), "Strategy do rule-based selector chọn."),
-                _module_row("latestSetupGrade", trade_intent_latest_intent.get("setup_grade"), "Setup grade từ Analysis Result."),
-                _module_row("latestTrendScore", trade_intent_latest_analysis.get("trend_score"), "Trend score shadow mới nhất."),
-                _module_row("latestContinuationScore", trade_intent_latest_analysis.get("continuation_score"), "Continuation score shadow mới nhất."),
-                _module_row("latestEntryQuality", trade_intent_latest_analysis.get("entry_quality"), "Entry quality shadow mới nhất."),
-                _module_row("latestMarketRegime", trade_intent_latest_context.get("market_regime"), "Market regime dùng để dựng context shadow."),
-                _module_row("latestReason", trade_intent_latest_intent.get("reason"), "Lý do Strategy Selector chọn hoặc không chọn strategy."),
-                _module_row("error", trade_intent_shadow.get("error"), "Lỗi shadow builder nếu có.", attention=bool(trade_intent_shadow.get("error"))),
             ],
         },
         {
