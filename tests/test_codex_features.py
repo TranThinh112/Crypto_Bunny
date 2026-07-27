@@ -943,10 +943,10 @@ class CodexFeaturesTest(TestCase):
 
         self.assertEqual(state["recoveryMode"], "HARD_RECOVERY")
         self.assertEqual(state["recoveryBand"], "hard")
-        self.assertAlmostEqual(state["recoveryCyclePnlUsdt"], -22.361896)
+        self.assertAlmostEqual(state["recoveryCyclePnlUsdt"], -17.822675)
         self.assertAlmostEqual(state["hardRecoveryPeakLossUsdt"], -29.814672)
         self.assertAlmostEqual(state["hardRecoverySoftExitThresholdUsdt"], -14.907336)
-        self.assertAlmostEqual(state["needToSoftUsdt"], 7.45456, places=5)
+        self.assertAlmostEqual(state["needToSoftUsdt"], 2.915339, places=5)
 
     def test_recovery_cycle_pnl_returns_none_when_okx_unavailable_with_configured_start(self) -> None:
         config = self._config()

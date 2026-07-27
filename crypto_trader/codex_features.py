@@ -2539,8 +2539,6 @@ def refresh_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
     cycle_pnl = _recovery_cycle_pnl(config)
     sizing_recovery_state = _position_sizing_recovery_state(config)
     sizing_state_is_current = _sizing_state_matches_configured_cycle(config, sizing_recovery_state)
-    if sizing_state_is_current and sizing_recovery_state.get("cycle_pnl_usdt") is not None:
-        cycle_pnl = _safe_float(sizing_recovery_state.get("cycle_pnl_usdt"), 0.0)
     cycle_pnl_for_mode = _safe_float(cycle_pnl, 0.0)
     paused_until: datetime | None = None
     existing = get_trading_system_state_row(config)
