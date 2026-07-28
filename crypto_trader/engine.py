@@ -536,7 +536,7 @@ def _resolve_strategy_symbols(
     if not enabled or mode != "top_volume_24h":
         return configured_symbols, {"enabled": False, "mode": "configured", "symbols": configured_symbols}, []
 
-    max_symbols = max(1, min(40, int(universe.get("max_symbols", 40) or 40)))
+    max_symbols = max(1, min(50, int(universe.get("max_symbols", 50) or 50)))
     volume_symbols, warnings = fetch_top_volume_symbols(config, market_data=market_data)
     if volume_symbols:
         selected = _ordered_unique(volume_symbols)[:max_symbols]
