@@ -4604,8 +4604,8 @@ function renderProfitProtectionPositionPanel(item) {
   const stepAchieved = (step) => achievedStep >= step;
   const lossGuard = levels.loss_guard && typeof levels.loss_guard === "object" ? levels.loss_guard : null;
   const contractSize = nullableNumber(levels.contract_size ?? item?.contract_size) ?? 1;
-  const currentSlLevel = levelByStep(slSteps, 1) || levels.current_sl;
-  const currentTpLevel = levelByStep(tpSteps, 1) || levels.current_tp;
+  const currentSlLevel = levels.current_sl || levelByStep(slSteps, 1);
+  const currentTpLevel = levels.current_tp || levelByStep(tpSteps, 1);
   const currentSlPrice = currentSlLevel?.price ?? item?.stop_loss;
   const partialPrice = levels.partial_30?.price ?? item?.partial_take_profit_price;
   const initialExtraRows = profitProtectionExtraRows([
