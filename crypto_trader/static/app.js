@@ -4373,7 +4373,7 @@ function tradeExecutionPartialBadge(item) {
   if (lossGuardDone) {
     return { label: "Đã chốt lỗ 25%", tone: "bear" };
   }
-  const profitPartialDone = Boolean(levels.partial_30?.executed || item?.partial_take_profit_done);
+  const profitPartialDone = Boolean(levels.partial_30?.executed);
   if (profitPartialDone) {
     return { label: "Đã chốt lời 30%", tone: "bull" };
   }

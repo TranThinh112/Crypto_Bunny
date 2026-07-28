@@ -819,6 +819,16 @@ def _trade_execution_target_from_payload(row: dict[str, Any], target: str) -> fl
 def _trade_execution_effective_stop_loss(row: dict[str, Any]) -> float | None:
     return _trade_execution_target_from_payload(row, "stop_loss") or _trade_execution_price(row, "stop_loss")
 
+def _trade_execution_stop_loss_is_valid(side: str, entry: float | None, stop_loss: float | None) -> bool:
+    if entry is None or stop_loss is None:
+        return False
+    side = str(side or "").lower()
+    if side == "long":
+        return stop_loss < entry
+    if side == "short":
+        return stop_loss > entry
+    return False
+
 def _trade_execution_effective_take_profit(row: dict[str, Any]) -> float | None:
     return _trade_execution_target_from_payload(row, "take_profit") or _trade_execution_price(row, "take_profit")
 
@@ -1042,6 +1052,17 @@ def _loss_guard_applies_to_row(row: dict[str, Any], settings: dict[str, Any]) ->
         created_at = created_at.replace(tzinfo=timezone.utc)
     return created_at >= effective_at
 
+def _trade_execution_partial_close_event(row: dict[str, Any]) -> dict[str, Any] | None:
+    events = _trade_execution_event_history(row)
+    partial_events = [
+        item for item in events
+        if isinstance(item, dict) and str(item.get("type") or "").lower() in {"partial_close", "loss_guard_partial_close"}
+    ]
+    if not partial_events:
+        return None
+    partial_events.sort(key=lambda item: str(item.get("created_at") or item.get("closed_at") or ""), reverse=True)
+    return partial_events[0]
+
 def _trade_execution_loss_guard(row: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:
     settings = _loss_guard_settings(config)
     if not settings["enabled"]:
@@ -1049,7 +1070,9 @@ def _trade_execution_loss_guard(row: dict[str, Any], config: dict[str, Any]) -> 
     applies_to_row = _loss_guard_applies_to_row(row, settings)
     side = str(row.get("side") or "").lower()
     entry = _trade_execution_live_entry_price(row)
-    initial_sl = _trade_execution_price(row, "initial_stop_loss") or _trade_execution_effective_stop_loss(row)
+    stored_initial_sl = _trade_execution_price(row, "initial_stop_loss")
+    live_sl = _trade_execution_effective_stop_loss(row)
+    initial_sl = stored_initial_sl if _trade_execution_stop_loss_is_valid(side, entry, stored_initial_sl) else live_sl
     take_profit = _trade_execution_effective_take_profit(row)
     qty = _trade_execution_quantity(row)
     if side not in {"long", "short"} or entry is None or initial_sl is None or qty is None:
@@ -1119,7 +1142,7 @@ def _trade_execution_profit_protection_levels(
     partial_done = bool(row.get("partial_take_profit_done"))
     stored_initial_sl = _trade_execution_price(row, "initial_stop_loss")
     live_sl = _trade_execution_effective_stop_loss(row)
-    initial_sl = (stored_initial_sl or live_sl) if partial_done else (live_sl or stored_initial_sl)
+    initial_sl = stored_initial_sl if _trade_execution_stop_loss_is_valid(side, entry, stored_initial_sl) else live_sl
     take_profit = _trade_execution_effective_take_profit(row)
     qty = _trade_execution_quantity(row)
     base_qty = _trade_execution_initial_quantity(row) or qty
@@ -1141,16 +1164,62 @@ def _trade_execution_profit_protection_levels(
     current_tp = _trade_execution_effective_take_profit(row)
     partial_price = row.get("partial_take_profit_price")
     partial_pnl_value = _safe_float(row.get("partial_take_profit_pnl"), float("nan"))
+    partial_reference_entry = _trade_execution_price(row, "initial_entry_price") or entry
+    partial_event = _trade_execution_partial_close_event(row)
+    if isinstance(partial_event, dict):
+        event_pnl = _safe_float(partial_event.get("pnl"), float("nan"))
+        event_price = _safe_float(partial_event.get("mark_price") or partial_event.get("price"), float("nan"))
+        event_amount = _safe_float(partial_event.get("partial_amount") or partial_event.get("amount"), float("nan"))
+        if partial_pnl_value != partial_pnl_value and event_pnl == event_pnl:
+            partial_pnl_value = event_pnl
+        if partial_price is None and event_price == event_price:
+            partial_price = event_price
+        if partial_amount != partial_amount and event_amount == event_amount:
+            partial_amount = event_amount
     partial_is_profitable = partial_done and _trade_execution_is_profitable_close(
         side,
-        entry,
+        partial_reference_entry,
         partial_price,
         partial_pnl_value if partial_pnl_value == partial_pnl_value else None,
     )
-    if not partial_is_profitable and partial_base_qty is not None:
+    if not partial_is_profitable and partial_amount != partial_amount and partial_base_qty is not None:
         partial_amount = partial_base_qty * partial_fraction
     if not partial_is_profitable and partial_base_qty is not None:
         remaining_amount = max(0.0, partial_base_qty - (partial_amount if partial_amount == partial_amount else 0.0))
+    partial_is_loss_close = bool(partial_done and not partial_is_profitable)
+    if partial_is_loss_close:
+        if (
+            partial_pnl_value != partial_pnl_value
+            and partial_reference_entry is not None
+            and partial_price is not None
+            and partial_amount == partial_amount
+        ):
+            close_price = _safe_float(partial_price, float("nan"))
+            if close_price == close_price:
+                gross = close_price - partial_reference_entry if side == "long" else partial_reference_entry - close_price
+                partial_pnl_value = round(gross * partial_amount * _trade_execution_contract_size(row), 6)
+        loss_fraction = _safe_float((loss_guard or {}).get("partial_close_fraction"), float("nan"))
+        if loss_fraction != loss_fraction and partial_amount == partial_amount and base_qty:
+            loss_fraction = partial_amount / base_qty
+        if loss_fraction != loss_fraction:
+            loss_fraction = 0.25
+        loss_guard = dict(loss_guard or {})
+        loss_guard.update(
+            {
+                "enabled": True,
+                "executed": True,
+                "executed_at": row.get("partial_take_profit_at") or (partial_event or {}).get("created_at"),
+                "actual_partial_price": partial_price,
+                "actual_partial_amount": partial_amount if partial_amount == partial_amount else None,
+                "actual_partial_pnl": partial_pnl_value if partial_pnl_value == partial_pnl_value else None,
+                "actual_partial_trigger_price": partial_price,
+                "partial_close_price": partial_price,
+                "partial_close_amount": partial_amount if partial_amount == partial_amount else None,
+                "partial_close_pnl": partial_pnl_value if partial_pnl_value == partial_pnl_value else None,
+                "partial_close_fraction": loss_fraction,
+                "source": "partial_close_loss_reclassified",
+            }
+        )
     original_tp = row.get("partial_take_profit_original_tp") or current_tp
     extended_tp = row.get("partial_take_profit_extended_tp")
     if partial_price is None and entry is not None and take_profit is not None:
@@ -1247,7 +1316,7 @@ def _trade_execution_profit_protection_levels(
             "trigger_price": displayed_partial_price,
             "executed": partial_is_profitable,
             "executed_at": row.get("partial_take_profit_at"),
-            "misclassified_loss_close": bool(partial_done and not partial_is_profitable),
+            "misclassified_loss_close": partial_is_loss_close,
         },
         "tp2": {"price": extended_tp, "pnl": _trade_execution_pnl_at(row, extended_tp, remaining_amount), "trigger_price": displayed_partial_price},
         "sl2": {"price": projected_sl2, "pnl": _trade_execution_pnl_at(row, projected_sl2, remaining_amount), "trigger_price": displayed_partial_price},

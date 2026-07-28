@@ -48,7 +48,7 @@ from .config import (
     runtime_config_override_payload,
     runtime_config_overrides_should_attempt,
 )
-from .ai_coordinator import candidate_okx_review, next_internal_market_scan_at
+from .ai_coordinator import candidate_okx_review, latest_internal_market_scan, next_internal_market_scan_at
 from .codex_features import (
     activate_strategy_version,
     ai_trade_decision_stats,
@@ -158,6 +158,7 @@ from .storage import (
     clear_dashboard_snapshot_cache,
     get_journal_state,
     latest_decision_payload,
+    list_journal_state_prefix,
     list_pending_orders,
     open_pending_symbols,
     list_paper_trades,
@@ -171,6 +172,7 @@ from .storage import (
 )
 from .sizing import STATE_KEY as SIZING_STATE_KEY
 from .trailing_stop import run_trailing_stop_cycle
+from .trend_scan import build_trend_setup_review_flow, persist_pool_pipeline_log, persist_trend_scan_log
 
 
 LOGGER = logging.getLogger(__name__)
@@ -1160,6 +1162,16 @@ def _run_lc_pipeline_worker_cycle(app: FastAPI) -> None:
                 "four_hour_slot": pipeline.get("four_hour_slot"),
             }
         )
+        try:
+            status["pool_pipeline_log"] = persist_pool_pipeline_log(notification_config, pipeline, now=datetime.now(timezone.utc))
+        except Exception as log_exc:
+            status["pool_pipeline_log_error"] = str(log_exc)
+            LOGGER.warning("Pool pipeline log failed: %s", log_exc)
+        try:
+            status["trend_scan_log"] = persist_trend_scan_log(notification_config, now=datetime.now(timezone.utc))
+        except Exception as log_exc:
+            status["trend_scan_log_error"] = str(log_exc)
+            LOGGER.warning("Trend scan log failed: %s", log_exc)
     except Exception as exc:
         status.update(
             {
@@ -3294,6 +3306,86 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
     def system_checklist_summary_endpoint(period: str = "week") -> dict[str, Any]:
         config = load_config(app.state.config_path)
         return dashboard_system_checklist_summary(config, period)
+
+    @app.get("/api/trend-scan/logs")
+    def trend_scan_logs_endpoint(limit: int = 20) -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        safe_limit = max(1, min(int(limit or 20), 100))
+
+        def _read_prefix(prefix: str) -> list[dict[str, Any]]:
+            rows = list_journal_state_prefix(config, prefix, limit=safe_limit)
+            items: list[dict[str, Any]] = []
+            for row in rows:
+                raw = get_journal_state(config, str(row.get("key") or ""))
+                try:
+                    payload = json.loads(raw or "{}")
+                except json.JSONDecodeError:
+                    payload = {"raw": raw}
+                items.append(
+                    {
+                        "key": row.get("key"),
+                        "updated_at": row.get("updated_at"),
+                        "payload": payload,
+                    }
+                )
+            return items
+
+        return {
+            "trend_scan_logs": _read_prefix("trend_scan_log:"),
+            "pool_pipeline_logs": _read_prefix("pool_pipeline_log:"),
+            "trend_setup_review_logs": _read_prefix("trend_setup_review_log:"),
+        }
+
+    @app.get("/api/trend-scan/state")
+    def trend_scan_state_endpoint() -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+
+        def _state(key: str) -> dict[str, Any]:
+            raw = get_journal_state(config, key)
+            try:
+                return json.loads(raw or "{}")
+            except json.JSONDecodeError:
+                return {"raw": raw}
+
+        return {
+            "watchlist": _state("trend_watchlist_state"),
+            "pending_plans": _state("trend_pending_plan_state"),
+        }
+
+    @app.post("/api/trend-scan/review-test")
+    def trend_scan_review_test_endpoint(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        config = load_config(app.state.config_path)
+        payload = payload or {}
+        symbol_filter = str(payload.get("symbol") or "").upper().strip()
+        call_ai = bool(payload.get("call_ai", False))
+        notify_telegram = bool(payload.get("notify_telegram", False))
+        latest_scan = latest_internal_market_scan(config) or {}
+        candidates = latest_scan.get("candidates") if isinstance(latest_scan.get("candidates"), list) else []
+        selected = None
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            symbol = str(candidate.get("symbol") or "").upper()
+            if not symbol_filter or symbol_filter in symbol:
+                selected = candidate
+                break
+        if selected is None:
+            raise HTTPException(status_code=404, detail=f"No mini scan candidate found for {symbol_filter or 'latest'}")
+        return {
+            "source_scan": {
+                "created_at": latest_scan.get("created_at"),
+                "slot_id": latest_scan.get("slot_id"),
+                "status": latest_scan.get("status"),
+                "candidate_count": latest_scan.get("candidate_count"),
+            },
+            "call_ai": call_ai,
+            "result": build_trend_setup_review_flow(
+                config,
+                selected,
+                call_ai=call_ai,
+                notify_telegram=notify_telegram,
+            ),
+        }
 
     @app.get("/api/dashboard/timeframes")
     def dashboard_timeframes_endpoint(lookback_hours: int = 24) -> dict[str, Any]:
