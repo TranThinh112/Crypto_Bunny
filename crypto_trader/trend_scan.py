@@ -199,6 +199,8 @@ def update_trend_watchlist(
         state = json.loads(raw or "{}")
     except json.JSONDecodeError:
         state = {}
+    internal = config.get("ai", {}).get("internal", {}) if isinstance(config.get("ai"), dict) else {}
+    min_keep_score = _float(internal.get("trend_watchlist_min_keep_score"), 60.0)
     items = state.get("items") if isinstance(state.get("items"), dict) else {}
     next_items: dict[str, dict[str, Any]] = {}
     expired: list[dict[str, Any]] = []
@@ -206,7 +208,7 @@ def update_trend_watchlist(
         if not isinstance(item, dict):
             continue
         expires_at = _parse_time(item.get("expires_at"))
-        if expires_at and expires_at > now and _float(item.get("trend_score")) >= 60:
+        if expires_at and expires_at > now and _float(item.get("trend_score")) >= min_keep_score:
             next_items[str(key)] = item
         else:
             expired.append(
@@ -216,7 +218,7 @@ def update_trend_watchlist(
                     "side": item.get("side"),
                     "expired_at": now.isoformat(),
                     "previous_status": item.get("status"),
-                    "reason": "ttl_expired_or_trend_score_below_60",
+                    "reason": f"ttl_expired_or_trend_score_below_{min_keep_score:g}",
                 }
             )
     for trend in snapshot.get("strong_symbols") or []:
