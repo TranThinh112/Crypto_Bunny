@@ -5577,7 +5577,11 @@ function groupedSystemModules(modules) {
     realModules.get("Configuration Impact"),
   ].filter(Boolean);
   const tradeExecutionModule = realModules.get("Thá»±c thi giao dá»‹ch & Quáº£n lÃ½ vá»‹ tháº¿") || realModules.get("Trade Execution & Position Management") || positionManagementBaseModule(sourceRows);
-  const positionManagementModules = positionManagementSections(tradeExecutionModule);
+  const activePositionManagerModule = sourceRows.find((module) => isActivePositionManagerModule(module));
+  const positionManagementModules = [
+    ...positionManagementSections(tradeExecutionModule),
+    activePositionManagerModule,
+  ].filter(Boolean);
   return [
     {
       key: "ai-decision",
