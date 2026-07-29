@@ -73,6 +73,21 @@ def _parse_json(value: Any) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _snapshot_position(row: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    payload = _parse_json(row.get("snapshot_json")) or _parse_json(row.get("payload_json"))
+    position = payload.get("position") if isinstance(payload.get("position"), dict) else {}
+    info = position.get("info") if isinstance(position.get("info"), dict) else {}
+    return position, info
+
+
+def _first_number(*values: Any) -> float | None:
+    for value in values:
+        number = _float(value)
+        if number is not None:
+            return number
+    return None
+
+
 def _event_history(row: dict[str, Any]) -> list[dict[str, Any]]:
     raw = row.get("trade_event_history_json")
     if not raw:
@@ -85,9 +100,7 @@ def _event_history(row: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _contract_size(row: dict[str, Any]) -> float:
-    payload = _parse_json(row.get("snapshot_json")) or _parse_json(row.get("payload_json"))
-    position = payload.get("position") if isinstance(payload.get("position"), dict) else {}
-    info = position.get("info") if isinstance(position.get("info"), dict) else {}
+    position, info = _snapshot_position(row)
     for value in (row.get("contract_size"), position.get("contractSize"), info.get("ctVal")):
         number = _float(value)
         if number is not None and number > 0:
@@ -96,7 +109,8 @@ def _contract_size(row: dict[str, Any]) -> float:
 
 
 def _pnl_at(row: dict[str, Any], price: float | None, quantity: float | None = None) -> float | None:
-    entry = _float(row.get("entry_price") or row.get("initial_entry_price"))
+    position, info = _snapshot_position(row)
+    entry = _first_number(row.get("entry_price"), row.get("initial_entry_price"), position.get("entry_price"), position.get("entryPrice"), info.get("avgPx"))
     target = _float(price)
     qty = _float(quantity if quantity is not None else row.get("quantity"))
     if entry is None or target is None or qty is None:
@@ -107,7 +121,8 @@ def _pnl_at(row: dict[str, Any], price: float | None, quantity: float | None = N
 
 
 def _risk_per_contract(row: dict[str, Any]) -> float | None:
-    entry = _float(row.get("initial_entry_price") or row.get("entry_price"))
+    position, info = _snapshot_position(row)
+    entry = _first_number(row.get("initial_entry_price"), row.get("entry_price"), position.get("entry_price"), position.get("entryPrice"), info.get("avgPx"))
     stop = _float(row.get("initial_stop_loss") or row.get("stop_loss"))
     if entry is None or stop is None:
         return None
@@ -117,8 +132,9 @@ def _risk_per_contract(row: dict[str, Any]) -> float | None:
 
 
 def _r_multiple(row: dict[str, Any]) -> float | None:
-    entry = _float(row.get("entry_price") or row.get("initial_entry_price"))
-    mark = _float(row.get("mark_price") or row.get("current_price"))
+    position, info = _snapshot_position(row)
+    entry = _first_number(row.get("entry_price"), row.get("initial_entry_price"), position.get("entry_price"), position.get("entryPrice"), info.get("avgPx"))
+    mark = _first_number(row.get("mark_price"), row.get("current_price"), position.get("mark_price"), position.get("markPrice"), info.get("markPx"), position.get("last"))
     risk = _risk_per_contract(row)
     if entry is None or mark is None or risk is None:
         return None
@@ -128,8 +144,9 @@ def _r_multiple(row: dict[str, Any]) -> float | None:
 
 
 def _tp_progress_pct(row: dict[str, Any]) -> float | None:
-    entry = _float(row.get("entry_price") or row.get("initial_entry_price"))
-    mark = _float(row.get("mark_price") or row.get("current_price"))
+    position, info = _snapshot_position(row)
+    entry = _first_number(row.get("entry_price"), row.get("initial_entry_price"), position.get("entry_price"), position.get("entryPrice"), info.get("avgPx"))
+    mark = _first_number(row.get("mark_price"), row.get("current_price"), position.get("mark_price"), position.get("markPrice"), info.get("markPx"), position.get("last"))
     target = _float(row.get("take_profit"))
     if entry is None or mark is None or target is None:
         return None
@@ -148,9 +165,11 @@ def _count_events(row: dict[str, Any], event_type: str) -> int:
 def _decision_for_row(row: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
     side = str(row.get("side") or "").lower()
     symbol = str(row.get("symbol") or "-")
-    quantity = _float(row.get("quantity"))
-    entry = _float(row.get("entry_price") or row.get("initial_entry_price"))
-    mark = _float(row.get("mark_price") or row.get("current_price"))
+    position, info = _snapshot_position(row)
+    quantity = _first_number(row.get("quantity"), position.get("contracts"), info.get("pos"), info.get("availPos"))
+    quantity = abs(quantity) if quantity is not None else None
+    entry = _first_number(row.get("entry_price"), row.get("initial_entry_price"), position.get("entry_price"), position.get("entryPrice"), info.get("avgPx"))
+    mark = _first_number(row.get("mark_price"), row.get("current_price"), position.get("mark_price"), position.get("markPrice"), info.get("markPx"), position.get("last"))
     stop_loss = _float(row.get("stop_loss"))
     take_profit = _float(row.get("take_profit"))
     pnl = _float(row.get("pnl"))
