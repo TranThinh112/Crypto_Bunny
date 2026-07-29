@@ -9,6 +9,7 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from .ai_coordinator import latest_internal_market_scan, next_internal_market_scan_at
+from .active_position_manager import evaluate_open_positions, latest_active_position_decisions
 from .atlas_mirror import atlas_database
 from .capital import (
     analyze_configuration_change,
@@ -1315,7 +1316,7 @@ def _trade_execution_profit_protection_levels(
             "pnl": _trade_execution_pnl_at(row, displayed_partial_price, partial_amount),
             "trigger_price": displayed_partial_price,
             "executed": partial_is_profitable,
-            "executed_at": row.get("partial_take_profit_at"),
+            "executed_at": row.get("partial_take_profit_at") if partial_is_profitable else None,
             "misclassified_loss_close": partial_is_loss_close,
         },
         "tp2": {"price": extended_tp, "pnl": _trade_execution_pnl_at(row, extended_tp, remaining_amount), "trigger_price": displayed_partial_price},
@@ -1935,6 +1936,19 @@ def system_modules_payload(
     market_pattern_feature = market_pattern_latest.get("feature_vector") if isinstance(market_pattern_latest, dict) else {}
     trade_execution = _trade_execution_summary(config)
     trade_config = trade_execution.get("trailing_config") or {}
+    try:
+        active_position = evaluate_open_positions(
+            config,
+            rows=list_trade_execution_rows(config, statuses=["OPEN"], limit=100, order="created_asc"),
+            notify=False,
+            persist=False,
+        )
+    except Exception as exc:
+        active_position = {"enabled": False, "error": str(exc), "items": []}
+    try:
+        active_position["recent_decisions"] = latest_active_position_decisions(config, limit=20)
+    except Exception:
+        active_position["recent_decisions"] = []
     _trade_intent_shadow_dashboard(config, regime)
 
     definitions = [
@@ -2266,6 +2280,31 @@ def system_modules_payload(
                 _module_row("atr_timeframe", trade_config.get("atr_timeframe"), "Khung ATR dung cho trailing SL sau partial."),
                 _module_row("atr_multiplier", trade_config.get("atr_multiplier"), "He so ATR de dat khoang cach trailing SL."),
                 _module_row("error", trade_execution.get("error") or "-", "Loi doc trade execution neu co.", attention=bool(trade_execution.get("error"))),
+            ],
+        },
+        {
+            "number": 16,
+            "name": "Quản lý vị thế chủ động",
+            "purpose": "Đánh giá lại các vị thế đang mở để đề xuất giữ, chốt lời ngắn, cắt lỗ sớm, DCA, scale-in hoặc bảo vệ lợi nhuận. Mặc định chạy shadow, không tự thực thi.",
+            "status": "warn" if active_position.get("error") else "ok",
+            "update_event": "Sau mỗi vòng đồng bộ OKX vị thế đang mở",
+            "update_schedule": "Theo runtime sync",
+            "update_interval": f"{max(1, int((active_position.get('review_interval_seconds') or 300) / 60))} phut",
+            "active_position_manager": active_position,
+            "stats": [
+                _module_row("enabled", _module_bool_percent(active_position.get("enabled")), "100 nghĩa là module đang bật."),
+                _module_row("shadow_mode", _module_bool_percent(active_position.get("shadow_mode")), "100 nghĩa là chỉ ghi log/khuyến nghị, không tự can thiệp thật.", attention=True),
+                _module_row("auto_execute_enabled", _module_bool_percent(active_position.get("auto_execute_enabled")), "100 nghĩa là có thể thực thi nếu Risk/Capital duyệt. Mặc định phải là 0.", attention=bool(active_position.get("auto_execute_enabled"))),
+                _module_row("open_positions", active_position.get("open_count"), "Số vị thế OPEN được review."),
+                _module_row("hold_count", (active_position.get("action_counts") or {}).get("HOLD", 0), "Số vị thế chưa cần can thiệp."),
+                _module_row("bad_cut_count", (active_position.get("action_counts") or {}).get("BAD_CUT", 0), "Số vị thế đang bị đề xuất cắt lỗ chủ động.", attention=bool((active_position.get("action_counts") or {}).get("BAD_CUT"))),
+                _module_row("dca_review_count", (active_position.get("action_counts") or {}).get("DCA_REVIEW", 0), "Số vị thế đang được xem xét DCA.", attention=bool((active_position.get("action_counts") or {}).get("DCA_REVIEW"))),
+                _module_row("scale_in_review_count", (active_position.get("action_counts") or {}).get("SCALE_IN_REVIEW", 0), "Số vị thế đang được xem xét thêm khối lượng.", attention=bool((active_position.get("action_counts") or {}).get("SCALE_IN_REVIEW"))),
+                _module_row("good_exit_review_count", (active_position.get("action_counts") or {}).get("GOOD_EXIT_REVIEW", 0), "Số vị thế đang được xem xét chốt lời ngắn.", attention=bool((active_position.get("action_counts") or {}).get("GOOD_EXIT_REVIEW"))),
+                _module_row("protect_profit_count", (active_position.get("action_counts") or {}).get("PROTECT_PROFIT", 0), "Số vị thế cần ưu tiên bảo vệ lợi nhuận.", attention=bool((active_position.get("action_counts") or {}).get("PROTECT_PROFIT"))),
+                _module_row("notified", active_position.get("notified"), "Số thông báo Telegram đã gửi trong lần review này."),
+                _module_row("updated_at", active_position.get("created_at"), "Thời điểm review mới nhất."),
+                _module_row("error", active_position.get("error") or "-", "Lỗi module nếu có.", attention=bool(active_position.get("error"))),
             ],
         },
         {

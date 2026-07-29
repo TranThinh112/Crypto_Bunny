@@ -658,6 +658,79 @@ def format_position_target_change_message(config: dict[str, Any], event: dict[st
     )
     return "\n".join(lines)
 
+def format_active_position_decision_message(config: dict[str, Any], event: dict[str, Any]) -> str:
+    def fmt(value: Any, digits: int = 6) -> str:
+        number = _float(value)
+        if number is None:
+            return "-"
+        text = f"{number:.{digits}f}"
+        return text if digits <= 0 else text.rstrip("0").rstrip(".")
+
+    def fmt_usdt(value: Any) -> str:
+        number = _float(value)
+        if number is None:
+            return "-"
+        return f"{number:+.2f} USDT"
+
+    action_label = {
+        "BAD_CUT": "Cắt lỗ chủ động",
+        "DCA_REVIEW": "Xem xét DCA",
+        "SCALE_IN_REVIEW": "Xem xét thêm khối lượng",
+        "GOOD_EXIT_REVIEW": "Xem xét chốt lời ngắn",
+        "BAD_CUT_REMAINDER": "Xem xét đóng phần còn lại",
+        "HOLD_AFTER_PARTIAL": "Giữ phần còn lại sau chốt lời 30%",
+        "HOLD_AFTER_LOSS_CUT": "Giữ phần còn lại sau chốt lỗ 25%",
+        "PROTECT_PROFIT": "Bảo vệ lợi nhuận",
+        "HOLD": "Giữ vị thế",
+    }.get(str(event.get("action") or ""), str(event.get("decision") or "-"))
+    symbol = str(event.get("symbol") or "-")
+    side = str(event.get("side") or "-").upper()
+    trade_id = event.get("trade_execution_id") or "-"
+    created_at = _parse_time(event.get("created_at"))
+    reasons = [str(item).strip() for item in (event.get("reasons") or []) if str(item).strip()]
+    amount = _float(event.get("amount"))
+    fraction = _float(event.get("fraction"))
+    amount_line = "Khối lượng can thiệp: -"
+    if amount is not None:
+        amount_line = f"Khối lượng can thiệp: {fmt(amount)}"
+        if fraction is not None:
+            amount_line += f" ({fmt(fraction * 100, 0)}%)"
+    mode_line = "Chế độ: Shadow, chỉ ghi log/khuyến nghị"
+    if event.get("auto_execute_enabled") and not event.get("shadow_mode"):
+        mode_line = "Chế độ: Được phép thực thi nếu Risk/Capital duyệt"
+    execution = event.get("execution") if isinstance(event.get("execution"), dict) else {}
+    execution_line = "Thực thi: chưa gửi lệnh"
+    if execution:
+        if execution.get("submitted"):
+            execution_line = "Thực thi: đã gửi lệnh reduce-only lên OKX"
+        elif execution.get("error"):
+            execution_line = f"Thực thi: lỗi OKX - {str(execution.get('error'))[:160]}"
+        else:
+            execution_line = f"Thực thi: chưa gửi lệnh ({execution.get('reason') or '-'})"
+    lines = [
+        "🧭 QUẢN LÝ VỊ THẾ CHỦ ĐỘNG",
+        "",
+        f"Cặp: {symbol} {side}",
+        f"ID lệnh: VT #{trade_id}",
+        f"Quyết định: {action_label}",
+        mode_line,
+        "",
+        f"Entry: {fmt(event.get('entry'))}",
+        f"Mark: {fmt(event.get('mark_price'))}",
+        f"SL: {fmt(event.get('stop_loss'))}",
+        f"TP: {fmt(event.get('take_profit'))}",
+        f"R hiện tại: {fmt(event.get('r_multiple'), 2)}R",
+        f"Tiến độ tới TP: {fmt(event.get('tp_progress_pct'), 2)}%",
+        f"PnL hiện tại: {fmt_usdt(event.get('pnl'))}",
+        f"PnL dự kiến nếu can thiệp: {fmt_usdt(event.get('expected_pnl'))}",
+        amount_line,
+        execution_line,
+        "",
+        f"Lý do: {'; '.join(reasons[:3]) if reasons else '-'}",
+        f"Thời gian: {_date_time_seconds_label(created_at) if created_at else '-'}",
+    ]
+    return "\n".join(lines)
+
 def format_partial_take_profit_message(config: dict[str, Any], event: dict[str, Any]) -> str:
     def fmt(value: Any, digits: int = 6) -> str:
         number = _float(value)

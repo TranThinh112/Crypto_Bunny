@@ -5311,8 +5311,129 @@ function renderCapitalManagementDetail(module, options = {}) {
   }
 }
 
+function isActivePositionManagerModule(module) {
+  return Number(module?.number) === 16 || Boolean(module?.active_position_manager);
+}
+
+function activePositionActionLabel(action) {
+  const key = String(action || "");
+  return {
+    HOLD: "Giữ",
+    BAD_CUT: "Cắt lỗ chủ động",
+    DCA_REVIEW: "Xem xét DCA",
+    SCALE_IN_REVIEW: "Xem xét thêm KL",
+    GOOD_EXIT_REVIEW: "Chốt lời ngắn",
+    BAD_CUT_REMAINDER: "Đóng phần còn lại",
+    HOLD_AFTER_PARTIAL: "Giữ sau chốt 30%",
+    HOLD_AFTER_LOSS_CUT: "Giữ sau chốt lỗ 25%",
+    PROTECT_PROFIT: "Bảo vệ lợi nhuận",
+  }[key] || key || "-";
+}
+
+function activePositionTone(action) {
+  const key = String(action || "");
+  if (["BAD_CUT", "BAD_CUT_REMAINDER"].includes(key)) return "bear";
+  if (["DCA_REVIEW", "SCALE_IN_REVIEW", "GOOD_EXIT_REVIEW"].includes(key)) return "warn";
+  if (key === "PROTECT_PROFIT") return "bull";
+  return "unknown";
+}
+
+function renderActivePositionRows(items) {
+  const rows = Array.isArray(items) ? items : [];
+  if (!rows.length) return `<div class="market-regime-empty compact">Chưa có vị thế mở để review.</div>`;
+  return `
+    <div class="table-wrap positions-table-wrap active-position-table">
+      <table>
+        <thead>
+          <tr>
+            <th>Cặp</th>
+            <th>Hướng</th>
+            <th>Hành động</th>
+            <th>R</th>
+            <th>PnL</th>
+            <th>KL can thiệp</th>
+            <th>Thực thi</th>
+            <th>Lý do</th>
+            <th>Thời gian</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((item) => `
+            <tr>
+              <td><strong>${escapeHtml(item.symbol || "-")}</strong><small>VT #${escapeHtml(item.trade_execution_id || "-")}</small></td>
+              <td>${escapeHtml(item.side || "-")}</td>
+              <td><span class="market-regime-badge ${activePositionTone(item.action)}">${escapeHtml(activePositionActionLabel(item.action))}</span></td>
+              <td>${escapeHtml(formatMarketRegimeNumber(item.r_multiple, 2))}R</td>
+              <td>${escapeHtml(formatTradeExecutionPnl(item.pnl))}</td>
+              <td>${escapeHtml(item.amount == null ? "-" : `${formatMarketRegimeNumber(item.amount)} (${formatMarketRegimeNumber(Number(item.fraction || 0) * 100, 0)}%)`)}</td>
+              <td>${escapeHtml(item.execution?.submitted ? "Đã gửi OKX" : item.execution?.error ? "Lỗi OKX" : item.execution?.reason || "-")}</td>
+              <td>${escapeHtml((Array.isArray(item.reasons) ? item.reasons.slice(0, 2).join("; ") : "") || "-")}</td>
+              <td>${escapeHtml(timeLabel(item.created_at))}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderActivePositionManagerDetail(module, options = {}) {
+  if (!refs.systemModuleDetail || !refs.systemModuleOverlay || !module) return;
+  const payload = module.active_position_manager && typeof module.active_position_manager === "object" ? module.active_position_manager : {};
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  const recent = Array.isArray(payload.recent_decisions) ? payload.recent_decisions : [];
+  const counts = payload.action_counts && typeof payload.action_counts === "object" ? payload.action_counts : {};
+  state.selectedSystemModuleKey = systemModuleKey(module);
+  refs.systemModuleOverlay.hidden = false;
+  refs.systemModuleDetail.classList.add("module-detail-chart-scroll", "market-regime-detail");
+  refs.systemModuleDetail.innerHTML = `
+    <button class="module-close" type="button" aria-label="Đóng">×</button>
+    <div class="module-detail-head market-regime-head">
+      <div>
+        <span class="module-number">Module ${escapeHtml(module.number || "16")}</span>
+        <h3 id="systemModuleTitle">${escapeHtml(module.name || "Quản lý vị thế chủ động")}</h3>
+        <p>${escapeHtml(module.purpose || "-")}</p>
+      </div>
+      <div class="module-head-actions">
+        <span class="status-pill ${module.status === "ok" ? "ok" : "warn"}">${moduleStatusLabel(module.status)}</span>
+      </div>
+    </div>
+    <div class="module-chart-scroll market-regime-scroll">
+      ${payload.error ? `<div class="market-regime-load-error" role="alert"><strong>Module đang lỗi.</strong><span>${escapeHtml(payload.error)}</span></div>` : ""}
+      <section class="market-regime-section">
+        <div class="market-regime-section-head"><div><strong>Tổng quan</strong><small>Shadow mode: ghi log/Telegram, chưa tự can thiệp thật</small></div></div>
+        <div class="market-pattern-summary-grid">
+          <article class="market-pattern-summary-card"><span>Vị thế review</span><strong>${escapeHtml(payload.open_count ?? 0)}</strong><small>OPEN</small></article>
+          <article class="market-pattern-summary-card"><span>Shadow mode</span><strong>${payload.shadow_mode ? "Bật" : "Tắt"}</strong><small>Auto execute: ${payload.auto_execute_enabled ? "Bật" : "Tắt"}</small></article>
+          <article class="market-pattern-summary-card"><span>Cắt lỗ/DCA</span><strong>${escapeHtml((counts.BAD_CUT || 0) + (counts.DCA_REVIEW || 0))}</strong><small>Can thiệp rủi ro</small></article>
+          <article class="market-pattern-summary-card"><span>Chốt/Scale</span><strong>${escapeHtml((counts.GOOD_EXIT_REVIEW || 0) + (counts.SCALE_IN_REVIEW || 0) + (counts.PROTECT_PROFIT || 0))}</strong><small>Can thiệp lợi nhuận</small></article>
+        </div>
+      </section>
+      <section class="market-regime-section">
+        <div class="market-regime-section-head"><div><strong>Review hiện tại</strong><small>Mọi hành động đều có lý do, tiền, thời gian</small></div></div>
+        ${renderActivePositionRows(items)}
+      </section>
+      <section class="market-regime-section">
+        <div class="market-regime-section-head"><div><strong>Log gần nhất</strong><small>Dùng để phân tích sau khi lệnh thắng/thua</small></div></div>
+        ${renderActivePositionRows(recent)}
+      </section>
+    </div>
+  `;
+  refs.systemModuleDetail.querySelector(".module-close")?.addEventListener("click", closeSystemModuleDetail);
+  if (Number.isFinite(Number(options.scrollTop))) {
+    const scrollNode = refs.systemModuleDetail.querySelector(".module-chart-scroll");
+    if (scrollNode) requestAnimationFrame(() => {
+      scrollNode.scrollTop = Number(options.scrollTop);
+    });
+  }
+}
+
 function renderModuleDetail(module, options = {}) {
   if (!refs.systemModuleDetail || !refs.systemModuleOverlay || !module) return;
+  if (isActivePositionManagerModule(module)) {
+    renderActivePositionManagerDetail(module, options);
+    return;
+  }
   if (isPositionManagementSection(module)) {
     renderPositionManagementSectionDetail(module, options);
     return;

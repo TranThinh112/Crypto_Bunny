@@ -1,0 +1,25 @@
+Module: Quản lý vị thế chủ động
+
+Mục tiêu:
+- Theo dõi các vị thế đang mở sau mỗi vòng đồng bộ OKX.
+- Đánh giá vị thế còn đáng giữ hay cần can thiệp.
+- Ghi log và gửi Telegram cho các trường hợp cần chú ý.
+
+Phạm vi hành động:
+- HOLD: tiếp tục giữ vị thế.
+- PROTECT_PROFIT: ưu tiên bảo vệ lợi nhuận, dời SL/chốt một phần theo lifecycle.
+- GOOD_EXIT_REVIEW: xem xét chốt lời ngắn khi lệnh đang lời nhưng có nguy cơ đảo chiều.
+- BAD_CUT: xem xét cắt lỗ chủ động khi setup đi quá xa.
+- DCA_REVIEW: xem xét DCA có kiểm soát khi lệnh âm nhưng setup chưa hỏng.
+- SCALE_IN_REVIEW: xem xét thêm khối lượng khi lệnh đang thắng và còn continuation.
+
+Quy tắc an toàn:
+- Mặc định chạy shadow mode.
+- Không tự thực thi DCA, scale-in, đóng lỗ hoặc chốt lời nếu auto_execute_enabled chưa bật.
+- Mọi khuyến nghị/can thiệp phải có cặp, ID lệnh, lý do, số tiền, khối lượng và thời gian.
+- Dữ liệu đầu vào lấy từ trạng thái OKX đã được runtime sync cập nhật.
+
+Log:
+- Journal key: active_position_manager_log
+- File local: logs/active_position_manager.jsonl
+- Khi lệnh đóng hoàn toàn, Trade Memory sẽ dùng lịch sử này để phân tích lý do thắng/thua.

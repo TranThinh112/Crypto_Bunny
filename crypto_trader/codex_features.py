@@ -777,6 +777,44 @@ def _lc_okx_review_call_message(item: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _brief_ai_reason_vi(reason: str, status: str = "") -> str:
+    text = str(reason or "").strip()
+    if not text:
+        return "-"
+    lower = text.lower()
+    points: list[str] = []
+    if "4h" in lower or "higher-timeframe" in lower or "higher timeframe" in lower or "htf" in lower:
+        if "does not support" in lower or "not support" in lower or "invalid" in lower:
+            points.append("khung lớn không ủng hộ setup")
+        elif "support" in lower or "trend" in lower:
+            points.append("trend khung lớn còn hiệu lực")
+    if "pullback" in lower and ("not confirmed" in lower or "wait" in lower or "better" in lower):
+        points.append("chờ pullback/confirmation rõ hơn")
+    if "near resistance" in lower or "resistance" in lower:
+        points.append("giá gần kháng cự, không đuổi lệnh")
+    if "near support" in lower or "support" in lower:
+        points.append("giá gần hỗ trợ, cần xác nhận thêm")
+    if "volume" in lower:
+        points.append("volume yếu" if ("weak" in lower or "low" in lower) else "volume có xác nhận")
+    if "rsi" in lower:
+        points.append("RSI chưa đủ đẹp")
+    if "slow ema" in lower or "ema" in lower or "extended" in lower or "overextended" in lower or "deeply" in lower:
+        points.append("giá đã đi xa EMA/quá đà")
+    if "mixed" in lower or "choppy" in lower:
+        points.append("nến/động lượng còn nhiễu")
+    if "rr" in lower or "risk" in lower:
+        points.append("rủi ro/RR chưa đạt")
+    if not points:
+        cleaned = " ".join(text.replace("\n", " ").split())
+        return cleaned[:160] + ("..." if len(cleaned) > 160 else "")
+    unique_points: list[str] = []
+    for point in points:
+        if point not in unique_points:
+            unique_points.append(point)
+    prefix = "Loại setup" if str(status).upper() == "REJECT" else "Chờ thêm" if str(status).upper() == "REVIEW" else "Đủ điều kiện"
+    return f"{prefix}: {', '.join(unique_points[:3])}."
+
+
 def _ai_call_message(item: dict[str, Any]) -> str:
     if str(item.get("review_kind") or "") == "lc_okx_review":
         return _lc_okx_review_call_message(item)
@@ -799,13 +837,13 @@ def _ai_call_message(item: dict[str, Any]) -> str:
         f"Trạng thái: {status}",
     ]
     if is_trend_setup_review:
-        lines.append("Luồng: Trend Scan -> Code dựng setup -> AI review")
+        lines.append("Luồng: Trend Scan")
         lines.append(f"Thời gian review setup: {_local_time_label(str(item.get('created_at') or _iso_now()))} VN")
         reason = str(item.get("reason") or "")
         if reason:
-            lines.append(f"Lý do: {reason[:700]}")
+            lines.append(f"Lý do: {_brief_ai_reason_vi(reason, status)}")
     elif role == "mini":
-        lines.append("Luồng: Pool 1H/2H/4H -> Mini -> LC")
+        lines.append("Luồng: Pool Scan")
         lines.append(f"Thời gian Mini xử lý Pool: {_local_time_label(str(item.get('created_at') or _iso_now()))} VN")
     elif role == "okx":
         if item.get("approved"):

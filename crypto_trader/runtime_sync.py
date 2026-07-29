@@ -11,6 +11,7 @@ from .codex_features import (
     refresh_bunny_health_state,
     refresh_trading_system_state,
 )
+from .active_position_manager import evaluate_open_positions
 from .executor import candidate_client_order_id
 from .market import create_exchange
 from .models import TradeCandidate, to_jsonable
@@ -1744,6 +1745,10 @@ def sync_exchange_runtime_state(
 
     refresh_trading_system_state(config)
     refresh_bunny_health_state(config)
+    try:
+        active_position_review = evaluate_open_positions(config, rows=list_trade_execution_rows(config, statuses=["OPEN"], limit=100, order="created_asc"))
+    except Exception as exc:
+        active_position_review = {"enabled": False, "error": str(exc)}
     return {
         "enabled": True,
         "created_at": created_at,
@@ -1758,6 +1763,7 @@ def sync_exchange_runtime_state(
         "duplicate_executions_closed": duplicate_executions_closed,
         "reclassified_executions": reclassified_executions,
         "corrected_close_pnls": corrected_close_pnls,
+        "active_position_review": active_position_review,
         "backfilled_close_notifications": backfilled_close_notifications,
         "retried_close_notifications": retried_close_notifications,
     }
