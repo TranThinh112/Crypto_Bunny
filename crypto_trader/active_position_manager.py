@@ -476,7 +476,16 @@ def evaluate_open_positions(
     for row, decision in zip(rows, decisions):
         action = str(decision.get("action") or "HOLD")
         action_counts[action] = action_counts.get(action, 0) + 1
-        execution_result = _execute_decision(config, decision, settings)
+        execution_result = (
+            _execute_decision(config, decision, settings)
+            if persist
+            else {
+                "submitted": False,
+                "reason": "read_only_preview",
+                "shadow_mode": settings["shadow_mode"],
+                "auto_execute_enabled": settings["auto_execute_enabled"],
+            }
+        )
         decision["execution"] = execution_result
         if persist:
             _persist_decision(config, decision)
