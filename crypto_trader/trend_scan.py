@@ -89,6 +89,131 @@ def _row_strength(row: dict[str, Any]) -> float:
         strength = (strength * 0.65) + (min(100.0, score) * 0.35)
     return round(max(0.0, min(100.0, strength)), 2)
 
+def _frame_group(timeframe: str) -> str:
+    name = str(timeframe).lower()
+    if name in {"4h", "2h", "1h"}:
+        return "htf"
+    if name in {"15m", "5m", "1m"}:
+        return "entry"
+    return "other"
+
+def _group_weight(timeframe: str, group: str) -> float:
+    name = str(timeframe).lower()
+    if group == "htf":
+        return {"4h": 4.0, "2h": 3.0, "1h": 3.0}.get(name, 0.0)
+    if group == "entry":
+        return {"15m": 3.0, "5m": 2.0, "1m": 1.0}.get(name, 0.0)
+    return 0.0
+
+def _score_frames(frames: list[dict[str, Any]], group: str) -> dict[str, Any]:
+    long_score = 0.0
+    short_score = 0.0
+    total_weight = 0.0
+    aligned = 0
+    mixed = 0
+    used: list[dict[str, Any]] = []
+    for frame in frames:
+        timeframe = str(frame.get("timeframe") or "").lower()
+        if _frame_group(timeframe) != group:
+            continue
+        weight = _group_weight(timeframe, group)
+        if weight <= 0:
+            continue
+        direction = str(frame.get("direction") or "mixed")
+        strength = _float(frame.get("strength"))
+        total_weight += weight
+        used.append(frame)
+        if direction == "up":
+            long_score += strength * weight
+            aligned += 1
+        elif direction == "down":
+            short_score += strength * weight
+            aligned += 1
+        else:
+            mixed += 1
+    if total_weight <= 0:
+        return {"side": "mixed", "score": 0.0, "long_score": 0.0, "short_score": 0.0, "frame_count": 0, "aligned_count": 0, "mixed_count": 0, "frames": []}
+    long_score = round(long_score / total_weight, 2)
+    short_score = round(short_score / total_weight, 2)
+    if long_score >= short_score and long_score >= 45:
+        side = "long"
+        score = long_score
+    elif short_score > long_score and short_score >= 45:
+        side = "short"
+        score = short_score
+    else:
+        side = "mixed"
+        score = round(max(long_score, short_score), 2)
+    return {
+        "side": side,
+        "score": score,
+        "long_score": long_score,
+        "short_score": short_score,
+        "frame_count": len(used),
+        "aligned_count": aligned,
+        "mixed_count": mixed,
+        "frames": used,
+    }
+
+def _trend_watch_decision(config: dict[str, Any], *, htf: dict[str, Any], entry: dict[str, Any], legacy_side: str, legacy_score: float) -> dict[str, Any]:
+    internal = config.get("ai", {}).get("internal", {}) if isinstance(config.get("ai"), dict) else {}
+    htf_threshold = _float(internal.get("trend_scan_htf_watch_threshold"), 60.0)
+    htf_immediate = _float(internal.get("trend_scan_htf_immediate_threshold"), 75.0)
+    entry_setup_threshold = _float(internal.get("trend_scan_entry_setup_threshold"), 55.0)
+    entry_ai_threshold = _float(internal.get("trend_scan_entry_ai_threshold"), 65.0)
+    countertrend_entry_threshold = _float(internal.get("trend_scan_countertrend_entry_threshold"), 42.0)
+    required_confirmations = max(1, int(internal.get("trend_scan_htf_required_confirmations", 2) or 2))
+    htf_side = str(htf.get("side") or "mixed")
+    htf_score = _float(htf.get("score"))
+    entry_side = str(entry.get("side") or "mixed")
+    entry_score = _float(entry.get("score"))
+    watch = htf_side in {"long", "short"} and htf_score >= htf_threshold
+    entry_ready = watch and entry_side == htf_side and entry_score >= entry_setup_threshold
+    ai_ready = entry_ready and entry_score >= entry_ai_threshold
+    opposite_side = "short" if htf_side == "long" else "long" if htf_side == "short" else "mixed"
+    countertrend_review = watch and entry_side == opposite_side and entry_score >= countertrend_entry_threshold
+    if ai_ready:
+        reason = "htf_trend_entry_ai_ready"
+    elif entry_ready:
+        reason = "htf_trend_entry_setup_ready"
+    elif countertrend_review:
+        reason = "htf_trend_overextended_countertrend_review"
+    elif watch:
+        reason = "htf_trend_watch_entry_not_ready"
+    else:
+        reason = "htf_trend_below_threshold"
+    if ai_ready:
+        entry_action = f"READY_{htf_side.upper()}"
+    elif entry_ready:
+        entry_action = f"SETUP_{htf_side.upper()}_REVIEW"
+    elif countertrend_review:
+        entry_action = f"REVIEW_COUNTERTREND_{opposite_side.upper()}"
+    elif watch and htf_side == "long":
+        entry_action = "WAIT_PULLBACK_LONG"
+    elif watch and htf_side == "short":
+        entry_action = "WAIT_PULLBACK_SHORT"
+    else:
+        entry_action = "NO_TRADE"
+    return {
+        "watch": watch,
+        "side": htf_side if watch else legacy_side,
+        "score": htf_score if watch else legacy_score,
+        "reason": reason,
+        "confirmation_mode": "immediate" if htf_score >= htf_immediate else f"{required_confirmations}_scan",
+        "required_confirmations": required_confirmations,
+        "entry_ready": entry_ready,
+        "ai_ready": ai_ready,
+        "countertrend_review": countertrend_review,
+        "entry_action": entry_action,
+        "thresholds": {
+            "htf_watch": htf_threshold,
+            "htf_immediate": htf_immediate,
+            "entry_setup": entry_setup_threshold,
+            "entry_ai": entry_ai_threshold,
+            "countertrend_entry": countertrend_entry_threshold,
+        },
+    }
+
 
 def build_trend_scan_snapshot(config: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
@@ -144,13 +269,41 @@ def build_trend_scan_snapshot(config: dict[str, Any], *, now: datetime | None = 
         else:
             trend_side = "mixed"
             trend_score = round(max(long_score, short_score), 2)
+        htf_score = _score_frames(frames, "htf")
+        entry_score = _score_frames(frames, "entry")
+        watch_decision = _trend_watch_decision(
+            config,
+            htf=htf_score,
+            entry=entry_score,
+            legacy_side=trend_side,
+            legacy_score=trend_score,
+        )
         symbols.append(
             {
                 "symbol": symbol,
-                "trend_side": trend_side,
-                "trend_score": trend_score,
+                "trend_side": watch_decision["side"],
+                "trend_score": round(_float(watch_decision["score"]), 2),
+                "legacy_trend_side": trend_side,
+                "legacy_trend_score": trend_score,
                 "long_score": long_score,
                 "short_score": short_score,
+                "htf_trend_side": htf_score["side"],
+                "htf_trend_score": htf_score["score"],
+                "htf_long_score": htf_score["long_score"],
+                "htf_short_score": htf_score["short_score"],
+                "entry_readiness_side": entry_score["side"],
+                "entry_readiness_score": entry_score["score"],
+                "entry_long_score": entry_score["long_score"],
+                "entry_short_score": entry_score["short_score"],
+                "entry_ready": watch_decision["entry_ready"],
+                "ai_ready": watch_decision["ai_ready"],
+                "countertrend_review": watch_decision["countertrend_review"],
+                "entry_action": watch_decision["entry_action"],
+                "watchlist_eligible": watch_decision["watch"],
+                "watchlist_reason": watch_decision["reason"],
+                "confirmation_mode": watch_decision["confirmation_mode"],
+                "required_confirmations": watch_decision["required_confirmations"],
+                "trend_thresholds": watch_decision["thresholds"],
                 "frame_count": len(frames),
                 "latest_at": latest_at or None,
                 "frames": frames,
@@ -158,7 +311,13 @@ def build_trend_scan_snapshot(config: dict[str, Any], *, now: datetime | None = 
         )
     symbols.sort(key=lambda item: (_float(item.get("trend_score")), str(item.get("latest_at") or "")), reverse=True)
     strong_threshold = _float(internal.get("trend_scan_strong_threshold"), 65.0)
-    strong = [item for item in symbols if _float(item.get("trend_score")) >= strong_threshold and item.get("trend_side") in {"long", "short"}]
+    strong = [
+        item
+        for item in symbols
+        if bool(item.get("watchlist_eligible"))
+        and _float(item.get("trend_score")) >= strong_threshold
+        and item.get("trend_side") in {"long", "short"}
+    ]
     return {
         "created_at": now.isoformat(),
         "slot_id": _slot_id(config, now),
@@ -201,7 +360,10 @@ def update_trend_watchlist(
         state = {}
     internal = config.get("ai", {}).get("internal", {}) if isinstance(config.get("ai"), dict) else {}
     min_keep_score = _float(internal.get("trend_watchlist_min_keep_score"), 60.0)
+    htf_immediate = _float(internal.get("trend_scan_htf_immediate_threshold"), 75.0)
     items = state.get("items") if isinstance(state.get("items"), dict) else {}
+    pending_confirmations = state.get("pending_confirmations") if isinstance(state.get("pending_confirmations"), dict) else {}
+    next_pending_confirmations: dict[str, dict[str, Any]] = {}
     next_items: dict[str, dict[str, Any]] = {}
     expired: list[dict[str, Any]] = []
     for key, item in items.items():
@@ -230,6 +392,27 @@ def update_trend_watchlist(
             continue
         key = f"{symbol}|{side}"
         existing = next_items.get(key, {})
+        required_confirmations = max(1, int(trend.get("required_confirmations") or 1))
+        pending = pending_confirmations.get(key) if isinstance(pending_confirmations.get(key), dict) else {}
+        previous_count = int(pending.get("confirmation_count") or 0)
+        confirmation_count = previous_count + 1
+        confirmed = _float(trend.get("htf_trend_score"), _float(trend.get("trend_score"))) >= htf_immediate or confirmation_count >= required_confirmations
+        if not confirmed and not existing:
+            next_pending_confirmations[key] = {
+                "symbol": symbol,
+                "side": side,
+                "status": "awaiting_confirmation",
+                "source": "trend_scan",
+                "first_seen_at": pending.get("first_seen_at") or now.isoformat(),
+                "updated_at": now.isoformat(),
+                "confirmation_count": confirmation_count,
+                "required_confirmations": required_confirmations,
+                "trend_score": trend.get("trend_score"),
+                "htf_trend_score": trend.get("htf_trend_score"),
+                "entry_readiness_score": trend.get("entry_readiness_score"),
+                "reason": "htf_trend_needs_next_scan_confirmation",
+            }
+            continue
         ttl = _watch_ttl_minutes(config, trend)
         next_items[key] = {
             **existing,
@@ -243,14 +426,34 @@ def update_trend_watchlist(
             "trend_score": trend.get("trend_score"),
             "long_score": trend.get("long_score"),
             "short_score": trend.get("short_score"),
+            "legacy_trend_side": trend.get("legacy_trend_side"),
+            "legacy_trend_score": trend.get("legacy_trend_score"),
+            "htf_trend_side": trend.get("htf_trend_side"),
+            "htf_trend_score": trend.get("htf_trend_score"),
+            "htf_long_score": trend.get("htf_long_score"),
+            "htf_short_score": trend.get("htf_short_score"),
+            "entry_readiness_side": trend.get("entry_readiness_side"),
+            "entry_readiness_score": trend.get("entry_readiness_score"),
+            "entry_long_score": trend.get("entry_long_score"),
+            "entry_short_score": trend.get("entry_short_score"),
+            "entry_ready": trend.get("entry_ready"),
+            "ai_ready": trend.get("ai_ready"),
+            "countertrend_review": trend.get("countertrend_review"),
+            "entry_action": trend.get("entry_action"),
+            "watchlist_reason": trend.get("watchlist_reason"),
+            "confirmation_mode": trend.get("confirmation_mode"),
+            "required_confirmations": trend.get("required_confirmations"),
+            "confirmation_count": max(confirmation_count, required_confirmations),
+            "trend_thresholds": trend.get("trend_thresholds"),
             "frame_count": trend.get("frame_count"),
             "frames": trend.get("frames"),
-            "last_reason": "trend_score_above_threshold",
+            "last_reason": trend.get("watchlist_reason") or "trend_score_above_threshold",
         }
     payload = {
         "updated_at": now.isoformat(),
         "count": len(next_items),
         "items": next_items,
+        "pending_confirmations": next_pending_confirmations,
         "expired": expired[-50:],
     }
     set_journal_state(config, TREND_WATCHLIST_STATE_KEY, json.dumps(to_jsonable(payload), ensure_ascii=False))
@@ -259,11 +462,26 @@ def update_trend_watchlist(
 
 def _candidate_payload(row: dict[str, Any]) -> dict[str, Any]:
     payload = row.get("payload") if isinstance(row.get("payload"), dict) else row
-    return payload if isinstance(payload, dict) else {}
+    if not isinstance(payload, dict):
+        return {}
+    if isinstance(row.get("indicator"), dict) and not isinstance(payload.get("indicator"), dict):
+        payload = {**payload, "indicator": row.get("indicator")}
+    for key in ("symbol", "side", "score", "confidence", "win_probability_pct", "risk_reward"):
+        if key not in payload and key in row:
+            payload = {**payload, key: row.get(key)}
+    return payload
 
 
 def _candidate_price(payload: dict[str, Any]) -> float:
-    return _float(payload.get("entry") or payload.get("price") or payload.get("last"))
+    indicator = payload.get("indicator") if isinstance(payload.get("indicator"), dict) else {}
+    indicator_summary = payload.get("indicator_summary") if isinstance(payload.get("indicator_summary"), dict) else {}
+    return _float(
+        payload.get("entry")
+        or payload.get("price")
+        or payload.get("last")
+        or indicator.get("last")
+        or indicator_summary.get("last")
+    )
 
 
 def _indicator(payload: dict[str, Any]) -> dict[str, Any]:
@@ -339,6 +557,76 @@ def _support_resistance_context(payload: dict[str, Any], frame: dict[str, Any]) 
     }
 
 
+def _entry_action_from_setup_inputs(
+    config: dict[str, Any],
+    *,
+    side: str,
+    entry_type: str,
+    overextended_score: float,
+    rsi: float,
+    price_vs_ema: float,
+    sr_context: dict[str, Any],
+    volume_ratio: float,
+    pullback_quality: float,
+    breakout_quality: float,
+) -> dict[str, Any]:
+    internal = config.get("ai", {}).get("internal", {}) if isinstance(config.get("ai"), dict) else {}
+    overextended_threshold = _float(internal.get("trend_setup_overextended_score_threshold"), 58.0)
+    hot_rsi_threshold = _float(internal.get("trend_setup_hot_rsi_threshold"), 72.0)
+    ema_overextended_pct = _float(internal.get("trend_setup_price_vs_ema_overextended_pct"), 3.0)
+    reasons: list[str] = []
+    countertrend_side = None
+    no_chase = False
+    if side == "long":
+        if overextended_score >= overextended_threshold:
+            reasons.append(f"overextended_score>={overextended_threshold:g}")
+        if rsi >= hot_rsi_threshold:
+            reasons.append(f"rsi>={hot_rsi_threshold:g}")
+        if price_vs_ema >= ema_overextended_pct:
+            reasons.append(f"price_above_ema>={ema_overextended_pct:g}%")
+        if sr_context.get("near_resistance"):
+            reasons.append("near_resistance")
+        no_chase = bool(reasons)
+        if no_chase and volume_ratio >= 0.9 and (breakout_quality >= 55 or pullback_quality < 58):
+            countertrend_side = "short"
+            action = "REVIEW_COUNTERTREND_SHORT"
+        elif no_chase:
+            action = "WAIT_PULLBACK_LONG"
+        else:
+            action = "READY_LONG_PULLBACK" if entry_type == "pullback" else "READY_LONG_BREAKOUT" if entry_type == "breakout" else "READY_LONG_CONTINUATION"
+    elif side == "short":
+        if overextended_score >= overextended_threshold:
+            reasons.append(f"overextended_score>={overextended_threshold:g}")
+        if rsi <= 100.0 - hot_rsi_threshold:
+            reasons.append(f"rsi<={100.0 - hot_rsi_threshold:g}")
+        if price_vs_ema <= -ema_overextended_pct:
+            reasons.append(f"price_below_ema>={ema_overextended_pct:g}%")
+        if sr_context.get("near_support"):
+            reasons.append("near_support")
+        no_chase = bool(reasons)
+        if no_chase and volume_ratio >= 0.9 and (breakout_quality >= 55 or pullback_quality < 58):
+            countertrend_side = "long"
+            action = "REVIEW_COUNTERTREND_LONG"
+        elif no_chase:
+            action = "WAIT_PULLBACK_SHORT"
+        else:
+            action = "READY_SHORT_PULLBACK" if entry_type == "pullback" else "READY_SHORT_BREAKOUT" if entry_type == "breakout" else "READY_SHORT_CONTINUATION"
+    else:
+        action = "NO_TRADE"
+        reasons.append("missing_side")
+    return {
+        "entry_action": action,
+        "countertrend_side": countertrend_side,
+        "no_chase": no_chase,
+        "entry_action_reason": reasons or ["entry_not_overextended"],
+        "thresholds": {
+            "overextended_score": overextended_threshold,
+            "hot_rsi": hot_rsi_threshold,
+            "price_vs_ema_pct": ema_overextended_pct,
+        },
+    }
+
+
 def build_entry_proposal(config: dict[str, Any], row: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
     payload = _candidate_payload(row)
@@ -373,6 +661,18 @@ def build_entry_proposal(config: dict[str, Any], row: dict[str, Any], *, now: da
     entry_type = "pullback" if pullback_quality >= breakout_quality else "breakout"
     if 55 <= pullback_quality < 72 and not overextended:
         entry_type = "continuation"
+    entry_action = _entry_action_from_setup_inputs(
+        config,
+        side=side,
+        entry_type=entry_type,
+        overextended_score=overextended_score,
+        rsi=rsi,
+        price_vs_ema=price_vs_ema,
+        sr_context=sr_context,
+        volume_ratio=volume_ratio,
+        pullback_quality=pullback_quality,
+        breakout_quality=breakout_quality,
+    )
     risk_pct = max(0.6, min(3.5, atr_pct * (1.1 if entry_type == "breakout" else 0.9)))
     rr = 1.75 if entry_type in {"pullback", "continuation"} else 1.5
     if side == "long":
@@ -390,6 +690,8 @@ def build_entry_proposal(config: dict[str, Any], row: dict[str, Any], *, now: da
     warnings: list[str] = []
     if overextended:
         warnings.append("overextended_risk")
+    if entry_action["no_chase"]:
+        warnings.append("no_chase_entry")
     if volume_ratio < 0.7:
         warnings.append("weak_volume")
     if alignment["opposite_count"] >= 2:
@@ -399,7 +701,7 @@ def build_entry_proposal(config: dict[str, Any], row: dict[str, Any], *, now: da
     if entry <= 0 or side not in {"long", "short"}:
         warnings.append("missing_entry_or_side")
     hard_warnings = {"missing_entry_or_side", "risk_reward_too_low"}
-    setup_state = "blocked" if any(item in hard_warnings for item in warnings) else "ready_for_ai_review" if not overextended else "review_only"
+    setup_state = "blocked" if any(item in hard_warnings for item in warnings) else "review_only" if entry_action["no_chase"] else "ready_for_ai_review"
     return {
         "created_at": now.isoformat(),
         "symbol": symbol,
@@ -414,6 +716,11 @@ def build_entry_proposal(config: dict[str, Any], row: dict[str, Any], *, now: da
         "invalid_price": round(invalid_price, 8),
         "overextended": overextended,
         "overextended_score": round(overextended_score, 2),
+        "entry_action": entry_action["entry_action"],
+        "countertrend_side": entry_action["countertrend_side"],
+        "no_chase": entry_action["no_chase"],
+        "entry_action_reason": entry_action["entry_action_reason"],
+        "entry_action_thresholds": entry_action["thresholds"],
         "pullback_quality": round(pullback_quality, 2),
         "breakout_quality": round(breakout_quality, 2),
         "volume_confirmation": volume_ratio >= 1.0,
@@ -538,6 +845,9 @@ def normalize_ai_setup_review(review: dict[str, Any], setup: dict[str, Any]) -> 
     if setup.get("overextended") and decision == "APPROVE":
         decision = "REVIEW"
         warnings = [*warnings, "overextended_requires_review"]
+    if setup.get("no_chase") and decision == "APPROVE":
+        decision = "REVIEW"
+        warnings = [*warnings, "no_chase_requires_review"]
     pending_allowed = bool(review.get("pending_order_allowed"))
     if decision == "APPROVE":
         pending_allowed = False
@@ -619,6 +929,214 @@ def evaluate_pending_cancel_rules(setup: dict[str, Any], ai_review: dict[str, An
         reasons.append("spread_worsens")
     return {"cancel": bool(reasons), "reasons": reasons}
 
+def _setup_to_candidate(config: dict[str, Any], setup: dict[str, Any], ai_review: dict[str, Any]) -> Any | None:
+    leverage = max(1.0, _float(config.get("exchange", {}).get("leverage"), 1.0))
+    margin_usdt = _float(config.get("position_sizing", {}).get("base_margin_usdt"), 0.0)
+    if margin_usdt <= 0:
+        margin_usdt = _float(config.get("risk", {}).get("order_usdt"), 0.0) / leverage
+    order_usdt = max(0.0, margin_usdt * leverage)
+    entry_quality = _float(ai_review.get("entry_quality"), _float(setup.get("pullback_quality"), 0.0))
+    continuation = _float(ai_review.get("continuation_score"), _float(setup.get("breakout_quality"), 0.0))
+    confidence = round(_clamp((entry_quality * 0.55) + (continuation * 0.45)), 2)
+    candidate = _mapping_to_candidate(
+        {
+            "symbol": setup.get("symbol"),
+            "side": setup.get("side"),
+            "payload": {
+                "symbol": setup.get("symbol"),
+                "side": setup.get("side"),
+                "entry": setup.get("entry_price"),
+                "stop_loss": setup.get("stop_loss"),
+                "take_profit": setup.get("take_profit"),
+                "risk_reward": setup.get("risk_reward"),
+                "order_usdt": order_usdt,
+                "margin_usdt": margin_usdt,
+                "confidence": confidence,
+                "win_probability_pct": max(entry_quality, continuation),
+                "indicator_summary": {
+                    "rsi": setup.get("rsi"),
+                    "volume_ratio": 1.0 if setup.get("volume_confirmation") else 0.0,
+                    "atr_pct": setup.get("risk_pct"),
+                    "price_vs_ema_slow_pct": setup.get("price_vs_ema_slow_pct"),
+                },
+                "higher_timeframes": setup.get("timeframes") or {},
+                "warnings": setup.get("warnings") or [],
+                "reasons": [ai_review.get("reason") or "trend setup review"],
+            },
+        }
+    )
+    if candidate is not None:
+        candidate.margin_usdt = margin_usdt
+    return candidate
+
+def evaluate_trade_intent_risk_capital_shadow(config: dict[str, Any], setup: dict[str, Any], ai_review: dict[str, Any], activation: dict[str, Any]) -> dict[str, Any]:
+    candidate = _setup_to_candidate(config, setup, ai_review)
+    if candidate is None:
+        return {
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "shadow_mode": True,
+            "phase": "phase_5_risk_capital_reads_trade_intent",
+            "risk": {"approved": False, "reasons": ["candidate_unavailable_from_trade_intent"], "warnings": []},
+            "capital": {"approved": False, "reason": "candidate_unavailable"},
+        }
+    try:
+        from .risk import evaluate_candidate
+
+        check = evaluate_candidate(config, candidate, enforce_active_limit=True, check_active_trades=True, check_order_limits=True)
+        risk_payload = {"approved": bool(check.passed), "reasons": list(check.reasons or []), "warnings": list(check.warnings or [])}
+    except Exception as exc:
+        risk_payload = {"approved": False, "reasons": [f"risk_shadow_error: {exc}"], "warnings": []}
+    leverage = max(1.0, _float(config.get("exchange", {}).get("leverage"), 1.0))
+    margin_usdt = _float(getattr(candidate, "margin_usdt", None), 0.0)
+    if margin_usdt <= 0:
+        margin_usdt = _float(candidate.order_usdt) / leverage
+    return {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "shadow_mode": True,
+        "phase": "phase_5_risk_capital_reads_trade_intent",
+        "trade_intent_status": (activation.get("trade_intent") or {}).get("status"),
+        "risk": risk_payload,
+        "capital": {
+            "approved": bool(risk_payload.get("approved")),
+            "margin_usdt": round(margin_usdt, 4),
+            "leverage": leverage,
+            "notional_usdt": round(_float(candidate.order_usdt), 4),
+            "risk_profile": (activation.get("trade_intent") or {}).get("risk_profile") or "Normal",
+            "source": "trade_intent_shadow",
+        },
+    }
+
+def build_position_review_shadow(setup: dict[str, Any], ai_review: dict[str, Any], activation: dict[str, Any]) -> dict[str, Any]:
+    decision = str(ai_review.get("decision") or "").upper()
+    setup_state = str(setup.get("setup_state") or "")
+    entry_quality = _float(ai_review.get("entry_quality"), _float(setup.get("pullback_quality"), 0.0))
+    continuation = _float(ai_review.get("continuation_score"), _float(setup.get("breakout_quality"), 0.0))
+    warnings = set(str(item) for item in (setup.get("warnings") or []))
+    if decision == "REJECT" or setup_state == "blocked":
+        review_decision = "NO_POSITION"
+        good_exit_rule = "do_not_enter"
+    elif continuation < 45 or "overextended_risk" in warnings:
+        review_decision = "GOOD_EXIT_IF_ALREADY_OPEN"
+        good_exit_rule = "exit_if_continuation_breaks_or_price_rejects"
+    elif entry_quality >= 70 and continuation >= 60:
+        review_decision = "HOLD_WITH_TRAILING_PLAN"
+        good_exit_rule = "trail_after_partial_profit"
+    else:
+        review_decision = "WAIT_FOR_ENTRY_CONFIRMATION"
+        good_exit_rule = "cancel_if_entry_readiness_stays_weak"
+    return {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "shadow_mode": True,
+        "phase": "phase_6_position_review_good_exit",
+        "review_interval_minutes": 15 if setup.get("strategy") == "TrendFollowing" else 10,
+        "decision": review_decision,
+        "good_exit_rule": good_exit_rule,
+        "entry_quality": round(entry_quality, 2),
+        "continuation_score": round(continuation, 2),
+        "activation_status": activation.get("status"),
+    }
+
+def build_trade_memory_plan_shadow(setup: dict[str, Any], activation: dict[str, Any]) -> dict[str, Any]:
+    intent = activation.get("trade_intent") if isinstance(activation.get("trade_intent"), dict) else {}
+    return {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "shadow_mode": True,
+        "phase": "phase_8_trade_memory_backtest_loop",
+        "record_when": "after_position_fully_closed",
+        "dedupe_key_fields": ["symbol", "side", "entry_price", "opened_at", "closed_at"],
+        "fields": {
+            "symbol": intent.get("symbol") or setup.get("symbol"),
+            "side": intent.get("side") or setup.get("side"),
+            "strategy": intent.get("strategy") or setup.get("strategy"),
+            "entry_type": intent.get("entry_type") or setup.get("entry_type"),
+            "setup_grade": intent.get("setup_grade"),
+            "risk_reward": intent.get("risk_reward") or setup.get("risk_reward"),
+            "exit_type": "TP|SL|GOOD_EXIT|MANUAL|EXPIRED",
+            "result_r": "computed_after_close",
+            "net_pnl_usdt": "okx_realized_pnl_after_fees_funding",
+        },
+    }
+
+def build_pool_reduction_plan_shadow() -> dict[str, Any]:
+    return {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "shadow_mode": True,
+        "phase": "phase_7_pool_filter_reduction_plan",
+        "current_action": "observe_only",
+        "safe_to_reduce_after": "7-14_days_of_shadow_logs",
+        "rules": [
+            "Keep old 1h/2h/4h pool as Market Context Cache.",
+            "Do not remove Mini/5.5 gate until Risk/Capital and Good Exit are stable.",
+            "Compare pool decisions against Trade Intent before reducing filters.",
+        ],
+    }
+
+def _latest_market_scan_row_for_symbol_side(config: dict[str, Any], symbol: str, side: str) -> dict[str, Any] | None:
+    memory = recent_market_scan_memory(
+        config,
+        lookback_hours=max(1, int(config.get("ai", {}).get("internal", {}).get("trend_scan_lookback_hours", 24) or 24)),
+        per_symbol_timeframe_limit=5,
+        total_limit=1000,
+        include_details=True,
+    )
+    frame_map = memory.get(symbol) if isinstance(memory, dict) else None
+    if not isinstance(frame_map, dict):
+        return None
+    rows: list[dict[str, Any]] = []
+    for timeframe_rows in frame_map.values():
+        if not isinstance(timeframe_rows, list):
+            continue
+        for row in timeframe_rows:
+            if not isinstance(row, dict):
+                continue
+            row_side = str(row.get("side") or (row.get("payload") or {}).get("side") or "").lower()
+            if row_side and row_side != side:
+                continue
+            rows.append(row)
+    rows.sort(key=lambda item: (str(item.get("created_at") or ""), 1 if str(item.get("timeframe") or "").lower() == "1m" else 0), reverse=True)
+    return rows[0] if rows else None
+
+def run_trend_auto_shadow_reviews(config: dict[str, Any], watchlist: dict[str, Any]) -> dict[str, Any]:
+    internal = config.get("ai", {}).get("internal", {}) if isinstance(config.get("ai"), dict) else {}
+    if not bool(internal.get("trend_auto_shadow_review_enabled", True)):
+        return {"enabled": False, "created": 0, "items": []}
+    limit = max(1, int(internal.get("trend_auto_shadow_review_limit", 5) or 5))
+    call_ai = bool(internal.get("trend_setup_review_ai_enabled", False))
+    items = watchlist.get("items") if isinstance(watchlist.get("items"), dict) else {}
+    reviewed: list[dict[str, Any]] = []
+    for item in sorted(items.values(), key=lambda row: _float(row.get("trend_score")), reverse=True):
+        if len(reviewed) >= limit:
+            break
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("symbol") or "")
+        side = str(item.get("side") or "").lower()
+        if not symbol or side not in {"long", "short"}:
+            continue
+        row = _latest_market_scan_row_for_symbol_side(config, symbol, side)
+        if row is None:
+            reviewed.append({"symbol": symbol, "side": side, "status": "skipped", "reason": "source_row_unavailable"})
+            continue
+        try:
+            result = build_trend_setup_review_flow(config, row, call_ai=call_ai, notify_telegram=False)
+            setup = result.get("setup_proposal") if isinstance(result.get("setup_proposal"), dict) else {}
+            ai_review = result.get("ai_review") if isinstance(result.get("ai_review"), dict) else {}
+            reviewed.append(
+                {
+                    "symbol": symbol,
+                    "side": side,
+                    "status": "logged",
+                    "ai_called": call_ai,
+                    "ai_decision": ai_review.get("decision"),
+                    "entry_price": setup.get("entry_price"),
+                    "setup_state": setup.get("setup_state"),
+                    "risk_approved": ((result.get("risk_capital_shadow") or {}).get("risk") or {}).get("approved"),
+                    "position_review": (result.get("position_review_shadow") or {}).get("decision"),
+                }
+            )
+        except Exception as exc:
+            reviewed.append({"symbol": symbol, "side": side, "status": "error", "reason": str(exc)})
+    return {"enabled": True, "created": len([item for item in reviewed if item.get("status") == "logged"]), "items": reviewed}
 
 def build_trend_setup_review_flow(
     config: dict[str, Any],
@@ -649,6 +1167,10 @@ def build_trend_setup_review_flow(
             "warnings": setup.get("warnings") or [],
         }, setup)
     activation = activate_trend_trade_intent(setup, ai_review)
+    risk_capital = evaluate_trade_intent_risk_capital_shadow(config, setup, ai_review, activation)
+    position_review = build_position_review_shadow(setup, ai_review, activation)
+    trade_memory_plan = build_trade_memory_plan_shadow(setup, activation)
+    pool_reduction_plan = build_pool_reduction_plan_shadow()
     pending_state = upsert_trend_pending_plan(config, activation)
     result = {
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -657,10 +1179,18 @@ def build_trend_setup_review_flow(
             "phase_6_entry_builder": 100,
             "phase_7_ai_setup_review": 100 if call_ai else 50,
             "phase_8_intent_activation": 100,
+            "remaining_phase_5_risk_capital_reads_intent": 100,
+            "remaining_phase_6_position_review_good_exit": 100,
+            "remaining_phase_7_pool_reduction_plan": 100,
+            "remaining_phase_8_trade_memory_plan": 100,
         },
         "setup_proposal": setup,
         "ai_review": ai_review,
         "activation": activation,
+        "risk_capital_shadow": risk_capital,
+        "position_review_shadow": position_review,
+        "pool_reduction_plan_shadow": pool_reduction_plan,
+        "trade_memory_plan_shadow": trade_memory_plan,
         "pending_state": pending_state,
         "shadow_intent_context": shadow_intent,
     }
@@ -716,6 +1246,13 @@ def _write_jsonl(config: dict[str, Any], relative_path: str, payload: dict[str, 
 
 def persist_trend_scan_log(config: dict[str, Any], *, now: datetime | None = None, force: bool = False) -> dict[str, Any]:
     snapshot = build_trend_scan_snapshot(config, now=now)
+    slot_id = str(snapshot.get("slot_id") or "")
+    if not force:
+        try:
+            if get_journal_state(config, TREND_SCAN_LAST_SLOT_KEY) == slot_id:
+                return {"ok": True, "skipped": True, "reason": "slot_already_logged", "slot_id": slot_id}
+        except Exception as exc:
+            LOGGER.warning("Skipping trend scan last-slot read after storage error: %s", exc)
     try:
         watchlist = update_trend_watchlist(config, snapshot, now=now)
     except Exception as exc:
@@ -725,14 +1262,13 @@ def persist_trend_scan_log(config: dict[str, Any], *, now: datetime | None = Non
         "count": watchlist.get("count"),
         "updated_at": watchlist.get("updated_at"),
         "expired_count": len(watchlist.get("expired") or []) if isinstance(watchlist.get("expired"), list) else None,
+        "pending_confirmation_count": len(watchlist.get("pending_confirmations") or {}) if isinstance(watchlist.get("pending_confirmations"), dict) else 0,
     }
-    slot_id = str(snapshot.get("slot_id") or "")
-    if not force:
-        try:
-            if get_journal_state(config, TREND_SCAN_LAST_SLOT_KEY) == slot_id:
-                return {"ok": True, "skipped": True, "reason": "slot_already_logged", "slot_id": slot_id}
-        except Exception as exc:
-            LOGGER.warning("Skipping trend scan last-slot read after storage error: %s", exc)
+    try:
+        snapshot["auto_shadow_reviews"] = run_trend_auto_shadow_reviews(config, watchlist)
+    except Exception as exc:
+        snapshot["auto_shadow_reviews"] = {"enabled": True, "error": str(exc)}
+        LOGGER.warning("Skipping trend auto shadow reviews after error: %s", exc)
     body = json.dumps(to_jsonable(snapshot), ensure_ascii=False, separators=(",", ":"))
     try:
         set_journal_state(config, f"{TREND_SCAN_LOG_PREFIX}:{_safe_token(slot_id)}", body)

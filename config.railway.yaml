@@ -156,6 +156,24 @@ ai:
     lc_pipeline_two_hour_icon: "🟡"
     lc_pipeline_promote_survivors: true
     lc_pipeline_promote_to_pending: true
+    trend_scan_log_interval_seconds: 900
+    trend_scan_top_limit: 50
+    trend_scan_strong_threshold: 55.0
+    trend_scan_htf_watch_threshold: 60.0
+    trend_scan_htf_immediate_threshold: 75.0
+    trend_scan_htf_required_confirmations: 2
+    trend_scan_entry_setup_threshold: 55.0
+    trend_scan_entry_ai_threshold: 65.0
+    trend_scan_countertrend_entry_threshold: 42.0
+    trend_setup_overextended_score_threshold: 58.0
+    trend_setup_hot_rsi_threshold: 72.0
+    trend_setup_price_vs_ema_overextended_pct: 3.0
+    trend_watchlist_ttl_minutes: 120
+    trend_watchlist_min_keep_score: 50.0
+    trend_setup_review_ai_enabled: true
+    trend_setup_review_ai_cooldown_seconds: 900
+    trend_auto_shadow_review_enabled: true
+    trend_auto_shadow_review_limit: 5
     timeout_seconds: 15
   okx:
     provider: local_policy
