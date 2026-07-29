@@ -256,6 +256,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enabled": True,
         "shadow_mode": False,
         "auto_execute_enabled": True,
+        "effective_from": "2026-07-29T21:58:22+00:00",
+        "apply_to_existing_positions": False,
         "execute_bad_cut": True,
         "execute_good_exit": True,
         "execute_remainder_cut": True,

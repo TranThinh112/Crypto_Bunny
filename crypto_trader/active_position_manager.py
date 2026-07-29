@@ -36,6 +36,8 @@ def _settings(config: dict[str, Any]) -> dict[str, Any]:
         "enabled": bool(raw.get("enabled", True)),
         "shadow_mode": bool(raw.get("shadow_mode", True)),
         "auto_execute_enabled": bool(raw.get("auto_execute_enabled", False)),
+        "effective_from": str(raw.get("effective_from") or ""),
+        "apply_to_existing_positions": bool(raw.get("apply_to_existing_positions", False)),
         "execute_bad_cut": bool(raw.get("execute_bad_cut", False)),
         "execute_good_exit": bool(raw.get("execute_good_exit", False)),
         "execute_remainder_cut": bool(raw.get("execute_remainder_cut", False)),
@@ -71,6 +73,30 @@ def _parse_json(value: Any) -> dict[str, Any]:
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _parse_time(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _applies_to_row(row: dict[str, Any], settings: dict[str, Any]) -> bool:
+    if settings.get("apply_to_existing_positions"):
+        return True
+    effective_at = _parse_time(settings.get("effective_from"))
+    if effective_at is None:
+        return False
+    created_at = _parse_time(row.get("created_at"))
+    if created_at is None:
+        return False
+    return created_at >= effective_at
 
 
 def _snapshot_position(row: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -355,7 +381,9 @@ def _amount_to_precision(exchange: Any, symbol: str, amount: float) -> str:
     return f"{amount:.8f}".rstrip("0").rstrip(".")
 
 
-def _execution_allowed(action: str, settings: dict[str, Any]) -> bool:
+def _execution_allowed(action: str, settings: dict[str, Any], decision: dict[str, Any]) -> bool:
+    if not decision.get("applies"):
+        return False
     if settings["shadow_mode"] or not settings["auto_execute_enabled"]:
         return False
     if action == "BAD_CUT":
@@ -429,12 +457,14 @@ def _execute_reduce_only_close(config: dict[str, Any], decision: dict[str, Any])
 
 def _execute_decision(config: dict[str, Any], decision: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
     action = str(decision.get("action") or "")
-    if not _execution_allowed(action, settings):
+    if not _execution_allowed(action, settings, decision):
         return {
             "submitted": False,
-            "reason": "execution_disabled_for_action",
+            "reason": "not_applied_to_existing_position" if not decision.get("applies") else "execution_disabled_for_action",
             "shadow_mode": settings["shadow_mode"],
             "auto_execute_enabled": settings["auto_execute_enabled"],
+            "effective_from": settings.get("effective_from"),
+            "apply_to_existing_positions": settings.get("apply_to_existing_positions"),
         }
     if action in {"BAD_CUT", "GOOD_EXIT_REVIEW", "BAD_CUT_REMAINDER"}:
         return _execute_reduce_only_close(config, decision)
@@ -474,6 +504,8 @@ def evaluate_open_positions(
     action_counts: dict[str, int] = {}
     notified = 0
     for row, decision in zip(rows, decisions):
+        decision["applies"] = _applies_to_row(row, settings)
+        decision["effective_from"] = settings.get("effective_from")
         action = str(decision.get("action") or "HOLD")
         action_counts[action] = action_counts.get(action, 0) + 1
         execution_result = (
