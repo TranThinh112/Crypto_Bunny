@@ -74,6 +74,9 @@ risk:
   max_stop_distance_pct: 6.0
   news_conflict_threshold: 2.0
 
+trade_memory:
+  limit: 500
+
 paper_trading:
   enabled: true
   auto_scan_enabled: false
@@ -170,8 +173,11 @@ ai:
     trend_setup_price_vs_ema_overextended_pct: 3.0
     trend_watchlist_ttl_minutes: 120
     trend_watchlist_min_keep_score: 50.0
+    trend_watchlist_reject_cooldown_minutes: 120
     trend_setup_review_ai_enabled: true
     trend_setup_review_ai_cooldown_seconds: 900
+    trend_setup_review_price_change_pct: 0.35
+    trend_setup_review_score_change: 8.0
     trend_auto_shadow_review_enabled: true
     trend_auto_shadow_review_limit: 5
     timeout_seconds: 15

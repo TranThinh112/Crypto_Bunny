@@ -783,14 +783,30 @@ def _ai_call_message(item: dict[str, Any]) -> str:
     role = str(item.get("role") or "ai")
     status = str(item.get("status") or "-")
     symbols = ", ".join(str(symbol) for symbol in item.get("symbols") or []) or "-"
+    is_trend_setup_review = str(item.get("prompt_version") or "") == "trend-setup-review-v1"
+    if is_trend_setup_review:
+        title = "🤖 AI luồng Trend được gọi"
+    elif role == "mini":
+        title = "🤖 AI luồng Pool cố định được gọi"
+    elif role == "okx":
+        title = "🤖 AI OKX 5.5 được gọi"
+    else:
+        title = "🤖 AI được gọi"
     lines = [
-        "🤖 AI được gọi" if role != "okx" else "🤖 AI OKX 5.5 được gọi",
+        title,
         f"Model: {item.get('model', '-')}",
         f"Cặp giao dịch: {symbols}",
         f"Trạng thái: {status}",
     ]
-    if role == "mini":
-        lines.append(f"Thời gian mini đề xuất LC: {_local_time_label(str(item.get('created_at') or _iso_now()))} VN")
+    if is_trend_setup_review:
+        lines.append("Luồng: Trend Scan -> Code dựng setup -> AI review")
+        lines.append(f"Thời gian review setup: {_local_time_label(str(item.get('created_at') or _iso_now()))} VN")
+        reason = str(item.get("reason") or "")
+        if reason:
+            lines.append(f"Lý do: {reason[:700]}")
+    elif role == "mini":
+        lines.append("Luồng: Pool 1H/2H/4H -> Mini -> LC")
+        lines.append(f"Thời gian Mini xử lý Pool: {_local_time_label(str(item.get('created_at') or _iso_now()))} VN")
     elif role == "okx":
         if item.get("approved"):
             lines.append(f"Thời gian vào lệnh: {_local_time_label(str(item.get('created_at') or _iso_now()))} VN")
@@ -824,6 +840,9 @@ def _notify_openai_api_call(
     if success:
         if role == "okx":
             status = "VÀO LỆNH" if approved else "KHÔNG VÀO LỆNH"
+        elif str(prompt_package.get("prompt_version") or "") == "trend-setup-review-v1":
+            decision = str(parsed.get("decision") or "").upper().strip()
+            status = decision if decision in {"APPROVE", "REJECT", "REVIEW"} else "REVIEW"
         elif role == "mini":
             approved_symbols = parsed.get("approved_symbols") or []
             status = "MINI ĐỀ XUẤT LC" if approved_symbols or approved else "NO_TRADE"

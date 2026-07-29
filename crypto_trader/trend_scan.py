@@ -363,6 +363,14 @@ def update_trend_watchlist(
     htf_immediate = _float(internal.get("trend_scan_htf_immediate_threshold"), 75.0)
     items = state.get("items") if isinstance(state.get("items"), dict) else {}
     pending_confirmations = state.get("pending_confirmations") if isinstance(state.get("pending_confirmations"), dict) else {}
+    rejected_until = state.get("rejected_until") if isinstance(state.get("rejected_until"), dict) else {}
+    next_rejected_until: dict[str, dict[str, Any]] = {}
+    for key, block in rejected_until.items():
+        if not isinstance(block, dict):
+            continue
+        until = _parse_time(block.get("until"))
+        if until and until > now:
+            next_rejected_until[str(key)] = block
     next_pending_confirmations: dict[str, dict[str, Any]] = {}
     next_items: dict[str, dict[str, Any]] = {}
     expired: list[dict[str, Any]] = []
@@ -391,6 +399,8 @@ def update_trend_watchlist(
         if not symbol or side not in {"long", "short"}:
             continue
         key = f"{symbol}|{side}"
+        if key in next_rejected_until:
+            continue
         existing = next_items.get(key, {})
         required_confirmations = max(1, int(trend.get("required_confirmations") or 1))
         pending = pending_confirmations.get(key) if isinstance(pending_confirmations.get(key), dict) else {}
@@ -414,15 +424,18 @@ def update_trend_watchlist(
             }
             continue
         ttl = _watch_ttl_minutes(config, trend)
+        first_seen_at = existing.get("first_seen_at") or now.isoformat()
+        expires_at = existing.get("expires_at") or (now + timedelta(minutes=ttl)).isoformat()
         next_items[key] = {
             **existing,
             "symbol": symbol,
             "side": side,
             "status": "watching",
             "source": "trend_scan",
-            "first_seen_at": existing.get("first_seen_at") or now.isoformat(),
+            "first_seen_at": first_seen_at,
             "updated_at": now.isoformat(),
-            "expires_at": (now + timedelta(minutes=ttl)).isoformat(),
+            "expires_at": expires_at,
+            "ttl_minutes": ttl,
             "trend_score": trend.get("trend_score"),
             "long_score": trend.get("long_score"),
             "short_score": trend.get("short_score"),
@@ -454,6 +467,7 @@ def update_trend_watchlist(
         "count": len(next_items),
         "items": next_items,
         "pending_confirmations": next_pending_confirmations,
+        "rejected_until": next_rejected_until,
         "expired": expired[-50:],
     }
     set_journal_state(config, TREND_WATCHLIST_STATE_KEY, json.dumps(to_jsonable(payload), ensure_ascii=False))
@@ -758,6 +772,9 @@ def _review_prompt_package(setup: dict[str, Any], source_payload: dict[str, Any]
             "APPROVE only if trend is still valid, entry is not overextended, RR is acceptable, and evidence supports continuation.",
             "REVIEW if trend is valid but entry should wait for pullback or confirmation.",
             "REJECT if trend is broken, setup is overextended, volume is too weak, or RR is poor.",
+            "For REJECT, classify whether only the current setup is bad or the watchlist item should be removed.",
+            "Use reject_scope=SETUP_ONLY when the trend can remain on watchlist but this entry is bad.",
+            "Use reject_scope=WATCHLIST_REMOVE when trend is invalid, RR cannot be fixed, liquidity/risk is unacceptable, or market context conflicts.",
             "Do not change entry_price, stop_loss, take_profit, or risk_reward.",
         ],
         "expected_json": {
@@ -766,6 +783,9 @@ def _review_prompt_package(setup: dict[str, Any], source_payload: dict[str, Any]
             "entry_quality": "number 0-100",
             "continuation_score": "number 0-100",
             "pending_order_allowed": "boolean",
+            "reject_scope": "SETUP_ONLY|WATCHLIST_REMOVE",
+            "reject_reason_type": "BAD_ENTRY|TREND_INVALID|RR_BAD|LIQUIDITY_RISK|MARKET_CONFLICT|SYSTEM_RISK|OTHER",
+            "allow_recheck_if_setup_changes": "boolean",
             "reason": "short reason",
             "evidence": ["short evidence strings"],
             "warnings": ["short warning strings"],
@@ -853,6 +873,19 @@ def normalize_ai_setup_review(review: dict[str, Any], setup: dict[str, Any]) -> 
         pending_allowed = False
     if decision == "REJECT":
         pending_allowed = False
+    reject_scope = str(review.get("reject_scope") or "").upper().strip()
+    reject_reason_type = str(review.get("reject_reason_type") or "").upper().strip()
+    if decision == "REJECT":
+        if reject_scope not in {"SETUP_ONLY", "WATCHLIST_REMOVE"}:
+            reject_scope = "SETUP_ONLY"
+        if reject_reason_type not in {"BAD_ENTRY", "TREND_INVALID", "RR_BAD", "LIQUIDITY_RISK", "MARKET_CONFLICT", "SYSTEM_RISK", "OTHER"}:
+            reject_reason_type = "OTHER"
+    else:
+        reject_scope = ""
+        reject_reason_type = ""
+    allow_recheck = bool(review.get("allow_recheck_if_setup_changes"))
+    if decision == "REJECT" and "TREND_INVALID" == reject_reason_type:
+        allow_recheck = False
     return {
         **review,
         "decision": decision,
@@ -860,6 +893,9 @@ def normalize_ai_setup_review(review: dict[str, Any], setup: dict[str, Any]) -> 
         "entry_quality": round(_clamp(_float(review.get("entry_quality"), _float(setup.get("pullback_quality"), 0.0))), 2),
         "continuation_score": round(_clamp(_float(review.get("continuation_score"), _float(setup.get("breakout_quality"), 0.0))), 2),
         "pending_order_allowed": pending_allowed,
+        "reject_scope": reject_scope,
+        "reject_reason_type": reject_reason_type,
+        "allow_recheck_if_setup_changes": allow_recheck,
         "reason": str(review.get("reason") or "AI review normalized without explicit reason."),
         "evidence": [str(item) for item in evidence[:8]],
         "warnings": [str(item) for item in warnings[:8]],
@@ -1096,6 +1132,133 @@ def _latest_market_scan_row_for_symbol_side(config: dict[str, Any], symbol: str,
     rows.sort(key=lambda item: (str(item.get("created_at") or ""), 1 if str(item.get("timeframe") or "").lower() == "1m" else 0), reverse=True)
     return rows[0] if rows else None
 
+def _trend_setup_signature(setup: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "symbol": setup.get("symbol"),
+        "side": setup.get("side"),
+        "entry_action": setup.get("entry_action"),
+        "setup_state": setup.get("setup_state"),
+        "entry_type": setup.get("entry_type"),
+        "entry_price": setup.get("entry_price"),
+        "stop_loss": setup.get("stop_loss"),
+        "take_profit": setup.get("take_profit"),
+        "risk_reward": setup.get("risk_reward"),
+        "trend_score": item.get("trend_score"),
+        "entry_readiness_score": item.get("entry_readiness_score"),
+        "warnings": sorted(str(value) for value in (setup.get("warnings") or [])),
+    }
+
+def _pct_delta(current: Any, previous: Any) -> float:
+    current_value = _float(current)
+    previous_value = _float(previous)
+    if previous_value == 0:
+        return 100.0 if current_value != 0 else 0.0
+    return abs((current_value - previous_value) / previous_value) * 100.0
+
+def _trend_setup_changed_enough(config: dict[str, Any], setup: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    internal = config.get("ai", {}).get("internal", {}) if isinstance(config.get("ai"), dict) else {}
+    price_delta_threshold = _float(internal.get("trend_setup_review_price_change_pct", 0.35), 0.35)
+    score_delta_threshold = _float(internal.get("trend_setup_review_score_change", 8.0), 8.0)
+    previous = item.get("last_ai_setup_signature") if isinstance(item.get("last_ai_setup_signature"), dict) else {}
+    current = _trend_setup_signature(setup, item)
+    if not previous:
+        return {"changed": True, "reason": "first_ai_review_for_watch_item", "signature": current}
+    reasons: list[str] = []
+    for key in ("entry_action", "setup_state", "entry_type"):
+        if str(current.get(key)) != str(previous.get(key)):
+            reasons.append(f"{key}_changed")
+    if _pct_delta(current.get("entry_price"), previous.get("entry_price")) >= price_delta_threshold:
+        reasons.append("entry_price_changed")
+    if _pct_delta(current.get("stop_loss"), previous.get("stop_loss")) >= price_delta_threshold:
+        reasons.append("stop_loss_changed")
+    if _pct_delta(current.get("take_profit"), previous.get("take_profit")) >= price_delta_threshold:
+        reasons.append("take_profit_changed")
+    if abs(_float(current.get("trend_score")) - _float(previous.get("trend_score"))) >= score_delta_threshold:
+        reasons.append("trend_score_changed")
+    if abs(_float(current.get("entry_readiness_score")) - _float(previous.get("entry_readiness_score"))) >= score_delta_threshold:
+        reasons.append("entry_readiness_changed")
+    if current.get("warnings") != previous.get("warnings"):
+        reasons.append("warnings_changed")
+    return {
+        "changed": bool(reasons),
+        "reason": ",".join(reasons) if reasons else "setup_unchanged",
+        "signature": current,
+    }
+
+def _save_watchlist_ai_review_state(
+    config: dict[str, Any],
+    symbol: str,
+    side: str,
+    *,
+    signature: dict[str, Any],
+    ai_review: dict[str, Any],
+    setup: dict[str, Any],
+) -> None:
+    raw = get_journal_state(config, TREND_WATCHLIST_STATE_KEY)
+    try:
+        state = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return
+    items = state.get("items") if isinstance(state.get("items"), dict) else {}
+    key = f"{symbol}|{side}"
+    item = items.get(key) if isinstance(items.get(key), dict) else None
+    if item is None:
+        return
+    previous_reject_count = int(item.get("reject_count") or 0)
+    decision = str(ai_review.get("decision") or "").upper()
+    reject_scope = str(ai_review.get("reject_scope") or "").upper()
+    reject_reason_type = str(ai_review.get("reject_reason_type") or "").upper()
+    remove_reasons = {"TREND_INVALID", "RR_BAD", "LIQUIDITY_RISK", "MARKET_CONFLICT", "SYSTEM_RISK"}
+    should_remove = decision == "REJECT" and (reject_scope == "WATCHLIST_REMOVE" or reject_reason_type in remove_reasons or previous_reject_count >= 1)
+    if should_remove:
+        internal = config.get("ai", {}).get("internal", {}) if isinstance(config.get("ai"), dict) else {}
+        reject_cooldown_minutes = max(15, int(internal.get("trend_watchlist_reject_cooldown_minutes", 120) or 120))
+        expired = state.get("expired") if isinstance(state.get("expired"), list) else []
+        rejected_until = state.get("rejected_until") if isinstance(state.get("rejected_until"), dict) else {}
+        expired.append(
+            {
+                "key": key,
+                "symbol": symbol,
+                "side": side,
+                "expired_at": datetime.now(timezone.utc).isoformat(),
+                "previous_status": item.get("status"),
+                "reason": "ai_reject_watchlist_remove" if reject_scope == "WATCHLIST_REMOVE" else "ai_reject_repeated_or_structural",
+                "reject_scope": reject_scope,
+                "reject_reason_type": reject_reason_type,
+                "reject_count": previous_reject_count + 1,
+            }
+        )
+        rejected_until[key] = {
+            "symbol": symbol,
+            "side": side,
+            "until": (datetime.now(timezone.utc) + timedelta(minutes=reject_cooldown_minutes)).isoformat(),
+            "reason": "ai_reject_watchlist_remove",
+            "reject_scope": reject_scope,
+            "reject_reason_type": reject_reason_type,
+        }
+        items.pop(key, None)
+        state["items"] = items
+        state["expired"] = expired[-50:]
+        state["rejected_until"] = rejected_until
+        set_journal_state(config, TREND_WATCHLIST_STATE_KEY, json.dumps(to_jsonable(state), ensure_ascii=False))
+        return
+    item["last_ai_review_at"] = datetime.now(timezone.utc).isoformat()
+    item["last_ai_decision"] = ai_review.get("decision")
+    item["last_ai_setup_signature"] = signature
+    item["last_ai_entry_action"] = setup.get("entry_action")
+    item["last_ai_setup_state"] = setup.get("setup_state")
+    item["last_reject_scope"] = reject_scope
+    item["last_reject_reason_type"] = reject_reason_type
+    item["allow_recheck_if_setup_changes"] = bool(ai_review.get("allow_recheck_if_setup_changes"))
+    if decision == "REJECT":
+        item["status"] = "rejected_wait_new_setup"
+        item["reject_count"] = previous_reject_count + 1
+    elif decision in {"APPROVE", "REVIEW"}:
+        item["reject_count"] = 0
+    items[key] = item
+    state["items"] = items
+    set_journal_state(config, TREND_WATCHLIST_STATE_KEY, json.dumps(to_jsonable(state), ensure_ascii=False))
+
 def run_trend_auto_shadow_reviews(config: dict[str, Any], watchlist: dict[str, Any]) -> dict[str, Any]:
     internal = config.get("ai", {}).get("internal", {}) if isinstance(config.get("ai"), dict) else {}
     if not bool(internal.get("trend_auto_shadow_review_enabled", True)):
@@ -1118,9 +1281,38 @@ def run_trend_auto_shadow_reviews(config: dict[str, Any], watchlist: dict[str, A
             reviewed.append({"symbol": symbol, "side": side, "status": "skipped", "reason": "source_row_unavailable"})
             continue
         try:
+            setup_preview = build_entry_proposal(config, row)
+            setup_change = _trend_setup_changed_enough(config, setup_preview, item)
+        except Exception as exc:
+            reviewed.append({"symbol": symbol, "side": side, "status": "error", "reason": f"setup_preview_error: {exc}"})
+            continue
+        if call_ai and not bool(setup_change.get("changed")):
+            reviewed.append(
+                {
+                    "symbol": symbol,
+                    "side": side,
+                    "status": "skipped",
+                    "reason": setup_change.get("reason") or "setup_unchanged",
+                    "ai_called": False,
+                    "entry_price": setup_preview.get("entry_price"),
+                    "setup_state": setup_preview.get("setup_state"),
+                    "entry_action": setup_preview.get("entry_action"),
+                }
+            )
+            continue
+        try:
             result = build_trend_setup_review_flow(config, row, call_ai=call_ai, notify_telegram=False)
             setup = result.get("setup_proposal") if isinstance(result.get("setup_proposal"), dict) else {}
             ai_review = result.get("ai_review") if isinstance(result.get("ai_review"), dict) else {}
+            if call_ai:
+                _save_watchlist_ai_review_state(
+                    config,
+                    symbol,
+                    side,
+                    signature=setup_change.get("signature") if isinstance(setup_change.get("signature"), dict) else _trend_setup_signature(setup, item),
+                    ai_review=ai_review,
+                    setup=setup,
+                )
             reviewed.append(
                 {
                     "symbol": symbol,
@@ -1128,7 +1320,9 @@ def run_trend_auto_shadow_reviews(config: dict[str, Any], watchlist: dict[str, A
                     "status": "logged",
                     "ai_called": call_ai,
                     "ai_decision": ai_review.get("decision"),
+                    "review_reason": setup_change.get("reason"),
                     "entry_price": setup.get("entry_price"),
+                    "entry_action": setup.get("entry_action"),
                     "setup_state": setup.get("setup_state"),
                     "risk_approved": ((result.get("risk_capital_shadow") or {}).get("risk") or {}).get("approved"),
                     "position_review": (result.get("position_review_shadow") or {}).get("decision"),

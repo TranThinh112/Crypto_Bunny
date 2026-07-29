@@ -30,6 +30,7 @@ from .storage import (
     set_pending_order_exchange_order,
     update_trade_execution,
 )
+from .trade_memory import record_trade_memory_from_execution
 
 EXCHANGE_CLOSE_NOTIFICATION_PREFIX = "runtime_sync_exchange_close_notified"
 MANUAL_POSITION_TARGET_NOTIFICATION_PREFIX = "runtime_sync_manual_position_target_notified"
@@ -660,6 +661,7 @@ def _close_missing_exchange_execution(
         },
     )
     if payload:
+        record_trade_memory_from_execution(config, payload, history=history)
         _notify_exchange_closed_execution(config, payload)
     return payload
 
@@ -716,6 +718,7 @@ def _backfill_reconciled_exchange_close_notifications(
             },
         )
         if payload:
+            record_trade_memory_from_execution(config, payload, history=history)
             before = get_journal_state(config, _exchange_close_notification_key(payload))
             _notify_exchange_closed_execution(config, payload)
             after = get_journal_state(config, _exchange_close_notification_key(payload))
@@ -772,7 +775,7 @@ def _correct_recent_exchange_closes_from_history(
         )
         reason_changed = reason != close_reason
         if current_pnl is None or abs(current_pnl - pnl) > 1e-9 or pct_changed or reason_changed:
-            update_trade_execution(config, int(row["id"]), updates)
+            payload = update_trade_execution(config, int(row["id"]), updates)
             append_trade_execution_event(
                 config,
                 int(row["id"]),
@@ -788,6 +791,8 @@ def _correct_recent_exchange_closes_from_history(
                     "history": to_jsonable(history) if history else None,
                 },
             )
+            if payload:
+                record_trade_memory_from_execution(config, payload, history=history)
             corrected += 1
     return corrected
 
