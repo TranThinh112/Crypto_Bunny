@@ -148,18 +148,39 @@
         </div>
       </section>
 
+      <section class="layout">
+        <article class="panel plan-panel">
+          <div class="panel-header">
+            <h2>Kế hoạch giao dịch</h2>
+            <span id="planTag" class="tag">Chưa có tín hiệu</span>
+          </div>
+          <canvas id="planCanvas" width="760" height="240"></canvas>
+          <div class="price-grid">
+            <div><span>Giá vào</span><strong id="entryValue">-</strong></div>
+            <div><span>Giá hiện tại</span><strong id="currentValue">-</strong></div>
+            <div><span>Stop</span><strong id="stopValue">-</strong></div>
+            <div><span>Mục tiêu</span><strong id="targetValue">-</strong></div>
+            <div><span>R:R</span><strong id="rrValue">-</strong></div>
+            <div><span>Khối lượng</span><strong id="qtyValue">-</strong></div>
+            <div><span>Spread</span><strong id="spreadValue">-</strong></div>
+            <div><span>TP %</span><strong id="tpPctValue">-</strong></div>
+            <div><span>SL %</span><strong id="slPctValue">-</strong></div>
+          </div>
+        </article>
+      </section>
+
       <section class="panel health-panel">
         <div class="panel-header health-panel-header">
           <div>
             <h2>Bảng kiểm sức khỏe hệ thống</h2>
-            <p class="muted">Gom 9 tiêu chí vào một trung tâm theo dõi; click từng tiêu chí để xem dẫn chứng trong ngày.</p>
+            <p class="muted">Gom 9 tiêu chí và toàn bộ module vào một trung tâm theo dõi trong ngày.</p>
           </div>
           <div class="health-panel-actions">
             <span id="systemChecklistStatus" class="muted">-</span>
-            <button id="systemChecklistToggle" class="button secondary" type="button">Mở chi tiết</button>
+            <button id="systemChecklistToggle" class="button secondary health-toggle-hidden" type="button" hidden>Mở chi tiết</button>
           </div>
         </div>
-        <div id="systemChecklistBody" class="health-body" hidden>
+        <div id="systemChecklistBody" class="health-body">
           <div class="health-controls">
             <input id="systemChecklistDate" type="date" aria-label="Chọn ngày dữ liệu hệ thống" />
             <button id="systemChecklistHistoryBtn" class="button secondary" type="button">Xem ngày cũ</button>
@@ -191,27 +212,6 @@
             </article>
           </div>
         </div>
-      </section>
-
-      <section class="layout">
-        <article class="panel plan-panel">
-          <div class="panel-header">
-            <h2>Kế hoạch giao dịch</h2>
-            <span id="planTag" class="tag">Chưa có tín hiệu</span>
-          </div>
-          <canvas id="planCanvas" width="760" height="240"></canvas>
-          <div class="price-grid">
-            <div><span>Giá vào</span><strong id="entryValue">-</strong></div>
-            <div><span>Giá hiện tại</span><strong id="currentValue">-</strong></div>
-            <div><span>Stop</span><strong id="stopValue">-</strong></div>
-            <div><span>Mục tiêu</span><strong id="targetValue">-</strong></div>
-            <div><span>R:R</span><strong id="rrValue">-</strong></div>
-            <div><span>Khối lượng</span><strong id="qtyValue">-</strong></div>
-            <div><span>Spread</span><strong id="spreadValue">-</strong></div>
-            <div><span>TP %</span><strong id="tpPctValue">-</strong></div>
-            <div><span>SL %</span><strong id="slPctValue">-</strong></div>
-          </div>
-        </article>
       </section>
 
       <section class="panel">

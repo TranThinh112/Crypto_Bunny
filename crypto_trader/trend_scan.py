@@ -20,6 +20,7 @@ POOL_PIPELINE_LAST_SOURCE_KEY = "pool_pipeline_last_source"
 TREND_WATCHLIST_STATE_KEY = "trend_watchlist_state"
 TREND_SETUP_REVIEW_LOG_PREFIX = "trend_setup_review_log"
 TREND_PENDING_PLAN_STATE_KEY = "trend_pending_plan_state"
+TREND_APPROVED_HOLD_QUEUE_STATE_KEY = "trend_approved_hold_queue_state"
 TREND_SETUP_REVIEW_LAST_CALL_PREFIX = "trend_setup_review_last_call"
 
 
@@ -1269,6 +1270,14 @@ def review_setup_with_mini(
         try:
             from .codex_features import record_ai_call_event
 
+            event_context = dict(notification_context or {})
+            if not _ai_review_should_extend_watchlist(normalized):
+                event_context["watchlist_ai_review_extend_minutes"] = 0
+            if _ai_review_removes_watchlist_pair(normalized):
+                event_context["watchlist_reject_cooldown_minutes"] = max(
+                    15,
+                    int(internal_config.get("trend_watchlist_reject_cooldown_minutes", 120) or 120),
+                )
             record_ai_call_event(
                 config,
                 {
@@ -1279,8 +1288,10 @@ def review_setup_with_mini(
                     "approved": normalized.get("decision") == "APPROVE",
                     "decision": normalized.get("decision"),
                     "reason": normalized.get("reason"),
+                    "reject_scope": normalized.get("reject_scope"),
+                    "reject_reason_type": normalized.get("reject_reason_type"),
                     "sl_tp_method": ((setup.get("risk_model") or {}).get("selected_method") if isinstance(setup.get("risk_model"), dict) else None),
-                    **(notification_context or {}),
+                    **event_context,
                     "prompt_version": "trend-setup-review-v1",
                     "prompt_hash": "trend-setup-review-v1",
                     "latency_ms": response.get("latency_ms"),
@@ -1502,6 +1513,443 @@ def evaluate_trade_intent_risk_capital_shadow(config: dict[str, Any], setup: dic
         },
     }
 
+def _approved_hold_settings(config: dict[str, Any]) -> dict[str, Any]:
+    internal = config.get("ai", {}).get("internal", {}) if isinstance(config.get("ai"), dict) else {}
+    return {
+        "ttl_minutes": max(5, int(internal.get("trend_approved_hold_ttl_minutes", 30) or 30)),
+        "recheck_seconds": max(30, int(internal.get("trend_approved_hold_recheck_seconds", 120) or 120)),
+        "priority_rewatch_ttl_minutes": max(5, int(internal.get("trend_priority_rewatch_ttl_minutes", 30) or 30)),
+        "max_entry_drift_pct": max(0.1, _float(internal.get("trend_approved_hold_max_entry_drift_pct"), 1.2)),
+        "stale_minutes": max(5, int(internal.get("trend_approved_hold_stale_minutes", 45) or 45)),
+        "reject_cooldown_minutes": max(15, int(internal.get("trend_watchlist_reject_cooldown_minutes", 120) or 120)),
+    }
+
+def _approved_hold_block_type(reasons: list[str], warnings: list[str] | None = None) -> str:
+    text = " | ".join(str(item).lower() for item in [*reasons, *(warnings or [])])
+    remove_tokens = (
+        "trend_invalid",
+        "liquidity",
+        "market_conflict",
+        "symbol is not tradable",
+        "not tradable",
+        "delisted",
+    )
+    rewatch_tokens = (
+        "risk/reward",
+        "risk_reward",
+        "volume",
+        "confidence",
+        "win probability",
+        "entry",
+        "spread",
+        "stop distance",
+        "news",
+    )
+    temporary_tokens = (
+        "health monitor",
+        "pause",
+        "recovery",
+        "order size is not positive",
+        "active trade limit",
+        "already exists",
+        "cooldown active",
+        "daily order limit",
+        "capital",
+        "automation",
+        "okx",
+        "api",
+        "cannot verify",
+        "lock",
+    )
+    if any(token in text for token in remove_tokens):
+        return "remove_pair"
+    if any(token in text for token in temporary_tokens):
+        return "temporary_block"
+    if any(token in text for token in rewatch_tokens):
+        return "priority_rewatch"
+    return "temporary_block"
+
+def _format_hold_minutes(value: Any) -> str:
+    minutes = int(max(0, _float(value)))
+    return f"{minutes}p"
+
+def _brief_hold_block_reason_vi(reason: str) -> str:
+    text = str(reason or "").strip()
+    lower = text.lower()
+    if not text:
+        return "-"
+    if "health monitor" in lower or "pause" in lower:
+        return "Health Monitor đang pause"
+    if "order size is not positive" in lower or "suggested order size is below minimum" in lower:
+        return "Vốn vào lệnh đang bằng 0/quá nhỏ"
+    if "confidence" in lower:
+        return "Confidence chưa đạt"
+    if "win probability" in lower:
+        return "Xác suất thắng chưa đạt"
+    if "risk/reward" in lower or "risk_reward" in lower:
+        return "RR chưa đạt"
+    if "volume" in lower:
+        return "Volume chưa xác nhận"
+    if "active trade limit" in lower:
+        return "Đã đủ số lệnh đang mở"
+    if "already exists" in lower:
+        return "Đã có lệnh/position cùng cặp"
+    if "cooldown active" in lower:
+        return "Cooldown lệnh chưa hết"
+    if "capital" in lower or "margin" in lower:
+        return "Vốn khả dụng chưa đủ"
+    if "market guard" in lower:
+        return "Market Guard đang chặn"
+    if "spread" in lower:
+        return "Spread chưa đạt"
+    if "stop distance" in lower:
+        return "Khoảng cách SL chưa hợp lệ"
+    if "news" in lower:
+        return "News/context chưa xác nhận"
+    if "trend_invalid" in lower or "trend invalid" in lower:
+        return "Trend đã gãy"
+    if "liquidity" in lower:
+        return "Thanh khoản rủi ro"
+    if "market_conflict" in lower or "market conflict" in lower:
+        return "Bối cảnh thị trường xung đột"
+    if "okx" in lower or "api" in lower:
+        return "OKX/API lỗi tạm thời"
+    if "cannot verify" in lower:
+        return "Chưa xác minh được trạng thái OKX"
+    return text[:90]
+
+def _format_hold_block_reasons(reasons: list[str]) -> str:
+    compact = []
+    seen: set[str] = set()
+    for reason in reasons:
+        label = _brief_hold_block_reason_vi(reason)
+        if label in seen or label == "-":
+            continue
+        seen.add(label)
+        compact.append(label)
+    if not compact:
+        compact = ["-"]
+    return "\n".join(f"  - {item}" for item in compact[:5])
+
+def _compact_hold_block_reason_labels(reasons: list[str]) -> list[str]:
+    labels: list[str] = []
+    seen: set[str] = set()
+    for reason in reasons:
+        label = _brief_hold_block_reason_vi(reason)
+        if label in seen or label == "-":
+            continue
+        seen.add(label)
+        labels.append(label)
+    return labels
+
+def _approved_hold_event_message(event: str, item: dict[str, Any], settings: dict[str, Any]) -> str:
+    symbol = str(item.get("symbol") or "-")
+    side = str(item.get("side") or "-").upper()
+    block_type = str(item.get("block_type") or "-")
+    reasons = [str(reason) for reason in item.get("block_reasons") or [] if reason]
+    reason_text = _format_hold_block_reasons(reasons)
+    resolved_reasons = [str(reason) for reason in item.get("block_resolved_reasons") or [] if reason]
+    resolved_text = _format_hold_block_reasons(resolved_reasons) if resolved_reasons else ""
+    ttl = settings.get("ttl_minutes")
+    if event == "entered":
+        title = "⏳ Trend APPROVED HOLD QUEUE"
+        status = "ENTERED_QUEUE"
+        meaning = "Mini đã duyệt nhưng đang bị block; giữ trong queue để recheck."
+        extra = f"Thời gian trong queue: {_format_hold_minutes(ttl)}"
+    elif event == "priority_rewatch":
+        title = "↩️ Trend PRIORITY REWATCH"
+        status = "BACK_TO_WATCHLIST"
+        meaning = "Setup cần làm mới; quay lại watchlist ưu tiên, không đi lại từ đầu."
+        extra = f"TTL rewatch: {_format_hold_minutes(settings.get('priority_rewatch_ttl_minutes'))}"
+    elif event == "remove_pair":
+        title = "🧹 Trend REMOVE PAIR"
+        status = "REMOVE_PAIR"
+        meaning = "Block/risk nặng; xóa khỏi watchlist và cooldown cặp/side này."
+        extra = f"Cooldown: {_format_hold_minutes(settings.get('reject_cooldown_minutes'))}"
+    elif event == "ready":
+        title = "✅ Trend QUEUE CLEARED"
+        status = "READY_FOR_ORDER"
+        meaning = "Block đã hết; setup có thể đi tiếp tới bước đặt lệnh."
+        extra = "Hướng đi: Risk/Capital clear → OKX order"
+    elif event == "update":
+        title = "📌 Trend APPROVED HOLD UPDATE"
+        status = "QUEUE_UPDATED"
+        meaning = "Một số block đã được gỡ; tiếp tục giữ queue nếu vẫn còn block."
+        extra = f"Thời gian trong queue: {_format_hold_minutes(ttl)}"
+    else:
+        title = "📌 Trend APPROVED HOLD UPDATE"
+        status = str(event or "UPDATE").upper()
+        meaning = "Trạng thái queue đã thay đổi."
+        extra = "-"
+    return "\n".join(
+        [
+            title,
+            f"Cặp: {symbol} | {side}",
+            f"Trạng thái queue: {status}",
+            f"Ý nghĩa: {meaning}",
+            f"Loại block: {block_type}",
+            "Lý do block:",
+            reason_text,
+            "Block đã gỡ:",
+            resolved_text,
+            extra,
+        ]
+    )
+
+def _notify_approved_hold_event(config: dict[str, Any], event: str, item: dict[str, Any], settings: dict[str, Any]) -> None:
+    internal = config.get("ai", {}).get("internal", {}) if isinstance(config.get("ai"), dict) else {}
+    if not bool(internal.get("trend_approved_hold_notify_enabled", True)):
+        return
+    telegram_config = config.get("notifications", {}).get("telegram", {})
+    if not bool(telegram_config.get("notify_ai_api_calls", True)):
+        return
+    try:
+        from .notifier import send_telegram_message
+
+        send_telegram_message(config, _approved_hold_event_message(event, item, settings), with_buttons=False, replace_previous=False)
+    except Exception:
+        LOGGER.warning("Skipping approved hold queue telegram notification", exc_info=True)
+
+def upsert_trend_approved_hold_queue(
+    config: dict[str, Any],
+    *,
+    setup: dict[str, Any],
+    ai_review: dict[str, Any],
+    activation: dict[str, Any],
+    risk_capital: dict[str, Any],
+) -> dict[str, Any]:
+    settings = _approved_hold_settings(config)
+    now = datetime.now(timezone.utc)
+    raw = get_journal_state(config, TREND_APPROVED_HOLD_QUEUE_STATE_KEY)
+    try:
+        state = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        state = {}
+    items = state.get("items") if isinstance(state.get("items"), dict) else {}
+    symbol = str(setup.get("symbol") or "")
+    side = str(setup.get("side") or "").lower()
+    if not symbol or side not in {"long", "short"}:
+        return {"updated_at": now.isoformat(), "count": len(items), "items": items, "error": "missing_symbol_or_side"}
+    key = f"{symbol}|{side}"
+    existing = items.get(key) if isinstance(items.get(key), dict) else {}
+    risk = risk_capital.get("risk") if isinstance(risk_capital.get("risk"), dict) else {}
+    capital = risk_capital.get("capital") if isinstance(risk_capital.get("capital"), dict) else {}
+    reasons = [str(item) for item in [*(risk.get("reasons") or []), capital.get("reason")] if item]
+    warnings = [str(item) for item in risk.get("warnings") or []]
+    block_type = _approved_hold_block_type(reasons, warnings)
+    previous_labels = set(_compact_hold_block_reason_labels([str(reason) for reason in existing.get("block_reasons") or []]))
+    current_labels = set(_compact_hold_block_reason_labels(reasons))
+    resolved_reasons = sorted(previous_labels - current_labels)
+    item = {
+        "created_at": existing.get("created_at") or now.isoformat(),
+        "updated_at": now.isoformat(),
+        "expires_at": (now + timedelta(minutes=settings["ttl_minutes"])).isoformat(),
+        "next_recheck_at": (now + timedelta(seconds=settings["recheck_seconds"])).isoformat(),
+        "symbol": symbol,
+        "side": side,
+        "status": "approved_hold",
+        "block_type": block_type,
+        "block_reasons": reasons[:10],
+        "block_resolved_reasons": resolved_reasons,
+        "block_warnings": warnings[:10],
+        "setup": setup,
+        "ai_review": ai_review,
+        "activation": activation,
+        "risk_capital": risk_capital,
+        "priority_rewatch_ttl_minutes": settings["priority_rewatch_ttl_minutes"],
+        "max_entry_drift_pct": settings["max_entry_drift_pct"],
+        "stale_minutes": settings["stale_minutes"],
+    }
+    items[key] = item
+    payload = {"updated_at": now.isoformat(), "count": len(items), "items": items}
+    set_journal_state(config, TREND_APPROVED_HOLD_QUEUE_STATE_KEY, json.dumps(to_jsonable(payload), ensure_ascii=False))
+    if not existing or str(existing.get("block_type") or "") != block_type:
+        _notify_approved_hold_event(config, "entered", item, settings)
+    elif resolved_reasons:
+        _notify_approved_hold_event(config, "update", item, settings)
+    return payload
+
+def _add_priority_rewatch_item(
+    config: dict[str, Any],
+    queue_item: dict[str, Any],
+    *,
+    now: datetime,
+) -> dict[str, Any]:
+    settings = _approved_hold_settings(config)
+    raw = get_journal_state(config, TREND_WATCHLIST_STATE_KEY)
+    try:
+        state = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        state = {}
+    items = state.get("items") if isinstance(state.get("items"), dict) else {}
+    symbol = str(queue_item.get("symbol") or "")
+    side = str(queue_item.get("side") or "").lower()
+    key = f"{symbol}|{side}"
+    setup = queue_item.get("setup") if isinstance(queue_item.get("setup"), dict) else {}
+    existing = items.get(key) if isinstance(items.get(key), dict) else {}
+    items[key] = {
+        **existing,
+        "symbol": symbol,
+        "side": side,
+        "status": "priority_rewatch",
+        "source": "approved_hold_returned",
+        "priority": 100,
+        "first_seen_at": existing.get("first_seen_at") or queue_item.get("created_at") or now.isoformat(),
+        "updated_at": now.isoformat(),
+        "expires_at": (now + timedelta(minutes=settings["priority_rewatch_ttl_minutes"])).isoformat(),
+        "ttl_minutes": settings["priority_rewatch_ttl_minutes"],
+        "last_reason": "approved_hold_returned_to_priority_rewatch",
+        "entry_price": setup.get("entry_price"),
+        "stop_loss": setup.get("stop_loss"),
+        "take_profit": setup.get("take_profit"),
+        "risk_reward": setup.get("risk_reward"),
+        "last_ai_decision": (queue_item.get("ai_review") or {}).get("decision") if isinstance(queue_item.get("ai_review"), dict) else None,
+        "last_ai_review_at": queue_item.get("updated_at"),
+    }
+    state["items"] = items
+    state["updated_at"] = now.isoformat()
+    state["count"] = len(items)
+    set_journal_state(config, TREND_WATCHLIST_STATE_KEY, json.dumps(to_jsonable(state), ensure_ascii=False))
+    return state
+
+def _cooldown_removed_approved_hold_pair(
+    config: dict[str, Any],
+    queue_item: dict[str, Any],
+    *,
+    now: datetime,
+) -> dict[str, Any]:
+    settings = _approved_hold_settings(config)
+    raw = get_journal_state(config, TREND_WATCHLIST_STATE_KEY)
+    try:
+        state = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        state = {}
+    items = state.get("items") if isinstance(state.get("items"), dict) else {}
+    rejected_until = state.get("rejected_until") if isinstance(state.get("rejected_until"), dict) else {}
+    expired = state.get("expired") if isinstance(state.get("expired"), list) else []
+    symbol = str(queue_item.get("symbol") or "")
+    side = str(queue_item.get("side") or "").lower()
+    key = f"{symbol}|{side}"
+    items.pop(key, None)
+    rejected_until[key] = {
+        "symbol": symbol,
+        "side": side,
+        "until": (now + timedelta(minutes=settings["reject_cooldown_minutes"])).isoformat(),
+        "reason": "approved_hold_remove_pair",
+        "block_reasons": queue_item.get("block_reasons") or [],
+    }
+    expired.append(
+        {
+            "key": key,
+            "symbol": symbol,
+            "side": side,
+            "expired_at": now.isoformat(),
+            "previous_status": "approved_hold",
+            "reason": "approved_hold_remove_pair",
+        }
+    )
+    state["items"] = items
+    state["rejected_until"] = rejected_until
+    state["expired"] = expired[-50:]
+    state["updated_at"] = now.isoformat()
+    state["count"] = len(items)
+    set_journal_state(config, TREND_WATCHLIST_STATE_KEY, json.dumps(to_jsonable(state), ensure_ascii=False))
+    return state
+
+def process_trend_approved_hold_queue(config: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+    now = now or datetime.now(timezone.utc)
+    raw = get_journal_state(config, TREND_APPROVED_HOLD_QUEUE_STATE_KEY)
+    try:
+        state = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        state = {}
+    items = state.get("items") if isinstance(state.get("items"), dict) else {}
+    next_items: dict[str, dict[str, Any]] = {}
+    processed: list[dict[str, Any]] = []
+    for key, item in items.items():
+        if not isinstance(item, dict):
+            continue
+        expires_at = _parse_time(item.get("expires_at"))
+        if expires_at and expires_at > now:
+            next_items[str(key)] = item
+            continue
+        block_type = str(item.get("block_type") or "temporary_block")
+        if block_type == "remove_pair":
+            _cooldown_removed_approved_hold_pair(config, item, now=now)
+            action = "remove_pair_cooldown"
+            _notify_approved_hold_event(config, "remove_pair", item, _approved_hold_settings(config))
+        else:
+            _add_priority_rewatch_item(config, item, now=now)
+            action = "priority_rewatch"
+            _notify_approved_hold_event(config, "priority_rewatch", item, _approved_hold_settings(config))
+        processed.append({"key": key, "symbol": item.get("symbol"), "side": item.get("side"), "action": action})
+    payload = {"updated_at": now.isoformat(), "count": len(next_items), "items": next_items, "processed": processed[-50:]}
+    set_journal_state(config, TREND_APPROVED_HOLD_QUEUE_STATE_KEY, json.dumps(to_jsonable(payload), ensure_ascii=False))
+    return payload
+
+def recheck_trend_approved_hold_queue(config: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+    """Re-evaluate held approved setups and mark them ready when all blocks clear.
+
+    This worker intentionally stops at READY_FOR_ORDER. The live order executor can
+    consume that state in a separate, explicit execution step.
+    """
+    now = now or datetime.now(timezone.utc)
+    raw = get_journal_state(config, TREND_APPROVED_HOLD_QUEUE_STATE_KEY)
+    try:
+        state = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        state = {}
+    items = state.get("items") if isinstance(state.get("items"), dict) else {}
+    next_items: dict[str, dict[str, Any]] = {}
+    checked: list[dict[str, Any]] = []
+    for key, item in items.items():
+        if not isinstance(item, dict):
+            continue
+        next_recheck_at = _parse_time(item.get("next_recheck_at"))
+        if next_recheck_at and next_recheck_at > now:
+            next_items[str(key)] = item
+            continue
+        setup = item.get("setup") if isinstance(item.get("setup"), dict) else {}
+        ai_review = item.get("ai_review") if isinstance(item.get("ai_review"), dict) else {}
+        activation = item.get("activation") if isinstance(item.get("activation"), dict) else {}
+        risk_capital = evaluate_trade_intent_risk_capital_shadow(config, setup, ai_review, activation)
+        risk = risk_capital.get("risk") if isinstance(risk_capital.get("risk"), dict) else {}
+        capital = risk_capital.get("capital") if isinstance(risk_capital.get("capital"), dict) else {}
+        reasons = [str(value) for value in [*(risk.get("reasons") or []), capital.get("reason")] if value and value != "OK"]
+        previous_labels = set(_compact_hold_block_reason_labels([str(reason) for reason in item.get("block_reasons") or []]))
+        current_labels = set(_compact_hold_block_reason_labels(reasons))
+        resolved_reasons = sorted(previous_labels - current_labels)
+        if bool(capital.get("approved")) and bool(risk.get("approved")):
+            ready_item = {
+                **item,
+                "updated_at": now.isoformat(),
+                "status": "ready_for_order",
+                "block_type": "cleared",
+                "block_reasons": [],
+                "block_resolved_reasons": sorted(previous_labels),
+                "risk_capital": risk_capital,
+            }
+            _notify_approved_hold_event(config, "ready", ready_item, _approved_hold_settings(config))
+            checked.append({"key": key, "symbol": item.get("symbol"), "side": item.get("side"), "action": "ready_for_order"})
+            continue
+        settings = _approved_hold_settings(config)
+        updated_item = {
+            **item,
+            "updated_at": now.isoformat(),
+            "next_recheck_at": (now + timedelta(seconds=settings["recheck_seconds"])).isoformat(),
+            "block_type": _approved_hold_block_type(reasons, risk.get("warnings") or []),
+            "block_reasons": reasons[:10],
+            "block_resolved_reasons": resolved_reasons,
+            "risk_capital": risk_capital,
+        }
+        if resolved_reasons or set(_compact_hold_block_reason_labels([str(reason) for reason in item.get("block_reasons") or []])) != current_labels:
+            _notify_approved_hold_event(config, "update", updated_item, settings)
+        next_items[str(key)] = updated_item
+        checked.append({"key": key, "symbol": item.get("symbol"), "side": item.get("side"), "action": "still_blocked"})
+    payload = {"updated_at": now.isoformat(), "count": len(next_items), "items": next_items, "checked": checked[-50:]}
+    set_journal_state(config, TREND_APPROVED_HOLD_QUEUE_STATE_KEY, json.dumps(to_jsonable(payload), ensure_ascii=False))
+    return payload
+
 def build_position_review_shadow(setup: dict[str, Any], ai_review: dict[str, Any], activation: dict[str, Any]) -> dict[str, Any]:
     decision = str(ai_review.get("decision") or "").upper()
     setup_state = str(setup.get("setup_state") or "")
@@ -1659,6 +2107,28 @@ def _watchlist_review_notification_context(config: dict[str, Any], item: dict[st
         "watchlist_ai_review_extend_minutes": extension_minutes if will_extend else 0,
     }
 
+def _ai_review_should_extend_watchlist(ai_review: dict[str, Any]) -> bool:
+    decision = str(ai_review.get("decision") or "").upper()
+    if decision == "APPROVE":
+        return True
+    if decision != "REVIEW":
+        return False
+    grade = str(ai_review.get("setup_grade") or "").upper()
+    if grade in {"S", "A", "B"}:
+        return True
+    if bool(ai_review.get("allow_recheck_if_setup_changes")):
+        return True
+    return _float(ai_review.get("entry_quality")) >= 70.0 or _float(ai_review.get("continuation_score")) >= 65.0
+
+def _ai_review_removes_watchlist_pair(ai_review: dict[str, Any]) -> bool:
+    decision = str(ai_review.get("decision") or "").upper()
+    if decision != "REJECT":
+        return False
+    reject_scope = str(ai_review.get("reject_scope") or "").upper()
+    reject_reason_type = str(ai_review.get("reject_reason_type") or "").upper()
+    remove_reasons = {"TREND_INVALID", "RR_BAD", "LIQUIDITY_RISK", "MARKET_CONFLICT", "SYSTEM_RISK"}
+    return reject_scope == "WATCHLIST_REMOVE" or reject_reason_type in remove_reasons
+
 def _save_watchlist_ai_review_state(
     config: dict[str, Any],
     symbol: str,
@@ -1682,8 +2152,7 @@ def _save_watchlist_ai_review_state(
     decision = str(ai_review.get("decision") or "").upper()
     reject_scope = str(ai_review.get("reject_scope") or "").upper()
     reject_reason_type = str(ai_review.get("reject_reason_type") or "").upper()
-    remove_reasons = {"TREND_INVALID", "RR_BAD", "LIQUIDITY_RISK", "MARKET_CONFLICT", "SYSTEM_RISK"}
-    should_remove = decision == "REJECT" and (reject_scope == "WATCHLIST_REMOVE" or reject_reason_type in remove_reasons or previous_reject_count >= 1)
+    should_remove = _ai_review_removes_watchlist_pair(ai_review) or (decision == "REJECT" and previous_reject_count >= 1)
     if should_remove:
         internal = config.get("ai", {}).get("internal", {}) if isinstance(config.get("ai"), dict) else {}
         reject_cooldown_minutes = max(15, int(internal.get("trend_watchlist_reject_cooldown_minutes", 120) or 120))
@@ -1733,7 +2202,7 @@ def _save_watchlist_ai_review_state(
             or 0
         ),
     )
-    if extension_minutes > 0:
+    if extension_minutes > 0 and _ai_review_should_extend_watchlist(ai_review):
         current_expires_at = _parse_time(item.get("expires_at"))
         extended_expires_at = now + timedelta(minutes=extension_minutes)
         if current_expires_at is None or current_expires_at < extended_expires_at:
@@ -1760,7 +2229,14 @@ def run_trend_auto_shadow_reviews(config: dict[str, Any], watchlist: dict[str, A
     call_ai = bool(internal.get("trend_setup_review_ai_enabled", False))
     items = watchlist.get("items") if isinstance(watchlist.get("items"), dict) else {}
     reviewed: list[dict[str, Any]] = []
-    for item in sorted(items.values(), key=lambda row: _float(row.get("trend_score")), reverse=True):
+    def _review_priority(row: dict[str, Any]) -> tuple[float, float]:
+        if str(row.get("status") or "") == "priority_rewatch" or str(row.get("source") or "") == "approved_hold_returned":
+            return (3.0, _float(row.get("trend_score")))
+        if str(row.get("watch_type") or "") == "post_move":
+            return (1.0, _float(row.get("trend_score")))
+        return (2.0, _float(row.get("trend_score")))
+
+    for item in sorted(items.values(), key=_review_priority, reverse=True):
         if len(reviewed) >= limit:
             break
         if not isinstance(item, dict):
@@ -1898,6 +2374,19 @@ def build_trend_setup_review_flow(
     trade_memory_plan = build_trade_memory_plan_shadow(setup, activation)
     pool_reduction_plan = build_pool_reduction_plan_shadow()
     pending_state = upsert_trend_pending_plan(config, activation)
+    approved_hold_queue = None
+    if str(ai_review.get("decision") or "").upper() == "APPROVE" and not bool((risk_capital.get("capital") or {}).get("approved")):
+        try:
+            approved_hold_queue = upsert_trend_approved_hold_queue(
+                config,
+                setup=setup,
+                ai_review=ai_review,
+                activation=activation,
+                risk_capital=risk_capital,
+            )
+        except Exception as exc:
+            approved_hold_queue = {"error": str(exc)}
+            LOGGER.warning("Skipping approved hold queue upsert after error: %s", exc)
     result = {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "phase_completion": {
@@ -1926,6 +2415,7 @@ def build_trend_setup_review_flow(
         "pool_reduction_plan_shadow": pool_reduction_plan,
         "trade_memory_plan_shadow": trade_memory_plan,
         "pending_state": pending_state,
+        "approved_hold_queue": approved_hold_queue,
         "shadow_intent_context": shadow_intent,
     }
     key = f"{TREND_SETUP_REVIEW_LOG_PREFIX}:{_safe_token(setup.get('symbol'))}:{_safe_token(result['created_at'])}"
@@ -1998,6 +2488,15 @@ def persist_trend_scan_log(config: dict[str, Any], *, now: datetime | None = Non
         "expired_count": len(watchlist.get("expired") or []) if isinstance(watchlist.get("expired"), list) else None,
         "pending_confirmation_count": len(watchlist.get("pending_confirmations") or {}) if isinstance(watchlist.get("pending_confirmations"), dict) else 0,
     }
+    try:
+        snapshot["approved_hold_recheck"] = recheck_trend_approved_hold_queue(config, now=now)
+        snapshot["approved_hold_queue"] = process_trend_approved_hold_queue(config, now=now)
+        if (snapshot["approved_hold_queue"].get("processed") or []):
+            raw_watchlist = get_journal_state(config, TREND_WATCHLIST_STATE_KEY)
+            watchlist = json.loads(raw_watchlist or "{}")
+    except Exception as exc:
+        snapshot["approved_hold_queue"] = {"error": str(exc)}
+        LOGGER.warning("Skipping approved hold queue processing after error: %s", exc)
     try:
         snapshot["auto_shadow_reviews"] = run_trend_auto_shadow_reviews(config, watchlist)
     except Exception as exc:

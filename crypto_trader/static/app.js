@@ -1177,6 +1177,7 @@ function moduleStatusLabel(status) {
 
 function systemModuleKey(module) {
   if (!module) return "";
+  if (module.capital_management_group) return "capital-management::combined";
   return `${String(module.number ?? "").trim()}::${String(module.name || "").trim()}`;
 }
 
@@ -2959,9 +2960,11 @@ function formatMarketRegimeNumber(value, maximumFractionDigits = 4) {
   const number = marketRegimeFiniteValue(value);
   if (number === null) return "-";
   const absNumber = Math.abs(number);
-  const digits = maximumFractionDigits === 4 && absNumber > 0 && absNumber < 0.0001
-    ? 8
-    : maximumFractionDigits;
+  let digits = maximumFractionDigits;
+  if (maximumFractionDigits === 4 && absNumber > 0 && absNumber < 1) {
+    const leadingZeros = Math.max(0, Math.ceil(-Math.log10(absNumber)) - 1);
+    digits = Math.max(maximumFractionDigits, Math.min(12, leadingZeros + 5));
+  }
   return number.toLocaleString("en-US", {
     maximumFractionDigits: digits,
   });
@@ -5302,9 +5305,283 @@ function capitalManagementChartGroups(payload) {
   ];
 }
 
+function renderCapitalSyncSummaryCards(snapshot) {
+  const cards = [
+    { title: "Số dư ví", value: `${formatMarketRegimeNumber(snapshot.wallet_balance)}u`, meta: "OKX account", tone: "neutral" },
+    { title: "PnL thả nổi", value: `${formatMarketRegimeNumber(snapshot.unrealized_pnl)}u`, meta: "Không dùng để tăng vốn", tone: Number(snapshot.unrealized_pnl || 0) < 0 ? "danger" : "success" },
+    { title: "Vốn đã chốt", value: `${formatMarketRegimeNumber(snapshot.realized_capital)}u`, meta: "Số dư ví - PnL thả nổi", tone: "success" },
+    { title: "Khả dụng", value: `${formatMarketRegimeNumber(snapshot.available_balance)}u`, meta: "Có thể mở lệnh", tone: "neutral" },
+  ];
+  return `
+    <div class="market-pattern-summary-grid capital-sync-summary-grid">
+      ${cards.map((card) => `
+        <article class="market-pattern-summary-card capital-summary-${card.tone}">
+          <span>${escapeHtml(card.title)}</span>
+          <strong>${escapeHtml(card.value)}</strong>
+          <small>${escapeHtml(card.meta)}</small>
+        </article>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderCapitalSyncDetail(module, payload, options = {}) {
+  if (!refs.systemModuleDetail || !refs.systemModuleOverlay || !module) return;
+  const snapshot = payload.snapshot || {};
+  const detailRows = [
+    { label: "Số dư ví", value: `${formatMarketRegimeNumber(snapshot.wallet_balance)}u`, note: "Số dư OKX hiện tại.", tone: "neutral" },
+    { label: "PnL thả nổi", value: `${formatMarketRegimeNumber(snapshot.unrealized_pnl)}u`, note: "Lãi/lỗ của vị thế còn mở, chưa được tính là vốn thật.", tone: Number(snapshot.unrealized_pnl || 0) < 0 ? "danger" : "success" },
+    { label: "Vốn đã chốt", value: `${formatMarketRegimeNumber(snapshot.realized_capital)}u`, note: "Dùng làm nền vốn cho các quyết định giao dịch.", tone: "success" },
+    { label: "Khả dụng", value: `${formatMarketRegimeNumber(snapshot.available_balance)}u`, note: "Số dư có thể dùng để mở lệnh futures/cross theo OKX.", tone: "neutral" },
+  ];
+  state.selectedSystemModuleKey = systemModuleKey(module);
+  refs.systemModuleOverlay.hidden = false;
+  refs.systemModuleDetail.classList.add("module-detail-chart-scroll", "market-regime-detail");
+  refs.systemModuleDetail.innerHTML = `
+    <button class="module-close" type="button" aria-label="Đóng">×</button>
+    <div class="module-detail-head market-regime-head">
+      <div>
+        <span class="module-number">Module ${escapeHtml(module.number || "-")}</span>
+        <h3 id="systemModuleTitle">${escapeHtml(module.name || "-")}</h3>
+        <p>${escapeHtml(module.purpose || "-")}</p>
+      </div>
+      <div class="module-head-actions">
+        <span class="status-pill ${module.status === "ok" ? "ok" : "warn"}">${moduleStatusLabel(module.status)}</span>
+      </div>
+    </div>
+    <div class="module-chart-scroll market-regime-scroll capital-sync-clean">
+      <section class="market-regime-section">
+        <div class="market-regime-section-head"><div><strong>Tổng quan</strong><small>Vốn thật được đồng bộ từ OKX</small></div></div>
+        ${renderCapitalSyncSummaryCards(snapshot)}
+        <div class="capital-sync-formula">
+          <strong>Vốn đã chốt = Số dư ví - PnL thả nổi.</strong>
+          <span>PnL chưa đóng không dùng để tăng vốn giao dịch.</span>
+        </div>
+      </section>
+      <section class="market-regime-section">
+        <div class="market-regime-section-head"><div><strong>Chi tiết vốn</strong><small>Bảng vận hành ngắn gọn</small></div></div>
+        <div class="capital-sync-table" role="table" aria-label="Chi tiết Capital Sync">
+          <div class="capital-sync-table-head" role="row">
+            <span>Chỉ số</span>
+            <span>Giá trị</span>
+            <span>Ghi chú</span>
+          </div>
+          ${detailRows.map((row) => `
+            <div class="capital-sync-table-row capital-row-${row.tone}" role="row">
+              <span>${escapeHtml(row.label)}</span>
+              <strong>${escapeHtml(row.value)}</strong>
+              <small>${escapeHtml(row.note)}</small>
+            </div>
+          `).join("")}
+        </div>
+      </section>
+    </div>
+  `;
+  refs.systemModuleDetail.querySelector(".module-close")?.addEventListener("click", closeSystemModuleDetail);
+  if (Number.isFinite(Number(options.scrollTop))) {
+    const scrollNode = refs.systemModuleDetail.querySelector(".module-chart-scroll");
+    if (scrollNode) requestAnimationFrame(() => {
+      scrollNode.scrollTop = Number(options.scrollTop);
+    });
+  }
+}
+
+function capitalGroupModuleBySection(module, section) {
+  return (Array.isArray(module?.modules) ? module.modules : []).find((item) => (
+    String(item?.capital_management?.section || "") === section
+  )) || null;
+}
+
+function renderCapitalGroupAllocation(module) {
+  const reserveModule = capitalGroupModuleBySection(module, "capital_reserve");
+  const sizingModule = capitalGroupModuleBySection(module, "position_sizing");
+  const blocks = [
+    reserveModule ? {
+      title: "Phân bổ vốn",
+      subtitle: "Reserve, trading capital và phần còn dùng được",
+      html: renderCapitalManagementSummary(reserveModule, capitalManagementPayload(reserveModule)),
+    } : null,
+    sizingModule ? {
+      title: "Size lệnh kế tiếp",
+      subtitle: "Suggested size, margin cần dùng và trạng thái cấp vốn",
+      html: renderCapitalManagementSummary(sizingModule, capitalManagementPayload(sizingModule)),
+    } : null,
+  ].filter(Boolean);
+  return blocks.map((block) => `
+    <section class="market-regime-section">
+      <div class="market-regime-section-head"><div><strong>${escapeHtml(block.title)}</strong><small>${escapeHtml(block.subtitle)}</small></div></div>
+      ${block.html}
+    </section>
+  `).join("");
+}
+
+function renderCapitalGroupImpact(module) {
+  const impactModule = capitalGroupModuleBySection(module, "configuration_impact");
+  if (!impactModule) {
+    return `
+      <section class="market-regime-section">
+        <div class="module-chart-empty">Chưa có dữ liệu Tác động cấu hình.</div>
+      </section>
+    `;
+  }
+  const payload = capitalManagementPayload(impactModule);
+  const charts = capitalManagementChartGroups(payload);
+  return `
+    <section class="market-regime-section">
+      <div class="market-regime-section-head"><div><strong>Tác động cấu hình</strong><small>So sánh trước/sau và mức an toàn vốn</small></div></div>
+      ${renderCapitalManagementSummary(impactModule, payload)}
+    </section>
+    <section class="market-regime-section">
+      <div class="market-regime-section-head"><div><strong>Biểu đồ tác động</strong><small>Chỉ dùng khi cần kiểm tra cấu hình</small></div></div>
+      <div class="market-regime-chart-grid market-pattern-chart-grid">
+        ${charts.map((chart) => renderMarketPatternBarChart(chart)).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderCapitalGroupImpactV2(module) {
+  const impactModule = capitalGroupModuleBySection(module, "configuration_impact");
+  if (!impactModule) {
+    return `
+      <section class="market-regime-section">
+        <div class="module-chart-empty">Chưa có dữ liệu Tác động cấu hình.</div>
+      </section>
+    `;
+  }
+  const payload = capitalManagementPayload(impactModule);
+  const impact = payload.configuration_impact || {};
+  const charts = capitalManagementChartGroups(payload);
+  const riskLevel = String(impact.risk_level || "-").toUpperCase();
+  const tradingBefore = Number(impact.trading_capital_before || 0);
+  const tradingAfter = Number(impact.trading_capital_after || 0);
+  const requiredBefore = Number(impact.required_capital_before || 0);
+  const requiredAfter = Number(impact.required_capital_after || 0);
+  const safetyScore = Number(impact.safety_score || 0);
+  const isCritical = riskLevel === "CRITICAL" || requiredAfter > Math.max(tradingAfter, 0);
+  const conclusion = isCritical
+    ? "Cấu hình đề xuất không an toàn với vốn hiện tại."
+    : "Cấu hình đề xuất nằm trong vùng có thể kiểm soát.";
+  const reason = requiredAfter > Math.max(tradingAfter, 0)
+    ? `Required capital ${formatMarketRegimeNumber(requiredAfter)}u lớn hơn trading capital ${formatMarketRegimeNumber(tradingAfter)}u.`
+    : `Safety score hiện tại là ${formatMarketRegimeNumber(safetyScore)}/100.`;
+  const recommendation = isCritical
+    ? `Không tăng size/cấu hình lúc này. Chỉ giữ size an toàn ${formatMarketRegimeNumber(impact.max_safe_order_size)}u.`
+    : `Có thể dùng suggested size ${formatMarketRegimeNumber(impact.suggested_order_size)}u nếu các risk gate khác đều OK.`;
+  const rows = [
+    ["Trading capital", `${formatMarketRegimeNumber(tradingBefore)}u`, `${formatMarketRegimeNumber(tradingAfter)}u`, "Vốn có thể dùng sau reserve"],
+    ["Required capital", `${formatMarketRegimeNumber(requiredBefore)}u`, `${formatMarketRegimeNumber(requiredAfter)}u`, "Vốn cấu hình cần để chạy"],
+    ["Safety score", `${formatMarketRegimeNumber(safetyScore)}/100`, `${formatMarketRegimeNumber(safetyScore)}/100`, "Điểm an toàn vốn"],
+    ["Max safe size", "-", `${formatMarketRegimeNumber(impact.max_safe_order_size)}u`, "Size tối đa an toàn"],
+    ["Suggested size", "-", `${formatMarketRegimeNumber(impact.suggested_order_size)}u`, "Size đề xuất sau phân tích"],
+  ];
+  return `
+    <section class="market-regime-section">
+      <div class="market-regime-section-head"><div><strong>Kết luận</strong><small>Đọc nhanh trước khi xem biểu đồ</small></div></div>
+      <div class="capital-impact-decision ${isCritical ? "critical" : "safe"}">
+        <div>
+          <span>${escapeHtml(riskLevel)}</span>
+          <strong>${escapeHtml(conclusion)}</strong>
+          <small>${escapeHtml(reason)}</small>
+        </div>
+        <p>${escapeHtml(recommendation)}</p>
+      </div>
+    </section>
+    <section class="market-regime-section">
+      <div class="market-regime-section-head"><div><strong>Trước / Sau</strong><small>Các số chính cần so sánh</small></div></div>
+      <div class="capital-impact-table" role="table" aria-label="Tác động cấu hình">
+        <div class="capital-impact-table-head" role="row">
+          <span>Chỉ số</span>
+          <span>Trước</span>
+          <span>Sau</span>
+          <span>Ý nghĩa</span>
+        </div>
+        ${rows.map((row) => `
+          <div class="capital-impact-table-row ${row[0] === "Required capital" && requiredAfter > tradingAfter ? "danger" : ""}" role="row">
+            <span>${escapeHtml(row[0])}</span>
+            <strong>${escapeHtml(row[1])}</strong>
+            <strong>${escapeHtml(row[2])}</strong>
+            <small>${escapeHtml(row[3])}</small>
+          </div>
+        `).join("")}
+      </div>
+    </section>
+    <section class="market-regime-section">
+      <div class="market-regime-section-head"><div><strong>Biểu đồ tác động</strong><small>Phần phụ để kiểm tra trực quan</small></div></div>
+      <div class="market-regime-chart-grid market-pattern-chart-grid">
+        ${charts.map((chart) => renderMarketPatternBarChart(chart)).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderCapitalManagementGroupDetail(module, options = {}) {
+  if (!refs.systemModuleDetail || !refs.systemModuleOverlay || !module) return;
+  const syncModule = capitalGroupModuleBySection(module, "capital_sync");
+  const syncPayload = capitalManagementPayload(syncModule || {});
+  const snapshot = syncPayload.snapshot || {};
+  const activeTab = options.activeTab || state.selectedCapitalManagementTab || "capital";
+  state.selectedCapitalManagementTab = activeTab === "impact" ? "impact" : "capital";
+  state.selectedSystemModuleKey = systemModuleKey(module);
+  refs.systemModuleOverlay.hidden = false;
+  refs.systemModuleDetail.classList.add("module-detail-chart-scroll", "market-regime-detail");
+  const tab = state.selectedCapitalManagementTab;
+  refs.systemModuleDetail.innerHTML = `
+    <button class="module-close" type="button" aria-label="Đóng">×</button>
+    <div class="module-detail-head market-regime-head">
+      <div>
+        <span class="module-number">Capital</span>
+        <h3 id="systemModuleTitle">Capital Management</h3>
+        <p>Quản lý vốn OKX, phân bổ vốn, size lệnh kế tiếp và tác động cấu hình.</p>
+      </div>
+      <div class="module-head-actions">
+        <span class="status-pill ${module.status === "ok" ? "ok" : "warn"}">${moduleStatusLabel(module.status)}</span>
+      </div>
+    </div>
+    <div class="module-chart-scroll market-regime-scroll capital-sync-clean">
+      <div class="trade-execution-tabs capital-management-tabs" role="tablist" aria-label="Capital Management">
+        <button type="button" class="trade-execution-tab ${tab === "capital" ? "active" : ""}" data-capital-tab="capital">Vốn</button>
+        <button type="button" class="trade-execution-tab ${tab === "impact" ? "active" : ""}" data-capital-tab="impact">Tác động</button>
+      </div>
+      ${tab === "impact" ? renderCapitalGroupImpactV2(module) : `
+        <section class="market-regime-section">
+          <div class="market-regime-section-head"><div><strong>Vốn OKX</strong><small>Vốn thật được đồng bộ từ OKX</small></div></div>
+          ${renderCapitalSyncSummaryCards(snapshot)}
+          <div class="capital-sync-formula">
+            <strong>Vốn đã chốt = Số dư ví - PnL thả nổi.</strong>
+            <span>PnL chưa đóng không dùng để tăng vốn giao dịch.</span>
+          </div>
+        </section>
+        ${renderCapitalGroupAllocation(module)}
+      `}
+    </div>
+  `;
+  refs.systemModuleDetail.querySelector(".module-close")?.addEventListener("click", closeSystemModuleDetail);
+  refs.systemModuleDetail.querySelectorAll("[data-capital-tab]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedCapitalManagementTab = button.getAttribute("data-capital-tab") || "capital";
+      renderCapitalManagementGroupDetail(module, { activeTab: state.selectedCapitalManagementTab });
+    });
+  });
+  if (Number.isFinite(Number(options.scrollTop))) {
+    const scrollNode = refs.systemModuleDetail.querySelector(".module-chart-scroll");
+    if (scrollNode) requestAnimationFrame(() => {
+      scrollNode.scrollTop = Number(options.scrollTop);
+    });
+  }
+}
+
 function renderCapitalManagementDetail(module, options = {}) {
   if (!refs.systemModuleDetail || !refs.systemModuleOverlay || !module) return;
+  if (module.capital_management_group) {
+    renderCapitalManagementGroupDetail(module, options);
+    return;
+  }
   const payload = capitalManagementPayload(module);
+  if (String(payload.section || "") === "capital_sync") {
+    renderCapitalSyncDetail(module, payload, options);
+    return;
+  }
   const charts = capitalManagementChartGroups(payload);
   state.selectedSystemModuleKey = systemModuleKey(module);
   refs.systemModuleOverlay.hidden = false;
@@ -5374,11 +5651,48 @@ function activePositionTone(action) {
   return "unknown";
 }
 
+function compactSymbolLabel(symbol) {
+  const text = String(symbol || "-").trim();
+  if (!text || text === "-") return "-";
+  return text.split("/")[0].replace(/[^A-Z0-9]/gi, "") || text;
+}
+
+function activePositionExecutionMeta(execution) {
+  const reason = String(execution?.reason || "").trim();
+  if (execution?.submitted) return { label: "Live", tone: "bull", title: "Đã gửi lệnh OKX" };
+  if (execution?.error) return { label: "Lỗi", tone: "bear", title: String(execution.error || "Lỗi OKX") };
+  if (reason === "read_only_preview") return { label: "Preview", tone: "warn", title: "Chỉ xem trước, chưa gửi lệnh" };
+  if (reason === "not_applied_to_existing_position") return { label: "Skipped", tone: "unknown", title: "Không áp dụng vào vị thế hiện tại" };
+  if (reason === "execution_disabled_for_action") return { label: "Off", tone: "unknown", title: "Thực thi đang tắt cho hành động này" };
+  return { label: reason || "-", tone: "unknown", title: reason || "-" };
+}
+
+function activePositionReasonText(item) {
+  const reasons = Array.isArray(item?.reasons) ? item.reasons.filter(Boolean).map(String) : [];
+  const full = reasons.join("; ") || "-";
+  if (!reasons.length) return { short: "-", full };
+  let short = reasons[0];
+  short = short
+    .replace(/^Lệnh đang âm\s+/i, "Âm ")
+    .replace(/trong vùng DCA cho phép/i, "trong vùng DCA")
+    .replace(/vượt ngưỡng cắt chủ động/i, "vượt ngưỡng cắt")
+    .replace(/Vị thế đã chốt lời 30%;\s*/i, "Đã chốt 30%; ");
+  if (short.length > 72) short = `${short.slice(0, 69).trim()}...`;
+  return { short, full };
+}
+
+function activePositionScanLabel(item) {
+  const createdAt = item?.created_at;
+  if (!createdAt) return "-";
+  const time = timeOnlyLabel(createdAt);
+  return time || "-";
+}
+
 function renderActivePositionRows(items) {
   const rows = Array.isArray(items) ? items : [];
   if (!rows.length) return `<div class="market-regime-empty compact">Chưa có vị thế mở để review.</div>`;
   return `
-    <div class="table-wrap positions-table-wrap active-position-table">
+    <div class="table-wrap positions-table-wrap active-position-table compact-active-position-table">
       <table>
         <thead>
           <tr>
@@ -5387,26 +5701,32 @@ function renderActivePositionRows(items) {
             <th>Hành động</th>
             <th>R</th>
             <th>PnL</th>
-            <th>KL can thiệp</th>
-            <th>Thực thi</th>
+            <th>KL</th>
+            <th>Mode</th>
             <th>Lý do</th>
-            <th>Thời gian</th>
+            <th>Scan</th>
           </tr>
         </thead>
         <tbody>
-          ${rows.map((item) => `
-            <tr>
-              <td><strong>${escapeHtml(item.symbol || "-")}</strong><small>VT #${escapeHtml(item.trade_execution_id || "-")}</small></td>
+          ${rows.map((item) => {
+            const symbol = item.symbol || "-";
+            const execution = activePositionExecutionMeta(item.execution || {});
+            const reason = activePositionReasonText(item);
+            const scanLabel = activePositionScanLabel(item);
+            return `
+            <tr title="${escapeHtml(`${symbol} | ${reason.full}`)}">
+              <td><strong title="${escapeHtml(symbol)}">${escapeHtml(compactSymbolLabel(symbol))}</strong><small>ID ${escapeHtml(item.trade_execution_id || "-")}</small></td>
               <td>${escapeHtml(item.side || "-")}</td>
               <td><span class="market-regime-badge ${activePositionTone(item.action)}">${escapeHtml(activePositionActionLabel(item.action))}</span></td>
               <td>${escapeHtml(formatMarketRegimeNumber(item.r_multiple, 2))}R</td>
               <td>${escapeHtml(formatTradeExecutionPnl(item.pnl))}</td>
               <td>${escapeHtml(item.amount == null ? "-" : `${formatMarketRegimeNumber(item.amount)} (${formatMarketRegimeNumber(Number(item.fraction || 0) * 100, 0)}%)`)}</td>
-              <td>${escapeHtml(item.execution?.submitted ? "Đã gửi OKX" : item.execution?.error ? "Lỗi OKX" : item.execution?.reason || "-")}</td>
-              <td>${escapeHtml((Array.isArray(item.reasons) ? item.reasons.slice(0, 2).join("; ") : "") || "-")}</td>
-              <td>${escapeHtml(timeLabel(item.created_at))}</td>
+              <td><span class="market-regime-badge ${execution.tone}" title="${escapeHtml(execution.title)}">${escapeHtml(execution.label)}</span></td>
+              <td class="active-position-reason" title="${escapeHtml(reason.full)}">${escapeHtml(reason.short)}</td>
+              <td title="${escapeHtml(timeLabel(item.created_at))}">${escapeHtml(scanLabel)}</td>
             </tr>
-          `).join("")}
+          `;
+          }).join("")}
         </tbody>
       </table>
     </div>
@@ -5464,8 +5784,121 @@ function renderActivePositionManagerDetail(module, options = {}) {
   }
 }
 
+function trendHoldCount(payload, key) {
+  const value = Number(payload?.[key]);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function trendHoldItemRows(items, emptyText) {
+  const rows = Array.isArray(items) ? items.filter(Boolean).slice(0, 12) : [];
+  if (!rows.length) {
+    return `<div class="trend-hold-empty">${escapeHtml(emptyText)}</div>`;
+  }
+  return rows.map((item) => {
+    const symbol = item.symbol || item.pair || item.market || "-";
+    const side = String(item.side || item.direction || "-").toUpperCase();
+    const status = item.status || "-";
+    const reason = item.block_reason || item.reason || item.last_block_reason || "-";
+    const expires = item.expires_at || item.expire_at || item.ttl_until || item.watchlist_expires_at || "-";
+    const cleared = Array.isArray(item.cleared_reasons) ? item.cleared_reasons.join(", ") : (item.block_cleared || item.cleared || "");
+    return `
+      <article class="trend-hold-row">
+        <div>
+          <strong>${escapeHtml(symbol)}</strong>
+          <span>${escapeHtml(side)} · ${escapeHtml(status)}</span>
+        </div>
+        <div>
+          <small>Block</small>
+          <span>${escapeHtml(reason)}</span>
+        </div>
+        <div>
+          <small>Block đã gỡ</small>
+          <span>${escapeHtml(cleared || "-")}</span>
+        </div>
+        <div>
+          <small>Hết hạn</small>
+          <span>${escapeHtml(timeLabel(expires) || String(expires || "-"))}</span>
+        </div>
+      </article>
+    `;
+  }).join("");
+}
+
+function renderTrendApprovedHoldDetail(module, options = {}) {
+  if (!refs.systemModuleDetail || !refs.systemModuleOverlay || !module) return;
+  const payload = module.trend_approved_hold || {};
+  const queueCount = trendHoldCount(payload, "queue_count");
+  const readyCount = trendHoldCount(payload, "ready_count");
+  const priorityCount = trendHoldCount(payload, "priority_rewatch_count");
+  const total = queueCount + readyCount + priorityCount;
+  const summary = total
+    ? `${queueCount} setup đang giữ · ${readyCount} sẵn sàng · ${priorityCount} quay lại watchlist ưu tiên`
+    : "Không có setup nào đang bị giữ trong queue";
+  refs.systemModuleOverlay.hidden = false;
+  refs.systemModuleDetail.classList.remove("market-regime-detail");
+  refs.systemModuleDetail.classList.add("module-detail-chart-scroll", "trend-hold-detail");
+  state.selectedSystemModuleKey = systemModuleKey(module);
+  refs.systemModuleDetail.innerHTML = `
+    <button id="systemModuleClose" class="module-close" type="button" aria-label="Đóng">×</button>
+    <div class="module-detail-head">
+      <div>
+        <span class="module-number">Module ${escapeHtml(module.number || "-")}</span>
+        <div class="module-title-line">
+          <h3 id="systemModuleTitle">${escapeHtml(module.name || "-")}</h3>
+        </div>
+        <p>${escapeHtml(module.purpose || "-")}</p>
+      </div>
+      <div class="module-head-actions">
+        <span class="status-pill ${module.status === "ok" ? "ok" : "warn"}">${moduleStatusLabel(module.status)}</span>
+      </div>
+    </div>
+    <div class="trend-hold-summary">
+      <div class="trend-hold-main-status">
+        <span>Trạng thái hiện tại</span>
+        <strong>${escapeHtml(summary)}</strong>
+        <small>Nguồn dữ liệu: trend_approved_hold_queue_state</small>
+      </div>
+      <div class="trend-hold-kpis">
+        <article><span>In Queue</span><strong>${queueCount}</strong><small>Đang chờ gỡ block</small></article>
+        <article><span>Ready</span><strong>${readyCount}</strong><small>Đã clear block</small></article>
+        <article><span>Priority Rewatch</span><strong>${priorityCount}</strong><small>Quay lại watchlist ưu tiên</small></article>
+      </div>
+      <div class="trend-hold-config">
+        <div><span>TTL queue</span><strong>30p</strong></div>
+        <div><span>Re-check</span><strong>2p/lần</strong></div>
+        <div><span>Gia hạn watchlist</span><strong>+30p</strong></div>
+      </div>
+    </div>
+    <div class="module-chart-scroll trend-hold-scroll">
+      <section class="trend-hold-section">
+        <div class="market-regime-section-head"><div><strong>Setup đang giữ</strong><small>Cặp đã được Mini approve nhưng Risk/Capital/System còn block</small></div></div>
+        ${trendHoldItemRows(payload.items, "Chưa có setup nào trong Approved Hold Queue.")}
+      </section>
+      <section class="trend-hold-section">
+        <div class="market-regime-section-head"><div><strong>Priority rewatch</strong><small>Cặp từ queue quay lại watchlist ưu tiên</small></div></div>
+        ${trendHoldItemRows(payload.priority_rewatch_items, "Chưa có setup nào quay lại watchlist ưu tiên.")}
+      </section>
+    </div>
+  `;
+  refs.systemModuleDetail.querySelector(".module-close")?.addEventListener("click", closeSystemModuleDetail);
+  if (Number.isFinite(Number(options.scrollTop))) {
+    const scrollNode = refs.systemModuleDetail.querySelector(".module-chart-scroll");
+    if (scrollNode) requestAnimationFrame(() => {
+      scrollNode.scrollTop = Number(options.scrollTop);
+    });
+  }
+}
+
 function renderModuleDetail(module, options = {}) {
   if (!refs.systemModuleDetail || !refs.systemModuleOverlay || !module) return;
+  if (module.name === "Trend Approved Hold Queue") {
+    renderTrendApprovedHoldDetail(module, options);
+    return;
+  }
+  if (module.capital_management_group) {
+    renderCapitalManagementGroupDetail(module, options);
+    return;
+  }
   if (isActivePositionManagerModule(module)) {
     renderActivePositionManagerDetail(module, options);
     return;
@@ -5589,6 +6022,7 @@ function groupedSystemModules(modules) {
     "Thực thi giao dịch & Quản lý vị thế": { event: "Sau khi mở lệnh, partial close hoặc amend SL/TP", schedule: "Theo runtime/trailing stop", interval: "1 phút" },
     "Bunny Health Monitor": { event: "Ngay khi lệnh đóng", schedule: "5 phút/lần để đối chiếu", interval: "5 phút" },
     "Recovery Chain Manager": { event: "Ngay khi lệnh đóng", schedule: "5 phút/lần để đối chiếu", interval: "5 phút" },
+    "Trend Approved Hold Queue": { event: "Khi setup được AI duyệt nhưng còn bị block", schedule: "Re-check 2 phút/lần", interval: "2 phút" },
     "Prompt Caching": { event: "Ghi token mỗi request", schedule: "Tổng hợp 6h sáng", interval: "6h sáng" },
   };
   const realModules = new Map(
@@ -5612,11 +6046,24 @@ function groupedSystemModules(modules) {
     realModules.get("Position Sizing"),
     realModules.get("Configuration Impact"),
   ].filter(Boolean);
+  const capitalManagementModule = capitalModules.length ? {
+    number: "Capital",
+    name: "Capital Management",
+    purpose: "Quản lý vốn OKX, phân bổ vốn, size lệnh kế tiếp và tác động cấu hình.",
+    status: capitalModules.some((module) => module.status !== "ok") ? "warn" : "ok",
+    update_event: "Sau nạp/rút, sau lệnh đóng",
+    update_schedule: "5 phút/lần đồng bộ OKX",
+    update_interval: "5 phút",
+    capital_management_group: true,
+    modules: capitalModules,
+    stats: capitalModules.flatMap((module) => Array.isArray(module.stats) ? module.stats : []),
+  } : null;
   const tradeExecutionModule = realModules.get("Thá»±c thi giao dá»‹ch & Quáº£n lÃ½ vá»‹ tháº¿") || realModules.get("Trade Execution & Position Management") || positionManagementBaseModule(sourceRows);
   const activePositionManagerModule = sourceRows.find((module) => isActivePositionManagerModule(module));
   const positionManagementModules = [
     ...positionManagementSections(tradeExecutionModule),
     activePositionManagerModule,
+    realModules.get("Trend Approved Hold Queue"),
   ].filter(Boolean);
   return [
     {
@@ -5673,7 +6120,9 @@ function groupedSystemModules(modules) {
       subtitle_vi: "Quản lý vốn",
       event_text: "Sau nạp/rút, sau lệnh đóng",
       schedule_text: "5 phút/lần đồng bộ OKX",
-      items: capitalModules,
+      items: [
+        capitalManagementModule,
+      ].filter(Boolean),
     },
     {
       key: "ai-optimization",
@@ -5744,7 +6193,6 @@ function renderSystemModules(modules) {
     });
 
     group.items.forEach((module) => {
-      const configFileLabel = module.has_file ? (module.file?.relative_path || module.file?.file_name || "-") : "Chưa có file .txt cấu hình";
       const updateIntervalLabel = normalizeVietnameseIntervalLabel(module.update_interval || module.update_schedule || module.update_event || "-");
       const runtimeUpdatedLabel = moduleUpdatedLabel(module);
       const displayName = marketRegimeModuleName(module);
@@ -5760,7 +6208,6 @@ function renderSystemModules(modules) {
             return `<small class="module-localized-name ${isJournalLabel || isOrderLabel ? "module-secondary-label" : ""}">${escapeHtml(line)}</small>`;
           }).join("")
         : "";
-      const hideConfigFile = isPositionManagementSection(module) && ["overview", "profit_protection"].includes(module.position_management_section);
       const attentionRows = Array.isArray(module.stats) ? module.stats.filter((row) => row && row.attention) : [];
       const displayRows = moduleDisplayRows(module, Array.isArray(module.stats) ? module.stats : []);
       const changedVariableCount = moduleChangedVariableCount(module, displayRows);
@@ -5791,7 +6238,6 @@ function renderSystemModules(modules) {
           ${displaySubtitleHtml}
           <small>${escapeHtml(module.purpose || "-")}</small>
           <span class="module-update-note"><b>Thời gian cập nhật:</b> <span class="module-update-value">${escapeHtml(runtimeUpdatedLabel || "-")}</span><em class="module-update-badge">mỗi ${escapeHtml(updateIntervalLabel)}/1 lần</em></span>
-          ${hideConfigFile ? "" : `<span class="module-file"><b>File cấu hình:</b> <span class="module-file-value" title="${escapeHtml(configFileLabel)}">${escapeHtml(configFileLabel)}</span></span>`}
         </div>
       `;
       card.addEventListener("click", () => {
@@ -6457,10 +6903,11 @@ async function loadSystemChecklist(date = "", options = {}) {
   if (!date) state.systemModuleAiRange = aiRange;
   const requestSeq = date ? null : ++state.systemChecklistRequestSeq;
   const forceParam = options.forceRefresh ? "&force_refresh=true" : "";
+  const fastParam = !date && !options.forceRefresh ? "&fast=true" : "";
   const aiRangeParam = !date ? `&ai_range=${encodeURIComponent(aiRange)}` : "";
   const url = date
     ? `/api/system-checklist?date=${encodeURIComponent(date)}&_=${Date.now()}`
-    : `/api/system-checklist?_=${Date.now()}${forceParam}${aiRangeParam}`;
+    : `/api/system-checklist?_=${Date.now()}${forceParam}${fastParam}${aiRangeParam}`;
   const request = (async () => {
     const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -7041,7 +7488,7 @@ refs.refreshBtn.addEventListener("click", () => {
   loadDecision().catch((err) => setStatus(`Lỗi: ${err.message}`));
   loadOkxPositions({ force: true }).catch((err) => setStatus(`Lỗi vi the OKX: ${err.message}`));
   loadLcPipeline().catch((err) => setStatus(`Lỗi LC pipeline: ${err.message}`));
-  loadSystemChecklist("", { forceRefresh: true, aiRange: "current" }).catch((err) => setStatus(`Lỗi system health: ${err.message}`));
+  loadSystemChecklist("", { aiRange: "current" }).catch((err) => setStatus(`Lỗi system health: ${err.message}`));
 });
 refs.analyzeBtn.addEventListener("click", runAnalysis);
 refs.autoRun.addEventListener("change", resetAutoTimer);
@@ -7084,7 +7531,8 @@ window.addEventListener("keydown", (event) => {
     closeSystemModuleDetail();
   }
 });
-if (refs.systemChecklistToggle && refs.systemChecklistBody) {
+if (refs.systemChecklistBody) refs.systemChecklistBody.hidden = false;
+if (refs.systemChecklistToggle && refs.systemChecklistBody && !refs.systemChecklistToggle.hidden) {
   refs.systemChecklistToggle.addEventListener("click", () => {
     const isHidden = refs.systemChecklistBody.hasAttribute("hidden");
     refs.systemChecklistBody.toggleAttribute("hidden", !isHidden);

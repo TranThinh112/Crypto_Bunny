@@ -213,6 +213,23 @@ market_guard:
 position_sizing:
   enabled: true
   base_margin_usdt: 2.0
+  quality_margin_enabled: true
+  quality_margin_percent_by_grade:
+    S: 10.0
+    A: 7.0
+    B: 5.0
+    C: 2.0
+    D: 0.0
+  quality_margin_mode_multiplier:
+    HEALTHY: 1.0
+    WARNING: 0.75
+    RECOVERY: 0.5
+    CRITICAL: 0.0
+  quality_margin_max_loss_percent_by_mode:
+    HEALTHY: 5.0
+    WARNING: 3.75
+    RECOVERY: 2.5
+    CRITICAL: 0.0
   target_profit_usdt: 0.30
   tp_roi: 0.75
   sl_roi: 0.50

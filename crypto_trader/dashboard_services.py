@@ -41,6 +41,7 @@ from .codex_features import (
 from .market_guard import market_guard_block_status
 from .models import to_jsonable
 from .sizing import STATE_KEY as SIZING_STATE_KEY
+from .trend_scan import TREND_APPROVED_HOLD_QUEUE_STATE_KEY, TREND_WATCHLIST_STATE_KEY
 from .storage import (
     count_pending_orders,
     dashboard_snapshot_cache_version,
@@ -67,6 +68,69 @@ DASHBOARD_SNAPSHOT_PREFIX = "dashboard_snapshot"
 DASHBOARD_DEFAULT_TTL_SECONDS = 300
 TRADE_INTENT_SHADOW_LOG_PREFIX = "trade_intent_shadow_log"
 TRADE_INTENT_SHADOW_LAST_SOURCE_KEY = "trade_intent_shadow_last_source"
+
+def _trend_approved_hold_dashboard(config: dict[str, Any]) -> dict[str, Any]:
+    try:
+        queue = json.loads(get_journal_state(config, TREND_APPROVED_HOLD_QUEUE_STATE_KEY) or "{}")
+    except Exception as exc:
+        queue = {"error": str(exc), "items": {}}
+    try:
+        watchlist = json.loads(get_journal_state(config, TREND_WATCHLIST_STATE_KEY) or "{}")
+    except Exception:
+        watchlist = {"items": {}}
+    queue_items = [dict(item) for item in (queue.get("items") or {}).values() if isinstance(item, dict)]
+    priority_items = [
+        dict(item)
+        for item in (watchlist.get("items") or {}).values()
+        if isinstance(item, dict)
+        and (str(item.get("status") or "") == "priority_rewatch" or str(item.get("source") or "") == "approved_hold_returned")
+    ]
+    ready_items = [item for item in queue_items if str(item.get("status") or "") == "ready_for_order"]
+    return {
+        "ok": not queue.get("error"),
+        "error": queue.get("error"),
+        "updated_at": queue.get("updated_at"),
+        "queue_count": len(queue_items),
+        "ready_count": len(ready_items),
+        "priority_rewatch_count": len(priority_items),
+        "processed": queue.get("processed") or [],
+        "checked": queue.get("checked") or [],
+        "items": queue_items[:20],
+        "priority_rewatch_items": priority_items[:20],
+    }
+
+def _trend_approved_hold_module(config: dict[str, Any]) -> dict[str, Any]:
+    approved_hold_dashboard = _trend_approved_hold_dashboard(config)
+    return {
+        "number": 13.5,
+        "name": "Trend Approved Hold Queue",
+        "purpose": "Theo doi cac setup Trend da duoc Mini approve nhung dang bi block truoc khi vao lenh.",
+        "status": "ok" if not approved_hold_dashboard.get("error") else "warn",
+        "trend_approved_hold": approved_hold_dashboard,
+        "update_event": "Sau Mini APPROVE bi block va moi lan trend scan recheck queue",
+        "update_schedule": "Moi trend scan; recheck theo cau hinh 120 giay",
+        "update_interval": "event-driven/120 giay",
+        "stats": [
+            _module_row("queue_count", approved_hold_dashboard.get("queue_count"), "So setup dang nam trong Approved Hold Queue.", attention=bool(approved_hold_dashboard.get("queue_count"))),
+            _module_row("ready_count", approved_hold_dashboard.get("ready_count"), "So setup da clear block va san sang di tiep vao order.", attention=bool(approved_hold_dashboard.get("ready_count"))),
+            _module_row("priority_rewatch_count", approved_hold_dashboard.get("priority_rewatch_count"), "So setup tu queue quay lai watchlist uu tien 30p.", attention=bool(approved_hold_dashboard.get("priority_rewatch_count"))),
+            _module_row("last_checked", (approved_hold_dashboard.get("checked") or [{}])[-1].get("action") if approved_hold_dashboard.get("checked") else "-", "Ket qua recheck queue gan nhat."),
+            _module_row("last_processed", (approved_hold_dashboard.get("processed") or [{}])[-1].get("action") if approved_hold_dashboard.get("processed") else "-", "Huong xu ly gan nhat khi queue het TTL."),
+            _module_row("updated_at", approved_hold_dashboard.get("updated_at"), "Thoi diem queue duoc cap nhat gan nhat."),
+            _module_row("error", approved_hold_dashboard.get("error") or "-", "Loi doc queue neu co.", attention=bool(approved_hold_dashboard.get("error"))),
+        ],
+    }
+
+def _ensure_trend_approved_hold_module(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    modules = payload.get("modules")
+    if not isinstance(modules, list):
+        return payload
+    if any(isinstance(module, dict) and module.get("name") == "Trend Approved Hold Queue" for module in modules):
+        return payload
+    next_payload = dict(payload)
+    next_payload["modules"] = [*modules, _trend_approved_hold_module(config)]
+    next_payload["module_count"] = len(next_payload["modules"])
+    return next_payload
 
 def _safe_log_token(value: Any) -> str:
     token = re.sub(r"[^0-9A-Za-z_.:-]+", "_", str(value or "").strip())
@@ -1916,6 +1980,7 @@ def system_modules_payload(
                 "side": "LONG",
                 "mode": capital_mode,
                 "leverage": config.get("exchange", {}).get("leverage", 1),
+                "setup_grade": "S",
             },
         )
     except Exception as exc:
@@ -1924,6 +1989,7 @@ def system_modules_payload(
         config_impact = analyze_configuration_change(config, {})
     except Exception as exc:
         config_impact = {"risk_level": "UNKNOWN", "is_safe": False, "summary": str(exc), "warnings": [str(exc)]}
+    approved_hold_dashboard = _trend_approved_hold_dashboard(config)
     capital_snapshot_ok = bool(capital_snapshot.get("ok", True)) and capital_snapshot.get("realized_capital") is not None
     capital_reserve_ok = bool(capital_reserve_state.get("ok", True)) and capital_reserve_state.get("realized_capital") is not None
     capital_position_ok = bool(capital_position_size.get("allowed"))
@@ -2224,13 +2290,39 @@ def system_modules_payload(
                 _module_row("mode", capital_position_size.get("mode") or capital_mode, "Mode dung de chon risk percent."),
                 _module_row("risk_percent", capital_position_size.get("risk_percent"), "Risk percent theo mode hien tai.", attention=True),
                 _module_row("risk_amount", capital_position_size.get("risk_amount"), "So USDT rui ro toi da theo trading capital."),
+                _module_row("effective_risk_amount", capital_position_size.get("effective_risk_amount"), "So USDT rui ro thuc te sau quality margin neu co."),
+                _module_row("effective_risk_source", capital_position_size.get("effective_risk_source") or "-", "Nguon quyet dinh risk: risk_percent hoac quality_margin_loss_cap."),
                 _module_row("available_trading_capital", capital_position_size.get("available_trading_capital"), "Trading capital con trong de cap margin."),
                 _module_row("max_order_size_by_risk", capital_position_size.get("max_order_size_by_risk"), "Order size toi da theo risk."),
                 _module_row("max_order_size_by_capital", capital_position_size.get("max_order_size_by_capital"), "Order size toi da theo gioi han trading capital."),
+                _module_row("quality_margin_enabled", _module_bool_percent(capital_position_size.get("quality_margin_enabled")), "100 nghia la dang bat margin target theo grade setup.", attention=bool(capital_position_size.get("quality_margin_enabled"))),
+                _module_row("quality_margin_setup_grade", capital_position_size.get("quality_margin_setup_grade") or "-", "Grade setup dung de tinh quality margin."),
+                _module_row("quality_margin_target_margin", capital_position_size.get("quality_margin_target_margin"), "Margin muc tieu theo % trading capital va grade."),
+                _module_row("quality_margin_max_loss_amount", capital_position_size.get("quality_margin_max_loss_amount"), "Tran lo toi da neu hit SL theo mode."),
+                _module_row("quality_margin_order_size", capital_position_size.get("quality_margin_order_size"), "Order size sau boost quality margin va cap lo."),
                 _module_row("suggested_order_size", capital_position_size.get("suggested_order_size"), "Khoi luong vi the de xuat."),
                 _module_row("required_margin", capital_position_size.get("required_margin"), "Margin can dung cho suggested order."),
                 _module_row("allowed", _module_bool_percent(capital_position_size.get("allowed")), "100 nghia la sizing hien tai hop le."),
                 _module_row("reason", capital_position_size.get("reason") or "-", "Ly do sizing duoc chap nhan hoac bi tu choi.", attention=not capital_position_ok),
+            ],
+        },
+        {
+            "number": 13.5,
+            "name": "Trend Approved Hold Queue",
+            "purpose": "Theo doi cac setup Trend da duoc Mini approve nhung dang bi block truoc khi vao lenh.",
+            "status": "ok" if not approved_hold_dashboard.get("error") else "warn",
+            "trend_approved_hold": approved_hold_dashboard,
+            "update_event": "Sau Mini APPROVE bi block va moi lan trend scan recheck queue",
+            "update_schedule": "Moi trend scan; recheck theo cau hinh 120 giay",
+            "update_interval": "event-driven/120 giay",
+            "stats": [
+                _module_row("queue_count", approved_hold_dashboard.get("queue_count"), "So setup dang nam trong Approved Hold Queue.", attention=bool(approved_hold_dashboard.get("queue_count"))),
+                _module_row("ready_count", approved_hold_dashboard.get("ready_count"), "So setup da clear block va san sang di tiep vao order.", attention=bool(approved_hold_dashboard.get("ready_count"))),
+                _module_row("priority_rewatch_count", approved_hold_dashboard.get("priority_rewatch_count"), "So setup tu queue quay lai watchlist uu tien 30p.", attention=bool(approved_hold_dashboard.get("priority_rewatch_count"))),
+                _module_row("last_checked", (approved_hold_dashboard.get("checked") or [{}])[-1].get("action") if approved_hold_dashboard.get("checked") else "-", "Ket qua recheck queue gan nhat."),
+                _module_row("last_processed", (approved_hold_dashboard.get("processed") or [{}])[-1].get("action") if approved_hold_dashboard.get("processed") else "-", "Huong xu ly gan nhat khi queue het TTL."),
+                _module_row("updated_at", approved_hold_dashboard.get("updated_at"), "Thoi diem queue duoc cap nhat gan nhat."),
+                _module_row("error", approved_hold_dashboard.get("error") or "-", "Loi doc queue neu co.", attention=bool(approved_hold_dashboard.get("error"))),
             ],
         },
         {
@@ -2920,6 +3012,7 @@ def system_checklist_payload(
     force_refresh: bool = False,
     max_age_seconds: int | None = SYSTEM_CHECKLIST_DEFAULT_TTL_SECONDS,
     ai_range: str = "current",
+    refresh_realtime: bool = True,
 ) -> dict[str, Any]:
     _ = max_age_seconds
     ai_range_key = _normalize_ai_decision_range(ai_range)
@@ -2929,23 +3022,29 @@ def system_checklist_payload(
             payload = _system_checklist_with_ai_range(config, snapshot, ai_range=ai_range_key)
         else:
             payload = _build_system_checklist_payload(config, automation=automation, ai_range=ai_range_key)
-        payload = _refresh_bunny_minimize_losses_in_payload(config, payload)
-        payload = _refresh_trade_execution_in_payload(config, payload)
-        payload = _refresh_capital_management_in_payload(config, payload)
+        if refresh_realtime:
+            payload = _refresh_bunny_minimize_losses_in_payload(config, payload)
+            payload = _refresh_trade_execution_in_payload(config, payload)
+            payload = _refresh_capital_management_in_payload(config, payload)
+        payload = _ensure_trend_approved_hold_module(config, payload)
         return attach_previous_system_checklist_snapshot(config, payload)
     date_key = _system_report_date(config)
     if not force_refresh:
         snapshot = _preferred_system_checklist_snapshot(config, date_key)
         if snapshot is not None:
-            snapshot = _refresh_bunny_minimize_losses_in_payload(config, snapshot)
-            snapshot = _refresh_trade_execution_in_payload(config, snapshot)
-            snapshot = _refresh_capital_management_in_payload(config, snapshot)
+            if refresh_realtime:
+                snapshot = _refresh_bunny_minimize_losses_in_payload(config, snapshot)
+                snapshot = _refresh_trade_execution_in_payload(config, snapshot)
+                snapshot = _refresh_capital_management_in_payload(config, snapshot)
+            snapshot = _ensure_trend_approved_hold_module(config, snapshot)
             return attach_previous_system_checklist_snapshot(config, snapshot)
         snapshot = _latest_system_checklist_snapshot(config)
         if isinstance(snapshot, dict) and str(snapshot.get("date") or "") == date_key:
-            snapshot = _refresh_bunny_minimize_losses_in_payload(config, snapshot)
-            snapshot = _refresh_trade_execution_in_payload(config, snapshot)
-            snapshot = _refresh_capital_management_in_payload(config, snapshot)
+            if refresh_realtime:
+                snapshot = _refresh_bunny_minimize_losses_in_payload(config, snapshot)
+                snapshot = _refresh_trade_execution_in_payload(config, snapshot)
+                snapshot = _refresh_capital_management_in_payload(config, snapshot)
+            snapshot = _ensure_trend_approved_hold_module(config, snapshot)
             return attach_previous_system_checklist_snapshot(config, snapshot)
     return refresh_system_checklist_snapshot(config, automation=automation, ai_range=ai_range_key)
 

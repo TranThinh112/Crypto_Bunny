@@ -925,6 +925,27 @@ class CodexFeaturesTest(TestCase):
 
         self.assertIn("Thời gian còn lại watchlist: 12p (+30p)", message)
 
+    def test_trend_reject_message_explains_watchlist_remove(self) -> None:
+        message = _ai_call_message(
+            {
+                "created_at": "2026-07-30T16:47:22+00:00",
+                "role": "mini",
+                "model": "gpt-5.4-mini",
+                "symbols": ["CAP/USDT:USDT"],
+                "status": "REJECT",
+                "decision": "REJECT",
+                "reject_scope": "WATCHLIST_REMOVE",
+                "reject_reason_type": "TREND_INVALID",
+                "watchlist_reject_cooldown_minutes": 120,
+                "prompt_version": "trend-setup-review-v1",
+                "reason": "trend invalid",
+            }
+        )
+
+        self.assertIn("REJECT (REMOVE_PAIR)", message)
+        self.assertIn("cooldown cặp/side", message)
+        self.assertIn("Cooldown: 120p", message)
+
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_bunny_minimize_losses_tracks_hard_peak_and_soft_threshold(self, _send_telegram_message) -> None:
         config = self._config()

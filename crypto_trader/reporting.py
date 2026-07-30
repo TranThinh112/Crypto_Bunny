@@ -1030,6 +1030,31 @@ def _balance_usdt(balance: dict[str, Any]) -> float | None:
     return None
 
 
+def _available_usdt(balance: dict[str, Any]) -> float | None:
+    usdt = balance.get("USDT") if isinstance(balance.get("USDT"), dict) else {}
+    for key in ("free", "available", "availBal"):
+        value = _float(usdt.get(key))
+        if value is not None:
+            return value
+    free = balance.get("free") if isinstance(balance.get("free"), dict) else {}
+    value = _float(free.get("USDT"))
+    if value is not None:
+        return value
+    info = balance.get("info", {}) if isinstance(balance.get("info"), dict) else {}
+    for account in info.get("data") or []:
+        for detail in account.get("details") or []:
+            if str(detail.get("ccy") or "").upper() == "USDT":
+                for key in ("availBal", "availEq", "cashBal"):
+                    value = _float(detail.get(key))
+                    if value is not None:
+                        return value
+        for key in ("availEq", "adjEq"):
+            value = _float(account.get(key))
+            if value is not None:
+                return value
+    return None
+
+
 def _latest_targets_by_position(config: dict[str, Any]) -> dict[tuple[str, str], dict[str, float | None]]:
     targets: dict[tuple[str, str], dict[str, float | None]] = {}
     for event in read_events(config):
@@ -1256,6 +1281,7 @@ def fetch_balance_snapshot(config: dict[str, Any], *, use_cache: bool = False) -
         "ok": True,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "balance_usdt": _balance_usdt(balance),
+        "available_usdt": _available_usdt(balance),
         "pending_count": count_pending_orders(config),
     })
 
@@ -1280,6 +1306,7 @@ def fetch_account_snapshot(config: dict[str, Any], *, use_cache: bool = False) -
                 "ok": True,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "balance_usdt": balance.get("balance_usdt"),
+                "available_usdt": balance.get("available_usdt"),
                 "positions": positions.get("positions") or [],
                 "pending_count": count_pending_orders(config),
             })
@@ -1287,6 +1314,7 @@ def fetch_account_snapshot(config: dict[str, Any], *, use_cache: bool = False) -
             "ok": False,
             "error": positions.get("error") or balance.get("error") or "Không lấy được dữ liệu tài khoản",
             "balance_usdt": balance.get("balance_usdt"),
+            "available_usdt": balance.get("available_usdt"),
             "positions": positions.get("positions") or [],
             "pending_count": count_pending_orders(config),
         }
@@ -1299,6 +1327,7 @@ def fetch_account_snapshot(config: dict[str, Any], *, use_cache: bool = False) -
         "ok": True,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "balance_usdt": _balance_usdt(balance),
+        "available_usdt": _available_usdt(balance),
         "positions": positions,
         "pending_count": count_pending_orders(config),
     })

@@ -832,13 +832,19 @@ def _ai_call_message(item: dict[str, Any]) -> str:
         title = "🤖 AI OKX 5.5 được gọi"
     else:
         title = "🤖 AI được gọi"
+    status_label = status
+    trend_status_meaning = ""
+    if is_trend_setup_review:
+        status_label, trend_status_meaning = _trend_review_status_label_and_meaning(item)
     lines = [
         title,
         f"Model: {item.get('model', '-')}",
         f"Cặp giao dịch: {symbols}",
-        f"Trạng thái: {status}",
+        f"Trạng thái: {status_label}",
     ]
     if is_trend_setup_review:
+        if trend_status_meaning:
+            lines.append(f"Ý nghĩa: {trend_status_meaning}")
         lines.append("Luồng: Trend Scan")
         method = _trend_sl_tp_method_label(item.get("sl_tp_method"))
         if method:
@@ -848,6 +854,9 @@ def _ai_call_message(item: dict[str, Any]) -> str:
             extend_minutes = _safe_int(item.get("watchlist_ai_review_extend_minutes"))
             suffix = f" (+{extend_minutes}p)" if extend_minutes > 0 else ""
             lines.append(f"Thời gian còn lại watchlist: {_safe_int(remaining)}p{suffix}")
+        cooldown_minutes = _safe_int(item.get("watchlist_reject_cooldown_minutes"))
+        if cooldown_minutes > 0:
+            lines.append(f"Cooldown: {cooldown_minutes}p")
         lines.append(f"Thời gian review setup: {_local_time_label(str(item.get('created_at') or _iso_now()))} VN")
         reason = str(item.get("reason") or "")
         if reason:
@@ -867,6 +876,21 @@ def _ai_call_message(item: dict[str, Any]) -> str:
     if item.get("latency_ms") is not None:
         lines.append(f"Độ trễ: {item.get('latency_ms')} ms")
     return "\n".join(lines)
+
+def _trend_review_status_label_and_meaning(item: dict[str, Any]) -> tuple[str, str]:
+    status = str(item.get("decision") or item.get("status") or "-").upper().strip()
+    reject_scope = str(item.get("reject_scope") or "").upper().strip()
+    reject_reason_type = str(item.get("reject_reason_type") or "").upper().strip()
+    remove_reasons = {"TREND_INVALID", "RR_BAD", "LIQUIDITY_RISK", "MARKET_CONFLICT", "SYSTEM_RISK"}
+    if status == "APPROVE":
+        return "APPROVE (APPROVED_SETUP)", "Qua vòng Mini; tiếp tục qua risk/capital trước khi vào lệnh."
+    if status == "REVIEW":
+        return "REVIEW (KEEP_SETUP)", "Chưa vào lệnh; giữ watchlist và chờ setup đẹp hơn."
+    if status == "REJECT":
+        if reject_scope == "WATCHLIST_REMOVE" or reject_reason_type in remove_reasons:
+            return "REJECT (REMOVE_PAIR)", "Loại khỏi watchlist và cooldown cặp/side này."
+        return "REJECT (REMOVE_SETUP)", "Setup hiện tại bị loại; giữ cặp nếu TTL còn."
+    return f"{status} (UNKNOWN)" if status and status != "-" else "-", "Chưa có phân loại rõ từ Mini."
 
 def _trend_sl_tp_method_label(value: Any) -> str:
     method = str(value or "").strip()

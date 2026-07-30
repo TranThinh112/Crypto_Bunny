@@ -3343,6 +3343,7 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
         date: str | None = None,
         force_refresh: bool = False,
         ai_range: str = "current",
+        fast: bool = False,
     ) -> dict[str, Any]:
         config = load_config(app.state.config_path)
         if date:
@@ -3355,6 +3356,7 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
             automation=_automation_status_payload(app),
             force_refresh=force_refresh,
             ai_range=ai_range,
+            refresh_realtime=not fast,
         )
 
     @app.get("/api/system-checklist/history")

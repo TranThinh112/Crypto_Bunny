@@ -380,6 +380,55 @@ class SystemChecklistPayloadTests(unittest.TestCase):
         recovery = next(item for item in modules if item["name"] == "Recovery Chain Manager")
         self.assertEqual(recovery["status"], "warn")
 
+    def test_trend_approved_hold_queue_module_summarizes_queue_and_rewatch(self) -> None:
+        queue_state = {
+            "updated_at": "2026-07-30T12:00:00+00:00",
+            "items": {
+                "CAP/USDT:USDT|long": {
+                    "symbol": "CAP/USDT:USDT",
+                    "side": "long",
+                    "status": "approved_hold",
+                    "block_type": "temporary_block",
+                }
+            },
+            "checked": [{"action": "still_blocked"}],
+        }
+        watchlist_state = {
+            "items": {
+                "ALLO/USDT:USDT|short": {
+                    "symbol": "ALLO/USDT:USDT",
+                    "side": "short",
+                    "status": "priority_rewatch",
+                }
+            }
+        }
+
+        def fake_get(_config, key):
+            if key == "trend_approved_hold_queue_state":
+                return json.dumps(queue_state)
+            if key == "trend_watchlist_state":
+                return json.dumps(watchlist_state)
+            return None
+
+        with patch("crypto_trader.dashboard_services.get_journal_state", side_effect=fake_get):
+            modules = system_modules_payload(
+                {},
+                checked_date="2026-07-12",
+                checked_at_iso="2026-07-12T09:00:00+00:00",
+                ai_history=[],
+                replay={},
+                strategy={},
+                regime={},
+                health={},
+                risk_state={},
+                row_counts={},
+            )
+
+        module = next(item for item in modules if item["name"] == "Trend Approved Hold Queue")
+        self.assertEqual(module["trend_approved_hold"]["queue_count"], 1)
+        self.assertEqual(module["trend_approved_hold"]["priority_rewatch_count"], 1)
+        self.assertEqual(module["stats"][0]["value"], 1)
+
     def test_health_monitor_critical_is_guard_warning_not_module_failure(self) -> None:
         health = {
             "isCritical": True,

@@ -77,6 +77,15 @@ def _capital_reserve_options(config: dict[str, Any]) -> dict[str, Any]:
 def _position_sizing_options(config: dict[str, Any]) -> dict[str, Any]:
     raw = config.get("position_sizing", {})
     leverage = _float(config.get("exchange", {}).get("leverage"), 1.0)
+    quality_margin_percent = raw.get("quality_margin_percent_by_grade")
+    if not isinstance(quality_margin_percent, dict):
+        quality_margin_percent = {"S": 10.0, "A": 7.0, "B": 5.0, "C": 2.0, "D": 0.0}
+    quality_mode_multiplier = raw.get("quality_margin_mode_multiplier")
+    if not isinstance(quality_mode_multiplier, dict):
+        quality_mode_multiplier = {"HEALTHY": 1.0, "WARNING": 0.75, "RECOVERY": 0.5, "CRITICAL": 0.0}
+    quality_max_loss_percent = raw.get("quality_margin_max_loss_percent_by_mode")
+    if not isinstance(quality_max_loss_percent, dict):
+        quality_max_loss_percent = {"HEALTHY": 5.0, "WARNING": 3.75, "RECOVERY": 2.5, "CRITICAL": 0.0}
     return {
         "enabled": bool(raw.get("enabled", True)),
         "normal_risk_percent": _float(raw.get("normal_risk_percent"), 1.0),
@@ -98,7 +107,53 @@ def _position_sizing_options(config: dict[str, Any]) -> dict[str, Any]:
         "base_margin_usdt": _float(raw.get("base_margin_usdt"), 2.0),
         "target_profit_usdt": _float(raw.get("target_profit_usdt"), 0.30),
         "max_recovery_step": _int(raw.get("max_recovery_step"), 4),
+        "quality_margin_enabled": bool(raw.get("quality_margin_enabled", False)),
+        "quality_margin_percent_by_grade": {
+            str(key).upper(): max(0.0, _float(value))
+            for key, value in quality_margin_percent.items()
+        },
+        "quality_margin_mode_multiplier": {
+            str(key).upper(): max(0.0, _float(value))
+            for key, value in quality_mode_multiplier.items()
+        },
+        "quality_margin_max_loss_percent_by_mode": {
+            str(key).upper(): max(0.0, _float(value))
+            for key, value in quality_max_loss_percent.items()
+        },
         "leverage": leverage,
+    }
+
+def _quality_margin_target(
+    options: dict[str, Any],
+    request: dict[str, Any],
+    *,
+    mode: str,
+    trading_capital: float,
+    leverage: float,
+    stop_loss_percent: float,
+) -> dict[str, Any]:
+    grade = str(request.get("setup_grade") or "").upper().strip()
+    if not bool(options.get("quality_margin_enabled")) or grade not in {"S", "A", "B", "C", "D"}:
+        return {"enabled": False}
+    grade_percent = _float((options.get("quality_margin_percent_by_grade") or {}).get(grade))
+    mode_multiplier = _float((options.get("quality_margin_mode_multiplier") or {}).get(mode), 1.0)
+    max_loss_percent = _float((options.get("quality_margin_max_loss_percent_by_mode") or {}).get(mode))
+    target_margin = max(0.0, trading_capital * grade_percent / 100.0 * mode_multiplier)
+    target_order_size = target_margin * leverage
+    max_loss_amount = max(0.0, trading_capital * max_loss_percent / 100.0)
+    max_order_by_loss_cap = max_loss_amount / max(stop_loss_percent / 100.0, 1e-12)
+    boosted_order_size = max(0.0, min(target_order_size, max_order_by_loss_cap))
+    return {
+        "enabled": True,
+        "setup_grade": grade,
+        "grade_margin_percent": grade_percent,
+        "mode_multiplier": mode_multiplier,
+        "target_margin": target_margin,
+        "target_order_size": target_order_size,
+        "max_loss_percent": max_loss_percent,
+        "max_loss_amount": max_loss_amount,
+        "max_order_size_by_loss_cap": max_order_by_loss_cap,
+        "boosted_order_size": boosted_order_size,
     }
 
 
@@ -122,6 +177,7 @@ def build_capital_snapshot(config: dict[str, Any], *, use_cache: bool = True) ->
             "created_at": _now_iso(),
         }
     wallet_balance = _float(account.get("balance_usdt"))
+    available_balance = _float(account.get("available_usdt"), wallet_balance)
     unrealized_pnl = _unrealized_pnl_from_account(account)
     realized_capital = calculate_realized_capital(wallet_balance, unrealized_pnl)
     return {
@@ -130,7 +186,7 @@ def build_capital_snapshot(config: dict[str, Any], *, use_cache: bool = True) ->
         "source": options["capital_source"],
         "quote_currency": options["quote_currency"],
         "wallet_balance": _round(wallet_balance),
-        "available_balance": _round(wallet_balance),
+        "available_balance": _round(available_balance),
         "equity": _round(wallet_balance),
         "unrealized_pnl": unrealized_pnl,
         "realized_capital": realized_capital,
@@ -331,6 +387,20 @@ def calculate_position_size(config: dict[str, Any], request: dict[str, Any]) -> 
     max_by_risk = risk_amount / max(stop_loss_percent / 100.0, 1e-12)
     max_by_capital = trading_capital * options["max_order_size_percent_of_trading_capital"] / 100.0
     raw_order_size = max(0.0, min(max_by_risk, max_by_capital))
+    quality_margin = _quality_margin_target(
+        options,
+        request,
+        mode=mode,
+        trading_capital=trading_capital,
+        leverage=leverage,
+        stop_loss_percent=stop_loss_percent,
+    )
+    if (
+        request.get("requested_order_size") in (None, "")
+        and bool(quality_margin.get("enabled"))
+        and _float(quality_margin.get("boosted_order_size")) > raw_order_size
+    ):
+        raw_order_size = _float(quality_margin.get("boosted_order_size"))
     requested = request.get("requested_order_size")
     order_size = _float(requested) if requested not in (None, "") else raw_order_size
     if requested not in (None, "") and order_size > raw_order_size:
@@ -351,6 +421,9 @@ def calculate_position_size(config: dict[str, Any], request: dict[str, Any]) -> 
     if order_size < options["min_order_size"]:
         allowed = False
         reason = "Suggested order size is below minimum"
+    estimated_loss = order_size * stop_loss_percent / 100.0
+    effective_risk_amount = estimated_loss if bool(quality_margin.get("enabled")) and estimated_loss > risk_amount else risk_amount
+    effective_risk_source = "quality_margin_loss_cap" if bool(quality_margin.get("enabled")) and estimated_loss > risk_amount else "risk_percent"
     result = {
         "allowed": bool(allowed),
         "reason": reason,
@@ -365,14 +438,22 @@ def calculate_position_size(config: dict[str, Any], request: dict[str, Any]) -> 
         "available_trading_capital": state.get("available_trading_capital"),
         "risk_percent": _round(risk_percent, 4),
         "risk_amount": _round(risk_amount),
+        "effective_risk_amount": _round(effective_risk_amount),
+        "effective_risk_source": effective_risk_source,
         "stop_loss_percent": _round(stop_loss_percent, 4),
         "take_profit_percent": _round(take_profit_percent, 4),
         "leverage": _round(leverage, 4),
         "max_order_size_by_risk": _round(max_by_risk, 2),
         "max_order_size_by_capital": _round(max_by_capital, 2),
+        "quality_margin_enabled": bool(quality_margin.get("enabled")),
+        "quality_margin_setup_grade": quality_margin.get("setup_grade"),
+        "quality_margin_target_margin": _round(quality_margin.get("target_margin"), 2),
+        "quality_margin_target_order_size": _round(quality_margin.get("target_order_size"), 2),
+        "quality_margin_max_loss_amount": _round(quality_margin.get("max_loss_amount"), 2),
+        "quality_margin_order_size": _round(quality_margin.get("boosted_order_size"), 2),
         "suggested_order_size": round(order_size, options["round_order_size_decimals"]),
         "required_margin": round(required_margin, options["round_margin_decimals"]),
-        "estimated_loss": _round(order_size * stop_loss_percent / 100.0, 2),
+        "estimated_loss": _round(estimated_loss, 2),
         "estimated_profit": _round(order_size * take_profit_percent / 100.0, 2),
     }
     return result
@@ -446,6 +527,7 @@ def calculate_trade_intent_position_size(
         "stop_loss_percent": stop_pct,
         "take_profit_percent": tp_pct,
         "risk_percent": risk_percent,
+        "setup_grade": ai_review.get("setup_grade") or intent.get("setup_grade"),
     }
     result = calculate_position_size(config, request)
     quantity = _round(_float(result.get("suggested_order_size")) / entry, 6) if entry > 0 else 0.0
