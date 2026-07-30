@@ -88,8 +88,15 @@ trading_risk:
   hard_to_soft_transition_cooldown_seconds: 900
   soft_recovery_risk_percent: 0.75
   soft_recovery_min_rule_score: 87
-  soft_recovery_min_gpt_confidence: 89
-  soft_recovery_min_risk_reward: 2.0
+  soft_recovery_min_gpt_confidence: 87
+  soft_recovery_min_win_probability_pct: 75
+  soft_recovery_min_risk_reward: 2.2
+  normal_min_gpt_confidence: 82
+  normal_min_win_probability_pct: 72
+  normal_min_risk_reward: 2.0
+  recovery_min_gpt_confidence: 92
+  recovery_min_win_probability_pct: 80
+  recovery_min_risk_reward: 2.5
 
 bunny_health_monitor:
   # Tranh khoa he thong vi mot mau thong ke qua nho (vi du chi 1 lenh thua).
@@ -287,8 +294,8 @@ strategy:
   timeframe: 1m
   ohlcv_limit: 180
   min_confidence: 75
-  min_win_probability_pct: 80
-  min_risk_reward: 1.5
+  min_win_probability_pct: 72
+  min_risk_reward: 2.0
   target:
     mode: risk_reward
     take_profit_pct: 75

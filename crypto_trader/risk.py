@@ -164,13 +164,11 @@ def evaluate_candidate(
     if stop_distance_pct > max_stop:
         reasons.append(f"Stop distance {stop_distance_pct:.2f}% exceeds maximum {max_stop:.2f}%")
 
-    if config["news"].get("require_symbol_news", True) and candidate.news_count <= 0:
-        reasons.append("No recent symbol-specific news confirmed the setup")
     conflict_threshold = float(risk_config.get("news_conflict_threshold", 2.0))
     if candidate.side == "long" and candidate.news_score <= -conflict_threshold:
-        reasons.append(f"News sentiment conflicts with LONG setup ({candidate.news_score:+.2f})")
+        warnings.append(f"News sentiment conflicts with LONG setup ({candidate.news_score:+.2f})")
     if candidate.side == "short" and candidate.news_score >= conflict_threshold:
-        reasons.append(f"News sentiment conflicts with SHORT setup ({candidate.news_score:+.2f})")
+        warnings.append(f"News sentiment conflicts with SHORT setup ({candidate.news_score:+.2f})")
 
     mode = config.get("mode", "dry_run")
     if mode == "live":

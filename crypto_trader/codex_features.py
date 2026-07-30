@@ -2877,15 +2877,18 @@ def get_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
             "recoveryModeRiskPercent": _safe_float(settings.get("recovery_mode_risk_percent"), 0.5),
             "normalMinRuleScore": _safe_float(settings.get("normal_min_rule_score"), 78),
             "normalMinGptConfidence": _safe_float(settings.get("normal_min_gpt_confidence"), 82),
+            "normalMinWinProbabilityPct": _safe_float(settings.get("normal_min_win_probability_pct"), 72),
             "normalMinRiskReward": _safe_float(settings.get("normal_min_risk_reward"), 1.8),
             "softRecoveryMinRuleScore": _safe_float(settings.get("soft_recovery_min_rule_score"), 87),
             "softRecoveryMinGptConfidence": _safe_float(settings.get("soft_recovery_min_gpt_confidence"), 89),
+            "softRecoveryMinWinProbabilityPct": _safe_float(settings.get("soft_recovery_min_win_probability_pct"), 75),
             "softRecoveryMinRiskReward": _safe_float(settings.get("soft_recovery_min_risk_reward"), 2.0),
             "strongSetupRuleScore": _safe_float(settings.get("strong_setup_rule_score"), 85),
             "strongSetupGptConfidence": _safe_float(settings.get("strong_setup_gpt_confidence"), 88),
             "strongSetupMinRiskReward": _safe_float(settings.get("strong_setup_min_risk_reward"), 2.0),
             "recoveryMinRuleScore": _safe_float(settings.get("recovery_min_rule_score"), 90),
             "recoveryMinGptConfidence": _safe_float(settings.get("recovery_min_gpt_confidence"), 92),
+            "recoveryMinWinProbabilityPct": _safe_float(settings.get("recovery_min_win_probability_pct"), 80),
             "recoveryMinRiskReward": _safe_float(settings.get("recovery_min_risk_reward"), 2.5),
             "pauseTradingLossStreak": _safe_int(settings.get("pause_trading_loss_streak"), 4),
             "pauseTradingHours": _safe_int(settings.get("pause_trading_hours"), 24),
@@ -3076,13 +3079,11 @@ def validate_entry(config: dict[str, Any], payload: dict[str, Any]) -> dict[str,
     reasons: list[str] = []
     rule_score = _safe_float(payload.get("ruleScore", payload.get("rule_score", payload.get("confidence"))))
     gpt_confidence = _safe_float(payload.get("gptConfidence", payload.get("gpt_confidence", payload.get("confidence"))))
+    win_probability = _safe_float(payload.get("winProbability", payload.get("win_probability_pct")), None)
     risk_reward = _safe_float(payload.get("riskReward", payload.get("risk_reward")), 0.0)
     spread = _safe_float(payload.get("spread", payload.get("spread_pct")), 0.0)
     funding_rate = _safe_float(payload.get("fundingRate", payload.get("funding_rate")), 0.0)
     volume_confirmed = bool(payload.get("volumeConfirmed", payload.get("volume_confirmed", True)))
-    no_high_impact_news = bool(
-        payload.get("noHighImpactNewsWithin60m", payload.get("no_high_impact_news_within_60m", True))
-    )
     entry_price = _safe_float(payload.get("entryPrice", payload.get("entry_price")), 0.0)
     current_price = _safe_float(payload.get("currentPrice", payload.get("current_price", entry_price)), entry_price)
     distance_pct = _entry_distance_pct(entry_price, current_price)
@@ -3097,6 +3098,7 @@ def validate_entry(config: dict[str, Any], payload: dict[str, Any]) -> dict[str,
         reasons.append(f"Da het slot: {open_count}/{settings.get('max_concurrent_positions')}")
     current_rule_threshold = float(state["currentNormalMinRuleScore"])
     current_conf_threshold = float(state["currentNormalMinGptConfidence"])
+    current_win_probability_threshold = _safe_float(settings.get("normal_min_win_probability_pct"), 72.0)
     normal_rr = _safe_float(settings.get("normal_min_risk_reward"), 1.8)
     if health["isWarning"]:
         current_rule_threshold += _safe_float(health["scoreAdjustment"], 0.0)
@@ -3109,6 +3111,10 @@ def validate_entry(config: dict[str, Any], payload: dict[str, Any]) -> dict[str,
             current_conf_threshold, _safe_float(settings.get("recovery_min_gpt_confidence"), 92)
         )
         normal_rr = max(normal_rr, _safe_float(settings.get("recovery_min_risk_reward"), 2.5))
+        current_win_probability_threshold = max(
+            current_win_probability_threshold,
+            _safe_float(settings.get("recovery_min_win_probability_pct"), 80.0),
+        )
     elif recovery_mode == "SOFT_RECOVERY":
         current_rule_threshold = max(
             current_rule_threshold, _safe_float(settings.get("soft_recovery_min_rule_score"), 87)
@@ -3117,21 +3123,25 @@ def validate_entry(config: dict[str, Any], payload: dict[str, Any]) -> dict[str,
             current_conf_threshold, _safe_float(settings.get("soft_recovery_min_gpt_confidence"), 89)
         )
         normal_rr = max(normal_rr, _safe_float(settings.get("soft_recovery_min_risk_reward"), 2.0))
+        current_win_probability_threshold = max(
+            current_win_probability_threshold,
+            _safe_float(settings.get("soft_recovery_min_win_probability_pct"), 75.0),
+        )
     if is_recovery:
         if abs(funding_rate) > _safe_float(settings.get("max_safe_funding_rate_abs"), 0.03):
             reasons.append(f"Funding rate {funding_rate:.4f} vuot nguong an toan")
         if spread > _safe_float(config.get("risk", {}).get("max_spread_pct"), 0.15):
             reasons.append(f"Spread {spread:.4f}% vuot nguong toi da")
-        if not volume_confirmed:
+        if recovery_mode == "HARD_RECOVERY" and not volume_confirmed:
             reasons.append("Volume chua xac nhan")
-        if not no_high_impact_news:
-            reasons.append("Co tin anh huong cao trong 60 phut")
         if distance_pct > _safe_float(settings.get("max_entry_distance_pct"), 0.6):
             reasons.append(f"Entry cach gia hien tai {distance_pct:.4f}% vuot nguong")
     if rule_score < current_rule_threshold:
         reasons.append(f"Rule score {rule_score:.2f} < {current_rule_threshold:.2f}")
     if gpt_confidence < current_conf_threshold:
         reasons.append(f"GPT confidence {gpt_confidence:.2f} < {current_conf_threshold:.2f}")
+    if win_probability is not None and win_probability < current_win_probability_threshold:
+        reasons.append(f"Win probability {win_probability:.2f}% < {current_win_probability_threshold:.2f}%")
     if risk_reward < normal_rr:
         reasons.append(f"Risk reward {risk_reward:.2f} < {normal_rr:.2f}")
     setup_quality = "REJECTED"
@@ -3178,12 +3188,12 @@ def apply_system_validation_to_candidate(config: dict[str, Any], candidate: Trad
             "side": candidate.side,
             "ruleScore": _candidate_rule_score(candidate),
             "gptConfidence": candidate.confidence,
+            "winProbability": candidate.win_probability_pct,
             "riskReward": candidate.risk_reward,
             "spread_pct": candidate.spread_pct,
             "entryPrice": candidate.entry,
             "currentPrice": candidate.entry,
             "volumeConfirmed": _safe_float(candidate.indicator_summary.get("volume_ratio"), 1.0) >= 1.0,
-            "noHighImpactNewsWithin60m": abs(candidate.news_score) < 4.0,
             "fundingRate": candidate.indicator_summary.get("funding_rate"),
         },
     )
@@ -3219,13 +3229,13 @@ def record_trade_execution(
             "side": candidate.side,
             "ruleScore": _candidate_rule_score(candidate),
             "gptConfidence": candidate.confidence,
+            "winProbability": candidate.win_probability_pct,
             "riskReward": candidate.risk_reward,
             "entryPrice": candidate.entry,
             "currentPrice": candidate.entry,
             "preferredPositionSlot": candidate.position_slot,
             "spread_pct": candidate.spread_pct,
             "volumeConfirmed": _safe_float(candidate.indicator_summary.get("volume_ratio"), 1.0) >= 1.0,
-            "noHighImpactNewsWithin60m": abs(candidate.news_score) < 4.0,
             "fundingRate": candidate.indicator_summary.get("funding_rate"),
         },
     )
@@ -3344,13 +3354,13 @@ def try_slot_refill(config: dict[str, Any], position_slot: int) -> dict[str, Any
                 "side": candidate.side,
                 "ruleScore": _candidate_rule_score(candidate),
                 "gptConfidence": candidate.confidence,
+                "winProbability": candidate.win_probability_pct,
                 "riskReward": candidate.risk_reward,
                 "entryPrice": candidate.entry,
                 "currentPrice": candidate.entry,
                 "preferredPositionSlot": position_slot,
                 "spread_pct": candidate.spread_pct,
                 "volumeConfirmed": _safe_float(candidate.indicator_summary.get("volume_ratio"), 1.0) >= 1.0,
-                "noHighImpactNewsWithin60m": abs(candidate.news_score) < 4.0,
                 "fundingRate": candidate.indicator_summary.get("funding_rate"),
             },
         )

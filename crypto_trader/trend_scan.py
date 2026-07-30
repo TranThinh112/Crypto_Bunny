@@ -1198,6 +1198,7 @@ def _review_prompt_package(setup: dict[str, Any], source_payload: dict[str, Any]
         "expected_json": {
             "decision": "APPROVE|REJECT|REVIEW",
             "setup_grade": "S|A|B|C|D",
+            "gpt_confidence": "required number 0-100; AI confidence that this setup is valid now",
             "entry_quality": "number 0-100",
             "continuation_score": "number 0-100",
             "pending_order_allowed": "boolean",
@@ -1312,6 +1313,11 @@ def normalize_ai_setup_review(review: dict[str, Any], setup: dict[str, Any]) -> 
         grade = "A" if entry_quality >= 84 else "B" if entry_quality >= 74 else "C" if entry_quality >= 62 else "D"
     warnings = review.get("warnings") if isinstance(review.get("warnings"), list) else []
     evidence = review.get("evidence") if isinstance(review.get("evidence"), list) else []
+    gpt_confidence_raw = review.get("gpt_confidence", review.get("gptConfidence"))
+    gpt_confidence = _float(gpt_confidence_raw, float("nan"))
+    if gpt_confidence != gpt_confidence or gpt_confidence < 0 or gpt_confidence > 100:
+        gpt_confidence = None
+        warnings = [*warnings, "gpt_confidence_missing_or_invalid"]
     hard_setup_block = setup.get("setup_state") == "blocked" or bool(set(setup.get("warnings") or []) & {"missing_entry_or_side", "risk_reward_too_low"})
     if hard_setup_block and decision == "APPROVE":
         decision = "REJECT"
@@ -1344,6 +1350,7 @@ def normalize_ai_setup_review(review: dict[str, Any], setup: dict[str, Any]) -> 
         **review,
         "decision": decision,
         "setup_grade": grade,
+        "gpt_confidence": None if gpt_confidence is None else round(gpt_confidence, 2),
         "entry_quality": round(_clamp(_float(review.get("entry_quality"), _float(setup.get("pullback_quality"), 0.0))), 2),
         "continuation_score": round(_clamp(_float(review.get("continuation_score"), _float(setup.get("breakout_quality"), 0.0))), 2),
         "pending_order_allowed": pending_allowed,
@@ -1428,7 +1435,8 @@ def _setup_to_candidate(config: dict[str, Any], setup: dict[str, Any], ai_review
     order_usdt = max(0.0, margin_usdt * leverage)
     entry_quality = _float(ai_review.get("entry_quality"), _float(setup.get("pullback_quality"), 0.0))
     continuation = _float(ai_review.get("continuation_score"), _float(setup.get("breakout_quality"), 0.0))
-    confidence = round(_clamp((entry_quality * 0.55) + (continuation * 0.45)), 2)
+    gpt_confidence = ai_review.get("gpt_confidence", ai_review.get("gptConfidence"))
+    confidence = round(_clamp(_float(gpt_confidence, 0.0)), 2)
     candidate = _mapping_to_candidate(
         {
             "symbol": setup.get("symbol"),

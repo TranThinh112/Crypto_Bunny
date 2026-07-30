@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 from copy import deepcopy
 from unittest import TestCase
+from unittest.mock import patch
 
 from crypto_trader.codex_features import get_trading_system_state
 from crypto_trader.config import DEFAULT_CONFIG
@@ -27,10 +28,18 @@ def _candidate(symbol: str = "BTC/USDT:USDT", side: str = "long") -> TradeCandid
         news_count=1,
         take_profit_pct=75,
         stop_loss_pct=50,
+        win_probability_pct=75.0,
     )
 
 
 class RiskTest(TestCase):
+    def setUp(self) -> None:
+        self.system_validation = patch(
+            "crypto_trader.risk.apply_system_validation_to_candidate",
+            return_value=([], []),
+        )
+        self.system_validation.start()
+
     def _config(self) -> dict:
         config = deepcopy(DEFAULT_CONFIG)
         config["mode"] = "demo"
@@ -47,6 +56,7 @@ class RiskTest(TestCase):
         return config
 
     def tearDown(self) -> None:
+        self.system_validation.stop()
         tmpdir = getattr(self, "tmpdir", None)
         if tmpdir:
             tmpdir.cleanup()
@@ -92,6 +102,29 @@ class RiskTest(TestCase):
         self.assertFalse(blocked.passed)
         self.assertIn("Win probability 76.50% is below minimum 80.00%", blocked.reasons)
         self.assertTrue(passed.passed)
+
+    def test_missing_symbol_news_does_not_block_entry(self) -> None:
+        config = self._config()
+        config["news"]["require_symbol_news"] = True
+        candidate = _candidate()
+        candidate.news_count = 0
+        candidate.news_score = 0.0
+
+        check = evaluate_candidate(config, candidate, active_summary=(0, set(), []))
+
+        self.assertTrue(check.passed)
+        self.assertNotIn("No recent symbol-specific news confirmed the setup", check.reasons)
+
+    def test_news_conflict_is_warning_not_hard_block(self) -> None:
+        config = self._config()
+        candidate = _candidate(side="long")
+        candidate.news_score = -3.0
+
+        check = evaluate_candidate(config, candidate, active_summary=(0, set(), []))
+
+        self.assertTrue(check.passed)
+        self.assertEqual(check.reasons, [])
+        self.assertIn("News sentiment conflicts with LONG setup (-3.00)", check.warnings)
 
     def test_trading_system_prefers_risk_max_active_when_trading_risk_not_overridden(self) -> None:
         state = get_trading_system_state(self._config())

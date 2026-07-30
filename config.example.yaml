@@ -66,8 +66,8 @@ strategy:
   timeframe: 1m
   ohlcv_limit: 180
   min_confidence: 75
-  min_win_probability_pct: 80
-  min_risk_reward: 1.5
+  min_win_probability_pct: 72
+  min_risk_reward: 2.0
   target:
     mode: roi_percent
     take_profit_pct: 75
@@ -133,6 +133,16 @@ risk:
   min_stop_distance_pct: 0.35
   max_stop_distance_pct: 6.0
   news_conflict_threshold: 2.0
+trading_risk:
+  normal_min_gpt_confidence: 82
+  normal_min_win_probability_pct: 72
+  normal_min_risk_reward: 2.0
+  soft_recovery_min_gpt_confidence: 87
+  soft_recovery_min_win_probability_pct: 75
+  soft_recovery_min_risk_reward: 2.2
+  recovery_min_gpt_confidence: 92
+  recovery_min_win_probability_pct: 80
+  recovery_min_risk_reward: 2.5
 execution:
   order_type: market
   attach_tp_sl: true

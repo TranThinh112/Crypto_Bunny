@@ -6,6 +6,9 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from crypto_trader.trend_scan import (
+    _review_prompt_package,
+    _setup_to_candidate,
+    normalize_ai_setup_review,
     process_trend_approved_hold_queue,
     recheck_trend_approved_hold_queue,
     run_trend_auto_shadow_reviews,
@@ -57,6 +60,52 @@ class TrendScanTest(TestCase):
         event = record_ai_call_event.call_args.args[1]
         self.assertEqual(event["sl_tp_method"], "atr_volatility_rr")
         self.assertEqual(event["symbols"], ["CAP/USDT:USDT"])
+
+    def test_trend_review_prompt_requires_gpt_confidence(self) -> None:
+        package = _review_prompt_package({"symbol": "CAP/USDT:USDT"}, {"symbol": "CAP/USDT:USDT"})
+
+        user = json.loads(package["messages"][1]["content"])
+
+        self.assertIn("gpt_confidence", user["expected_json"])
+        self.assertIn("required number 0-100", user["expected_json"]["gpt_confidence"])
+
+    def test_ai_review_uses_returned_gpt_confidence_without_calculating(self) -> None:
+        setup = {"symbol": "CAP/USDT:USDT", "side": "long", "entry_price": 1, "stop_loss": 0.98, "take_profit": 1.05, "risk_reward": 2.5}
+        normalized = normalize_ai_setup_review(
+            {
+                "decision": "APPROVE",
+                "setup_grade": "A",
+                "gpt_confidence": 93,
+                "entry_quality": 50,
+                "continuation_score": 50,
+            },
+            setup,
+        )
+
+        candidate = _setup_to_candidate(self._config(), setup, normalized)
+
+        self.assertEqual(normalized["gpt_confidence"], 93)
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate.confidence, 93)
+
+    def test_missing_gpt_confidence_is_not_inferred_from_quality_scores(self) -> None:
+        setup = {"symbol": "CAP/USDT:USDT", "side": "long", "entry_price": 1, "stop_loss": 0.98, "take_profit": 1.05, "risk_reward": 2.5}
+        normalized = normalize_ai_setup_review(
+            {
+                "decision": "APPROVE",
+                "setup_grade": "A",
+                "entry_quality": 99,
+                "continuation_score": 99,
+            },
+            setup,
+        )
+
+        candidate = _setup_to_candidate(self._config(), setup, normalized)
+
+        self.assertIsNone(normalized["gpt_confidence"])
+        self.assertIn("gpt_confidence_missing_or_invalid", normalized["warnings"])
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate.confidence, 0)
 
     def test_weak_review_notification_does_not_show_extension(self) -> None:
         setup = {

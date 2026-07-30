@@ -26,6 +26,7 @@ from crypto_trader.codex_features import (
     refresh_bunny_health_state,
     refresh_trading_system_state,
     select_runtime_config,
+    validate_entry,
 )
 from crypto_trader.config import DEFAULT_CONFIG
 from crypto_trader.models import TradeCandidate
@@ -69,6 +70,106 @@ class CodexFeaturesTest(TestCase):
 
     def _role_config(self) -> dict:
         return {"api_key_env": "OPENAI_API_KEY_TEST", "timeout_seconds": 1}
+
+    def _validation_config(self) -> dict:
+        config = deepcopy(DEFAULT_CONFIG)
+        config["_atlas_test_mode"] = True
+        config["_config_dir"] = self._tmpdir.name
+        config["mode"] = "demo"
+        config["trading_risk"].update(
+            {
+                "max_concurrent_positions": 5,
+                "normal_min_rule_score": 75,
+                "normal_min_gpt_confidence": 82,
+                "normal_min_win_probability_pct": 72,
+                "normal_min_risk_reward": 2.0,
+                "soft_recovery_min_rule_score": 87,
+                "soft_recovery_min_gpt_confidence": 87,
+                "soft_recovery_min_win_probability_pct": 75,
+                "soft_recovery_min_risk_reward": 2.2,
+                "recovery_min_rule_score": 90,
+                "recovery_min_gpt_confidence": 92,
+                "recovery_min_win_probability_pct": 80,
+                "recovery_min_risk_reward": 2.5,
+            }
+        )
+        return config
+
+    def test_validate_entry_uses_mode_win_probability_thresholds(self) -> None:
+        config = self._validation_config()
+        payload = {
+            "ruleScore": 91,
+            "gptConfidence": 92,
+            "winProbability": 76,
+            "riskReward": 2.5,
+            "entryPrice": 100,
+            "currentPrice": 100,
+            "volumeConfirmed": True,
+        }
+        with patch("crypto_trader.codex_features.get_trading_system_state") as state, patch(
+            "crypto_trader.codex_features.get_bunny_health_state",
+            return_value={"isPaused": False, "isWarning": False, "isCritical": False},
+        ), patch("crypto_trader.codex_features._open_trade_executions", return_value=[]):
+            state.return_value = {
+                "isPaused": False,
+                "isRecoveryMode": False,
+                "recoveryMode": "NORMAL",
+                "currentNormalMinRuleScore": 75,
+                "currentNormalMinGptConfidence": 82,
+            }
+            self.assertTrue(validate_entry(config, payload)["allowed"])
+            state.return_value = {
+                "isPaused": False,
+                "isRecoveryMode": True,
+                "recoveryMode": "HARD_RECOVERY",
+                "currentNormalMinRuleScore": 75,
+                "currentNormalMinGptConfidence": 82,
+            }
+            blocked = validate_entry(config, payload)
+
+        self.assertFalse(blocked["allowed"])
+        self.assertIn("Win probability 76.00% < 80.00%", blocked["reason"])
+
+    def test_validate_entry_requires_volume_only_in_hard_recovery(self) -> None:
+        config = self._validation_config()
+        payload = {
+            "ruleScore": 92,
+            "gptConfidence": 92,
+            "winProbability": 80,
+            "riskReward": 2.5,
+            "entryPrice": 100,
+            "currentPrice": 100,
+            "volumeConfirmed": False,
+        }
+        with patch("crypto_trader.codex_features.get_bunny_health_state", return_value={"isPaused": False, "isWarning": False, "isCritical": False}), patch(
+            "crypto_trader.codex_features._open_trade_executions",
+            return_value=[],
+        ):
+            with patch(
+                "crypto_trader.codex_features.get_trading_system_state",
+                return_value={
+                    "isPaused": False,
+                    "isRecoveryMode": True,
+                    "recoveryMode": "SOFT_RECOVERY",
+                    "currentNormalMinRuleScore": 75,
+                    "currentNormalMinGptConfidence": 82,
+                },
+            ):
+                self.assertTrue(validate_entry(config, payload)["allowed"])
+            with patch(
+                "crypto_trader.codex_features.get_trading_system_state",
+                return_value={
+                    "isPaused": False,
+                    "isRecoveryMode": True,
+                    "recoveryMode": "HARD_RECOVERY",
+                    "currentNormalMinRuleScore": 75,
+                    "currentNormalMinGptConfidence": 82,
+                },
+            ):
+                blocked = validate_entry(config, payload)
+
+        self.assertFalse(blocked["allowed"])
+        self.assertIn("Volume chua xac nhan", blocked["reason"])
 
     def test_recovery_mode_notification_dedupes_repeated_hard_mode(self) -> None:
         config = self._config()
