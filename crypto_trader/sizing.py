@@ -121,6 +121,18 @@ def _position_pnl(row: dict[str, Any]) -> float | None:
     return round(pnl + adjustments, 6) if adjusted else pnl
 
 
+def _position_is_full_close(row: dict[str, Any]) -> bool:
+    info = row.get("info", {}) if isinstance(row.get("info"), dict) else {}
+    open_max = _float(row.get("openMaxPos") or info.get("openMaxPos"))
+    close_total = _float(row.get("closeTotalPos") or info.get("closeTotalPos"))
+    if open_max is None and close_total is None:
+        return True
+    if open_max is None or close_total is None:
+        return False
+    if open_max <= 0 or close_total <= 0:
+        return False
+    return abs(open_max - close_total) <= max(1e-12, abs(open_max) * 1e-9)
+
 def _position_time(row: dict[str, Any]) -> datetime | None:
     info = row.get("info", {}) if isinstance(row.get("info"), dict) else {}
     timestamp = row.get("lastUpdateTimestamp") or row.get("uTime") or info.get("uTime") or info.get("closeTime") or row.get("timestamp") or info.get("cTime")
@@ -354,6 +366,8 @@ def _closed_positions(config: dict[str, Any], settings: dict[str, Any]) -> list[
     closed: list[dict[str, Any]] = []
     for row in rows:
         if not isinstance(row, dict):
+            continue
+        if not _position_is_full_close(row):
             continue
         key = _position_key(row)
         symbol = _position_symbol(row)
