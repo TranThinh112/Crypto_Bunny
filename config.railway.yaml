@@ -353,6 +353,8 @@ position_sizing:
   max_recovery_step: 4
   max_margin_usdt: 50
   max_cycle_loss_usdt: 50
+  hard_loss_streak_threshold: 2
+  hard_loss_usdt_threshold: 10
   min_recovery_confidence: 88
   min_recovery_win_probability_pct: 58
   block_recovery_on_market_guard: true

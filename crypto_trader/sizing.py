@@ -184,6 +184,8 @@ def _sizing_config(config: dict[str, Any]) -> dict[str, Any]:
         "max_recovery_step": int(raw.get("max_recovery_step", 4) or 4),
         "max_margin_usdt": float(raw.get("max_margin_usdt", 20) or 20),
         "max_cycle_loss_usdt": float(raw.get("max_cycle_loss_usdt", 10) or 10),
+        "hard_loss_streak_threshold": int(raw.get("hard_loss_streak_threshold", 2)),
+        "hard_loss_usdt_threshold": float(raw.get("hard_loss_usdt_threshold", 10)),
         "history_limit": int(raw.get("history_limit", 100) or 100),
         "reset_orphaned_blocked_state": bool(raw.get("reset_orphaned_blocked_state", True)),
         "min_recovery_confidence": float(raw.get("min_recovery_confidence", 88) or 88),
@@ -217,6 +219,7 @@ def _default_state(base_margin: float) -> dict[str, Any]:
         "last_loss_symbol": None,
         "last_loss_side": None,
         "last_loss_key": None,
+        "loss_streak": 0,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -381,29 +384,50 @@ def _refresh_state_from_closed_positions(
     closed: list[dict[str, Any]],
 ) -> dict[str, Any]:
     base_margin = float(settings["base_margin_usdt"])
-    total_pnl = round(sum(float(row.get("pnl_usdt") or 0.0) for row in closed), 6)
-    state["processed_keys"] = [str(row["key"]) for row in closed]
-    state["processed_pnl_by_key"] = {
-        str(row["key"]): round(float(row.get("pnl_usdt") or 0.0), 6) for row in closed
-    }
-    state["cycle_pnl_usdt"] = total_pnl
-    state["recovery_step"] = 0
-    state["recovery_band"] = "soft" if total_pnl < 0 else "normal"
-    state["blocked"] = False
-    state["block_reason"] = None
-    state["next_margin_usdt"] = base_margin
-    state["last_processed_key"] = str(closed[-1]["key"]) if closed else None
-    state["last_realized_net_pnl"] = round(float(closed[-1].get("pnl_usdt") or 0.0), 6) if closed else None
-    if total_pnl < 0:
-        state["hard_start_pnl_usdt"] = total_pnl
-        state["hard_peak_loss_usdt"] = total_pnl
-        state["soft_return_pnl_usdt"] = round(total_pnl * 0.5, 6)
-    else:
-        state["hard_start_pnl_usdt"] = None
-        state["hard_peak_loss_usdt"] = None
-        state["soft_return_pnl_usdt"] = None
-    state["hard_soft_recovered_at"] = None
-    state["hard_started_at"] = None
+    cycle_start_at = state.get("cycle_start_at")
+    state = _default_state(base_margin)
+    state["cycle_start_at"] = cycle_start_at
+    total_pnl = 0.0
+    for row in closed:
+        key = str(row["key"])
+        pnl = float(row.get("pnl_usdt") or 0.0)
+        total_pnl = round(total_pnl + pnl, 6)
+        state["cycle_pnl_usdt"] = total_pnl
+        state["last_realized_net_pnl"] = round(pnl, 6)
+        state["blocked"] = False
+        state["block_reason"] = None
+        _set_loss_streak_fields(
+            state,
+            pnl,
+            str(row.get("symbol") or ""),
+            str(row.get("side") or ""),
+            key,
+        )
+        hard_reason = _hard_loss_rule_reason(state, settings, total_pnl)
+        if hard_reason:
+            _enter_hard_recovery(state, total_pnl)
+            _stop_state(state, hard_reason)
+        elif state.get("recovery_band") == "hard":
+            if _hard_recovery_returned_to_soft(state, total_pnl):
+                state["recovery_step"] = min(
+                    int(state.get("recovery_step") or 0),
+                    max(0, int(settings["max_recovery_step"]) - 1),
+                )
+            else:
+                soft_return = _float(state.get("soft_return_pnl_usdt"))
+                reason = "Hard recovery remains active until 50% of the hard loss is recovered"
+                if soft_return is not None:
+                    reason = f"{reason}: cycle pnl {total_pnl:.4f} < soft threshold {soft_return:.4f}"
+                _stop_state(state, reason)
+        elif total_pnl < 0:
+            state["recovery_band"] = "soft"
+            state["next_margin_usdt"] = base_margin
+        else:
+            _clear_hard_recovery_state(state)
+            state["next_margin_usdt"] = base_margin
+        state["processed_keys"].append(key)
+        state.setdefault("processed_pnl_by_key", {})[key] = round(pnl, 6)
+        state["last_processed_key"] = key
     state["updated_at"] = datetime.now(timezone.utc).isoformat()
     return state
 
@@ -434,6 +458,16 @@ def _clear_hard_recovery_state(state: dict[str, Any]) -> None:
     state["soft_return_pnl_usdt"] = None
     state["hard_soft_recovered_at"] = None
 
+
+def _set_loss_streak_fields(state: dict[str, Any], pnl: float, symbol: str, side: str, key: str) -> None:
+    if pnl < 0:
+        state["loss_streak"] = int(state.get("loss_streak") or 0) + 1
+        state["last_loss_symbol"] = symbol or None
+        state["last_loss_side"] = _normalize_side(side) or None
+        state["last_loss_key"] = key or None
+        return
+    if pnl > 0 and state.get("recovery_band") != "hard":
+        state["loss_streak"] = 0
 
 def _enter_hard_recovery(state: dict[str, Any], cycle_pnl: float) -> None:
     now = datetime.now(timezone.utc).isoformat()
@@ -470,6 +504,20 @@ def _hard_recovery_returned_to_soft(state: dict[str, Any], cycle_pnl: float) -> 
     return False
 
 
+def _hard_loss_rule_reason(state: dict[str, Any], settings: dict[str, Any], cycle_pnl: float) -> str | None:
+    if state.get("recovery_band") == "hard":
+        return None
+    if state.get("recovery_band") == "soft" and state.get("hard_soft_recovered_at"):
+        return None
+    loss_streak_threshold = int(settings.get("hard_loss_streak_threshold") or 0)
+    loss_streak = int(state.get("loss_streak") or 0)
+    if loss_streak_threshold > 0 and loss_streak >= loss_streak_threshold:
+        return f"Hard recovery triggered by loss streak: {loss_streak}/{loss_streak_threshold}"
+    loss_threshold = float(settings.get("hard_loss_usdt_threshold") or 0)
+    if loss_threshold > 0 and cycle_pnl <= -loss_threshold:
+        return f"Hard recovery triggered by cycle loss: {cycle_pnl:.4f} <= -{loss_threshold:.4f}"
+    return None
+
 def _apply_realized_pnl(
     state: dict[str, Any],
     settings: dict[str, Any],
@@ -490,10 +538,7 @@ def _apply_realized_pnl(
     state["last_realized_net_pnl"] = round(pnl, 6)
     state["blocked"] = False
     state["block_reason"] = None
-    if pnl < 0:
-        state["last_loss_symbol"] = symbol or None
-        state["last_loss_side"] = _normalize_side(side) or None
-        state["last_loss_key"] = key or None
+    _set_loss_streak_fields(state, pnl, symbol, side, key)
 
     if cycle_pnl >= target_profit:
         state["cycle_pnl_usdt"] = 0.0
@@ -503,7 +548,14 @@ def _apply_realized_pnl(
         state["last_loss_symbol"] = None
         state["last_loss_side"] = None
         state["last_loss_key"] = None
+        state["loss_streak"] = 0
         return f"Cycle target reached: pnl {cycle_pnl:.4f} >= {target_profit:.4f}; reset to base size"
+
+    hard_reason = _hard_loss_rule_reason(state, settings, cycle_pnl)
+    if hard_reason:
+        _enter_hard_recovery(state, cycle_pnl)
+        _stop_state(state, hard_reason)
+        return str(state["block_reason"])
 
     if max_cycle_loss > 0 and cycle_pnl <= -max_cycle_loss:
         _enter_hard_recovery(state, cycle_pnl)
@@ -515,6 +567,13 @@ def _apply_realized_pnl(
     if returned_to_soft:
         recovery_step = min(recovery_step, max(0, max_step - 1))
         state["recovery_step"] = recovery_step
+    elif state.get("recovery_band") == "hard":
+        soft_return = _float(state.get("soft_return_pnl_usdt"))
+        reason = "Hard recovery remains active until 50% of the hard loss is recovered"
+        if soft_return is not None:
+            reason = f"{reason}: cycle pnl {cycle_pnl:.4f} < soft threshold {soft_return:.4f}"
+        _stop_state(state, reason)
+        return str(state["block_reason"])
     if recovery_step >= max_step:
         _enter_hard_recovery(state, cycle_pnl)
         if state.get("recovery_band") == "hard":
@@ -606,27 +665,9 @@ def rebuild_recovery_cycle_state(config: dict[str, Any]) -> dict[str, Any]:
         state["rebuild_error"] = str(exc)
         return {"state": state, "notes": [f"Recovery history unavailable: {exc}"], "closed_count": 0}
 
-    total_pnl = 0.0
+    state = _refresh_state_from_closed_positions(state, settings, closed)
     for row in closed:
-        key = str(row["key"])
-        pnl = float(row["pnl_usdt"])
-        total_pnl += pnl
-        state["processed_keys"].append(key)
-        state.setdefault("processed_pnl_by_key", {})[key] = round(pnl, 6)
-        state["last_processed_key"] = key
-        state["last_realized_net_pnl"] = round(pnl, 6)
-        notes.append(f"{row['symbol']} closed {pnl:+.4f} USDT.")
-
-    state["cycle_pnl_usdt"] = round(total_pnl, 6)
-    state["recovery_step"] = 0
-    state["recovery_band"] = "soft" if total_pnl < 0 else "normal"
-    state["blocked"] = False
-    state["block_reason"] = None
-    state["next_margin_usdt"] = base_margin
-    if total_pnl < 0:
-        state["hard_start_pnl_usdt"] = round(total_pnl, 6)
-        state["hard_peak_loss_usdt"] = round(total_pnl, 6)
-        state["soft_return_pnl_usdt"] = round(total_pnl * 0.5, 6)
+        notes.append(f"{row['symbol']} closed {float(row['pnl_usdt']):+.4f} USDT.")
 
     state["rebuilt_at"] = datetime.now(timezone.utc).isoformat()
     state["rebuild_closed_count"] = len(closed)
@@ -794,5 +835,6 @@ def apply_position_sizing(config: dict[str, Any], candidates: list[TradeCandidat
         "recovery_source_key": source_key,
         "last_loss_symbol": state.get("last_loss_symbol"),
         "last_loss_side": state.get("last_loss_side"),
+        "loss_streak": int(state.get("loss_streak") or 0),
         "notes": sizing_notes,
     }
