@@ -1191,6 +1191,83 @@ class CodexFeaturesTest(TestCase):
         self.assertTrue(state["isRecoveryMode"])
         send_telegram_message.assert_not_called()
 
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_recovery_mode_notification_rejects_cycle_pnl_outlier(self, send_telegram_message) -> None:
+        config = self._config()
+        config["position_sizing"] = {
+            "cycle_start_at": "2026-07-05T00:00:00+07:00",
+            "target_profit_usdt": 0.3,
+        }
+        config["trading_risk"] = {
+            "global_loss_streak_threshold": 2,
+            "soft_recovery_min_rule_score": 87,
+            "soft_recovery_min_gpt_confidence": 89,
+            "soft_recovery_min_risk_reward": 2.0,
+            "soft_recovery_risk_percent": 0.75,
+        }
+        previous_payload = {
+            "recoveryMode": "NORMAL",
+            "recoveryCyclePnlUsdt": -20.835449,
+        }
+
+        with patch("crypto_trader.codex_features.get_global_loss_streak", return_value=0), patch(
+            "crypto_trader.codex_features._recovery_cycle_pnl",
+            return_value=-884.8548,
+        ), patch(
+            "crypto_trader.codex_features.get_trading_system_state_row",
+            return_value={
+                "is_recovery_mode": 0,
+                "payload_json": json.dumps(previous_payload),
+            },
+        ), patch("crypto_trader.codex_features.get_journal_state", return_value=None), patch(
+            "crypto_trader.codex_features.upsert_trading_system_state_row"
+        ):
+            state = refresh_trading_system_state(config)
+
+        self.assertEqual(state["recoveryMode"], "SOFT_RECOVERY")
+        self.assertAlmostEqual(state["recoveryCyclePnlUsdt"], -20.835449, places=6)
+        self.assertTrue(state["cyclePnlOutlierRejected"])
+        self.assertAlmostEqual(state["cyclePnlRejectedRawUsdt"], -884.8548, places=4)
+        message = send_telegram_message.call_args.args[1]
+        self.assertIn("Cycle PnL: -20.8354 USDT", message)
+        self.assertNotIn("-884.8548", message)
+
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_hard_recovery_stays_hard_until_soft_exit_threshold_is_recovered(self, send_telegram_message) -> None:
+        config = self._config()
+        config["position_sizing"] = {
+            "cycle_start_at": "2026-07-05T00:00:00+07:00",
+            "target_profit_usdt": 0.3,
+        }
+        config["trading_risk"] = {"global_loss_streak_threshold": 2}
+
+        with patch("crypto_trader.codex_features.get_global_loss_streak", return_value=0), patch(
+            "crypto_trader.codex_features._recovery_cycle_pnl",
+            return_value=-20.835449,
+        ), patch(
+            "crypto_trader.codex_features.get_trading_system_state_row",
+            return_value={
+                "is_recovery_mode": 1,
+                "payload_json": json.dumps(
+                    {
+                        "recoveryMode": "HARD_RECOVERY",
+                        "recoveryBand": "hard",
+                        "recoveryCyclePnlUsdt": -20.835449,
+                        "hardRecoveryPeakLossUsdt": -33.790195,
+                        "hardRecoverySoftExitThresholdUsdt": -16.895097,
+                    }
+                ),
+            },
+        ), patch("crypto_trader.codex_features.get_journal_state", return_value=json.dumps({"cycle_pnl_usdt": -20.835449})), patch(
+            "crypto_trader.codex_features.upsert_trading_system_state_row"
+        ):
+            state = refresh_trading_system_state(config)
+
+        self.assertEqual(state["recoveryMode"], "HARD_RECOVERY")
+        self.assertEqual(state["recoveryBand"], "hard")
+        self.assertFalse(state["cyclePnlOutlierRejected"])
+        send_telegram_message.assert_not_called()
+
     def test_health_monitor_reuses_pause_deadline_for_same_trade_sample(self) -> None:
         config = self._config()
         config["bunny_health_monitor"] = {

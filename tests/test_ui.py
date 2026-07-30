@@ -55,7 +55,6 @@ class UiTest(TestCase):
     def test_telegram_command_list_includes_internal_notification_commands(self) -> None:
         commands = {item["command"] for item in telegram_command_list()}
         self.assertIn("thongbao", commands)
-        self.assertIn("noibo", commands)
 
     @patch("crypto_trader.ui.recent_ai_call_history")
     def test_ai_history_view_uses_short_vietnamese_mini_reasons(self, recent_history) -> None:
@@ -708,7 +707,13 @@ class UiTest(TestCase):
             _, _, keyboard = _telegram_action_response(config, "view_menu", config_path)
 
         rows = keyboard["inline_keyboard"]
-        self.assertEqual(rows[2], [{"text": "🤖 AI", "callback_data": "view_ai"}])
+        self.assertEqual(
+            rows[2],
+            [
+                {"text": "🤖 AI", "callback_data": "view_ai"},
+                {"text": "📈 Trend", "callback_data": "view_trend_watchlist"},
+            ],
+        )
         self.assertEqual(
             rows[3],
             [

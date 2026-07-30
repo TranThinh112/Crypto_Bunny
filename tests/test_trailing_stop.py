@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from crypto_trader.config import DEFAULT_CONFIG
 from crypto_trader.reporting import format_partial_take_profit_message
-from crypto_trader.storage import get_journal_state, insert_trade_execution_row, list_trade_execution_rows
+from crypto_trader.storage import get_journal_state, insert_trade_execution_row, list_trade_execution_rows, update_trade_execution
 from crypto_trader.trailing_stop import STATE_KEY, run_trailing_stop_cycle
 
 
@@ -667,6 +667,39 @@ class TrailingStopTest(TestCase):
         row = list_trade_execution_rows(config, statuses=["OPEN"])[0]
         self.assertTrue(row["partial_take_profit_done"])
         self.assertAlmostEqual(row["partial_take_profit_amount"], 0.3)
+
+    def test_partial_take_profit_ignores_loss_guard_reduction_and_closes_live_amount(self) -> None:
+        config = self._config()
+        config["trailing_stop"]["partial_take_profit"] = {
+            "enabled": True,
+            "trigger_tp_progress": 0.7,
+            "close_fraction": 0.3,
+            "remaining_sl_buffer_r": 0.1,
+            "tp_extension_fraction": 0.3,
+        }
+        self._insert_open_execution(config)
+        row = list_trade_execution_rows(config, statuses=["OPEN"])[0]
+        update_trade_execution(
+            config,
+            int(row["id"]),
+            {
+                "loss_guard_partial_done": True,
+                "loss_guard_partial_amount": 0.25,
+                "loss_guard_partial_price": 64300.0,
+            },
+        )
+        exchange = FakeTrailingExchange(mark=64900.0, current_sl=64407.0, contracts=0.75)
+
+        with patch("crypto_trader.trailing_stop.create_exchange", return_value=exchange):
+            result = run_trailing_stop_cycle(config)
+
+        self.assertEqual(result["partial_closed"], 1)
+        self.assertEqual(len(exchange.orders), 1)
+        self.assertEqual(exchange.orders[0]["amount"], "0.225")
+        self.assertFalse(result["items"][0].get("manual_partial_detected", False))
+        row = list_trade_execution_rows(config, statuses=["OPEN"])[0]
+        self.assertTrue(row["partial_take_profit_done"])
+        self.assertAlmostEqual(row["partial_take_profit_amount"], 0.225)
 
     def test_manual_reduction_uses_okx_fill_history_for_price_time_and_pnl(self) -> None:
         config = self._config()

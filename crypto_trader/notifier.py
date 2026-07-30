@@ -82,7 +82,7 @@ def telegram_command_list() -> list[dict[str, str]]:
         {"command": "vt", "description": "Xem vi the va PNL"},
         {"command": "lc", "description": "Xem lenh cho"},
         {"command": "thongbao", "description": "Xem thong bao noi bo"},
-        {"command": "noibo", "description": "Xem timeline noi bo"},
+        {"command": "trend", "description": "Xem trend scan watchlist"},
         {"command": "memory", "description": "Xem bo nho scan"},
         {"command": "ai", "description": "Xem lich su goi AI"},
         {"command": "usdt", "description": "Chinh USDT cho lenh sau"},
@@ -138,6 +138,7 @@ def telegram_control_keyboard() -> dict[str, Any]:
             ],
             [
                 {"text": "\U0001f916 AI", "callback_data": "view_ai"},
+                {"text": "\U0001f4c8 Trend", "callback_data": "view_trend_watchlist"},
             ],
             [
                 {"text": "\U0001f6e1 Guard", "callback_data": "view_guard"},

@@ -82,6 +82,8 @@ VIETNAM_TZ = timezone(timedelta(hours=7))
 POSITION_SIZING_STATE_KEY = "position_sizing:recovery_cycle"
 RISK_MODE_NOTIFICATION_STATE_KEY = "trading_risk:last_mode_notification"
 RISK_MODE_NOTIFICATION_REPEAT_SUPPRESS_SECONDS = 6 * 60 * 60
+RECOVERY_CYCLE_PNL_OUTLIER_JUMP_USDT = 100.0
+RECOVERY_CYCLE_PNL_OUTLIER_RATIO = 10.0
 
 
 def _utcnow() -> datetime:
@@ -2514,6 +2516,42 @@ def _recovery_mode_label(mode: str) -> str:
     return labels.get(str(mode or "").upper(), str(mode or "-"))
 
 
+def _stable_recovery_cycle_pnl(
+    config: dict[str, Any],
+    computed_pnl: float | None,
+    previous_payload: dict[str, Any],
+) -> tuple[float | None, dict[str, Any]]:
+    metadata = {
+        "cyclePnlSource": "okx_positions_history" if config.get("position_sizing", {}).get("cycle_start_at") else "recovery_state",
+        "cyclePnlOutlierRejected": False,
+        "cyclePnlRawUsdt": None if computed_pnl is None else round(_safe_float(computed_pnl, 0.0), 6),
+    }
+    if computed_pnl is None:
+        return None, metadata
+    previous_raw = previous_payload.get("recoveryCyclePnlUsdt")
+    if previous_raw is None:
+        return computed_pnl, metadata
+    previous_pnl = _safe_float(previous_raw, None)
+    if previous_pnl is None:
+        return computed_pnl, metadata
+    current = _safe_float(computed_pnl, 0.0)
+    jump = abs(current - previous_pnl)
+    sizing = config.get("position_sizing", {}) if isinstance(config.get("position_sizing"), dict) else {}
+    max_jump = _safe_float(sizing.get("cycle_pnl_outlier_max_jump_usdt"), RECOVERY_CYCLE_PNL_OUTLIER_JUMP_USDT)
+    ratio_limit = _safe_float(sizing.get("cycle_pnl_outlier_ratio"), RECOVERY_CYCLE_PNL_OUTLIER_RATIO)
+    ratio = abs(current) / max(abs(previous_pnl), 1.0)
+    if jump >= max_jump and ratio >= ratio_limit:
+        metadata.update(
+            {
+                "cyclePnlOutlierRejected": True,
+                "cyclePnlRejectedRawUsdt": round(current, 6),
+                "cyclePnlAcceptedPreviousUsdt": round(previous_pnl, 6),
+                "cyclePnlOutlierReason": f"raw jump {jump:.4f} USDT, ratio {ratio:.2f}x",
+            }
+        )
+        return previous_pnl, metadata
+    return computed_pnl, metadata
+
 def _mode_thresholds(
     mode: str,
     payload: dict[str, Any],
@@ -2638,7 +2676,6 @@ def refresh_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
     cycle_pnl = _recovery_cycle_pnl(config)
     sizing_recovery_state = _position_sizing_recovery_state(config)
     sizing_state_is_current = _sizing_state_matches_configured_cycle(config, sizing_recovery_state)
-    cycle_pnl_for_mode = _safe_float(cycle_pnl, 0.0)
     paused_until: datetime | None = None
     existing = get_trading_system_state_row(config)
     previous_recovery_mode = _previous_recovery_mode(existing)
@@ -2649,6 +2686,8 @@ def refresh_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
             previous_payload = json.loads(existing.get("payload_json") or "{}")
         except (TypeError, json.JSONDecodeError):
             previous_payload = {}
+    cycle_pnl, cycle_pnl_metadata = _stable_recovery_cycle_pnl(config, cycle_pnl, previous_payload)
+    cycle_pnl_for_mode = _safe_float(cycle_pnl, 0.0)
     if paused_until and paused_until <= _utcnow():
         paused_until = None
     if global_loss_streak >= _safe_int(settings.get("pause_trading_loss_streak"), 4):
@@ -2657,6 +2696,7 @@ def refresh_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
     target_profit = _safe_float(config.get("position_sizing", {}).get("target_profit_usdt"), 0.30)
     now_iso = _iso_now()
     previous_band = str(previous_payload.get("recoveryBand") or "").strip().lower()
+    previous_payload_mode = str(previous_payload.get("recoveryMode") or "").strip().upper()
     sizing_band = str(sizing_recovery_state.get("recovery_band") or "").strip().lower()
     hard_started_at = previous_payload.get("hardRecoveryStartedAt")
     hard_entry_cycle_pnl = _safe_float(previous_payload.get("hardRecoveryEntryCyclePnlUsdt"), 0.0)
@@ -2672,13 +2712,20 @@ def refresh_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
         hard_started_at = now_iso
         hard_entry_cycle_pnl = cycle_pnl_for_mode
         hard_peak_loss = cycle_pnl_for_mode
-    if previous_recovery_mode == "HARD_RECOVERY" or previous_band == "hard":
+    has_previous_hard_peak = _safe_float(previous_payload.get("hardRecoveryPeakLossUsdt"), None) is not None
+    was_hard_recovery = (
+        previous_band == "hard"
+        or (previous_payload_mode == "HARD_RECOVERY" and has_previous_hard_peak)
+        or (sizing_state_is_current and sizing_band == "hard")
+    )
+    if was_hard_recovery:
         if hard_peak_loss >= 0 or cycle_pnl_for_mode < hard_peak_loss:
             hard_peak_loss = cycle_pnl_for_mode
     soft_exit_threshold = hard_peak_loss * 0.5 if hard_peak_loss < 0 else 0.0
-    hard_recovery = global_loss_streak >= hard_threshold and cycle_pnl_for_mode < soft_exit_threshold
-    if sizing_state_is_current and sizing_band == "hard":
+    if was_hard_recovery:
         hard_recovery = cycle_pnl_for_mode < soft_exit_threshold
+    else:
+        hard_recovery = global_loss_streak >= hard_threshold and cycle_pnl_for_mode < soft_exit_threshold
     soft_recovery = (
         not hard_recovery
         and bool(settings.get("enable_soft_recovery_mode", True))
@@ -2722,6 +2769,7 @@ def refresh_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
         "currentNormalMinRuleScore": current_rule_score,
         "currentNormalMinGptConfidence": current_confidence,
         "updatedAt": now_iso,
+        **cycle_pnl_metadata,
     }
     upsert_trading_system_state_row(
         config,

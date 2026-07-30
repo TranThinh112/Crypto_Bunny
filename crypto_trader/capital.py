@@ -88,6 +88,7 @@ def _position_sizing_options(config: dict[str, Any]) -> dict[str, Any]:
             raw.get("max_order_size_percent_of_trading_capital"),
             20.0,
         ),
+        "max_margin_usdt": _float(raw.get("max_margin_usdt"), 50.0),
         "min_leverage": _float(raw.get("min_leverage"), 1.0),
         "max_leverage": _float(raw.get("max_leverage"), max(20.0, leverage)),
         "default_stop_loss_percent": _float(raw.get("default_stop_loss_percent"), _float(raw.get("sl_roi"), 0.5) * 100),
@@ -310,6 +311,9 @@ def calculate_position_size(config: dict[str, Any], request: dict[str, Any]) -> 
         "RECOVERY": options["recovery_risk_percent"],
         "CRITICAL": options["critical_risk_percent"],
     }.get(mode, options["normal_risk_percent"])
+    risk_override = request.get("risk_percent")
+    if risk_override not in (None, ""):
+        risk_percent = max(0.0, _float(risk_override, risk_percent))
     trading_capital = _float(state.get("trading_capital"))
     available = _float(state.get("available_trading_capital"))
     reason = "OK"
@@ -340,6 +344,10 @@ def calculate_position_size(config: dict[str, Any], request: dict[str, Any]) -> 
         else:
             allowed = False
             reason = "Insufficient trading capital after reserve protection"
+    max_margin = max(0.0, options["max_margin_usdt"])
+    if requested in (None, "") and max_margin > 0 and required_margin > max_margin:
+        order_size = max_margin * leverage
+        required_margin = max_margin
     if order_size < options["min_order_size"]:
         allowed = False
         reason = "Suggested order size is below minimum"
@@ -368,6 +376,94 @@ def calculate_position_size(config: dict[str, Any], request: dict[str, Any]) -> 
         "estimated_profit": _round(order_size * take_profit_percent / 100.0, 2),
     }
     return result
+
+def _trade_intent_mode(intent: dict[str, Any], ai_review: dict[str, Any]) -> str:
+    risk_profile = str(intent.get("risk_profile") or "").strip().upper()
+    if risk_profile == "RECOVERY":
+        return "RECOVERY"
+    if risk_profile == "REDUCED":
+        return "WARNING"
+    if str(ai_review.get("setup_grade") or intent.get("setup_grade") or "").upper() in {"C", "D"}:
+        return "WARNING"
+    return "HEALTHY"
+
+def _intent_risk_percent(config: dict[str, Any], intent: dict[str, Any], ai_review: dict[str, Any]) -> float:
+    options = _position_sizing_options(config)
+    grade = str(ai_review.get("setup_grade") or intent.get("setup_grade") or "").upper()
+    risk_profile = str(intent.get("risk_profile") or "").strip().upper()
+    base = options["normal_risk_percent"]
+    if risk_profile == "RECOVERY":
+        base = options["recovery_risk_percent"]
+    elif risk_profile == "REDUCED":
+        base = min(base, options["warning_risk_percent"])
+    grade_multiplier = {"S": 1.15, "A": 1.0, "B": 0.85, "C": 0.6, "D": 0.0}.get(grade, 0.75)
+    return _round(max(0.0, base * grade_multiplier), 4)
+
+def _intent_leverage(config: dict[str, Any], intent: dict[str, Any], setup: dict[str, Any], ai_review: dict[str, Any]) -> float:
+    options = _position_sizing_options(config)
+    configured = _float(config.get("exchange", {}).get("leverage"), options["leverage"])
+    stop_pct = _float(setup.get("risk_pct"))
+    grade = str(ai_review.get("setup_grade") or intent.get("setup_grade") or "").upper()
+    risk_profile = str(intent.get("risk_profile") or "").strip().upper()
+    leverage = configured
+    if stop_pct >= 5.0:
+        leverage = min(leverage, 5.0)
+    elif stop_pct >= 3.0:
+        leverage = min(leverage, 10.0)
+    elif stop_pct >= 2.0:
+        leverage = min(leverage, 15.0)
+    if risk_profile == "REDUCED" or grade in {"C", "D"}:
+        leverage = min(leverage, 10.0)
+    if risk_profile == "RECOVERY":
+        leverage = min(leverage, 8.0)
+    return _round(max(options["min_leverage"], min(options["max_leverage"], leverage)), 4)
+
+def calculate_trade_intent_position_size(
+    config: dict[str, Any],
+    intent: dict[str, Any],
+    setup: dict[str, Any],
+    ai_review: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    ai_review = ai_review if isinstance(ai_review, dict) else {}
+    entry = _float(intent.get("entry_price") or setup.get("entry_price"))
+    stop_loss = _float(intent.get("stop_loss") or setup.get("stop_loss"))
+    take_profit = _float(intent.get("take_profit") or setup.get("take_profit"))
+    if entry <= 0 or stop_loss <= 0 or take_profit <= 0:
+        return {
+            "allowed": False,
+            "reason": "entry_stop_or_take_profit_unavailable",
+            "source": "trade_intent_capital",
+        }
+    stop_pct = abs(entry - stop_loss) / entry * 100.0
+    tp_pct = abs(take_profit - entry) / entry * 100.0
+    risk_percent = _intent_risk_percent(config, intent, ai_review)
+    leverage = _intent_leverage(config, intent, setup, ai_review)
+    request = {
+        "mode": _trade_intent_mode(intent, ai_review),
+        "symbol": intent.get("symbol") or setup.get("symbol"),
+        "side": intent.get("side") or setup.get("side"),
+        "leverage": leverage,
+        "stop_loss_percent": stop_pct,
+        "take_profit_percent": tp_pct,
+        "risk_percent": risk_percent,
+    }
+    result = calculate_position_size(config, request)
+    quantity = _round(_float(result.get("suggested_order_size")) / entry, 6) if entry > 0 else 0.0
+    return {
+        **result,
+        "source": "trade_intent_capital",
+        "risk_profile": intent.get("risk_profile") or "Normal",
+        "setup_grade": ai_review.get("setup_grade") or intent.get("setup_grade"),
+        "entry_price": _round(entry, 8),
+        "stop_loss": _round(stop_loss, 8),
+        "take_profit": _round(take_profit, 8),
+        "quantity_estimate": quantity,
+        "margin_usdt": result.get("required_margin"),
+        "notional_usdt": result.get("suggested_order_size"),
+        "risk_usdt": result.get("estimated_loss"),
+        "expected_profit_usdt": result.get("estimated_profit"),
+        "sizing_formula": "notional = min(risk_budget / stop_pct, capital_cap, max_margin * leverage)",
+    }
 
 
 def save_position_size_calculation(config: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
@@ -589,4 +685,3 @@ def apply_trading_config(
     collection.replace_one({"id": row_id}, row, upsert=True)
     save_configuration_impact_report(config, report)
     return {"applied": True, "config": row, "impact": report}
-

@@ -144,15 +144,6 @@ def _add_position_history_rows(rows: Any, target: list[dict[str, Any]], seen: se
         target.append(row)
 
 def _fetch_positions_history_rows(exchange: Any, limit: int) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    fetch_history = getattr(exchange, "fetch_positions_history", None)
-    if callable(fetch_history):
-        try:
-            _add_position_history_rows(fetch_history(None, None, limit), rows, seen)
-        except Exception:
-            pass
-
     fetch_raw = getattr(exchange, "privateGetAccountPositionsHistory", None)
     if not callable(fetch_raw):
         fetch_raw = getattr(exchange, "private_get_account_positions_history", None)
@@ -160,7 +151,18 @@ def _fetch_positions_history_rows(exchange: Any, limit: int) -> list[dict[str, A
         try:
             response = fetch_raw({"instType": "SWAP", "limit": str(max(1, min(int(limit or 100), 100)))})
             raw_rows = response.get("data") if isinstance(response, dict) else response
-            _add_position_history_rows(raw_rows, rows, seen)
+            rows: list[dict[str, Any]] = []
+            _add_position_history_rows(raw_rows, rows, set())
+            if rows:
+                return rows
+        except Exception:
+            pass
+
+    rows = []
+    fetch_history = getattr(exchange, "fetch_positions_history", None)
+    if callable(fetch_history):
+        try:
+            _add_position_history_rows(fetch_history(None, None, limit), rows, set())
         except Exception:
             pass
     return rows
@@ -448,6 +450,8 @@ def _apply_realized_pnl(
     target_profit = float(settings["target_profit_usdt"])
     base_margin = float(settings["base_margin_usdt"])
     max_step = int(settings["max_recovery_step"])
+    max_cycle_loss = float(settings["max_cycle_loss_usdt"])
+    max_margin = float(settings["max_margin_usdt"])
 
     cycle_pnl = float(state.get("cycle_pnl_usdt") or 0) + pnl
     state["cycle_pnl_usdt"] = round(cycle_pnl, 6)
@@ -469,6 +473,11 @@ def _apply_realized_pnl(
         state["last_loss_key"] = None
         return f"Cycle target reached: pnl {cycle_pnl:.4f} >= {target_profit:.4f}; reset to base size"
 
+    if max_cycle_loss > 0 and cycle_pnl <= -max_cycle_loss:
+        _enter_hard_recovery(state, cycle_pnl)
+        _stop_state(state, f"Recovery cycle loss limit reached: {cycle_pnl:.4f} <= -{max_cycle_loss:.4f}")
+        return str(state["block_reason"])
+
     recovery_step = int(state.get("recovery_step") or 0)
     returned_to_soft = _hard_recovery_returned_to_soft(state, cycle_pnl)
     if returned_to_soft:
@@ -487,6 +496,12 @@ def _apply_realized_pnl(
 
     required_profit = target_profit - cycle_pnl
     next_margin = max(base_margin, required_profit / expected_net_tp)
+    if max_margin > 0 and next_margin > max_margin:
+        state["next_margin_usdt"] = round(next_margin, 4)
+        _enter_hard_recovery(state, cycle_pnl)
+        _stop_state(state, f"Recovery margin limit reached: {next_margin:.4f} > {max_margin:.4f}")
+        return str(state["block_reason"])
+
     state["next_margin_usdt"] = round(next_margin, 4)
     state["recovery_step"] = recovery_step if returned_to_soft else recovery_step + 1
     if state["recovery_step"] >= max_step:
@@ -590,6 +605,20 @@ def _recovery_active(state: dict[str, Any], margin: float, base_margin: float) -
         return True
     return abs(_state_cycle_pnl(state)) > 1e-9
 
+def _enforce_recovery_limits(state: dict[str, Any], settings: dict[str, Any], margin: float) -> tuple[float, bool, str]:
+    cycle_pnl = _state_cycle_pnl(state)
+    max_cycle_loss = float(settings["max_cycle_loss_usdt"])
+    max_margin = float(settings["max_margin_usdt"])
+    if max_cycle_loss > 0 and cycle_pnl <= -max_cycle_loss:
+        reason = f"Recovery cycle loss limit reached: {cycle_pnl:.4f} <= -{max_cycle_loss:.4f}"
+        _stop_state(state, reason)
+        return 0.0, True, reason
+    if max_margin > 0 and margin > max_margin:
+        reason = f"Recovery margin limit reached: {margin:.4f} > {max_margin:.4f}"
+        _stop_state(state, reason)
+        return 0.0, True, reason
+    return margin, bool(state.get("blocked")), str(state.get("block_reason") or "")
+
 
 def _candidate_recovery_guard_reasons(
     candidate: TradeCandidate,
@@ -644,8 +673,9 @@ def apply_position_sizing(config: dict[str, Any], candidates: list[TradeCandidat
     state, notes = _update_cycle_state(config, settings)
     base_margin = float(settings["base_margin_usdt"])
     margin = float(state.get("next_margin_usdt") or base_margin)
-    blocked = bool(state.get("blocked"))
-    block_reason = str(state.get("block_reason") or "")
+    margin, blocked, block_reason = _enforce_recovery_limits(state, settings, margin)
+    if blocked:
+        _save_state(config, state)
 
     sizing_notes = [
         f"Base margin {base_margin:.2f} USDT, leverage {leverage:.0f}x",

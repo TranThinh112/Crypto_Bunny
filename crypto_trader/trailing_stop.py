@@ -851,6 +851,8 @@ def run_trailing_stop_cycle(config: dict[str, Any]) -> dict[str, Any]:
                 live_contracts=live_contracts,
                 close_fraction=close_fraction,
             )
+            if bool(execution.get("loss_guard_partial_done")):
+                manually_reduced_amount = None
             progress = _tp_progress(side, initial_entry, take_profit, mark)
             trigger_progress = float(partial_settings.get("trigger_tp_progress", 0.7) or 0.7)
             if progress is None:

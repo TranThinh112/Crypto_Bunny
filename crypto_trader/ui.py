@@ -172,7 +172,7 @@ from .storage import (
 )
 from .sizing import STATE_KEY as SIZING_STATE_KEY
 from .trailing_stop import run_trailing_stop_cycle
-from .trend_scan import build_trend_setup_review_flow, persist_pool_pipeline_log, persist_trend_scan_log
+from .trend_scan import TREND_WATCHLIST_STATE_KEY, build_trend_setup_review_flow, persist_pool_pipeline_log, persist_trend_scan_log
 
 
 LOGGER = logging.getLogger(__name__)
@@ -1717,6 +1717,63 @@ def _telegram_vn_time(config: dict[str, Any], value: Any) -> str:
         return str(value)
 
 
+def _format_trend_watchlist_view(config: dict[str, Any]) -> str:
+    raw = get_journal_state(config, TREND_WATCHLIST_STATE_KEY)
+    try:
+        state = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        state = {}
+    items = state.get("items") if isinstance(state.get("items"), dict) else {}
+    pending = state.get("pending_confirmations") if isinstance(state.get("pending_confirmations"), dict) else {}
+    lines = [
+        "📈 Trend Scan Watchlist",
+        f"Cập nhật: {_telegram_vn_time(config, state.get('updated_at'))}",
+        f"Đang theo dõi: {len(items)} cặp | Chờ xác nhận: {len(pending)}",
+    ]
+    if not items:
+        lines.append("Chưa có cặp nào trong watchlist trend scan.")
+    else:
+        sorted_items = sorted(
+            items.values(),
+            key=lambda item: float(item.get("trend_score") or item.get("htf_trend_score") or 0),
+            reverse=True,
+        )
+        for index, item in enumerate(sorted_items[:20], start=1):
+            symbol = str(item.get("symbol") or "-")
+            side = _telegram_side_label(item.get("side"))
+            status = str(item.get("status") or "-")
+            source = str(item.get("source") or item.get("watch_type") or "trend_scan")
+            branch = "Post Move Watch" if source == "post_move_watch" or str(item.get("watch_type") or "") == "post_move" else "Trend Scan"
+            ttl_minutes = item.get("ttl_minutes")
+            ttl_label = f"{_telegram_number(ttl_minutes)}p" if ttl_minutes is not None else "-"
+            trend_score = _telegram_number(item.get("trend_score"))
+            htf_score = _telegram_number(item.get("htf_trend_score"))
+            entry_score = _telegram_number(item.get("entry_readiness_score"))
+            action = str(item.get("entry_action") or "-")
+            ai_ready = "có" if bool(item.get("ai_ready")) else "chưa"
+            expires_at = _telegram_vn_time(config, item.get("expires_at"))
+            lines.extend(
+                [
+                    "",
+                    f"{index}. {symbol} | {side} | {status}",
+                    f"Score trend {trend_score} | HTF {htf_score} | Entry {entry_score}",
+                    f"Hành động: {action} | AI ready: {ai_ready}",
+                    f"Nhánh: {branch} | TTL: {ttl_label}",
+                    f"Nguồn: {source} | Hết hạn: {expires_at}",
+                ]
+            )
+    if pending:
+        lines.append("")
+        lines.append("⏳ Chờ xác nhận scan kế tiếp:")
+        for index, item in enumerate(list(pending.values())[:10], start=1):
+            lines.append(
+                f"{index}. {item.get('symbol') or '-'} | {_telegram_side_label(item.get('side'))} | "
+                f"{item.get('confirmation_count') or 0}/{item.get('required_confirmations') or 1} | "
+                f"HTF {_telegram_number(item.get('htf_trend_score'))}"
+            )
+    return "\n".join(lines)
+
+
 def _telegram_dashboard_message(
     config: dict[str, Any],
     app: FastAPI | None = None,
@@ -1892,6 +1949,8 @@ def _telegram_action_response(
         return config, format_internal_notifications_view(config), telegram_control_keyboard()
     if action == "view_wait_slot_notifications":
         return config, format_wait_slot_notifications_view(config), telegram_control_keyboard()
+    if action == "view_trend_watchlist":
+        return config, _format_trend_watchlist_view(config), telegram_control_keyboard()
     if action == "view_memory":
         return config, format_market_scan_memory_view(config), None
     if action == "view_ai":
@@ -2173,6 +2232,7 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
             "view_sd",
             "view_lc",
             "view_wait_slot_notifications",
+            "view_trend_watchlist",
             "view_memory",
             "view_ai",
             "view_ai_more",
@@ -2189,6 +2249,7 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
             "view_lc",
             "view_undecided_lc",
             "view_wait_slot_notifications",
+            "view_trend_watchlist",
             "view_memory",
             "view_ai",
             "view_ai_more",
@@ -2329,8 +2390,8 @@ def _handle_telegram_update(config: dict[str, Any], update: dict[str, Any], conf
         "/vt": "view_positions_account",
         "/lc": "view_lc",
         "/chuaduyet": "view_undecided_lc",
-        "/noibo": "view_internal_notifications",
         "/thongbao": "view_internal_notifications",
+        "/trend": "view_trend_watchlist",
         "/memory": "view_memory",
         "/ai": "view_ai",
         "/pnl": "view_positions_account",
@@ -2398,7 +2459,7 @@ def _telegram_button_worker(app: FastAPI) -> None:
     config: dict[str, Any] | None = None
     try:
         config = load_config(app.state.config_path)
-        sync_telegram_commands(config)
+        sync_telegram_commands(config, force=True)
         app.state.telegram_commands_next_sync_at = datetime.now(timezone.utc) + timedelta(
             seconds=TELEGRAM_COMMANDS_SYNC_INTERVAL_SECONDS
         )
