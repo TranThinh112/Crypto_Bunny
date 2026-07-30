@@ -582,21 +582,27 @@ def rebuild_recovery_cycle_state(config: dict[str, Any]) -> dict[str, Any]:
         state["rebuild_error"] = str(exc)
         return {"state": state, "notes": [f"Recovery history unavailable: {exc}"], "closed_count": 0}
 
+    total_pnl = 0.0
     for row in closed:
         key = str(row["key"])
         pnl = float(row["pnl_usdt"])
-        note = _apply_realized_pnl(
-            state,
-            settings,
-            pnl,
-            symbol=str(row.get("symbol") or ""),
-            side=str(row.get("side") or ""),
-            key=key,
-        )
+        total_pnl += pnl
         state["processed_keys"].append(key)
         state.setdefault("processed_pnl_by_key", {})[key] = round(pnl, 6)
         state["last_processed_key"] = key
-        notes.append(f"{row['symbol']} closed {pnl:+.4f} USDT. {note}")
+        state["last_realized_net_pnl"] = round(pnl, 6)
+        notes.append(f"{row['symbol']} closed {pnl:+.4f} USDT.")
+
+    state["cycle_pnl_usdt"] = round(total_pnl, 6)
+    state["recovery_step"] = 0
+    state["recovery_band"] = "soft" if total_pnl < 0 else "normal"
+    state["blocked"] = False
+    state["block_reason"] = None
+    state["next_margin_usdt"] = base_margin
+    if total_pnl < 0:
+        state["hard_start_pnl_usdt"] = round(total_pnl, 6)
+        state["hard_peak_loss_usdt"] = round(total_pnl, 6)
+        state["soft_return_pnl_usdt"] = round(total_pnl * 0.5, 6)
 
     state["rebuilt_at"] = datetime.now(timezone.utc).isoformat()
     state["rebuild_closed_count"] = len(closed)
