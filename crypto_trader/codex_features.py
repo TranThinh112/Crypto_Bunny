@@ -2381,13 +2381,6 @@ def _recovery_cycle_closed_pnl_from_okx_positions_history(
     for row in rows:
         if not isinstance(row, dict):
             continue
-        try:
-            from .sizing import _position_is_full_close
-
-            if not _position_is_full_close(row):
-                continue
-        except Exception:
-            pass
         closed_at = _recovery_cycle_history_closed_at(row)
         if closed_at is None:
             continue

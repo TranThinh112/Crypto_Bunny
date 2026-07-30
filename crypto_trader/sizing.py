@@ -121,18 +121,6 @@ def _position_pnl(row: dict[str, Any]) -> float | None:
     return round(pnl + adjustments, 6) if adjusted else pnl
 
 
-def _position_is_full_close(row: dict[str, Any]) -> bool:
-    info = row.get("info", {}) if isinstance(row.get("info"), dict) else {}
-    open_max = _float(row.get("openMaxPos") or info.get("openMaxPos"))
-    close_total = _float(row.get("closeTotalPos") or info.get("closeTotalPos"))
-    if open_max is None and close_total is None:
-        return True
-    if open_max is None or close_total is None:
-        return False
-    if open_max <= 0 or close_total <= 0:
-        return False
-    return abs(open_max - close_total) <= max(1e-12, abs(open_max) * 1e-9)
-
 def _position_time(row: dict[str, Any]) -> datetime | None:
     info = row.get("info", {}) if isinstance(row.get("info"), dict) else {}
     timestamp = row.get("lastUpdateTimestamp") or row.get("uTime") or info.get("uTime") or info.get("closeTime") or row.get("timestamp") or info.get("cTime")
@@ -367,8 +355,6 @@ def _closed_positions(config: dict[str, Any], settings: dict[str, Any]) -> list[
     for row in rows:
         if not isinstance(row, dict):
             continue
-        if not _position_is_full_close(row):
-            continue
         key = _position_key(row)
         symbol = _position_symbol(row)
         pnl = _position_pnl(row)
@@ -388,6 +374,38 @@ def _closed_positions(config: dict[str, Any], settings: dict[str, Any]) -> list[
         )
     closed.sort(key=lambda item: item.get("closed_at") or datetime.min.replace(tzinfo=timezone.utc))
     return closed
+
+def _refresh_state_from_closed_positions(
+    state: dict[str, Any],
+    settings: dict[str, Any],
+    closed: list[dict[str, Any]],
+) -> dict[str, Any]:
+    base_margin = float(settings["base_margin_usdt"])
+    total_pnl = round(sum(float(row.get("pnl_usdt") or 0.0) for row in closed), 6)
+    state["processed_keys"] = [str(row["key"]) for row in closed]
+    state["processed_pnl_by_key"] = {
+        str(row["key"]): round(float(row.get("pnl_usdt") or 0.0), 6) for row in closed
+    }
+    state["cycle_pnl_usdt"] = total_pnl
+    state["recovery_step"] = 0
+    state["recovery_band"] = "soft" if total_pnl < 0 else "normal"
+    state["blocked"] = False
+    state["block_reason"] = None
+    state["next_margin_usdt"] = base_margin
+    state["last_processed_key"] = str(closed[-1]["key"]) if closed else None
+    state["last_realized_net_pnl"] = round(float(closed[-1].get("pnl_usdt") or 0.0), 6) if closed else None
+    if total_pnl < 0:
+        state["hard_start_pnl_usdt"] = total_pnl
+        state["hard_peak_loss_usdt"] = total_pnl
+        state["soft_return_pnl_usdt"] = round(total_pnl * 0.5, 6)
+    else:
+        state["hard_start_pnl_usdt"] = None
+        state["hard_peak_loss_usdt"] = None
+        state["soft_return_pnl_usdt"] = None
+    state["hard_soft_recovered_at"] = None
+    state["hard_started_at"] = None
+    state["updated_at"] = datetime.now(timezone.utc).isoformat()
+    return state
 
 
 def _expected_net_tp(settings: dict[str, Any]) -> float:
@@ -545,6 +563,12 @@ def _update_cycle_state(config: dict[str, Any], settings: dict[str, Any]) -> tup
     ):
         state["processed_keys"] = [str(row["key"]) for row in closed]
         notes.append("Recovery cycle initialized; existing closed positions marked as processed")
+        _save_state(config, state)
+        return state, notes
+
+    if config.get("position_sizing", {}).get("cycle_start_at"):
+        state = _refresh_state_from_closed_positions(state, settings, closed)
+        notes.append("Recovery cycle refreshed from OKX history window")
         _save_state(config, state)
         return state, notes
 
