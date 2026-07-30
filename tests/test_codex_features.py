@@ -1037,6 +1037,40 @@ class CodexFeaturesTest(TestCase):
 
         self.assertAlmostEqual(pnl, 0.757775, places=6)
 
+    def test_recovery_cycle_pnl_excludes_partial_okx_position_closes(self) -> None:
+        config = self._config()
+        config["position_sizing"] = {
+            "cycle_start_at": "2026-07-05T00:00:00+07:00",
+            "history_limit": 100,
+        }
+        rows = [
+            {
+                "instId": "BOME-USDT-SWAP",
+                "posId": "partial-bome",
+                "realizedPnl": "-3.790009",
+                "openMaxPos": "100",
+                "closeTotalPos": "30",
+                "uTime": str(int(datetime(2026, 7, 30, tzinfo=timezone.utc).timestamp() * 1000)),
+            },
+            {
+                "instId": "LAB-USDT-SWAP",
+                "posId": "full-lab",
+                "realizedPnl": "0.296297",
+                "openMaxPos": "12.9",
+                "closeTotalPos": "12.9",
+                "uTime": str(int(datetime(2026, 7, 30, 1, tzinfo=timezone.utc).timestamp() * 1000)),
+            },
+        ]
+        exchange = SimpleNamespace(
+            load_markets=lambda: {},
+            privateGetAccountPositionsHistory=lambda params: {"data": rows},
+        )
+
+        with patch("crypto_trader.market.create_exchange", return_value=exchange):
+            pnl = _recovery_cycle_pnl(config)
+
+        self.assertAlmostEqual(pnl or 0.0, 0.296297, places=6)
+
     def test_recovery_cycle_pnl_ignores_partial_fills_and_bot_rows(self) -> None:
         config = self._config()
         config["position_sizing"] = {

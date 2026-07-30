@@ -2349,6 +2349,14 @@ def _recovery_cycle_history_pnl(row: dict[str, Any]) -> float | None:
             adjusted = True
     return round(pnl + adjustments, 6) if adjusted else pnl
 
+def _recovery_cycle_history_is_full_close(row: dict[str, Any]) -> bool:
+    try:
+        from .sizing import _position_history_is_full_close
+
+        return _position_history_is_full_close(row)
+    except Exception:
+        return True
+
 def _recovery_cycle_closed_pnl_from_okx_positions_history(
     exchange: Any,
     start_at: datetime,
@@ -2387,6 +2395,8 @@ def _recovery_cycle_closed_pnl_from_okx_positions_history(
         if closed_at.tzinfo is None:
             closed_at = closed_at.replace(tzinfo=timezone.utc)
         if closed_at < start_at:
+            continue
+        if not _recovery_cycle_history_is_full_close(row):
             continue
         pnl = _recovery_cycle_history_pnl(row)
         if pnl is None:
