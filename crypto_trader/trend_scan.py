@@ -1229,6 +1229,7 @@ def review_setup_with_mini(
     source_payload: dict[str, Any],
     *,
     notify_telegram: bool = False,
+    notification_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from .codex_features import call_openai_json
 
@@ -1252,7 +1253,7 @@ def review_setup_with_mini(
         model_name=str(internal_config.get("model", "gpt-5.4-mini")),
         purpose="mini_market_scan",
         route="trend_setup_review",
-        record_history=True,
+        record_history=not notify_telegram,
         notify_telegram=False,
     )
     parsed = dict(response.get("parsed") or {})
@@ -1279,6 +1280,7 @@ def review_setup_with_mini(
                     "decision": normalized.get("decision"),
                     "reason": normalized.get("reason"),
                     "sl_tp_method": ((setup.get("risk_model") or {}).get("selected_method") if isinstance(setup.get("risk_model"), dict) else None),
+                    **(notification_context or {}),
                     "prompt_version": "trend-setup-review-v1",
                     "prompt_hash": "trend-setup-review-v1",
                     "latency_ms": response.get("latency_ms"),
@@ -1643,6 +1645,20 @@ def _trend_setup_changed_enough(config: dict[str, Any], setup: dict[str, Any], i
         "signature": current,
     }
 
+def _watchlist_review_notification_context(config: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    expires_at = _parse_time(item.get("expires_at"))
+    remaining_minutes = 0
+    if expires_at is not None:
+        remaining_minutes = max(0, int((expires_at - now).total_seconds() // 60))
+    internal = config.get("ai", {}).get("internal", {}) if isinstance(config.get("ai"), dict) else {}
+    extension_minutes = max(0, int(internal.get("trend_watchlist_ai_review_extend_minutes", 30) or 0))
+    will_extend = extension_minutes > 0 and (expires_at is None or expires_at < now + timedelta(minutes=extension_minutes))
+    return {
+        "watchlist_remaining_minutes": remaining_minutes,
+        "watchlist_ai_review_extend_minutes": extension_minutes if will_extend else 0,
+    }
+
 def _save_watchlist_ai_review_state(
     config: dict[str, Any],
     symbol: str,
@@ -1705,6 +1721,25 @@ def _save_watchlist_ai_review_state(
     item["last_ai_setup_signature"] = signature
     item["last_ai_entry_action"] = setup.get("entry_action")
     item["last_ai_setup_state"] = setup.get("setup_state")
+    now = datetime.now(timezone.utc)
+    extension_minutes = max(
+        0,
+        int(
+            (
+                config.get("ai", {}).get("internal", {})
+                if isinstance(config.get("ai"), dict)
+                else {}
+            ).get("trend_watchlist_ai_review_extend_minutes", 30)
+            or 0
+        ),
+    )
+    if extension_minutes > 0:
+        current_expires_at = _parse_time(item.get("expires_at"))
+        extended_expires_at = now + timedelta(minutes=extension_minutes)
+        if current_expires_at is None or current_expires_at < extended_expires_at:
+            item["expires_at"] = extended_expires_at.isoformat()
+            item["ai_review_extended_at"] = now.isoformat()
+            item["ai_review_extend_minutes"] = extension_minutes
     item["last_reject_scope"] = reject_scope
     item["last_reject_reason_type"] = reject_reason_type
     item["allow_recheck_if_setup_changes"] = bool(ai_review.get("allow_recheck_if_setup_changes"))
@@ -1768,7 +1803,13 @@ def run_trend_auto_shadow_reviews(config: dict[str, Any], watchlist: dict[str, A
             )
             continue
         try:
-            result = build_trend_setup_review_flow(config, row, call_ai=call_ai, notify_telegram=call_ai)
+            result = build_trend_setup_review_flow(
+                config,
+                row,
+                call_ai=call_ai,
+                notify_telegram=call_ai,
+                notification_context=_watchlist_review_notification_context(config, item),
+            )
             setup = result.get("setup_proposal") if isinstance(result.get("setup_proposal"), dict) else {}
             ai_review = result.get("ai_review") if isinstance(result.get("ai_review"), dict) else {}
             if call_ai:
@@ -1805,6 +1846,7 @@ def build_trend_setup_review_flow(
     *,
     call_ai: bool = False,
     notify_telegram: bool = False,
+    notification_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = _candidate_payload(row)
     setup = build_entry_proposal(config, row)
@@ -1815,7 +1857,13 @@ def build_trend_setup_review_flow(
     except Exception:
         shadow_intent = None
     if call_ai:
-        ai_review = review_setup_with_mini(config, setup, payload, notify_telegram=notify_telegram)
+        ai_review = review_setup_with_mini(
+            config,
+            setup,
+            payload,
+            notify_telegram=notify_telegram,
+            notification_context=notification_context,
+        )
     else:
         ai_review = normalize_ai_setup_review({
             "decision": "REVIEW" if setup.get("warnings") else "APPROVE",

@@ -85,6 +85,7 @@ paper_trading:
 
 trading_risk:
   max_concurrent_positions: 5
+  hard_to_soft_transition_cooldown_seconds: 900
   soft_recovery_risk_percent: 0.75
   soft_recovery_min_rule_score: 87
   soft_recovery_min_gpt_confidence: 89
@@ -180,6 +181,7 @@ ai:
     post_move_watch_retest_entry_score: 45.0
     trend_watchlist_ttl_minutes: 120
     trend_watchlist_min_keep_score: 50.0
+    trend_watchlist_ai_review_extend_minutes: 30
     trend_watchlist_reject_cooldown_minutes: 120
     trend_setup_review_ai_enabled: true
     trend_setup_review_ai_cooldown_seconds: 900
@@ -335,6 +337,7 @@ position_sizing:
   enabled: true
   cycle_start_at: '2026-07-05T00:00:00+07:00'
   cycle_start_pnl_fallback_usdt: -25.275453
+  cycle_pnl_use_trade_executions_fallback: true
   base_margin_usdt: 2.0
   normal_risk_percent: 1.0
   warning_risk_percent: 0.7

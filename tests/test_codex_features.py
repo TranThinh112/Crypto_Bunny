@@ -106,6 +106,70 @@ class CodexFeaturesTest(TestCase):
 
         send_message.assert_called_once()
 
+    def test_recovery_mode_notification_suppresses_mode_flapping(self) -> None:
+        config = self._config()
+        hard_payload = {
+            "recoveryMode": "HARD_RECOVERY",
+            "globalLossStreak": 0,
+            "recoveryCyclePnlUsdt": -20.3289,
+            "hardRecoveryEntryCyclePnlUsdt": -17.4084,
+            "hardRecoveryPeakLossUsdt": -29.251,
+            "hardRecoverySoftExitThresholdUsdt": -14.6255,
+            "needToSoftUsdt": 5.7034,
+            "needToNormalUsdt": 20.6289,
+            "updatedAt": "2026-07-30T16:24:43+00:00",
+        }
+        soft_payload = {
+            **hard_payload,
+            "recoveryMode": "SOFT_RECOVERY",
+            "recoveryCyclePnlUsdt": -12.6089,
+            "needToSoftUsdt": 0.0,
+            "needToNormalUsdt": 12.9089,
+            "updatedAt": "2026-07-30T16:25:43+00:00",
+        }
+        settings = {
+            "soft_recovery_min_rule_score": 87,
+            "soft_recovery_min_gpt_confidence": 89,
+            "soft_recovery_min_risk_reward": 2.0,
+            "soft_recovery_risk_percent": 0.75,
+            "recovery_min_rule_score": 90,
+            "recovery_min_gpt_confidence": 92,
+            "recovery_min_risk_reward": 2.5,
+            "recovery_mode_risk_percent": 0.5,
+        }
+
+        with patch("crypto_trader.notifier.send_telegram_message") as send_message:
+            _notify_recovery_mode_transition(config, previous_mode="SOFT_RECOVERY", payload=hard_payload, settings=settings)
+            _notify_recovery_mode_transition(config, previous_mode="HARD_RECOVERY", payload=soft_payload, settings=settings)
+
+        send_message.assert_called_once()
+
+    def test_recovery_mode_notification_explains_hard_to_soft_recovered_amount(self) -> None:
+        config = self._config()
+        payload = {
+            "recoveryMode": "SOFT_RECOVERY",
+            "globalLossStreak": 0,
+            "recoveryCyclePnlUsdt": -12.6089,
+            "hardRecoveryPeakLossUsdt": -29.2510,
+            "hardRecoverySoftExitThresholdUsdt": -14.6255,
+            "needToSoftUsdt": 0.0,
+            "needToNormalUsdt": 12.9089,
+            "updatedAt": "2026-07-30T16:37:29+00:00",
+        }
+        settings = {
+            "soft_recovery_min_rule_score": 87,
+            "soft_recovery_min_gpt_confidence": 89,
+            "soft_recovery_min_risk_reward": 2.0,
+            "soft_recovery_risk_percent": 0.75,
+        }
+
+        with patch("crypto_trader.notifier.send_telegram_message") as send_message:
+            _notify_recovery_mode_transition(config, previous_mode="HARD_RECOVERY", payload=payload, settings=settings)
+
+        message = send_message.call_args.args[1]
+        self.assertIn("Lý do: đã gỡ được 50% số vốn thua là 16.6421 USDT.", message)
+        self.assertIn("16.6421 USDT", message)
+
     def test_compact_candidate_storage_payload_preserves_market_pattern_context(self) -> None:
         candidate = TradeCandidate(
             symbol="BTC/USDT:USDT",
@@ -843,6 +907,24 @@ class CodexFeaturesTest(TestCase):
         self.assertIn("Chuyển từ: HARD RECOVERY → SOFT RECOVERY", message)
         self.assertIn("Cycle PnL: -4.8000 USDT", message)
 
+    def test_trend_review_message_includes_watchlist_remaining_and_extension(self) -> None:
+        message = _ai_call_message(
+            {
+                "created_at": "2026-07-30T16:47:22+00:00",
+                "role": "mini",
+                "model": "gpt-5.4-mini",
+                "symbols": ["CAP/USDT:USDT"],
+                "status": "REVIEW",
+                "prompt_version": "trend-setup-review-v1",
+                "sl_tp_method": "atr_volatility_rr",
+                "watchlist_remaining_minutes": 12,
+                "watchlist_ai_review_extend_minutes": 30,
+                "reason": "wait for confirmation",
+            }
+        )
+
+        self.assertIn("Thời gian còn lại watchlist: 12p (+30p)", message)
+
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_bunny_minimize_losses_tracks_hard_peak_and_soft_threshold(self, _send_telegram_message) -> None:
         config = self._config()
@@ -950,6 +1032,40 @@ class CodexFeaturesTest(TestCase):
         self.assertAlmostEqual(normal["needToNormalUsdt"], 0.0)
 
     @patch("crypto_trader.notifier.send_telegram_message")
+    def test_bunny_minimize_losses_debounces_hard_to_soft_flapping(self, _send_telegram_message) -> None:
+        config = self._config()
+        config["position_sizing"] = {"target_profit_usdt": 0.30}
+        config["trading_risk"] = {
+            "global_loss_streak_threshold": 2,
+            "hard_to_soft_transition_cooldown_seconds": 900,
+        }
+        previous = {
+            "recoveryMode": "HARD_RECOVERY",
+            "recoveryBand": "hard",
+            "updatedAt": "2026-07-30T16:36:40+00:00",
+            "hardRecoveryStartedAt": "2026-07-30T16:30:35+00:00",
+            "hardRecoveryEntryCyclePnlUsdt": -17.408398,
+            "hardRecoveryPeakLossUsdt": -29.250977,
+            "hardRecoverySoftExitThresholdUsdt": -14.625488,
+        }
+
+        with patch("crypto_trader.codex_features.get_global_loss_streak", return_value=0), patch(
+            "crypto_trader.codex_features._recovery_cycle_pnl",
+            return_value=-12.608914,
+        ), patch(
+            "crypto_trader.codex_features._utcnow",
+            return_value=datetime(2026, 7, 30, 16, 37, 29, tzinfo=timezone.utc),
+        ), patch(
+            "crypto_trader.codex_features.get_trading_system_state_row",
+            return_value={"is_recovery_mode": 1, "payload_json": json.dumps(previous)},
+        ), patch("crypto_trader.codex_features.upsert_trading_system_state_row"):
+            state = refresh_trading_system_state(config)
+
+        self.assertEqual(state["recoveryMode"], "HARD_RECOVERY")
+        self.assertEqual(state["recoveryBand"], "hard")
+        self.assertAlmostEqual(state["needToSoftUsdt"], 0.0)
+
+    @patch("crypto_trader.notifier.send_telegram_message")
     def test_bunny_minimize_losses_uses_current_sizing_hard_band(self, _send_telegram_message) -> None:
         config = self._config()
         config["position_sizing"] = {
@@ -1001,6 +1117,29 @@ class CodexFeaturesTest(TestCase):
         self.assertIsNone(pnl)
         closed_trade_executions.assert_not_called()
 
+    def test_recovery_cycle_pnl_can_fallback_to_local_closed_trades_when_enabled(self) -> None:
+        config = self._config()
+        config["position_sizing"] = {
+            "cycle_start_at": "2026-07-05T00:00:00+07:00",
+            "cycle_pnl_use_trade_executions_fallback": True,
+        }
+        closed_trades = [
+            {
+                "symbol": "BTC/USDT:USDT",
+                "side": "LONG",
+                "pnl": -20.3289,
+                "closed_at": "2026-07-30T16:24:43+00:00",
+            },
+        ]
+
+        with patch("crypto_trader.market.create_exchange", side_effect=RuntimeError("okx unavailable")), patch(
+            "crypto_trader.codex_features._closed_trade_executions",
+            return_value=closed_trades,
+        ):
+            pnl = _recovery_cycle_pnl(config)
+
+        self.assertAlmostEqual(pnl, -20.3289, places=6)
+
     def test_recovery_cycle_pnl_uses_okx_closed_position_realized_pnl(self) -> None:
         config = self._config()
         config["position_sizing"] = {
@@ -1036,6 +1175,41 @@ class CodexFeaturesTest(TestCase):
             pnl = _recovery_cycle_pnl(config)
 
         self.assertAlmostEqual(pnl, 0.757775, places=6)
+
+    def test_recovery_cycle_pnl_rejects_okx_history_outlier_against_local_closed_trades(self) -> None:
+        config = self._config()
+        config["position_sizing"] = {
+            "cycle_start_at": "2026-07-05T00:00:00+07:00",
+            "history_limit": 100,
+        }
+        rows = [
+            {
+                "instId": "BAD-USDT-SWAP",
+                "posId": "bad",
+                "realizedPnl": "-884.854803",
+                "uTime": str(int(datetime(2026, 7, 30, tzinfo=timezone.utc).timestamp() * 1000)),
+            },
+        ]
+        exchange = SimpleNamespace(
+            load_markets=lambda: {},
+            privateGetAccountPositionsHistory=lambda params: {"data": rows},
+        )
+        closed_trades = [
+            {
+                "symbol": "BTC/USDT:USDT",
+                "side": "LONG",
+                "pnl": -20.3289,
+                "closed_at": "2026-07-30T16:24:43+00:00",
+            },
+        ]
+
+        with patch("crypto_trader.market.create_exchange", return_value=exchange), patch(
+            "crypto_trader.codex_features._closed_trade_executions",
+            return_value=closed_trades,
+        ):
+            pnl = _recovery_cycle_pnl(config)
+
+        self.assertAlmostEqual(pnl, -20.3289, places=6)
 
     def test_recovery_cycle_pnl_excludes_partial_okx_position_closes(self) -> None:
         config = self._config()

@@ -843,6 +843,11 @@ def _ai_call_message(item: dict[str, Any]) -> str:
         method = _trend_sl_tp_method_label(item.get("sl_tp_method"))
         if method:
             lines.append(f"TP/SL dựa vào: {method}")
+        remaining = item.get("watchlist_remaining_minutes")
+        if remaining is not None:
+            extend_minutes = _safe_int(item.get("watchlist_ai_review_extend_minutes"))
+            suffix = f" (+{extend_minutes}p)" if extend_minutes > 0 else ""
+            lines.append(f"Thời gian còn lại watchlist: {_safe_int(remaining)}p{suffix}")
         lines.append(f"Thời gian review setup: {_local_time_label(str(item.get('created_at') or _iso_now()))} VN")
         reason = str(item.get("reason") or "")
         if reason:
@@ -2496,7 +2501,20 @@ def _recovery_cycle_pnl_since_config_start(config: dict[str, Any]) -> float | No
         start_at = start_at.replace(tzinfo=timezone.utc)
     display_pnl = _recovery_cycle_display_pnl_from_okx(start_at, config)
     if display_pnl is not None:
+        local_pnl = _recovery_cycle_pnl_from_trade_executions(start_at, config)
+        if local_pnl is None:
+            return display_pnl
+        max_jump = _safe_float(sizing_config.get("cycle_pnl_outlier_max_jump_usdt"), RECOVERY_CYCLE_PNL_OUTLIER_JUMP_USDT)
+        ratio_limit = _safe_float(sizing_config.get("cycle_pnl_outlier_ratio"), RECOVERY_CYCLE_PNL_OUTLIER_RATIO)
+        jump = abs(_safe_float(display_pnl, 0.0) - _safe_float(local_pnl, 0.0))
+        ratio = max(abs(_safe_float(display_pnl, 0.0)), abs(_safe_float(local_pnl, 0.0))) / max(
+            min(abs(_safe_float(display_pnl, 0.0)), abs(_safe_float(local_pnl, 0.0))), 1.0
+        )
+        if jump >= max_jump and ratio >= ratio_limit:
+            return local_pnl
         return display_pnl
+    if bool(sizing_config.get("cycle_pnl_use_trade_executions_fallback", False)):
+        return _recovery_cycle_pnl_from_trade_executions(start_at, config)
     return None
 
 
@@ -2627,11 +2645,7 @@ def _notify_recovery_mode_transition(
     except (TypeError, json.JSONDecodeError):
         existing_marker = {}
     notified_at = _parse_time(existing_marker.get("notified_at"))
-    if (
-        str(existing_marker.get("current_mode") or "").upper() == current_mode
-        and notified_at is not None
-        and (_utcnow() - notified_at).total_seconds() < RISK_MODE_NOTIFICATION_REPEAT_SUPPRESS_SECONDS
-    ):
+    if notified_at is not None and (_utcnow() - notified_at).total_seconds() < RISK_MODE_NOTIFICATION_REPEAT_SUPPRESS_SECONDS:
         return
     icon = "🔴" if current_mode == "HARD_RECOVERY" else "🟡" if current_mode == "SOFT_RECOVERY" else "🟢"
     score, confidence, risk_reward, risk_percent = _mode_thresholds(current_mode, payload, settings)
@@ -2654,7 +2668,15 @@ def _notify_recovery_mode_transition(
     if current_mode == "HARD_RECOVERY":
         lines.append("Lý do: chuỗi thua chạm ngưỡng Hard Recovery.")
     elif current_mode == "SOFT_RECOVERY":
-        lines.append("Lý do: chuỗi thua đã reset nhưng cycle PnL vẫn âm.")
+        if str(previous_mode or "").upper() == "HARD_RECOVERY":
+            recovered_usdt = max(
+                0.0,
+                _safe_float(payload.get("recoveryCyclePnlUsdt"), 0.0)
+                - _safe_float(payload.get("hardRecoveryPeakLossUsdt"), 0.0),
+            )
+            lines.append(f"Lý do: đã gỡ được 50% số vốn thua là {recovered_usdt:.4f} USDT.")
+        else:
+            lines.append("Lý do: chuỗi thua đã reset nhưng cycle PnL vẫn âm.")
     else:
         lines.append("Lý do: cycle PnL đã ổn, bot quay về Normal.")
     try:
@@ -2748,6 +2770,17 @@ def refresh_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
         )
     )
     recovery_mode = "HARD_RECOVERY" if hard_recovery else "SOFT_RECOVERY" if soft_recovery else "NORMAL"
+    hard_to_soft_cooldown_seconds = _safe_int(settings.get("hard_to_soft_transition_cooldown_seconds"), 15 * 60)
+    previous_updated_at = _parse_time(previous_payload.get("updatedAt"))
+    if (
+        previous_recovery_mode == "HARD_RECOVERY"
+        and recovery_mode == "SOFT_RECOVERY"
+        and previous_updated_at is not None
+        and (_utcnow() - previous_updated_at).total_seconds() < hard_to_soft_cooldown_seconds
+    ):
+        hard_recovery = True
+        soft_recovery = False
+        recovery_mode = "HARD_RECOVERY"
     if recovery_mode == "NORMAL":
         hard_started_at = None
         hard_entry_cycle_pnl = 0.0

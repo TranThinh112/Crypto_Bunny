@@ -361,6 +361,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "trend_setup_near_target_buffer_pct": 0.35,
         "trend_watchlist_ttl_minutes": 120,
         "trend_watchlist_min_keep_score": 50.0,
+        "trend_watchlist_ai_review_extend_minutes": 30,
         "trend_watchlist_reject_cooldown_minutes": 120,
         "trend_pending_default_ttl_minutes": 45,
             "trend_pending_min_risk_reward": 1.2,
