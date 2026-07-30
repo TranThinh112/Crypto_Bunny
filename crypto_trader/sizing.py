@@ -131,6 +131,14 @@ def _position_time(row: dict[str, Any]) -> datetime | None:
         return datetime.fromtimestamp(numeric, tz=timezone.utc)
     return _event_time(timestamp)
 
+def _position_history_is_full_close(row: dict[str, Any]) -> bool:
+    info = row.get("info", {}) if isinstance(row.get("info"), dict) else {}
+    open_max = _float(row.get("openMaxPos") or info.get("openMaxPos"))
+    close_total = _float(row.get("closeTotalPos") or info.get("closeTotalPos"))
+    if open_max is None or close_total is None or open_max <= 0:
+        return True
+    return close_total + 1e-12 >= open_max
+
 def _add_position_history_rows(rows: Any, target: list[dict[str, Any]], seen: set[str]) -> None:
     if not isinstance(rows, list):
         return
@@ -363,6 +371,8 @@ def _closed_positions(config: dict[str, Any], settings: dict[str, Any]) -> list[
         pnl = _position_pnl(row)
         closed_at = _position_time(row)
         if not key or not symbol or pnl is None:
+            continue
+        if not _position_history_is_full_close(row):
             continue
         if cycle_start_at is not None and (closed_at is None or closed_at < cycle_start_at):
             continue

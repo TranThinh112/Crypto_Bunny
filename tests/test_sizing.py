@@ -473,7 +473,7 @@ class SizingTest(TestCase):
         state = get_journal_state(config, "position_sizing:recovery_cycle") or ""
         self.assertNotIn("ccxt-stale", state)
 
-    def test_rebuild_recovery_cycle_includes_partial_okx_position_closes_within_cycle_window(self) -> None:
+    def test_rebuild_recovery_cycle_excludes_partial_okx_position_closes_within_cycle_window(self) -> None:
         config = self._config()
         partial_row = {
             "instId": "ETH-USDT-SWAP",
@@ -497,8 +497,11 @@ class SizingTest(TestCase):
         with patch("crypto_trader.sizing.create_exchange", return_value=RawHistoryExchange([], [partial_row, full_row])):
             result = rebuild_recovery_cycle_state(config)
 
-        self.assertEqual(result["closed_count"], 2)
-        self.assertAlmostEqual(result["state"]["cycle_pnl_usdt"], -4.635822, places=6)
+        self.assertEqual(result["closed_count"], 1)
+        self.assertAlmostEqual(result["state"]["cycle_pnl_usdt"], 0.296297, places=6)
+        state = get_journal_state(config, "position_sizing:recovery_cycle") or ""
+        self.assertNotIn("partial-1", state)
+        self.assertIn("full-1", state)
 
     def test_recovery_cycle_blocks_when_cycle_loss_limit_is_reached(self) -> None:
         config = self._config()
