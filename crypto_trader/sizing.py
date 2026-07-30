@@ -471,8 +471,6 @@ def _set_loss_streak_fields(state: dict[str, Any], pnl: float, symbol: str, side
 
 def _enter_hard_recovery(state: dict[str, Any], cycle_pnl: float) -> None:
     now = datetime.now(timezone.utc).isoformat()
-    if state.get("recovery_band") == "soft" and state.get("hard_soft_recovered_at"):
-        return
     if state.get("recovery_band") != "hard":
         state["hard_started_at"] = now
         state["hard_start_pnl_usdt"] = round(cycle_pnl, 6)
@@ -506,8 +504,6 @@ def _hard_recovery_returned_to_soft(state: dict[str, Any], cycle_pnl: float) -> 
 
 def _hard_loss_rule_reason(state: dict[str, Any], settings: dict[str, Any], cycle_pnl: float) -> str | None:
     if state.get("recovery_band") == "hard":
-        return None
-    if state.get("recovery_band") == "soft" and state.get("hard_soft_recovered_at"):
         return None
     loss_streak_threshold = int(settings.get("hard_loss_streak_threshold") or 0)
     loss_streak = int(state.get("loss_streak") or 0)
@@ -574,7 +570,8 @@ def _apply_realized_pnl(
             reason = f"{reason}: cycle pnl {cycle_pnl:.4f} < soft threshold {soft_return:.4f}"
         _stop_state(state, reason)
         return str(state["block_reason"])
-    if recovery_step >= max_step:
+    soft_after_hard_recovery = state.get("recovery_band") == "soft" and bool(state.get("hard_soft_recovered_at"))
+    if recovery_step >= max_step and not soft_after_hard_recovery:
         _enter_hard_recovery(state, cycle_pnl)
         if state.get("recovery_band") == "hard":
             _stop_state(state, f"Recovery step limit reached: {recovery_step}/{max_step}")
@@ -595,7 +592,8 @@ def _apply_realized_pnl(
 
     state["next_margin_usdt"] = round(next_margin, 4)
     state["recovery_step"] = recovery_step if returned_to_soft else recovery_step + 1
-    if state["recovery_step"] >= max_step:
+    soft_after_hard_recovery = state.get("recovery_band") == "soft" and bool(state.get("hard_soft_recovered_at"))
+    if state["recovery_step"] >= max_step and not soft_after_hard_recovery:
         _enter_hard_recovery(state, cycle_pnl)
     elif cycle_pnl < 0:
         state["recovery_band"] = "soft"

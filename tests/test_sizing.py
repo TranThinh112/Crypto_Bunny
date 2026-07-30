@@ -291,6 +291,8 @@ class SizingTest(TestCase):
     def test_soft_recovery_after_half_recovery_does_not_reblock_at_step_limit(self) -> None:
         config = self._config()
         config["position_sizing"]["reset_orphaned_blocked_state"] = False
+        config["position_sizing"]["hard_loss_usdt_threshold"] = 0
+        config["position_sizing"]["hard_loss_streak_threshold"] = 0
         set_journal_state(
             config,
             "position_sizing:recovery_cycle",
@@ -320,6 +322,39 @@ class SizingTest(TestCase):
         self.assertEqual(result["recovery_band"], "soft")
         self.assertAlmostEqual(result["cycle_pnl_usdt"], -9.2, places=6)
         self.assertAlmostEqual(result["hard_peak_loss_usdt"], -20.0, places=6)
+
+    def test_soft_recovery_reenters_hard_when_cycle_loss_crosses_ten_usdt(self) -> None:
+        config = self._config()
+        config["position_sizing"]["reset_orphaned_blocked_state"] = False
+        set_journal_state(
+            config,
+            "position_sizing:recovery_cycle",
+            (
+                '{"cycle_pnl_usdt": -9.0, "recovery_step": 3, '
+                '"recovery_band": "soft", "next_margin_usdt": 0.0, '
+                '"processed_keys": ["old"], "processed_pnl_by_key": {}, '
+                '"blocked": false, "block_reason": null, '
+                '"hard_start_pnl_usdt": -20.0, "hard_peak_loss_usdt": -20.0, '
+                '"soft_return_pnl_usdt": -10.0, '
+                '"hard_soft_recovered_at": "2026-07-20T01:00:00+00:00"}'
+            ),
+        )
+        row = {
+            "symbol": "ETH/USDT:USDT",
+            "id": "soft-to-hard-loss",
+            "side": "long",
+            "pnl": -2.0,
+            "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
+        }
+        candidates = [_candidate("SOL/USDT:USDT", "long")]
+
+        with patch("crypto_trader.sizing.create_exchange", return_value=FakeExchange([row])):
+            result = apply_position_sizing(config, candidates)
+
+        self.assertTrue(result["blocked"])
+        self.assertEqual(result["recovery_band"], "hard")
+        self.assertAlmostEqual(result["cycle_pnl_usdt"], -11.0, places=6)
+        self.assertIn("cycle loss", result["block_reason"])
 
     def test_configured_cycle_start_rebuilds_legacy_blocked_state_from_okx_history(self) -> None:
         config = self._config()
