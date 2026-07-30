@@ -4504,6 +4504,32 @@ function formatPositionQuantityUsdt(contracts, price, contractSize) {
   return `${formatMarketRegimeNumber(usdtValue, 2)} USDT (${contractText})`;
 }
 
+function calculateRuntimePositionPnl(side, entryPrice, targetPrice, contracts, contractSize) {
+  const entry = nullableNumber(entryPrice);
+  const target = nullableNumber(targetPrice);
+  const amount = nullableNumber(contracts);
+  const size = nullableNumber(contractSize) ?? 1;
+  if (entry === null || target === null || amount === null || size <= 0) return null;
+  const direction = normalizedPositionSide(side) === "short" ? -1 : 1;
+  return (target - entry) * amount * size * direction;
+}
+
+function profitProtectionLevelWithRuntimePnl(level, item, amount, contractSize) {
+  if (!level || typeof level !== "object") return level;
+  const runtimePnl = calculateRuntimePositionPnl(
+    item?.side,
+    item?.entry_price ?? item?.initial_entry_price,
+    level.price,
+    amount,
+    contractSize
+  );
+  if (runtimePnl === null) return level;
+  return {
+    ...level,
+    pnl: runtimePnl,
+  };
+}
+
 function renderProfitProtectionLevel(label, level, tone = "", options = {}) {
   const price = level && typeof level === "object" ? level.price : null;
   const pnl = level && typeof level === "object" ? level.pnl : null;
@@ -4604,27 +4630,37 @@ function renderProfitProtectionPositionPanel(item) {
   const stepAchieved = (step) => achievedStep >= step;
   const lossGuard = levels.loss_guard && typeof levels.loss_guard === "object" ? levels.loss_guard : null;
   const contractSize = nullableNumber(levels.contract_size ?? item?.contract_size) ?? 1;
-  const currentSlLevel = levels.current_sl || levelByStep(slSteps, 1);
-  const currentTpLevel = levels.current_tp || levelByStep(tpSteps, 1);
-  const currentSlPrice = currentSlLevel?.price ?? item?.stop_loss;
+  const rawCurrentSlLevel = levels.current_sl || levelByStep(slSteps, 1);
+  const rawCurrentTpLevel = levels.current_tp || levelByStep(tpSteps, 1);
+  const currentSlPrice = rawCurrentSlLevel?.price ?? item?.stop_loss;
   const partialPrice = levels.partial_30?.price ?? item?.partial_take_profit_price;
+  const currentAmountForRuntime = nullableNumber(levels.current_amount ?? item?.quantity);
+  const runtimeLevel = (level) => profitProtectionLevelWithRuntimePnl(level, item, currentAmountForRuntime, contractSize);
+  const currentSlLevel = runtimeLevel(rawCurrentSlLevel);
+  const currentTpLevel = runtimeLevel(rawCurrentTpLevel);
   const initialExtraRows = profitProtectionExtraRows([
     { label: "Khối lượng ban đầu", value: formatPositionQuantityUsdt(levels.current_sl?.initial_amount ?? item?.initial_quantity, currentSlPrice, contractSize) },
   ]);
   const currentExtraRows = profitProtectionExtraRows([
     { label: "Mark", value: formatMarketRegimeNumber(item?.mark_price) },
-    { label: "KL hi\u1ec7n t\u1ea1i", value: formatPositionQuantityUsdt(levels.current_amount ?? item?.quantity, item?.mark_price, contractSize) },
+    { label: "KL hi\u1ec7n t\u1ea1i", value: formatPositionQuantityUsdt(currentAmountForRuntime, item?.mark_price, contractSize) },
   ]);
-  const initialAmountForPartial = nullableNumber(levels.current_sl?.initial_amount ?? item?.initial_quantity ?? levels.current_amount ?? item?.quantity);
+  const partialBaseAmount = currentAmountForRuntime;
   const partialAmount = nullableNumber(item?.partial_take_profit_amount);
-  const plannedPartialAmount = initialAmountForPartial === null
+  const plannedPartialAmount = partialBaseAmount === null
     ? null
-    : initialAmountForPartial * 0.3;
-  const afterProfitPartialAmount = initialAmountForPartial === null
+    : partialBaseAmount * 0.3;
+  const afterProfitPartialAmount = partialBaseAmount === null
     ? null
     : partialDone
-      ? nullableNumber(levels.current_amount ?? item?.quantity)
-      : Math.max(0, initialAmountForPartial - plannedPartialAmount);
+      ? currentAmountForRuntime
+      : Math.max(0, partialBaseAmount - plannedPartialAmount);
+  const partialLevel = profitProtectionLevelWithRuntimePnl(
+    levels.partial_30,
+    item,
+    partialDone && partialAmount !== null ? partialAmount : plannedPartialAmount,
+    contractSize
+  );
   const partialTimeLabel = levels.partial_30?.executed_at ? timeLabel(levels.partial_30.executed_at) : "-";
   const badge = tradeExecutionPartialBadge(item);
   const partialExtraRows = [
@@ -4648,14 +4684,14 @@ function renderProfitProtectionPositionPanel(item) {
         ${renderProfitProtectionLevel("SL1 ban đầu", currentSlLevel, "base", { extraRows: initialExtraRows, showInitialAmount: false })}
         ${renderProfitProtectionLevel("TP1 ban đầu", currentTpLevel, "base")}
         ${renderProfitProtectionLevel("PnL hi\u1ec7n t\u1ea1i", currentPnlLevel, "current", { extraRows: currentExtraRows })}
-        ${renderProfitProtectionLevel("Ch\u1ed1t l\u1eddi 30%", levels.partial_30, "partial", { achieved: partialDone, extraRows: partialExtraRows, showTrigger: false })}
+        ${renderProfitProtectionLevel("Ch\u1ed1t l\u1eddi 30%", partialLevel, "partial", { achieved: partialDone, extraRows: partialExtraRows, showTrigger: false })}
         ${renderLossGuardLevelActual(lossGuard, levels)}
-        ${renderProfitProtectionLevel("SL2", levelByStep(slSteps, 2) || levels.sl2, "step2", { achieved: stepAchieved(1) })}
-        ${renderProfitProtectionLevel("TP2", levelByStep(tpSteps, 2) || levels.tp2, "step2", { showTrigger: false, achieved: stepAchieved(1) })}
-        ${renderProfitProtectionLevel("SL3", levelByStep(slSteps, 3) || levels.sl3, "step3", { achieved: stepAchieved(2) })}
-        ${renderProfitProtectionLevel("TP3", levelByStep(tpSteps, 3), "step3", { showTrigger: false, achieved: stepAchieved(2) })}
-        ${renderProfitProtectionLevel("SL4", levelByStep(slSteps, 4), "step4", { achieved: stepAchieved(3) })}
-        ${renderProfitProtectionLevel("TP4", levelByStep(tpSteps, 4), "step4", { showTrigger: false, achieved: stepAchieved(3) })}
+        ${renderProfitProtectionLevel("SL2", runtimeLevel(levelByStep(slSteps, 2) || levels.sl2), "step2", { achieved: stepAchieved(1) })}
+        ${renderProfitProtectionLevel("TP2", runtimeLevel(levelByStep(tpSteps, 2) || levels.tp2), "step2", { showTrigger: false, achieved: stepAchieved(1) })}
+        ${renderProfitProtectionLevel("SL3", runtimeLevel(levelByStep(slSteps, 3) || levels.sl3), "step3", { achieved: stepAchieved(2) })}
+        ${renderProfitProtectionLevel("TP3", runtimeLevel(levelByStep(tpSteps, 3)), "step3", { showTrigger: false, achieved: stepAchieved(2) })}
+        ${renderProfitProtectionLevel("SL4", runtimeLevel(levelByStep(slSteps, 4)), "step4", { achieved: stepAchieved(3) })}
+        ${renderProfitProtectionLevel("TP4", runtimeLevel(levelByStep(tpSteps, 4)), "step4", { showTrigger: false, achieved: stepAchieved(3) })}
       </div>
     </article>
   `;

@@ -314,6 +314,7 @@ strategy:
     - ETH/USDT:USDT
     - BNB/USDT:USDT
     - XRP/USDT:USDT
+    - ETC/USDT:USDT
     weekday_priority_enabled: true
     weekday_priority_symbols:
     - XAU/USDT:USDT

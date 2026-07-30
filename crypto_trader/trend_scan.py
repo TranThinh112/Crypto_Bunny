@@ -155,6 +155,20 @@ def _score_frames(frames: list[dict[str, Any]], group: str) -> dict[str, Any]:
         "frames": used,
     }
 
+def _core_trend_symbols(config: dict[str, Any]) -> list[str]:
+    universe = config.get("strategy", {}).get("universe", {}) if isinstance(config.get("strategy"), dict) else {}
+    raw_symbols = list(universe.get("priority_symbols") or [])
+    raw_symbols.extend(["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "BNB/USDT:USDT", "XRP/USDT:USDT", "ETC/USDT:USDT"])
+    seen: set[str] = set()
+    result: list[str] = []
+    for symbol in raw_symbols:
+        normalized = str(symbol or "").strip().upper()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result
+
 def _trend_watch_decision(config: dict[str, Any], *, htf: dict[str, Any], entry: dict[str, Any], legacy_side: str, legacy_score: float) -> dict[str, Any]:
     internal = config.get("ai", {}).get("internal", {}) if isinstance(config.get("ai"), dict) else {}
     htf_threshold = _float(internal.get("trend_scan_htf_watch_threshold"), 60.0)
@@ -310,6 +324,15 @@ def build_trend_scan_snapshot(config: dict[str, Any], *, now: datetime | None = 
             }
         )
     symbols.sort(key=lambda item: (_float(item.get("trend_score")), str(item.get("latest_at") or "")), reverse=True)
+    symbol_by_name = {str(item.get("symbol") or "").upper(): item for item in symbols}
+    core_symbols = [
+        {
+            **symbol_by_name.get(symbol, {"symbol": symbol}),
+            "core_symbol": True,
+            "core_status": "scanned" if symbol in symbol_by_name else "missing_from_market_scan",
+        }
+        for symbol in _core_trend_symbols(config)
+    ]
     strong_threshold = _float(internal.get("trend_scan_strong_threshold"), 65.0)
     strong = [
         item
@@ -328,6 +351,7 @@ def build_trend_scan_snapshot(config: dict[str, Any], *, now: datetime | None = 
         "strong_threshold": strong_threshold,
         "strong_count": len(strong),
         "side_counts": dict(Counter(str(item.get("trend_side") or "mixed") for item in symbols)),
+        "core_symbols": core_symbols,
         "top_symbols": symbols[:top_limit],
         "strong_symbols": strong[:top_limit],
     }
@@ -558,16 +582,217 @@ def _timeframe_alignment(payload: dict[str, Any], side: str) -> dict[str, Any]:
         "details": details,
     }
 
-def _support_resistance_context(payload: dict[str, Any], frame: dict[str, Any]) -> dict[str, Any]:
+def _support_resistance_context(payload: dict[str, Any], frame: dict[str, Any], *, entry: float = 0.0) -> dict[str, Any]:
     support_distance = _float(frame.get("support_distance_pct"), _float(payload.get("support_distance_pct"), 0.0))
     resistance_distance = _float(frame.get("resistance_distance_pct"), _float(payload.get("resistance_distance_pct"), 0.0))
     range_position = _float(frame.get("range_position"), _float(payload.get("range_position"), 0.5))
+    support = _float(frame.get("support"), _float(payload.get("support"), 0.0))
+    resistance = _float(frame.get("resistance"), _float(payload.get("resistance"), 0.0))
+    if entry > 0 and support > 0 and support_distance <= 0:
+        support_distance = ((entry - support) / entry) * 100.0
+    if entry > 0 and resistance > 0 and resistance_distance <= 0:
+        resistance_distance = ((resistance - entry) / entry) * 100.0
     return {
+        "support": round(support, 8),
+        "resistance": round(resistance, 8),
         "support_distance_pct": round(support_distance, 4),
         "resistance_distance_pct": round(resistance_distance, 4),
         "range_position": round(range_position, 4),
         "near_support": 0 <= support_distance <= 1.5,
         "near_resistance": 0 <= resistance_distance <= 1.5,
+    }
+
+def _risk_model_settings(config: dict[str, Any]) -> dict[str, float]:
+    internal = config.get("ai", {}).get("internal", {}) if isinstance(config.get("ai"), dict) else {}
+    return {
+        "min_sl_pct": max(0.2, _float(internal.get("trend_setup_min_sl_pct"), 1.2)),
+        "small_coin_min_sl_pct": max(0.5, _float(internal.get("trend_setup_small_coin_min_sl_pct"), 1.8)),
+        "max_sl_pct": max(1.0, _float(internal.get("trend_setup_max_sl_pct"), 5.0)),
+        "atr_pullback_mult": max(0.5, _float(internal.get("trend_setup_atr_pullback_mult"), 1.35)),
+        "atr_breakout_mult": max(0.5, _float(internal.get("trend_setup_atr_breakout_mult"), 1.6)),
+        "sr_buffer_atr_mult": max(0.0, _float(internal.get("trend_setup_sr_buffer_atr_mult"), 0.25)),
+        "sr_buffer_min_pct": max(0.0, _float(internal.get("trend_setup_sr_buffer_min_pct"), 0.25)),
+        "near_target_buffer_pct": max(0.0, _float(internal.get("trend_setup_near_target_buffer_pct"), 0.35)),
+        "min_acceptable_rr": max(0.5, _float(internal.get("trend_setup_min_acceptable_rr"), 1.15)),
+        "preferred_rr": max(1.0, _float(internal.get("trend_setup_preferred_rr"), 1.5)),
+    }
+
+def _is_small_or_noisy_coin(entry: float, atr_pct: float, volume_ratio: float) -> bool:
+    return entry < 1.0 or atr_pct >= 1.4 or volume_ratio < 0.9
+
+def _risk_from_market_structure(
+    config: dict[str, Any],
+    *,
+    side: str,
+    entry: float,
+    entry_type: str,
+    atr_pct: float,
+    volume_ratio: float,
+    sr_context: dict[str, Any],
+    rr: float,
+) -> dict[str, Any]:
+    settings = _risk_model_settings(config)
+    if entry <= 0 or side not in {"long", "short"}:
+        return {
+            "stop_loss": 0.0,
+            "take_profit": 0.0,
+            "invalid_price": 0.0,
+            "risk_pct": 0.0,
+            "tp_distance_pct": 0.0,
+            "warnings": ["missing_entry_or_side"],
+            "risk_model": {"method": "invalid_input"},
+        }
+    min_sl_pct = settings["small_coin_min_sl_pct"] if _is_small_or_noisy_coin(entry, atr_pct, volume_ratio) else settings["min_sl_pct"]
+    atr_mult = settings["atr_breakout_mult"] if entry_type == "breakout" else settings["atr_pullback_mult"]
+    atr_risk_pct = max(min_sl_pct, atr_pct * atr_mult)
+    buffer_pct = max(settings["sr_buffer_min_pct"], atr_pct * settings["sr_buffer_atr_mult"])
+    support = _float(sr_context.get("support"))
+    resistance = _float(sr_context.get("resistance"))
+    sr_risk_pct = 0.0
+    sr_anchor = None
+    if side == "long" and 0 < support < entry:
+        sr_risk_pct = ((entry - support) / entry) * 100.0 + buffer_pct
+        sr_anchor = "support"
+    elif side == "short" and resistance > entry:
+        sr_risk_pct = ((resistance - entry) / entry) * 100.0 + buffer_pct
+        sr_anchor = "resistance"
+    def _price_from_pct(pct: float, is_stop: bool) -> float:
+        if side == "long":
+            return entry * (1.0 - pct / 100.0) if is_stop else entry * (1.0 + pct / 100.0)
+        return entry * (1.0 + pct / 100.0) if is_stop else entry * (1.0 - pct / 100.0)
+
+    def _pct_to_target(target: float) -> float:
+        if target <= 0:
+            return 0.0
+        return ((target - entry) / entry) * 100.0 if side == "long" else ((entry - target) / entry) * 100.0
+
+    def _make_plan(method: str, risk_pct_value: float, reward_pct_value: float, *, target_anchor: str | None = None, stop_anchor: str | None = None) -> dict[str, Any]:
+        risk_pct_value = min(settings["max_sl_pct"], max(0.0, risk_pct_value))
+        reward_pct_value = max(0.0, reward_pct_value)
+        actual_rr = reward_pct_value / risk_pct_value if risk_pct_value > 0 else 0.0
+        warnings: list[str] = []
+        if risk_pct_value <= 0 or reward_pct_value <= 0:
+            warnings.append("invalid_sl_tp_plan")
+        if risk_pct_value >= settings["max_sl_pct"] - 1e-9:
+            warnings.append("sl_capped_by_max_risk")
+        if risk_pct_value <= min_sl_pct + 1e-9:
+            warnings.append("sl_uses_min_volatility_floor")
+        if actual_rr < settings["min_acceptable_rr"]:
+            warnings.append("rr_below_minimum")
+        if side == "long" and 0 < resistance < _price_from_pct(reward_pct_value, False):
+            warnings.append("tp_beyond_resistance")
+        if side == "short" and 0 < support and _price_from_pct(reward_pct_value, False) < support:
+            warnings.append("tp_beyond_support")
+        score = 50.0
+        score += min(25.0, actual_rr * 10.0)
+        score += 10.0 if stop_anchor in {"support", "resistance", "swing"} else 0.0
+        score += 8.0 if target_anchor in {"resistance", "support", "fib_extension"} else 0.0
+        score -= 18.0 if "rr_below_minimum" in warnings else 0.0
+        score -= 8.0 if method == "rr_minimum" else 0.0
+        score -= 5.0 if "sl_capped_by_max_risk" in warnings else 0.0
+        return {
+            "method": method,
+            "stop_loss": _price_from_pct(risk_pct_value, True),
+            "take_profit": _price_from_pct(reward_pct_value, False),
+            "risk_pct": risk_pct_value,
+            "tp_distance_pct": reward_pct_value,
+            "actual_rr": actual_rr,
+            "score": round(_clamp(score), 2),
+            "warnings": warnings,
+            "stop_anchor": stop_anchor,
+            "target_anchor": target_anchor,
+        }
+
+    plans: list[dict[str, Any]] = []
+    natural_target_pct = 0.0
+    if side == "long" and resistance > entry:
+        natural_target_pct = _pct_to_target(resistance)
+    elif side == "short" and 0 < support < entry:
+        natural_target_pct = _pct_to_target(support)
+    if sr_risk_pct > 0 and natural_target_pct > 0:
+        plans.append(_make_plan("structure_swing_to_previous_extreme", sr_risk_pct, natural_target_pct, stop_anchor=sr_anchor or "swing", target_anchor="resistance" if side == "long" else "support"))
+    plans.append(_make_plan("atr_volatility_rr", max(atr_risk_pct, sr_risk_pct * 0.65), max(atr_risk_pct, sr_risk_pct * 0.65) * rr, stop_anchor=sr_anchor or "atr", target_anchor="rr"))
+    plans.append(_make_plan("rr_minimum", max(atr_risk_pct, min_sl_pct), max(atr_risk_pct, min_sl_pct) * settings["preferred_rr"], stop_anchor="atr", target_anchor="rr"))
+    if support > 0 and resistance > support:
+        range_pct = ((resistance - support) / entry) * 100.0
+        fib_target_pct = natural_target_pct + range_pct * 0.272
+        if fib_target_pct > 0:
+            plans.append(_make_plan("fib_extension_1272", max(atr_risk_pct, sr_risk_pct), fib_target_pct, stop_anchor=sr_anchor or "atr", target_anchor="fib_extension"))
+    viable = [plan for plan in plans if "invalid_sl_tp_plan" not in plan["warnings"]]
+    structure_plans = [
+        plan for plan in viable
+        if plan.get("method") == "structure_swing_to_previous_extreme"
+        and _float(plan.get("actual_rr")) >= settings["preferred_rr"]
+    ]
+    preferred = [plan for plan in viable if "rr_below_minimum" not in plan["warnings"]]
+    selected = max(structure_plans or preferred or viable, key=lambda item: item["score"], default=_make_plan("invalid", 0.0, 0.0))
+    warnings = list(selected.get("warnings") or [])
+    return {
+        "stop_loss": selected["stop_loss"],
+        "take_profit": selected["take_profit"],
+        "invalid_price": selected["stop_loss"],
+        "risk_pct": selected["risk_pct"],
+        "tp_distance_pct": selected["tp_distance_pct"],
+        "warnings": warnings,
+        "risk_model": {
+            "method": "multi_method_sl_tp_selector",
+            "selected_method": selected.get("method"),
+            "atr_pct": round(atr_pct, 4),
+            "atr_risk_pct": round(atr_risk_pct, 4),
+            "sr_risk_pct": round(sr_risk_pct, 4),
+            "sr_anchor": sr_anchor,
+            "natural_target_pct": round(natural_target_pct, 4),
+            "buffer_pct": round(buffer_pct, 4),
+            "min_sl_pct": round(min_sl_pct, 4),
+            "max_sl_pct": round(settings["max_sl_pct"], 4),
+            "rr": round(rr, 4),
+            "actual_rr": round(selected.get("actual_rr") or 0.0, 4),
+            "tp_distance_pct": round(selected.get("tp_distance_pct") or 0.0, 4),
+            "uses_small_coin_floor": _is_small_or_noisy_coin(entry, atr_pct, volume_ratio),
+            "candidate_plans": [
+                {
+                    "method": plan.get("method"),
+                    "risk_pct": round(_float(plan.get("risk_pct")), 4),
+                    "tp_distance_pct": round(_float(plan.get("tp_distance_pct")), 4),
+                    "actual_rr": round(_float(plan.get("actual_rr")), 4),
+                    "score": plan.get("score"),
+                    "warnings": plan.get("warnings"),
+                    "stop_anchor": plan.get("stop_anchor"),
+                    "target_anchor": plan.get("target_anchor"),
+                }
+                for plan in plans
+            ],
+        },
+    }
+
+def _fibonacci_context(*, side: str, entry: float, take_profit: float, sr_context: dict[str, Any]) -> dict[str, Any]:
+    support = _float(sr_context.get("support"))
+    resistance = _float(sr_context.get("resistance"))
+    if entry <= 0 or support <= 0 or resistance <= support:
+        return {"available": False, "reason": "missing_support_resistance"}
+    range_size = resistance - support
+    range_position = (entry - support) / range_size
+    if side == "long":
+        pullback_fib = 1.0 - range_position
+        extension_1272 = resistance + range_size * 0.272
+        extension_1618 = resistance + range_size * 0.618
+        tp_extension = (take_profit - resistance) / range_size if take_profit > resistance else 0.0
+    elif side == "short":
+        pullback_fib = range_position
+        extension_1272 = support - range_size * 0.272
+        extension_1618 = support - range_size * 0.618
+        tp_extension = (support - take_profit) / range_size if take_profit < support else 0.0
+    else:
+        return {"available": False, "reason": "invalid_side"}
+    in_pullback_zone = 0.382 <= pullback_fib <= 0.618
+    return {
+        "available": True,
+        "range_position": round(range_position, 4),
+        "pullback_fib": round(pullback_fib, 4),
+        "in_pullback_zone_382_618": in_pullback_zone,
+        "extension_1272": round(extension_1272, 8),
+        "extension_1618": round(extension_1618, 8),
+        "tp_extension_from_range": round(tp_extension, 4),
     }
 
 
@@ -654,7 +879,7 @@ def build_entry_proposal(config: dict[str, Any], row: dict[str, Any], *, now: da
     volume_ratio = _float(frame.get("volume_ratio"), _float(payload.get("volume_ratio"), 1.0))
     price_vs_ema = _float(frame.get("price_vs_ema_slow_pct"))
     alignment = _timeframe_alignment(payload, side)
-    sr_context = _support_resistance_context(payload, frame)
+    sr_context = _support_resistance_context(payload, frame, entry=entry)
     overextended_score = _clamp(abs(price_vs_ema) * 14.0 + max(0.0, rsi - 68.0 if side == "long" else 32.0 - rsi) * 3.0)
     overextended = overextended_score >= 70.0
     pullback_quality = _clamp(
@@ -687,21 +912,24 @@ def build_entry_proposal(config: dict[str, Any], row: dict[str, Any], *, now: da
         pullback_quality=pullback_quality,
         breakout_quality=breakout_quality,
     )
-    risk_pct = max(0.6, min(3.5, atr_pct * (1.1 if entry_type == "breakout" else 0.9)))
     rr = 1.75 if entry_type in {"pullback", "continuation"} else 1.5
-    if side == "long":
-        stop_loss = entry * (1.0 - risk_pct / 100.0)
-        take_profit = entry + (entry - stop_loss) * rr
-        invalid_price = stop_loss
-    elif side == "short":
-        stop_loss = entry * (1.0 + risk_pct / 100.0)
-        take_profit = entry - (stop_loss - entry) * rr
-        invalid_price = stop_loss
-    else:
-        stop_loss = 0.0
-        take_profit = 0.0
-        invalid_price = 0.0
+    risk_model = _risk_from_market_structure(
+        config,
+        side=side,
+        entry=entry,
+        entry_type=entry_type,
+        atr_pct=atr_pct,
+        volume_ratio=volume_ratio,
+        sr_context=sr_context,
+        rr=rr,
+    )
+    stop_loss = _float(risk_model.get("stop_loss"))
+    take_profit = _float(risk_model.get("take_profit"))
+    invalid_price = _float(risk_model.get("invalid_price"))
+    risk_pct = _float(risk_model.get("risk_pct"))
+    fibonacci = _fibonacci_context(side=side, entry=entry, take_profit=take_profit, sr_context=sr_context)
     warnings: list[str] = []
+    warnings.extend(str(item) for item in risk_model.get("warnings") or [])
     if overextended:
         warnings.append("overextended_risk")
     if entry_action["no_chase"]:
@@ -710,6 +938,8 @@ def build_entry_proposal(config: dict[str, Any], row: dict[str, Any], *, now: da
         warnings.append("weak_volume")
     if alignment["opposite_count"] >= 2:
         warnings.append("lower_timeframe_misalignment")
+    if fibonacci.get("available") and entry_type in {"pullback", "continuation"} and not fibonacci.get("in_pullback_zone_382_618"):
+        warnings.append("fib_pullback_zone_mismatch")
     if _float(payload.get("risk_reward"), rr) < 1.3:
         warnings.append("risk_reward_too_low")
     if entry <= 0 or side not in {"long", "short"}:
@@ -727,7 +957,10 @@ def build_entry_proposal(config: dict[str, Any], row: dict[str, Any], *, now: da
         "take_profit": round(take_profit, 8),
         "risk_reward": round(rr, 4),
         "risk_pct": round(risk_pct, 4),
+        "tp_distance_pct": round(_float(risk_model.get("tp_distance_pct")), 4),
         "invalid_price": round(invalid_price, 8),
+        "risk_model": risk_model.get("risk_model"),
+        "fibonacci_context": fibonacci,
         "overextended": overextended,
         "overextended_score": round(overextended_score, 2),
         "entry_action": entry_action["entry_action"],
@@ -836,7 +1069,7 @@ def review_setup_with_mini(
         purpose="mini_market_scan",
         route="trend_setup_review",
         record_history=True,
-        notify_telegram=notify_telegram,
+        notify_telegram=False,
     )
     parsed = dict(response.get("parsed") or {})
     parsed.update(
@@ -846,7 +1079,31 @@ def review_setup_with_mini(
             "latency_ms": response.get("latency_ms"),
         }
     )
-    return normalize_ai_setup_review(parsed, setup)
+    normalized = normalize_ai_setup_review(parsed, setup)
+    if notify_telegram:
+        try:
+            from .codex_features import record_ai_call_event
+
+            record_ai_call_event(
+                config,
+                {
+                    "role": "mini",
+                    "model": normalized.get("model_version") or internal_config.get("model", "gpt-5.4-mini"),
+                    "symbols": [symbol],
+                    "status": normalized.get("decision"),
+                    "approved": normalized.get("decision") == "APPROVE",
+                    "decision": normalized.get("decision"),
+                    "reason": normalized.get("reason"),
+                    "sl_tp_method": ((setup.get("risk_model") or {}).get("selected_method") if isinstance(setup.get("risk_model"), dict) else None),
+                    "prompt_version": "trend-setup-review-v1",
+                    "prompt_hash": "trend-setup-review-v1",
+                    "latency_ms": response.get("latency_ms"),
+                },
+                notify_telegram=True,
+            )
+        except Exception:
+            LOGGER.warning("Skipping normalized trend setup review telegram notification", exc_info=True)
+    return normalized
 
 def normalize_ai_setup_review(review: dict[str, Any], setup: dict[str, Any]) -> dict[str, Any]:
     decision = str(review.get("decision") or "").upper().strip()

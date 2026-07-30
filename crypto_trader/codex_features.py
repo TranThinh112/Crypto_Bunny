@@ -838,6 +838,9 @@ def _ai_call_message(item: dict[str, Any]) -> str:
     ]
     if is_trend_setup_review:
         lines.append("Luồng: Trend Scan")
+        method = _trend_sl_tp_method_label(item.get("sl_tp_method"))
+        if method:
+            lines.append(f"TP/SL dựa vào: {method}")
         lines.append(f"Thời gian review setup: {_local_time_label(str(item.get('created_at') or _iso_now()))} VN")
         reason = str(item.get("reason") or "")
         if reason:
@@ -857,6 +860,17 @@ def _ai_call_message(item: dict[str, Any]) -> str:
     if item.get("latency_ms") is not None:
         lines.append(f"Độ trễ: {item.get('latency_ms')} ms")
     return "\n".join(lines)
+
+def _trend_sl_tp_method_label(value: Any) -> str:
+    method = str(value or "").strip()
+    labels = {
+        "structure_swing_to_previous_extreme": "Cấu trúc chart - đáy/đỉnh cũ",
+        "atr_volatility_rr": "ATR/biến động + RR",
+        "rr_minimum": "RR tối thiểu",
+        "fib_extension_1272": "Fibonacci extension 1.272",
+        "multi_method_sl_tp_selector": "Chọn linh hoạt nhiều phương pháp",
+    }
+    return labels.get(method, method)
 
 
 def _notify_openai_api_call(
