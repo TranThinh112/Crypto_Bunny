@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from collections import Counter
@@ -773,10 +774,20 @@ def _support_resistance_context(payload: dict[str, Any], frame: dict[str, Any], 
     range_position = _float(frame.get("range_position"), _float(payload.get("range_position"), 0.5))
     support = _float(frame.get("support"), _float(payload.get("support"), 0.0))
     resistance = _float(frame.get("resistance"), _float(payload.get("resistance"), 0.0))
+    market_pattern = frame.get("market_pattern") if isinstance(frame.get("market_pattern"), dict) else payload.get("market_pattern")
+    if isinstance(market_pattern, dict):
+        nearest_support = market_pattern.get("nearest_support") if isinstance(market_pattern.get("nearest_support"), dict) else {}
+        nearest_resistance = market_pattern.get("nearest_resistance") if isinstance(market_pattern.get("nearest_resistance"), dict) else {}
+        if support <= 0:
+            support = _float(nearest_support.get("center_price"))
+        if resistance <= 0:
+            resistance = _float(nearest_resistance.get("center_price"))
     if entry > 0 and support > 0 and support_distance <= 0:
         support_distance = ((entry - support) / entry) * 100.0
     if entry > 0 and resistance > 0 and resistance_distance <= 0:
         resistance_distance = ((resistance - entry) / entry) * 100.0
+    if entry > 0 and support > 0 and resistance > support:
+        range_position = (entry - support) / max(resistance - support, 1e-12)
     return {
         "support": round(support, 8),
         "resistance": round(resistance, 8),
@@ -2055,14 +2066,24 @@ def _trend_setup_signature(setup: dict[str, Any], item: dict[str, Any]) -> dict[
         "entry_action": setup.get("entry_action"),
         "setup_state": setup.get("setup_state"),
         "entry_type": setup.get("entry_type"),
-        "entry_price": setup.get("entry_price"),
-        "stop_loss": setup.get("stop_loss"),
-        "take_profit": setup.get("take_profit"),
-        "risk_reward": setup.get("risk_reward"),
-        "trend_score": item.get("trend_score"),
-        "entry_readiness_score": item.get("entry_readiness_score"),
+        "entry_price": round(_float(setup.get("entry_price")), 8),
+        "stop_loss": round(_float(setup.get("stop_loss")), 8),
+        "take_profit": round(_float(setup.get("take_profit")), 8),
+        "risk_reward": round(_float(setup.get("risk_reward")), 4),
+        "trend_score": round(_float(item.get("trend_score")), 2),
+        "entry_readiness_score": round(_float(item.get("entry_readiness_score")), 2),
+        "pullback_quality": round(_float(setup.get("pullback_quality")), 2),
+        "breakout_quality": round(_float(setup.get("breakout_quality")), 2),
+        "rsi": round(_float(setup.get("rsi")), 2),
+        "price_vs_ema_slow_pct": round(_float(setup.get("price_vs_ema_slow_pct")), 4),
+        "volume_confirmation": bool(setup.get("volume_confirmation")),
+        "watch_type": item.get("watch_type"),
         "warnings": sorted(str(value) for value in (setup.get("warnings") or [])),
     }
+
+def _trend_setup_fingerprint(setup: dict[str, Any], item: dict[str, Any]) -> str:
+    payload = json.dumps(_trend_setup_signature(setup, item), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 def _pct_delta(current: Any, previous: Any) -> float:
     current_value = _float(current)
@@ -2075,10 +2096,46 @@ def _trend_setup_changed_enough(config: dict[str, Any], setup: dict[str, Any], i
     internal = config.get("ai", {}).get("internal", {}) if isinstance(config.get("ai"), dict) else {}
     price_delta_threshold = _float(internal.get("trend_setup_review_price_change_pct", 0.35), 0.35)
     score_delta_threshold = _float(internal.get("trend_setup_review_score_change", 8.0), 8.0)
+    same_fingerprint_block_enabled = bool(internal.get("trend_setup_review_same_fingerprint_block_enabled", True))
+    review_cooldown_minutes = max(
+        5,
+        int(internal.get("trend_setup_review_review_cooldown_minutes", 45) or 45),
+    )
+    reject_setup_cooldown_minutes = max(
+        15,
+        int(internal.get("trend_setup_review_reject_setup_only_cooldown_minutes", 120) or 120),
+    )
+    reject_remove_cooldown_minutes = max(
+        60,
+        int(internal.get("trend_setup_review_reject_watchlist_remove_cooldown_minutes", 720) or 720),
+    )
+    approve_cooldown_minutes = max(
+        5,
+        int(internal.get("trend_setup_review_approve_cooldown_minutes", 15) or 15),
+    )
     previous = item.get("last_ai_setup_signature") if isinstance(item.get("last_ai_setup_signature"), dict) else {}
     current = _trend_setup_signature(setup, item)
+    current_fingerprint = _trend_setup_fingerprint(setup, item)
+    previous_fingerprint = str(item.get("last_ai_setup_fingerprint") or previous.get("fingerprint") or "")
+    last_verdict = str(item.get("last_ai_verdict") or "").upper().strip()
+    last_reject_scope = str(item.get("last_ai_reject_scope") or "").upper().strip()
+    last_reject_reason_type = str(item.get("last_ai_reject_reason_type") or "").upper().strip()
+    last_reviewed_at = _parse_time(item.get("last_ai_review_at") or item.get("last_ai_reviewed_at"))
+    same_verdict_count = max(0, int(item.get("last_ai_same_verdict_count") or 0))
     if not previous:
-        return {"changed": True, "reason": "first_ai_review_for_watch_item", "signature": current}
+        return {
+            "changed": True,
+            "reason": "first_ai_review_for_watch_item",
+            "signature": current,
+            "fingerprint": current_fingerprint,
+        }
+    if same_fingerprint_block_enabled and previous_fingerprint and current_fingerprint == previous_fingerprint:
+        return {
+            "changed": False,
+            "reason": "setup_fingerprint_unchanged",
+            "signature": current,
+            "fingerprint": current_fingerprint,
+        }
     reasons: list[str] = []
     for key in ("entry_action", "setup_state", "entry_type"):
         if str(current.get(key)) != str(previous.get(key)):
@@ -2095,10 +2152,36 @@ def _trend_setup_changed_enough(config: dict[str, Any], setup: dict[str, Any], i
         reasons.append("entry_readiness_changed")
     if current.get("warnings") != previous.get("warnings"):
         reasons.append("warnings_changed")
+    if not reasons and last_reviewed_at is not None and last_verdict:
+        now = datetime.now(timezone.utc)
+        verdict_key = last_verdict
+        if last_verdict == "REJECT":
+            verdict_key = f"{last_verdict}:{last_reject_scope}:{last_reject_reason_type}"
+        cooldown_minutes = review_cooldown_minutes
+        if last_verdict == "APPROVE":
+            cooldown_minutes = approve_cooldown_minutes
+        elif last_verdict == "REVIEW":
+            cooldown_minutes = review_cooldown_minutes
+        elif last_verdict == "REJECT":
+            if last_reject_scope == "WATCHLIST_REMOVE" or last_reject_reason_type in {"TREND_INVALID", "LIQUIDITY_RISK", "MARKET_CONFLICT", "SYSTEM_RISK"}:
+                cooldown_minutes = reject_remove_cooldown_minutes
+            else:
+                cooldown_minutes = reject_setup_cooldown_minutes
+        if same_verdict_count >= 2:
+            cooldown_minutes = max(cooldown_minutes, reject_remove_cooldown_minutes if last_verdict == "REJECT" else review_cooldown_minutes * 2)
+        if (now - last_reviewed_at) < timedelta(minutes=cooldown_minutes):
+            remaining_minutes = int((timedelta(minutes=cooldown_minutes) - (now - last_reviewed_at)).total_seconds() // 60)
+            return {
+                "changed": False,
+                "reason": f"verdict_cooldown_active:{verdict_key}:{remaining_minutes}m",
+                "signature": current,
+                "fingerprint": current_fingerprint,
+            }
     return {
         "changed": bool(reasons),
         "reason": ",".join(reasons) if reasons else "setup_unchanged",
         "signature": current,
+        "fingerprint": current_fingerprint,
     }
 
 def _watchlist_review_notification_context(config: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
@@ -2157,6 +2240,8 @@ def _save_watchlist_ai_review_state(
     if item is None:
         return
     previous_reject_count = int(item.get("reject_count") or 0)
+    previous_verdict = str(item.get("last_ai_verdict") or "").upper().strip()
+    previous_verdict_count = int(item.get("last_ai_same_verdict_count") or 0)
     decision = str(ai_review.get("decision") or "").upper()
     reject_scope = str(ai_review.get("reject_scope") or "").upper()
     reject_reason_type = str(ai_review.get("reject_reason_type") or "").upper()
@@ -2195,7 +2280,11 @@ def _save_watchlist_ai_review_state(
         return
     item["last_ai_review_at"] = datetime.now(timezone.utc).isoformat()
     item["last_ai_decision"] = ai_review.get("decision")
+    item["last_ai_verdict"] = str(ai_review.get("decision") or "").upper().strip()
+    item["last_ai_reject_scope"] = str(ai_review.get("reject_scope") or "").upper().strip()
+    item["last_ai_reject_reason_type"] = str(ai_review.get("reject_reason_type") or "").upper().strip()
     item["last_ai_setup_signature"] = signature
+    item["last_ai_setup_fingerprint"] = _trend_setup_fingerprint(setup, item)
     item["last_ai_entry_action"] = setup.get("entry_action")
     item["last_ai_setup_state"] = setup.get("setup_state")
     now = datetime.now(timezone.utc)
@@ -2220,6 +2309,7 @@ def _save_watchlist_ai_review_state(
     item["last_reject_scope"] = reject_scope
     item["last_reject_reason_type"] = reject_reason_type
     item["allow_recheck_if_setup_changes"] = bool(ai_review.get("allow_recheck_if_setup_changes"))
+    item["last_ai_same_verdict_count"] = previous_verdict_count + 1 if previous_verdict == decision else 1
     if decision == "REJECT":
         item["status"] = "rejected_wait_new_setup"
         item["reject_count"] = previous_reject_count + 1

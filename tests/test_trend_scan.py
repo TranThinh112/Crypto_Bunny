@@ -6,7 +6,10 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from crypto_trader.trend_scan import (
+    build_entry_proposal,
     _review_prompt_package,
+    _trend_setup_changed_enough,
+    _trend_setup_fingerprint,
     _setup_to_candidate,
     normalize_ai_setup_review,
     process_trend_approved_hold_queue,
@@ -250,6 +253,88 @@ class TrendScanTest(TestCase):
         item = updated["items"]["CAP/USDT:USDT|long"]
         self.assertEqual(item["expires_at"], original_expires_at)
         self.assertNotIn("ai_review_extended_at", item)
+
+    def test_same_fingerprint_blocks_repeat_trend_ai_review(self) -> None:
+        setup = {
+            "symbol": "CAP/USDT:USDT",
+            "side": "long",
+            "entry_action": "WAIT_PULLBACK_LONG",
+            "setup_state": "ready_for_ai_review",
+            "entry_type": "pullback",
+            "entry_price": 1.0,
+            "stop_loss": 0.98,
+            "take_profit": 1.05,
+            "risk_reward": 2.5,
+            "pullback_quality": 62.0,
+            "breakout_quality": 60.0,
+            "rsi": 61.0,
+            "price_vs_ema_slow_pct": 0.4,
+            "volume_confirmation": True,
+            "warnings": ["near_resistance"],
+        }
+        item = {
+            "trend_score": 62.14,
+            "entry_readiness_score": 9.88,
+            "watch_type": "trend",
+            "last_ai_verdict": "REVIEW",
+            "last_ai_review_at": "2026-07-31T10:00:00+00:00",
+            "last_ai_same_verdict_count": 2,
+        }
+        item["last_ai_setup_signature"] = {
+            "symbol": "CAP/USDT:USDT",
+            "side": "long",
+            "entry_action": "WAIT_PULLBACK_LONG",
+            "setup_state": "ready_for_ai_review",
+            "entry_type": "pullback",
+            "entry_price": 1.0,
+            "stop_loss": 0.98,
+            "take_profit": 1.05,
+            "risk_reward": 2.5,
+            "trend_score": 62.14,
+            "entry_readiness_score": 9.88,
+            "pullback_quality": 62.0,
+            "breakout_quality": 60.0,
+            "rsi": 61.0,
+            "price_vs_ema_slow_pct": 0.4,
+            "volume_confirmation": True,
+            "watch_type": "trend",
+            "warnings": ["near_resistance"],
+        }
+        item["last_ai_setup_fingerprint"] = _trend_setup_fingerprint(setup, item)
+
+        changed = _trend_setup_changed_enough(self._config(), setup, item)
+
+        self.assertFalse(changed["changed"])
+        self.assertEqual(changed["reason"], "setup_fingerprint_unchanged")
+
+    def test_entry_proposal_uses_structure_levels_when_support_resistance_available(self) -> None:
+        config = self._config()
+        row = {
+            "symbol": "CAP/USDT:USDT",
+            "side": "long",
+            "payload": {
+                "symbol": "CAP/USDT:USDT",
+                "side": "long",
+                "entry": 100.0,
+                "indicator_summary": {
+                    "last": 100.0,
+                    "rsi": 52.0,
+                    "atr_pct": 1.0,
+                    "volume_ratio": 1.2,
+                    "price_vs_ema_slow_pct": 0.5,
+                    "support": 96.0,
+                    "resistance": 112.0,
+                    "range_position": 0.25,
+                },
+            },
+        }
+
+        setup = build_entry_proposal(config, row)
+
+        self.assertEqual(setup["risk_model"]["selected_method"], "structure_swing_to_previous_extreme")
+        self.assertTrue(setup["fibonacci_context"]["available"])
+        self.assertGreater(setup["support_resistance"]["support"], 0)
+        self.assertGreater(setup["support_resistance"]["resistance"], 0)
 
     def test_setup_only_reject_does_not_extend_or_remove_watchlist_first_time(self) -> None:
         now = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)

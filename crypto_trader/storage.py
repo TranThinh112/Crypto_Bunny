@@ -1600,6 +1600,8 @@ def _compact_market_indicator(indicator: dict[str, Any] | None) -> dict[str, Any
         "ema_gap_pct",
         "price_vs_ema_fast_pct",
         "price_vs_ema_slow_pct",
+        "support",
+        "resistance",
         "support_distance_pct",
         "resistance_distance_pct",
         "range_position",

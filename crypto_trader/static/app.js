@@ -4869,7 +4869,7 @@ function renderPositionManagementSectionDetail(module, options = {}) {
             </div>
           ` : ""}
         </div>
-        ${heading.subtitle ? `<p>${escapeHtml(heading.subtitle)}</p>` : ""}
+        ${heading.subtitle ? `<p class="${section === "profit_protection" ? "position-management-profit-subtitle" : ""}">${escapeHtml(heading.subtitle)}</p>` : ""}
       </div>
       <div class="module-head-actions">
         <span class="status-pill ${module.status === "ok" ? "ok" : "warn"}">${moduleStatusLabel(module.status)}</span>
@@ -4924,7 +4924,7 @@ function renderPositionManagementSectionDetail(module, options = {}) {
               </article>
             </div>
           </section>
-          <section class="market-regime-section">
+          <section class="market-regime-section profit-protection-live-section">
             <div class="market-regime-section-head"><div><strong>V\u1ecb th\u1ebf \u0111ang g\u1ed3ng</strong><small>M\u1ed7i tab l\u00e0 1 c\u1eb7p: SL/TP hi\u1ec7n t\u1ea1i, ch\u1ed1t 30%, TP2, SL2, SL3</small></div></div>
             ${renderProfitProtectionPositionTabs(items)}
           </section>

@@ -3077,6 +3077,7 @@ def validate_entry(config: dict[str, Any], payload: dict[str, Any]) -> dict[str,
     open_rows = _open_trade_executions(config)
     open_count, free_slots = _slot_state(open_rows, _safe_int(settings.get("max_concurrent_positions"), 3))
     reasons: list[str] = []
+    warnings: list[str] = []
     rule_score = _safe_float(payload.get("ruleScore", payload.get("rule_score", payload.get("confidence"))))
     gpt_confidence = _safe_float(payload.get("gptConfidence", payload.get("gpt_confidence", payload.get("confidence"))))
     win_probability = _safe_float(payload.get("winProbability", payload.get("win_probability_pct")), None)
@@ -3142,8 +3143,15 @@ def validate_entry(config: dict[str, Any], payload: dict[str, Any]) -> dict[str,
         reasons.append(f"GPT confidence {gpt_confidence:.2f} < {current_conf_threshold:.2f}")
     if win_probability is not None and win_probability < current_win_probability_threshold:
         reasons.append(f"Win probability {win_probability:.2f}% < {current_win_probability_threshold:.2f}%")
+    absolute_min_rr = _safe_float(settings.get("absolute_min_risk_reward"), 1.5)
+    rr_hard_block_enabled = bool(settings.get("rr_hard_block_enabled", False))
+    rr_absolute_hard_block_enabled = bool(settings.get("rr_absolute_hard_block_enabled", False))
     if risk_reward < normal_rr:
-        reasons.append(f"Risk reward {risk_reward:.2f} < {normal_rr:.2f}")
+        warnings.append(f"Risk reward {risk_reward:.2f} < tham chiếu {normal_rr:.2f}; giảm size thay vì loại cứng")
+        if rr_hard_block_enabled:
+            reasons.append(f"Risk reward {risk_reward:.2f} < {normal_rr:.2f}")
+    if risk_reward > 0 and risk_reward < absolute_min_rr and rr_absolute_hard_block_enabled:
+        reasons.append(f"Risk reward {risk_reward:.2f} < sàn tuyệt đối {absolute_min_rr:.2f}")
     setup_quality = "REJECTED"
     if not reasons:
         if (
@@ -3176,6 +3184,8 @@ def validate_entry(config: dict[str, Any], payload: dict[str, Any]) -> dict[str,
         "currentRuleThreshold": round(current_rule_threshold, 2),
         "currentConfidenceThreshold": round(current_conf_threshold, 2),
         "currentRiskRewardThreshold": round(normal_rr, 2),
+        "riskRewardIsAdvisory": not rr_hard_block_enabled,
+        "riskRewardWarnings": warnings,
         "healthState": health,
     }
 
@@ -3205,6 +3215,7 @@ def apply_system_validation_to_candidate(config: dict[str, Any], candidate: Trad
     warnings: list[str] = []
     if health.get("isWarning"):
         warnings.append("Bunny Health Monitor dang o trang thai warning")
+    warnings.extend(str(item) for item in response.get("riskRewardWarnings") or [])
     if response["allowed"]:
         return [], warnings
     return [str(response.get("reason") or "System validation rejected entry")], warnings

@@ -617,6 +617,42 @@ class StorageTest(TestCase):
         self.assertEqual(rows[0]["prompt_version"], "prompt-v2")
         self.assertEqual(rows[0]["prompt_hash"], "hash-b")
 
+    def test_market_scan_memory_preserves_support_resistance_levels(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config = self._config(tmpdir)
+            candidate = TradeCandidate(
+                symbol="CAP/USDT:USDT",
+                base="CAP",
+                side="long",
+                confidence=72,
+                entry=100.0,
+                stop_loss=96.0,
+                take_profit=112.0,
+                risk_reward=2.0,
+                order_usdt=10.0,
+                quantity=None,
+                spread_pct=0.01,
+                news_score=0.0,
+                news_count=0,
+                indicator_summary={
+                    "timeframe": "15m",
+                    "last": 100.0,
+                    "support": 96.0,
+                    "resistance": 112.0,
+                    "support_distance_pct": 4.0,
+                    "resistance_distance_pct": 12.0,
+                    "range_position": 0.25,
+                },
+            )
+
+            save_market_scan_observations(config, [candidate], source="test", limit=1)
+            memory = recent_market_scan_memory(config, symbols=["CAP/USDT:USDT"], timeframes=["15m"])
+
+        row = memory["CAP/USDT:USDT"]["15m"][0]
+        self.assertEqual(row["indicator"]["support"], 96.0)
+        self.assertEqual(row["indicator"]["resistance"], 112.0)
+        self.assertEqual(row["indicator"]["range_position"], 0.25)
+
     @patch("crypto_trader.storage._mongo_find_many", side_effect=AssertionError("storage_stats should not scan all rows in Python"))
     def test_storage_stats_uses_server_side_payload_aggregation(self, _mongo_find_many) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:

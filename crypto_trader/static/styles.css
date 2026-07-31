@@ -3513,6 +3513,10 @@ body.dark-mode .position-management-flow span {
   gap: 8px;
 }
 
+.position-management-profit-subtitle {
+  margin-top: 8px;
+}
+
 .trade-execution-tab {
   min-height: 34px;
   border: 1px solid var(--line);
@@ -3572,6 +3576,10 @@ body.dark-mode .position-management-flow span {
 
 .profit-protection-position {
   gap: 14px;
+}
+
+.profit-protection-live-section {
+  margin-top: 10px;
 }
 
 .profit-protection-level-grid {

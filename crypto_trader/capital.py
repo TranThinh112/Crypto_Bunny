@@ -108,6 +108,14 @@ def _position_sizing_options(config: dict[str, Any]) -> dict[str, Any]:
         "target_profit_usdt": _float(raw.get("target_profit_usdt"), 0.30),
         "max_recovery_step": _int(raw.get("max_recovery_step"), 4),
         "quality_margin_enabled": bool(raw.get("quality_margin_enabled", False)),
+        "rr_sizing_enabled": bool(raw.get("rr_sizing_enabled", True)),
+        "rr_sizing_multiplier_low": _float(raw.get("rr_sizing_multiplier_low"), 0.6),
+        "rr_sizing_multiplier_base": _float(raw.get("rr_sizing_multiplier_base"), 1.0),
+        "rr_sizing_multiplier_good": _float(raw.get("rr_sizing_multiplier_good"), 1.15),
+        "rr_sizing_multiplier_excellent": _float(raw.get("rr_sizing_multiplier_excellent"), 1.3),
+        "rr_sizing_low_threshold": _float(raw.get("rr_sizing_low_threshold"), 1.5),
+        "rr_sizing_good_threshold": _float(raw.get("rr_sizing_good_threshold"), 2.0),
+        "rr_sizing_excellent_threshold": _float(raw.get("rr_sizing_excellent_threshold"), 2.5),
         "quality_margin_percent_by_grade": {
             str(key).upper(): max(0.0, _float(value))
             for key, value in quality_margin_percent.items()
@@ -156,6 +164,32 @@ def _quality_margin_target(
         "boosted_order_size": boosted_order_size,
     }
 
+
+def _rr_sizing_adjustment(options: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
+    rr = _float(request.get("risk_reward"), 0.0)
+    if not bool(options.get("rr_sizing_enabled")) or rr <= 0:
+        return {"enabled": False, "risk_reward": rr, "multiplier": 1.0, "band": "disabled"}
+    low = _float(options.get("rr_sizing_low_threshold"), 1.5)
+    good = _float(options.get("rr_sizing_good_threshold"), 2.0)
+    excellent = _float(options.get("rr_sizing_excellent_threshold"), 2.5)
+    if rr >= excellent:
+        band = "excellent"
+        multiplier = _float(options.get("rr_sizing_multiplier_excellent"), 1.3)
+    elif rr >= good:
+        band = "good"
+        multiplier = _float(options.get("rr_sizing_multiplier_good"), 1.15)
+    elif rr >= low:
+        band = "base"
+        multiplier = _float(options.get("rr_sizing_multiplier_base"), 1.0)
+    else:
+        band = "low"
+        multiplier = _float(options.get("rr_sizing_multiplier_low"), 0.6)
+    return {
+        "enabled": True,
+        "risk_reward": rr,
+        "multiplier": max(0.0, multiplier),
+        "band": band,
+    }
 
 def calculate_realized_capital(wallet_balance: Any, unrealized_pnl: Any) -> float:
     return _round(_float(wallet_balance) - _float(unrealized_pnl), 6)
@@ -401,6 +435,10 @@ def calculate_position_size(config: dict[str, Any], request: dict[str, Any]) -> 
         and _float(quality_margin.get("boosted_order_size")) > raw_order_size
     ):
         raw_order_size = _float(quality_margin.get("boosted_order_size"))
+    rr_sizing = _rr_sizing_adjustment(options, request)
+    if request.get("requested_order_size") in (None, "") and bool(rr_sizing.get("enabled")):
+        raw_order_size *= _float(rr_sizing.get("multiplier"), 1.0)
+        raw_order_size = min(raw_order_size, max_by_capital)
     requested = request.get("requested_order_size")
     order_size = _float(requested) if requested not in (None, "") else raw_order_size
     if requested not in (None, "") and order_size > raw_order_size:
@@ -451,6 +489,10 @@ def calculate_position_size(config: dict[str, Any], request: dict[str, Any]) -> 
         "quality_margin_target_order_size": _round(quality_margin.get("target_order_size"), 2),
         "quality_margin_max_loss_amount": _round(quality_margin.get("max_loss_amount"), 2),
         "quality_margin_order_size": _round(quality_margin.get("boosted_order_size"), 2),
+        "rr_sizing_enabled": bool(rr_sizing.get("enabled")),
+        "rr_sizing_band": rr_sizing.get("band"),
+        "rr_sizing_multiplier": _round(rr_sizing.get("multiplier"), 4),
+        "risk_reward": _round(rr_sizing.get("risk_reward"), 4),
         "suggested_order_size": round(order_size, options["round_order_size_decimals"]),
         "required_margin": round(required_margin, options["round_margin_decimals"]),
         "estimated_loss": _round(estimated_loss, 2),
@@ -528,6 +570,7 @@ def calculate_trade_intent_position_size(
         "take_profit_percent": tp_pct,
         "risk_percent": risk_percent,
         "setup_grade": ai_review.get("setup_grade") or intent.get("setup_grade"),
+        "risk_reward": ai_review.get("risk_reward") or intent.get("risk_reward") or setup.get("risk_reward"),
     }
     result = calculate_position_size(config, request)
     quantity = _round(_float(result.get("suggested_order_size")) / entry, 6) if entry > 0 else 0.0

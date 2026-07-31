@@ -975,6 +975,46 @@ class CodexFeaturesTest(TestCase):
         self.assertIn("SOFT RECOVERY", message)
         self.assertIn("Chuỗi thua hệ thống: 0", message)
 
+    def test_validate_entry_treats_rr_as_advisory_by_default(self) -> None:
+        config = self._config()
+        config.setdefault("trading_risk", {}).update(
+            {
+                "recovery_min_rule_score": 90,
+                "recovery_min_gpt_confidence": 92,
+                "recovery_min_win_probability_pct": 80,
+                "recovery_min_risk_reward": 2.5,
+                "rr_hard_block_enabled": False,
+            }
+        )
+        hard_state = {
+            "isPaused": False,
+            "isRecoveryMode": True,
+            "recoveryMode": "HARD_RECOVERY",
+            "currentNormalMinRuleScore": 75,
+            "currentNormalMinGptConfidence": 82,
+        }
+        health = {"isPaused": False, "isWarning": False, "isCritical": False}
+
+        with patch("crypto_trader.codex_features.get_trading_system_state", return_value=hard_state), patch(
+            "crypto_trader.codex_features.get_bunny_health_state", return_value=health
+        ), patch("crypto_trader.codex_features._open_trade_executions", return_value=[]):
+            result = validate_entry(
+                config,
+                {
+                    "ruleScore": 95,
+                    "gptConfidence": 93,
+                    "winProbability": 82,
+                    "riskReward": 1.5,
+                    "volumeConfirmed": True,
+                    "entryPrice": 100,
+                    "currentPrice": 100,
+                },
+            )
+
+        self.assertTrue(result["allowed"])
+        self.assertTrue(result["riskRewardIsAdvisory"])
+        self.assertIn("Risk reward 1.50", result["riskRewardWarnings"][0])
+
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_recovery_mode_sends_telegram_when_soft_recovery(self, send_telegram_message) -> None:
         config = self._config()

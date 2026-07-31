@@ -147,8 +147,13 @@ def evaluate_candidate(
             )
 
     min_rr = float(strategy_config.get("min_risk_reward", 2.0))
+    rr_hard_block_enabled = bool(config.get("trading_risk", {}).get("rr_hard_block_enabled", False))
     if candidate.risk_reward < min_rr:
-        reasons.append(f"Risk/reward {candidate.risk_reward:.2f} is below minimum {min_rr:.2f}")
+        message = f"Risk/reward {candidate.risk_reward:.2f} is below reference {min_rr:.2f}"
+        if rr_hard_block_enabled:
+            reasons.append(message)
+        else:
+            warnings.append(message)
 
     max_spread = float(risk_config.get("max_spread_pct", 0.15))
     if candidate.spread_pct is not None and candidate.spread_pct > max_spread:

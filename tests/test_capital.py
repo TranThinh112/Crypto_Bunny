@@ -192,6 +192,50 @@ class CapitalTest(TestCase):
         self.assertEqual(result["effective_risk_amount"], 0.5)
         self.assertEqual(result["effective_risk_source"], "quality_margin_loss_cap")
 
+    def test_rr_sizing_adjusts_suggested_order_size(self) -> None:
+        config = self._config()
+        config["position_sizing"].update(
+            {
+                "rr_sizing_enabled": True,
+                "rr_sizing_multiplier_low": 0.6,
+                "rr_sizing_multiplier_base": 1.0,
+                "rr_sizing_multiplier_good": 1.15,
+                "rr_sizing_multiplier_excellent": 1.3,
+            }
+        )
+        state = {
+            "ok": True,
+            "mode": "HEALTHY",
+            "realized_capital": 125,
+            "reserve_amount": 25,
+            "trading_capital": 100,
+            "used_trading_capital": 0,
+            "available_trading_capital": 50,
+        }
+
+        def size(rr: float) -> dict:
+            with patch("crypto_trader.capital.latest_capital_reserve_state", return_value=state):
+                return calculate_position_size(
+                    config,
+                    {
+                        "symbol": "CAP/USDT:USDT",
+                        "side": "LONG",
+                        "mode": "HEALTHY",
+                        "leverage": 10,
+                        "risk_reward": rr,
+                    },
+                )
+
+        low = size(1.2)
+        base = size(1.5)
+        excellent = size(2.5)
+
+        self.assertEqual(low["rr_sizing_band"], "low")
+        self.assertEqual(base["rr_sizing_band"], "base")
+        self.assertEqual(excellent["rr_sizing_band"], "excellent")
+        self.assertLess(low["suggested_order_size"], base["suggested_order_size"])
+        self.assertGreater(excellent["suggested_order_size"], base["suggested_order_size"])
+
     def test_trade_intent_position_size_passes_setup_grade_to_quality_margin(self) -> None:
         config = self._config()
         config["exchange"]["leverage"] = 25
