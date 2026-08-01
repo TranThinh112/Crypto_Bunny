@@ -384,8 +384,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "trend_setup_review_reject_setup_only_cooldown_minutes": 120,
             "trend_setup_review_reject_watchlist_remove_cooldown_minutes": 720,
             "trend_setup_review_approve_cooldown_minutes": 15,
-            "trend_setup_review_price_change_pct": 0.35,
-            "trend_setup_review_score_change": 8.0,
+            "trend_setup_review_price_change_pct": 3.0,
+            "trend_setup_review_score_change": 15.0,
+            "trend_setup_review_trend_score_change": 12.0,
+            "trend_setup_review_same_class_second_cooldown_minutes": 120,
+            "trend_setup_review_same_class_third_cooldown_minutes": 240,
+            "trend_setup_review_daily_budget_per_class": 3,
             "trend_auto_shadow_review_enabled": True,
             "trend_auto_shadow_review_limit": 5,
             "lc_pipeline_min_win_probability_pct": 62,
@@ -504,6 +508,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "runtime_sync": {
         "position_close_grace_seconds": 120,
+        "manual_target_fast_sync_enabled": True,
+        "manual_target_fast_sync_interval_seconds": 10,
     },
     "market_regime": {
         "enabled": True,

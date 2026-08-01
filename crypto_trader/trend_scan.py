@@ -23,6 +23,7 @@ TREND_SETUP_REVIEW_LOG_PREFIX = "trend_setup_review_log"
 TREND_PENDING_PLAN_STATE_KEY = "trend_pending_plan_state"
 TREND_APPROVED_HOLD_QUEUE_STATE_KEY = "trend_approved_hold_queue_state"
 TREND_SETUP_REVIEW_LAST_CALL_PREFIX = "trend_setup_review_last_call"
+TREND_SETUP_CLASS_MEMORY_PREFIX = "trend_setup_class_memory"
 
 
 def _float(value: Any, default: float = 0.0) -> float:
@@ -2085,6 +2086,88 @@ def _trend_setup_fingerprint(setup: dict[str, Any], item: dict[str, Any]) -> str
     payload = json.dumps(_trend_setup_signature(setup, item), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
+def _trend_setup_class(setup: dict[str, Any], item: dict[str, Any] | None = None) -> str:
+    warnings = {str(value) for value in (setup.get("warnings") or [])}
+    reasons = {str(value) for value in (setup.get("entry_action_reason") or [])}
+    entry_action = str(setup.get("entry_action") or "").upper()
+    setup_state = str(setup.get("setup_state") or "").lower()
+    volume_confirmed = bool(setup.get("volume_confirmation"))
+    support_resistance = setup.get("support_resistance") if isinstance(setup.get("support_resistance"), dict) else {}
+    near_resistance = "near_resistance" in reasons or bool(support_resistance.get("near_resistance"))
+    near_support = "near_support" in reasons or bool(support_resistance.get("near_support"))
+    no_chase = "no_chase_entry" in warnings or "NO_CHASE" in entry_action or entry_action.startswith("REVIEW_COUNTERTREND")
+    method = str((setup.get("risk_model") or {}).get("selected_method") or setup.get("sl_tp_method") or "")
+    if setup_state in {"invalid", "rejected"}:
+        return "trend_invalid"
+    if not volume_confirmed:
+        return "volume_weak"
+    if near_resistance and no_chase:
+        return "near_resistance_no_chase"
+    if near_support and no_chase:
+        return "near_support_no_chase"
+    if "BREAKOUT" in entry_action:
+        return "breakout_confirmation"
+    if setup_state in {"ready", "approved", "trade_ready"} or entry_action.startswith("READY"):
+        return "ready_to_review"
+    if method in {"structure_swing_to_previous_extreme", "fib_extension_1272"} and not no_chase:
+        return "clean_pullback"
+    if "PULLBACK" in entry_action or str(setup.get("entry_type") or "") == "pullback":
+        return "wait_pullback"
+    return "setup_review"
+
+def _trend_setup_quality_rank(setup_class: str) -> int:
+    ranks = {
+        "trend_invalid": 0,
+        "volume_weak": 1,
+        "near_resistance_no_chase": 2,
+        "near_support_no_chase": 2,
+        "wait_pullback": 3,
+        "breakout_confirmation": 4,
+        "clean_pullback": 5,
+        "ready_to_review": 6,
+    }
+    return ranks.get(str(setup_class or ""), 3)
+
+def _trend_setup_memory_date(config: dict[str, Any]) -> str:
+    timezone_name = str(config.get("timezone") or config.get("ai", {}).get("internal", {}).get("market_scan_timezone") or "Asia/Ho_Chi_Minh")
+    try:
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo(timezone_name)
+    except Exception:
+        tz = timezone(timedelta(hours=7))
+    return datetime.now(tz).date().isoformat()
+
+def _trend_setup_class_memory_key(config: dict[str, Any], symbol: str, side: str, setup_class: str) -> str:
+    return (
+        f"{TREND_SETUP_CLASS_MEMORY_PREFIX}:"
+        f"{_trend_setup_memory_date(config)}:"
+        f"{_safe_token(symbol)}:"
+        f"{_safe_token(side)}:"
+        f"{_safe_token(setup_class)}"
+    )
+
+def _load_trend_setup_class_memory(config: dict[str, Any], symbol: str, side: str, setup_class: str) -> dict[str, Any]:
+    raw = get_journal_state(config, _trend_setup_class_memory_key(config, symbol, side, setup_class))
+    try:
+        payload = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        payload = {}
+    return payload if isinstance(payload, dict) else {}
+
+def _save_trend_setup_class_memory(
+    config: dict[str, Any],
+    symbol: str,
+    side: str,
+    setup_class: str,
+    payload: dict[str, Any],
+) -> None:
+    set_journal_state(
+        config,
+        _trend_setup_class_memory_key(config, symbol, side, setup_class),
+        json.dumps(to_jsonable(payload), ensure_ascii=False, sort_keys=True),
+    )
+
 def _pct_delta(current: Any, previous: Any) -> float:
     current_value = _float(current)
     previous_value = _float(previous)
@@ -2094,8 +2177,9 @@ def _pct_delta(current: Any, previous: Any) -> float:
 
 def _trend_setup_changed_enough(config: dict[str, Any], setup: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
     internal = config.get("ai", {}).get("internal", {}) if isinstance(config.get("ai"), dict) else {}
-    price_delta_threshold = _float(internal.get("trend_setup_review_price_change_pct", 0.35), 0.35)
-    score_delta_threshold = _float(internal.get("trend_setup_review_score_change", 8.0), 8.0)
+    price_delta_threshold = _float(internal.get("trend_setup_review_price_change_pct", 3.0), 3.0)
+    score_delta_threshold = _float(internal.get("trend_setup_review_score_change", 15.0), 15.0)
+    trend_score_delta_threshold = _float(internal.get("trend_setup_review_trend_score_change", 12.0), 12.0)
     same_fingerprint_block_enabled = bool(internal.get("trend_setup_review_same_fingerprint_block_enabled", True))
     review_cooldown_minutes = max(
         5,
@@ -2115,6 +2199,9 @@ def _trend_setup_changed_enough(config: dict[str, Any], setup: dict[str, Any], i
     )
     previous = item.get("last_ai_setup_signature") if isinstance(item.get("last_ai_setup_signature"), dict) else {}
     current = _trend_setup_signature(setup, item)
+    current_setup_class = _trend_setup_class(setup, item)
+    previous_setup_class = str(item.get("last_ai_setup_class") or previous.get("setup_class") or "")
+    current["setup_class"] = current_setup_class
     current_fingerprint = _trend_setup_fingerprint(setup, item)
     previous_fingerprint = str(item.get("last_ai_setup_fingerprint") or previous.get("fingerprint") or "")
     last_verdict = str(item.get("last_ai_verdict") or "").upper().strip()
@@ -2123,11 +2210,43 @@ def _trend_setup_changed_enough(config: dict[str, Any], setup: dict[str, Any], i
     last_reviewed_at = _parse_time(item.get("last_ai_review_at") or item.get("last_ai_reviewed_at"))
     same_verdict_count = max(0, int(item.get("last_ai_same_verdict_count") or 0))
     if not previous:
+        symbol = str(setup.get("symbol") or item.get("symbol") or "")
+        side = str(setup.get("side") or item.get("side") or "").lower()
+        memory = _load_trend_setup_class_memory(config, symbol, side, current_setup_class) if symbol and side else {}
+        memory_last_reviewed_at = _parse_time(memory.get("last_review_at"))
+        memory_verdict = str(memory.get("last_verdict") or "").upper().strip()
+        memory_count = max(0, int(memory.get("same_class_review_count") or 0))
+        daily_budget = max(1, int(internal.get("trend_setup_review_daily_budget_per_class", 3) or 3))
+        if memory_count >= daily_budget:
+            return {
+                "changed": False,
+                "reason": f"setup_class_daily_budget_reached:{current_setup_class}:{memory_count}/{daily_budget}",
+                "signature": current,
+                "fingerprint": current_fingerprint,
+                "setup_class": current_setup_class,
+            }
+        if memory_last_reviewed_at is not None and memory_verdict == "REVIEW":
+            if memory_count <= 1:
+                class_cooldown_minutes = review_cooldown_minutes
+            elif memory_count == 2:
+                class_cooldown_minutes = max(review_cooldown_minutes, int(internal.get("trend_setup_review_same_class_second_cooldown_minutes", 120) or 120))
+            else:
+                class_cooldown_minutes = max(review_cooldown_minutes, int(internal.get("trend_setup_review_same_class_third_cooldown_minutes", 240) or 240))
+            if (datetime.now(timezone.utc) - memory_last_reviewed_at) < timedelta(minutes=class_cooldown_minutes):
+                remaining_minutes = int((timedelta(minutes=class_cooldown_minutes) - (datetime.now(timezone.utc) - memory_last_reviewed_at)).total_seconds() // 60)
+                return {
+                    "changed": False,
+                    "reason": f"setup_class_cooldown_active:{current_setup_class}:{remaining_minutes}m",
+                    "signature": current,
+                    "fingerprint": current_fingerprint,
+                    "setup_class": current_setup_class,
+                }
         return {
             "changed": True,
             "reason": "first_ai_review_for_watch_item",
             "signature": current,
             "fingerprint": current_fingerprint,
+            "setup_class": current_setup_class,
         }
     if same_fingerprint_block_enabled and previous_fingerprint and current_fingerprint == previous_fingerprint:
         return {
@@ -2135,23 +2254,39 @@ def _trend_setup_changed_enough(config: dict[str, Any], setup: dict[str, Any], i
             "reason": "setup_fingerprint_unchanged",
             "signature": current,
             "fingerprint": current_fingerprint,
+            "setup_class": current_setup_class,
         }
     reasons: list[str] = []
+    price_reasons: list[str] = []
     for key in ("entry_action", "setup_state", "entry_type"):
         if str(current.get(key)) != str(previous.get(key)):
             reasons.append(f"{key}_changed")
     if _pct_delta(current.get("entry_price"), previous.get("entry_price")) >= price_delta_threshold:
-        reasons.append("entry_price_changed")
+        price_reasons.append("entry_price_changed")
     if _pct_delta(current.get("stop_loss"), previous.get("stop_loss")) >= price_delta_threshold:
-        reasons.append("stop_loss_changed")
+        price_reasons.append("stop_loss_changed")
     if _pct_delta(current.get("take_profit"), previous.get("take_profit")) >= price_delta_threshold:
-        reasons.append("take_profit_changed")
-    if abs(_float(current.get("trend_score")) - _float(previous.get("trend_score"))) >= score_delta_threshold:
-        reasons.append("trend_score_changed")
-    if abs(_float(current.get("entry_readiness_score")) - _float(previous.get("entry_readiness_score"))) >= score_delta_threshold:
-        reasons.append("entry_readiness_changed")
-    if current.get("warnings") != previous.get("warnings"):
-        reasons.append("warnings_changed")
+        price_reasons.append("take_profit_changed")
+    trend_score_delta = _float(current.get("trend_score")) - _float(previous.get("trend_score"))
+    entry_readiness_delta = _float(current.get("entry_readiness_score")) - _float(previous.get("entry_readiness_score"))
+    if trend_score_delta >= trend_score_delta_threshold:
+        reasons.append("trend_score_improved")
+    if entry_readiness_delta >= score_delta_threshold:
+        reasons.append("entry_readiness_improved")
+    previous_warnings = set(previous.get("warnings") or [])
+    current_warnings = set(current.get("warnings") or [])
+    if "no_chase_entry" in previous_warnings and "no_chase_entry" not in current_warnings:
+        reasons.append("no_chase_cleared")
+    if previous_setup_class and current_setup_class != previous_setup_class:
+        if _trend_setup_quality_rank(current_setup_class) > _trend_setup_quality_rank(previous_setup_class):
+            reasons.append(f"setup_class_improved:{previous_setup_class}->{current_setup_class}")
+        else:
+            price_reasons.append(f"setup_class_changed:{previous_setup_class}->{current_setup_class}")
+    if price_reasons and not reasons:
+        reasons.append("price_changed_only")
+        reasons.extend(price_reasons)
+    if reasons and reasons[0] == "price_changed_only":
+        reasons = []
     if not reasons and last_reviewed_at is not None and last_verdict:
         now = datetime.now(timezone.utc)
         verdict_key = last_verdict
@@ -2176,12 +2311,46 @@ def _trend_setup_changed_enough(config: dict[str, Any], setup: dict[str, Any], i
                 "reason": f"verdict_cooldown_active:{verdict_key}:{remaining_minutes}m",
                 "signature": current,
                 "fingerprint": current_fingerprint,
+                "setup_class": current_setup_class,
             }
+    if not reasons:
+        symbol = str(setup.get("symbol") or item.get("symbol") or "")
+        side = str(setup.get("side") or item.get("side") or "").lower()
+        memory = _load_trend_setup_class_memory(config, symbol, side, current_setup_class) if symbol and side else {}
+        memory_last_reviewed_at = _parse_time(memory.get("last_review_at"))
+        memory_verdict = str(memory.get("last_verdict") or "").upper().strip()
+        memory_count = max(0, int(memory.get("same_class_review_count") or 0))
+        daily_budget = max(1, int(internal.get("trend_setup_review_daily_budget_per_class", 3) or 3))
+        if memory_count >= daily_budget:
+            return {
+                "changed": False,
+                "reason": f"setup_class_daily_budget_reached:{current_setup_class}:{memory_count}/{daily_budget}",
+                "signature": current,
+                "fingerprint": current_fingerprint,
+                "setup_class": current_setup_class,
+            }
+        if memory_last_reviewed_at is not None and memory_verdict == "REVIEW":
+            if memory_count <= 1:
+                class_cooldown_minutes = review_cooldown_minutes
+            elif memory_count == 2:
+                class_cooldown_minutes = max(review_cooldown_minutes, int(internal.get("trend_setup_review_same_class_second_cooldown_minutes", 120) or 120))
+            else:
+                class_cooldown_minutes = max(review_cooldown_minutes, int(internal.get("trend_setup_review_same_class_third_cooldown_minutes", 240) or 240))
+            if (datetime.now(timezone.utc) - memory_last_reviewed_at) < timedelta(minutes=class_cooldown_minutes):
+                remaining_minutes = int((timedelta(minutes=class_cooldown_minutes) - (datetime.now(timezone.utc) - memory_last_reviewed_at)).total_seconds() // 60)
+                return {
+                    "changed": False,
+                    "reason": f"setup_class_cooldown_active:{current_setup_class}:{remaining_minutes}m",
+                    "signature": current,
+                    "fingerprint": current_fingerprint,
+                    "setup_class": current_setup_class,
+                }
     return {
         "changed": bool(reasons),
         "reason": ",".join(reasons) if reasons else "setup_unchanged",
         "signature": current,
         "fingerprint": current_fingerprint,
+        "setup_class": current_setup_class,
     }
 
 def _watchlist_review_notification_context(config: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
@@ -2245,6 +2414,7 @@ def _save_watchlist_ai_review_state(
     decision = str(ai_review.get("decision") or "").upper()
     reject_scope = str(ai_review.get("reject_scope") or "").upper()
     reject_reason_type = str(ai_review.get("reject_reason_type") or "").upper()
+    setup_class = _trend_setup_class(setup, item)
     should_remove = _ai_review_removes_watchlist_pair(ai_review) or (decision == "REJECT" and previous_reject_count >= 1)
     if should_remove:
         internal = config.get("ai", {}).get("internal", {}) if isinstance(config.get("ai"), dict) else {}
@@ -2277,6 +2447,26 @@ def _save_watchlist_ai_review_state(
         state["expired"] = expired[-50:]
         state["rejected_until"] = rejected_until
         set_journal_state(config, TREND_WATCHLIST_STATE_KEY, json.dumps(to_jsonable(state), ensure_ascii=False))
+        _save_trend_setup_class_memory(
+            config,
+            symbol,
+            side,
+            setup_class,
+            {
+                "symbol": symbol,
+                "side": side,
+                "setup_class": setup_class,
+                "last_review_at": datetime.now(timezone.utc).isoformat(),
+                "last_verdict": decision,
+                "same_class_review_count": 0,
+                "last_setup_signature": signature,
+                "last_ai_reason": ai_review.get("reason"),
+                "last_ai_grade": ai_review.get("setup_grade"),
+                "last_ai_gpt_confidence": ai_review.get("gpt_confidence"),
+                "reject_scope": reject_scope,
+                "reject_reason_type": reject_reason_type,
+            },
+        )
         return
     item["last_ai_review_at"] = datetime.now(timezone.utc).isoformat()
     item["last_ai_decision"] = ai_review.get("decision")
@@ -2285,6 +2475,7 @@ def _save_watchlist_ai_review_state(
     item["last_ai_reject_reason_type"] = str(ai_review.get("reject_reason_type") or "").upper().strip()
     item["last_ai_setup_signature"] = signature
     item["last_ai_setup_fingerprint"] = _trend_setup_fingerprint(setup, item)
+    item["last_ai_setup_class"] = setup_class
     item["last_ai_entry_action"] = setup.get("entry_action")
     item["last_ai_setup_state"] = setup.get("setup_state")
     now = datetime.now(timezone.utc)
@@ -2318,6 +2509,33 @@ def _save_watchlist_ai_review_state(
     items[key] = item
     state["items"] = items
     set_journal_state(config, TREND_WATCHLIST_STATE_KEY, json.dumps(to_jsonable(state), ensure_ascii=False))
+    memory = _load_trend_setup_class_memory(config, symbol, side, setup_class)
+    previous_memory_verdict = str(memory.get("last_verdict") or "").upper().strip()
+    previous_memory_count = int(memory.get("same_class_review_count") or 0)
+    if decision == "REVIEW" and previous_memory_verdict == "REVIEW":
+        same_class_review_count = previous_memory_count + 1
+    elif decision == "REVIEW":
+        same_class_review_count = 1
+    else:
+        same_class_review_count = 0
+    _save_trend_setup_class_memory(
+        config,
+        symbol,
+        side,
+        setup_class,
+        {
+            "symbol": symbol,
+            "side": side,
+            "setup_class": setup_class,
+            "last_review_at": item["last_ai_review_at"],
+            "last_verdict": decision,
+            "same_class_review_count": same_class_review_count,
+            "last_setup_signature": signature,
+            "last_ai_reason": ai_review.get("reason"),
+            "last_ai_grade": ai_review.get("setup_grade"),
+            "last_ai_gpt_confidence": ai_review.get("gpt_confidence"),
+        },
+    )
 
 def run_trend_auto_shadow_reviews(config: dict[str, Any], watchlist: dict[str, Any]) -> dict[str, Any]:
     internal = config.get("ai", {}).get("internal", {}) if isinstance(config.get("ai"), dict) else {}

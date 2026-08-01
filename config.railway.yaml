@@ -7,6 +7,8 @@ runtime:
 
 runtime_sync:
   position_close_grace_seconds: 120
+  manual_target_fast_sync_enabled: true
+  manual_target_fast_sync_interval_seconds: 10
 
 trailing_stop:
   enabled: true
@@ -206,8 +208,12 @@ ai:
     trend_setup_review_reject_setup_only_cooldown_minutes: 120
     trend_setup_review_reject_watchlist_remove_cooldown_minutes: 720
     trend_setup_review_approve_cooldown_minutes: 15
-    trend_setup_review_price_change_pct: 0.35
-    trend_setup_review_score_change: 8.0
+    trend_setup_review_price_change_pct: 3.0
+    trend_setup_review_score_change: 15.0
+    trend_setup_review_trend_score_change: 12.0
+    trend_setup_review_same_class_second_cooldown_minutes: 120
+    trend_setup_review_same_class_third_cooldown_minutes: 240
+    trend_setup_review_daily_budget_per_class: 3
     trend_auto_shadow_review_enabled: true
     trend_auto_shadow_review_limit: 5
     timeout_seconds: 15

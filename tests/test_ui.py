@@ -20,6 +20,9 @@ from crypto_trader.ui import (
     SCAN_TELEGRAM_SLOT_KEY,
     STARTUP_TELEGRAM_MESSAGE,
     _format_ai_call_history_view,
+    _compact_system_checklist_payload,
+    _compact_trend_scan_payload,
+    _compact_trend_setup_review_payload,
     _handle_telegram_update,
     _market_guard_notification_status,
     _open_okx_positions,
@@ -35,6 +38,69 @@ from crypto_trader.ui import (
 
 
 class UiTest(TestCase):
+    def test_dashboard_compact_payload_keeps_selected_module_detail_only(self) -> None:
+        payload = {
+            "date": "2026-08-01",
+            "ok": True,
+            "ok_count": 1,
+            "total": 1,
+            "items": [
+                {
+                    "name": "Runtime",
+                    "status": "ok",
+                    "detail": "OK",
+                    "evidence": [{"label": f"e{i}", "value": i, "extra": "drop"} for i in range(20)],
+                }
+            ],
+            "modules": [
+                {
+                    "number": 1,
+                    "name": "Light",
+                    "status": "ok",
+                    "stats": [{"label": "a", "value": 1, "meaning": "m"}],
+                    "file": {"preview": ["heavy"] * 100},
+                },
+                {
+                    "number": 2,
+                    "name": "Open",
+                    "status": "ok",
+                    "stats": [],
+                    "file": {"preview": ["keep"]},
+                },
+            ],
+        }
+
+        compact = _compact_system_checklist_payload(payload, selected_module_key="2::Open")
+
+        self.assertNotIn("file", compact["modules"][0])
+        self.assertEqual(compact["modules"][1]["file"], {"preview": ["keep"]})
+        self.assertEqual(len(compact["items"][0]["evidence"]), 8)
+
+    def test_trend_log_compact_payload_strips_heavy_raw_fields(self) -> None:
+        trend = _compact_trend_scan_payload(
+            {
+                "created_at": "2026-08-01T00:00:00+00:00",
+                "strong_symbols": [
+                    {
+                        "symbol": "CAP/USDT:USDT",
+                        "trend_score": 70,
+                        "ai_ready": True,
+                        "frames": [{"timeframe": "4h"}],
+                    }
+                ],
+            }
+        )
+        review = _compact_trend_setup_review_payload(
+            {
+                "setup_proposal": {"symbol": "CAP/USDT:USDT", "risk_reward": 1.75, "frames": [1]},
+                "ai_review": {"decision": "REVIEW", "reason": "wait", "evidence": ["heavy"]},
+            }
+        )
+
+        self.assertNotIn("frames", trend["strong_symbols"][0])
+        self.assertNotIn("frames", review["setup_proposal"])
+        self.assertNotIn("evidence", review["ai_review"])
+
     @patch("crypto_trader.ui._is_railway_runtime", return_value=True)
     @patch("crypto_trader.ui.send_telegram_message", return_value=True)
     def test_system_error_notification_is_vietnamese_and_deduplicated(self, send_message, _railway_runtime) -> None:

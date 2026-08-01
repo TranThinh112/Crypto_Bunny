@@ -307,6 +307,112 @@ class TrendScanTest(TestCase):
         self.assertFalse(changed["changed"])
         self.assertEqual(changed["reason"], "setup_fingerprint_unchanged")
 
+    def test_price_drift_same_setup_class_does_not_trigger_ai_recheck(self) -> None:
+        setup = {
+            "symbol": "GIGGLE/USDT:USDT",
+            "side": "long",
+            "entry_action": "REVIEW_COUNTERTREND_SHORT",
+            "setup_state": "review_only",
+            "entry_type": "pullback",
+            "entry_price": 48.6,
+            "stop_loss": 47.9439,
+            "take_profit": 49.748175,
+            "risk_reward": 1.75,
+            "pullback_quality": 100.0,
+            "breakout_quality": 60.0,
+            "volume_confirmation": True,
+            "warnings": ["no_chase_entry"],
+            "entry_action_reason": ["near_resistance"],
+            "support_resistance": {"near_resistance": True},
+        }
+        item = {
+            "symbol": "GIGGLE/USDT:USDT",
+            "side": "long",
+            "trend_score": 66.0,
+            "entry_readiness_score": 58.0,
+            "last_ai_verdict": "REVIEW",
+            "last_ai_review_at": "2026-08-01T08:00:00+00:00",
+            "last_ai_setup_class": "near_resistance_no_chase",
+            "last_ai_setup_signature": {
+                "symbol": "GIGGLE/USDT:USDT",
+                "side": "long",
+                "entry_action": "REVIEW_COUNTERTREND_SHORT",
+                "setup_state": "review_only",
+                "entry_type": "pullback",
+                "entry_price": 45.0,
+                "stop_loss": 44.3925,
+                "take_profit": 46.063125,
+                "risk_reward": 1.75,
+                "trend_score": 65.0,
+                "entry_readiness_score": 57.0,
+                "pullback_quality": 100.0,
+                "breakout_quality": 60.0,
+                "volume_confirmation": True,
+                "warnings": ["no_chase_entry"],
+                "setup_class": "near_resistance_no_chase",
+            },
+        }
+
+        with patch("crypto_trader.trend_scan.get_journal_state", return_value=None):
+            changed = _trend_setup_changed_enough(self._config(), setup, item)
+
+        self.assertFalse(changed["changed"])
+        self.assertEqual(changed["reason"], "setup_unchanged")
+        self.assertEqual(changed["setup_class"], "near_resistance_no_chase")
+
+    def test_quality_improvement_overrides_same_class_cooldown(self) -> None:
+        setup = {
+            "symbol": "GIGGLE/USDT:USDT",
+            "side": "long",
+            "entry_action": "READY_PULLBACK_LONG",
+            "setup_state": "ready",
+            "entry_type": "pullback",
+            "entry_price": 48.6,
+            "stop_loss": 47.9439,
+            "take_profit": 49.748175,
+            "risk_reward": 1.75,
+            "pullback_quality": 100.0,
+            "breakout_quality": 60.0,
+            "volume_confirmation": True,
+            "warnings": [],
+            "entry_action_reason": [],
+            "risk_model": {"selected_method": "structure_swing_to_previous_extreme"},
+        }
+        item = {
+            "symbol": "GIGGLE/USDT:USDT",
+            "side": "long",
+            "trend_score": 80.0,
+            "entry_readiness_score": 78.0,
+            "last_ai_verdict": "REVIEW",
+            "last_ai_review_at": "2026-08-01T08:00:00+00:00",
+            "last_ai_setup_class": "near_resistance_no_chase",
+            "last_ai_setup_signature": {
+                "symbol": "GIGGLE/USDT:USDT",
+                "side": "long",
+                "entry_action": "REVIEW_COUNTERTREND_SHORT",
+                "setup_state": "review_only",
+                "entry_type": "pullback",
+                "entry_price": 48.6,
+                "stop_loss": 47.9439,
+                "take_profit": 49.748175,
+                "risk_reward": 1.75,
+                "trend_score": 66.0,
+                "entry_readiness_score": 58.0,
+                "pullback_quality": 100.0,
+                "breakout_quality": 60.0,
+                "volume_confirmation": True,
+                "warnings": ["no_chase_entry"],
+                "setup_class": "near_resistance_no_chase",
+            },
+        }
+
+        with patch("crypto_trader.trend_scan.get_journal_state", return_value=None):
+            changed = _trend_setup_changed_enough(self._config(), setup, item)
+
+        self.assertTrue(changed["changed"])
+        self.assertIn("entry_readiness_improved", changed["reason"])
+        self.assertIn("setup_class_improved", changed["reason"])
+
     def test_entry_proposal_uses_structure_levels_when_support_resistance_available(self) -> None:
         config = self._config()
         row = {

@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 from market_pattern_engine.api.router import router as market_pattern_router
 
 from . import __version__
@@ -216,6 +217,182 @@ def _system_error_action(error_group: str) -> str:
 
 def _is_railway_runtime() -> bool:
     return bool(os.getenv("RAILWAY_SERVICE_ID") or os.getenv("RAILWAY_DEPLOYMENT_ID"))
+
+def _system_module_key(module: dict[str, Any]) -> str:
+    if not isinstance(module, dict):
+        return ""
+    if module.get("capital_management_group"):
+        return "capital-management::combined"
+    return f"{str(module.get('number') or '').strip()}::{str(module.get('name') or '').strip()}"
+
+def _compact_stat_rows(rows: Any, *, limit: int = 40) -> list[dict[str, Any]]:
+    if not isinstance(rows, list):
+        return []
+    compact: list[dict[str, Any]] = []
+    for row in rows[:limit]:
+        if not isinstance(row, dict):
+            continue
+        compact.append(
+            {
+                key: row.get(key)
+                for key in ("label", "value", "meaning", "attention")
+                if row.get(key) not in (None, [], {})
+            }
+        )
+    return compact
+
+def _compact_system_module(module: Any, *, keep_detail: bool = False) -> dict[str, Any]:
+    if not isinstance(module, dict):
+        return {}
+    if keep_detail:
+        return module
+    keep_keys = {
+        "number",
+        "name",
+        "purpose",
+        "status",
+        "stats",
+        "recovery_mode",
+        "ai_range",
+        "ai_range_label",
+        "market_regime_module",
+        "position_management_section",
+        "capital_management_group",
+        "group_title",
+        "group_icon",
+        "group_order",
+        "update_interval",
+        "update_schedule",
+        "update_event",
+    }
+    compact = {key: module.get(key) for key in keep_keys if module.get(key) not in (None, [], {})}
+    compact["stats"] = _compact_stat_rows(module.get("stats"), limit=60)
+    return compact
+
+def _compact_checklist_item(item: Any) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        return {}
+    compact = {
+        key: item.get(key)
+        for key in ("name", "target", "status", "ok", "required", "detail")
+        if item.get(key) not in (None, [], {})
+    }
+    evidence = item.get("evidence")
+    if isinstance(evidence, list):
+        compact["evidence"] = [
+            {key: row.get(key) for key in ("label", "value") if isinstance(row, dict) and row.get(key) not in (None, [], {})}
+            for row in evidence[:8]
+            if isinstance(row, dict)
+        ]
+    return compact
+
+def _compact_system_checklist_payload(
+    payload: dict[str, Any],
+    *,
+    selected_module_key: str = "",
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    selected_module_key = str(selected_module_key or "").strip()
+    modules = []
+    for module in payload.get("modules") or []:
+        key = _system_module_key(module) if isinstance(module, dict) else ""
+        modules.append(_compact_system_module(module, keep_detail=bool(selected_module_key and key == selected_module_key)))
+    compact = {
+        key: payload.get(key)
+        for key in (
+            "date",
+            "created_at",
+            "ok",
+            "ok_count",
+            "total",
+            "ai_range",
+            "ai_range_label",
+            "automation",
+            "market_regime",
+        )
+        if payload.get(key) not in (None, [], {})
+    }
+    items = payload.get("items") or payload.get("criteria") or []
+    compact["items"] = [_compact_checklist_item(item) for item in items if isinstance(item, dict)]
+    compact["criteria"] = compact["items"]
+    compact["modules"] = modules
+    storage = payload.get("storage") if isinstance(payload.get("storage"), dict) else {}
+    compact["storage"] = {
+        key: storage.get(key)
+        for key in ("disk", "files", "row_counts", "payload_bytes", "market_scan_by_timeframe")
+        if storage.get(key) not in (None, [], {})
+    }
+    previous = payload.get("previous_snapshot")
+    if isinstance(previous, dict):
+        compact["previous_snapshot"] = _compact_system_checklist_payload(previous, selected_module_key=selected_module_key)
+    return compact
+
+def _compact_trend_setup_review_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    setup = payload.get("setup_proposal") if isinstance(payload.get("setup_proposal"), dict) else {}
+    review = payload.get("ai_review") if isinstance(payload.get("ai_review"), dict) else {}
+    return {
+        "created_at": payload.get("created_at"),
+        "setup_proposal": {
+            key: setup.get(key)
+            for key in ("symbol", "side", "entry_price", "stop_loss", "take_profit", "risk_reward", "setup_grade", "status")
+            if setup.get(key) not in (None, [], {})
+        },
+        "ai_review": {
+            key: review.get(key)
+            for key in (
+                "decision",
+                "setup_grade",
+                "gpt_confidence",
+                "entry_quality",
+                "continuation_score",
+                "pending_order_allowed",
+                "reject_scope",
+                "reject_reason_type",
+                "reason",
+            )
+            if review.get(key) not in (None, [], {})
+        },
+    }
+
+def _compact_trend_scan_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    def _compact_symbol(item: Any) -> dict[str, Any]:
+        if not isinstance(item, dict):
+            return {}
+        return {
+            key: item.get(key)
+            for key in (
+                "symbol",
+                "trend_side",
+                "trend_score",
+                "watch_type",
+                "entry_readiness_score",
+                "entry_ready",
+                "ai_ready",
+                "entry_action",
+                "watchlist_eligible",
+                "watchlist_reason",
+                "confirmation_count",
+                "required_confirmations",
+                "latest_at",
+            )
+            if item.get(key) not in (None, [], {})
+        }
+
+    return {
+        "created_at": payload.get("created_at"),
+        "slot_id": payload.get("slot_id"),
+        "source": payload.get("source"),
+        "symbol_count": payload.get("symbol_count"),
+        "strong_count": payload.get("strong_count"),
+        "post_move_count": payload.get("post_move_count"),
+        "side_counts": payload.get("side_counts"),
+        "watchlist": payload.get("watchlist"),
+        "approved_hold_queue": payload.get("approved_hold_queue"),
+        "strong_symbols": [_compact_symbol(item) for item in (payload.get("strong_symbols") or [])[:20]],
+        "post_move_symbols": [_compact_symbol(item) for item in (payload.get("post_move_symbols") or [])[:20]],
+        "top_symbols": [_compact_symbol(item) for item in (payload.get("top_symbols") or [])[:20]],
+    }
 
 
 def _notify_system_error(config: dict[str, Any], component: str, error: Any) -> bool:
@@ -746,6 +923,15 @@ def _lc_pipeline_slot_poll_interval(config: dict[str, Any]) -> int:
     return max(5, min(60, int(internal.get("lc_pipeline_slot_poll_seconds", 10) or 10)))
 
 
+def _manual_target_fast_sync_enabled(config: dict[str, Any]) -> bool:
+    runtime_sync = config.get("runtime_sync", {}) if isinstance(config.get("runtime_sync"), dict) else {}
+    targets = config.get("manual_position_targets", {}) if isinstance(config.get("manual_position_targets"), dict) else {}
+    return bool(runtime_sync.get("manual_target_fast_sync_enabled", True)) and bool(targets.get("enabled", True))
+
+def _manual_target_fast_sync_interval(config: dict[str, Any]) -> int:
+    runtime_sync = config.get("runtime_sync", {}) if isinstance(config.get("runtime_sync"), dict) else {}
+    return max(5, min(60, int(runtime_sync.get("manual_target_fast_sync_interval_seconds", 10) or 10)))
+
 def _next_automation_cycle_at(now: datetime, interval_seconds: int) -> datetime:
     interval = max(60, int(interval_seconds or 60))
     current = int(now.timestamp())
@@ -1106,6 +1292,51 @@ def _automation_worker(app: FastAPI) -> None:
         wait_seconds = max(1.0, (next_run_at - datetime.now(timezone.utc)).total_seconds())
         app.state.automation_stop.wait(wait_seconds)
 
+
+def _manual_target_fast_sync_worker(app: FastAPI) -> None:
+    interval = 10
+    while not app.state.automation_stop.is_set():
+        try:
+            config = load_config(app.state.config_path)
+            interval = _manual_target_fast_sync_interval(config)
+            if not _automation_enabled(config) or not _manual_target_fast_sync_enabled(config):
+                app.state.automation_stop.wait(interval)
+                continue
+            if not app.state.lock.acquire(blocking=False):
+                app.state.automation_stop.wait(interval)
+                continue
+            try:
+                app.state.manual_target_fast_sync_status = {
+                    "enabled": True,
+                    "interval_seconds": interval,
+                    "last_started_at": datetime.now(timezone.utc).isoformat(),
+                    "status": "running",
+                }
+                result = sync_runtime_state(config)
+                app.state.manual_target_fast_sync_status.update(
+                    {
+                        "status": "ok",
+                        "last_finished_at": datetime.now(timezone.utc).isoformat(),
+                        "positions_synced": result.get("positions_synced"),
+                        "manual_positions_imported": result.get("manual_positions_imported"),
+                        "position_targets_submitted": result.get("position_targets_submitted"),
+                        "position_target_errors": result.get("position_target_errors"),
+                    }
+                )
+            finally:
+                app.state.lock.release()
+        except Exception as exc:
+            try:
+                app.state.manual_target_fast_sync_status = {
+                    "enabled": True,
+                    "status": "error",
+                    "last_error": str(exc),
+                    "last_finished_at": datetime.now(timezone.utc).isoformat(),
+                }
+                _notify_system_error(load_config(app.state.config_path), "Manual TP/SL fast sync", exc)
+            except Exception:
+                LOGGER.exception("Manual TP/SL fast sync worker failed before Telegram notification")
+        app.state.automation_stop.wait(interval)
 
 def _run_lc_pipeline_worker_cycle(app: FastAPI) -> None:
     if _app_is_stopping(app):
@@ -2935,6 +3166,7 @@ def _okx_position_history(config: dict[str, Any], *, symbol: str = "", inst_id: 
 
 def create_app(config_path: str = "config.example.yaml") -> FastAPI:
     app = FastAPI(title="Crypto Signal Bot UI")
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
     app.include_router(market_pattern_router)
     app.state.config_path = config_path
     app.state.lock = threading.Lock()
@@ -2958,6 +3190,10 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
     }
     app.state.lc_pipeline_candidate_cache = {}
     app.state.market_guard_status = None
+    app.state.manual_target_fast_sync_status = {
+        "enabled": False,
+        "status": "not_started",
+    }
     app.state.price_cache = None
     app.state.telegram_view_cache = {}
     app.state.telegram_commands_next_sync_at = None
@@ -3042,6 +3278,12 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
             daemon=True,
         )
         app.state.automation_thread.start()
+        app.state.manual_target_fast_sync_thread = threading.Thread(
+            target=lambda: _manual_target_fast_sync_worker(app),
+            name="crypto-manual-tp-sl-fast-sync",
+            daemon=True,
+        )
+        app.state.manual_target_fast_sync_thread.start()
         app.state.telegram_thread = threading.Thread(
             target=lambda: _telegram_button_worker(app),
             name="crypto-telegram-buttons",
@@ -3074,6 +3316,9 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
         thread = getattr(app.state, "automation_thread", None)
         if thread and thread.is_alive():
             thread.join(timeout=5)
+        manual_target_thread = getattr(app.state, "manual_target_fast_sync_thread", None)
+        if manual_target_thread and manual_target_thread.is_alive():
+            manual_target_thread.join(timeout=5)
         telegram_thread = getattr(app.state, "telegram_thread", None)
         if telegram_thread and telegram_thread.is_alive():
             telegram_thread.join(timeout=5)
@@ -3098,6 +3343,7 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
             "ok": True,
             "mode": load_config(app.state.config_path).get("mode", "dry_run"),
             "automation": _automation_status_payload(app),
+            "manual_target_fast_sync": getattr(app.state, "manual_target_fast_sync_status", {}),
             "lc_pipeline_worker": _lc_pipeline_status_payload(app),
         }
         payload.update(_build_runtime_metadata())
@@ -3344,6 +3590,7 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
         force_refresh: bool = False,
         ai_range: str = "current",
         fast: bool = False,
+        selected_module_key: str = "",
     ) -> dict[str, Any]:
         config = load_config(app.state.config_path)
         if date:
@@ -3351,13 +3598,16 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
             if snapshot is None:
                 raise HTTPException(status_code=404, detail=f"No system checklist snapshot for {date}")
             return attach_previous_system_checklist_snapshot(config, snapshot)
-        return system_checklist_payload(
+        payload = system_checklist_payload(
             config,
             automation=_automation_status_payload(app),
             force_refresh=force_refresh,
             ai_range=ai_range,
             refresh_realtime=not fast,
         )
+        if fast or selected_module_key:
+            return _compact_system_checklist_payload(payload, selected_module_key=selected_module_key)
+        return payload
 
     @app.get("/api/system-checklist/history")
     def system_checklist_history_endpoint(limit: int = 30) -> dict[str, Any]:
@@ -3371,7 +3621,7 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
         return dashboard_system_checklist_summary(config, period)
 
     @app.get("/api/trend-scan/logs")
-    def trend_scan_logs_endpoint(limit: int = 20) -> dict[str, Any]:
+    def trend_scan_logs_endpoint(limit: int = 20, raw: bool = False) -> dict[str, Any]:
         config = load_config(app.state.config_path)
         safe_limit = max(1, min(int(limit or 20), 100))
 
@@ -3393,10 +3643,37 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
                 )
             return items
 
+        def _compact_rows(prefix: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            compact: list[dict[str, Any]] = []
+            for row in rows:
+                payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+                if prefix == "trend_setup_review_log:":
+                    payload = _compact_trend_setup_review_payload(payload)
+                elif prefix == "trend_scan_log:":
+                    payload = _compact_trend_scan_payload(payload)
+                else:
+                    payload = {
+                        key: payload.get(key)
+                        for key in ("created_at", "source_key", "pipeline", "trend_scan_log", "last_result", "reason")
+                        if payload.get(key) not in (None, [], {})
+                    }
+                compact.append({"key": row.get("key"), "updated_at": row.get("updated_at"), "payload": payload})
+            return compact
+
+        trend_rows = _read_prefix("trend_scan_log:")
+        pool_rows = _read_prefix("pool_pipeline_log:")
+        review_rows = _read_prefix("trend_setup_review_log:")
+        if raw:
+            return {
+                "trend_scan_logs": trend_rows,
+                "pool_pipeline_logs": pool_rows,
+                "trend_setup_review_logs": review_rows,
+            }
         return {
-            "trend_scan_logs": _read_prefix("trend_scan_log:"),
-            "pool_pipeline_logs": _read_prefix("pool_pipeline_log:"),
-            "trend_setup_review_logs": _read_prefix("trend_setup_review_log:"),
+            "compact": True,
+            "trend_scan_logs": _compact_rows("trend_scan_log:", trend_rows),
+            "pool_pipeline_logs": _compact_rows("pool_pipeline_log:", pool_rows),
+            "trend_setup_review_logs": _compact_rows("trend_setup_review_log:", review_rows),
         }
 
     @app.get("/api/trend-scan/state")

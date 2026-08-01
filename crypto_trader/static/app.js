@@ -40,7 +40,7 @@ const el = (id) => document.getElementById(id);
 const MIN_LEVERAGE = 5;
 const MAX_LEVERAGE = 25;
 const MIN_BASE_MARGIN_USDT = 1;
-const SYSTEM_CHECKLIST_REFRESH_MS = 5 * 60 * 1000;
+const SYSTEM_CHECKLIST_REFRESH_MS = 60 * 1000;
 const LC_PIPELINE_REFRESH_MS = 3 * 60 * 1000;
 const PRICE_REFRESH_MS = 30 * 1000;
 const OKX_POSITIONS_REFRESH_MS = 15 * 1000;
@@ -6905,9 +6905,13 @@ async function loadSystemChecklist(date = "", options = {}) {
   const forceParam = options.forceRefresh ? "&force_refresh=true" : "";
   const fastParam = !date && !options.forceRefresh ? "&fast=true" : "";
   const aiRangeParam = !date ? `&ai_range=${encodeURIComponent(aiRange)}` : "";
+  const selectedModuleKey = !date
+    ? (options.selectedModuleKey || state.selectedSystemModuleKey || "")
+    : "";
+  const selectedModuleParam = selectedModuleKey ? `&selected_module_key=${encodeURIComponent(selectedModuleKey)}` : "";
   const url = date
     ? `/api/system-checklist?date=${encodeURIComponent(date)}&_=${Date.now()}`
-    : `/api/system-checklist?_=${Date.now()}${forceParam}${fastParam}${aiRangeParam}`;
+    : `/api/system-checklist?_=${Date.now()}${forceParam}${fastParam}${aiRangeParam}${selectedModuleParam}`;
   const request = (async () => {
     const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -6949,7 +6953,7 @@ function startSystemChecklistRefresh() {
   if (state.systemChecklistTimer) clearInterval(state.systemChecklistTimer);
   state.systemChecklistTimer = setInterval(() => {
     if (!dashboardIsVisible()) return;
-    loadSystemChecklist("", { aiRange: "current" }).catch((err) => setStatus(`Lá»i system health: ${err.message}`));
+    loadSystemChecklist("", { aiRange: "current", selectedModuleKey: state.selectedSystemModuleKey }).catch((err) => setStatus(`Lá»i system health: ${err.message}`));
   }, SYSTEM_CHECKLIST_REFRESH_MS);
 }
 
@@ -6960,7 +6964,7 @@ function startRealtimeModuleRefresh() {
     if (!state.selectedSystemModuleKey || !refs.systemModuleOverlay || refs.systemModuleOverlay.hidden) return;
     const module = findSystemModuleByKey(state.selectedSystemModuleKey);
     if (!isRealtimeSystemModule(module)) return;
-    loadSystemChecklist("", { forceRefresh: true, aiRange: "current" }).catch((err) => setStatus(`Loi realtime module: ${err.message}`));
+    loadSystemChecklist("", { forceRefresh: true, aiRange: "current", selectedModuleKey: state.selectedSystemModuleKey }).catch((err) => setStatus(`Loi realtime module: ${err.message}`));
   }, REALTIME_MODULE_REFRESH_MS);
 }
 
@@ -7488,7 +7492,7 @@ refs.refreshBtn.addEventListener("click", () => {
   loadDecision().catch((err) => setStatus(`Lỗi: ${err.message}`));
   loadOkxPositions({ force: true }).catch((err) => setStatus(`Lỗi vi the OKX: ${err.message}`));
   loadLcPipeline().catch((err) => setStatus(`Lỗi LC pipeline: ${err.message}`));
-  loadSystemChecklist("", { aiRange: "current" }).catch((err) => setStatus(`Lỗi system health: ${err.message}`));
+  loadSystemChecklist("", { aiRange: "current", selectedModuleKey: state.selectedSystemModuleKey }).catch((err) => setStatus(`Lỗi system health: ${err.message}`));
 });
 refs.analyzeBtn.addEventListener("click", runAnalysis);
 refs.autoRun.addEventListener("change", resetAutoTimer);
