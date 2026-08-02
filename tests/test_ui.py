@@ -76,6 +76,44 @@ class UiTest(TestCase):
         self.assertEqual(compact["modules"][1]["file"], {"preview": ["keep"]})
         self.assertEqual(len(compact["items"][0]["evidence"]), 8)
 
+    def test_dashboard_compact_payload_keeps_trade_execution_open_items(self) -> None:
+        payload = {
+            "date": "2026-08-02",
+            "ok": True,
+            "modules": [
+                {
+                    "number": 15,
+                    "name": "Thực thi giao dịch & Quản lý vị thế",
+                    "status": "ok",
+                    "stats": [{"label": "open_positions", "value": 1}],
+                    "trade_execution": {
+                        "open_count": 1,
+                        "partial_done_count": 0,
+                        "waiting_partial_count": 1,
+                        "trailing_config": {"partial_enabled": True},
+                        "open_items": [
+                            {
+                                "symbol": "XRP/USDT:USDT",
+                                "side": "LONG",
+                                "profit_protection_levels": {"partial_30": {"price": 1.2}},
+                            }
+                        ],
+                        "recent_closed": [{"symbol": "BTC/USDT:USDT", "status": "WIN"}],
+                        "heavy_debug": ["drop"],
+                    },
+                }
+            ],
+        }
+
+        compact = _compact_system_checklist_payload(payload)
+        trade_execution = compact["modules"][0]["trade_execution"]
+
+        self.assertEqual(trade_execution["open_count"], 1)
+        self.assertEqual(trade_execution["open_items"][0]["symbol"], "XRP/USDT:USDT")
+        self.assertEqual(trade_execution["recent_closed"][0]["symbol"], "BTC/USDT:USDT")
+        self.assertEqual(trade_execution["trailing_config"], {"partial_enabled": True})
+        self.assertNotIn("heavy_debug", trade_execution)
+
     def test_trend_log_compact_payload_strips_heavy_raw_fields(self) -> None:
         trend = _compact_trend_scan_payload(
             {
@@ -92,7 +130,18 @@ class UiTest(TestCase):
         )
         review = _compact_trend_setup_review_payload(
             {
-                "setup_proposal": {"symbol": "CAP/USDT:USDT", "risk_reward": 1.75, "frames": [1]},
+                "setup_proposal": {
+                    "symbol": "CAP/USDT:USDT",
+                    "risk_reward": 1.75,
+                    "selected_setup_method": "structure_swing_to_previous_extreme",
+                    "setup_quality_score": 77.6,
+                    "setup_quality_grade": "B",
+                    "setup_quality_components": {"entry_score": 82},
+                    "setup_candidates": [
+                        {"entry_type": "pullback", "quality_score": 77.6, "warnings": ["fib_pullback_zone_mismatch"], "raw": "drop"}
+                    ],
+                    "frames": [1],
+                },
                 "ai_review": {"decision": "REVIEW", "reason": "wait", "evidence": ["heavy"]},
             }
         )
@@ -100,6 +149,11 @@ class UiTest(TestCase):
         self.assertNotIn("frames", trend["strong_symbols"][0])
         self.assertNotIn("frames", review["setup_proposal"])
         self.assertNotIn("evidence", review["ai_review"])
+        self.assertEqual(review["setup_proposal"]["selected_setup_method"], "structure_swing_to_previous_extreme")
+        self.assertEqual(review["setup_proposal"]["setup_quality_grade"], "B")
+        self.assertEqual(review["setup_quality_components"], {"entry_score": 82})
+        self.assertEqual(review["setup_candidates"][0]["entry_type"], "pullback")
+        self.assertNotIn("raw", review["setup_candidates"][0])
 
     @patch("crypto_trader.ui._is_railway_runtime", return_value=True)
     @patch("crypto_trader.ui.send_telegram_message", return_value=True)

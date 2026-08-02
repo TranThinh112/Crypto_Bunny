@@ -993,6 +993,92 @@ def _fibonacci_context(*, side: str, entry: float, take_profit: float, sr_contex
     }
 
 
+def _setup_grade_from_score(score: float) -> str:
+    if score >= 88:
+        return "A"
+    if score >= 76:
+        return "B"
+    if score >= 62:
+        return "C"
+    return "D"
+
+
+def _setup_quality_score(
+    *,
+    entry_type: str,
+    side: str,
+    pullback_quality: float,
+    breakout_quality: float,
+    volume_ratio: float,
+    alignment: dict[str, Any],
+    sr_context: dict[str, Any],
+    fibonacci: dict[str, Any],
+    risk_model: dict[str, Any],
+    entry_action: dict[str, Any],
+    warnings: list[str],
+) -> dict[str, Any]:
+    selected_risk = risk_model.get("risk_model") if isinstance(risk_model.get("risk_model"), dict) else {}
+    selected_method = str(selected_risk.get("selected_method") or "")
+    candidate_plans = selected_risk.get("candidate_plans") if isinstance(selected_risk.get("candidate_plans"), list) else []
+    selected_plan = next((plan for plan in candidate_plans if plan.get("method") == selected_method), {})
+    risk_score = _float(selected_plan.get("score"), 50.0)
+    rr = _float(selected_risk.get("actual_rr"), 0.0)
+    entry_score = pullback_quality if entry_type in {"pullback", "continuation"} else breakout_quality
+    score = 0.0
+    score += entry_score * 0.34
+    score += _float(alignment.get("score"), 50.0) * 0.20
+    score += risk_score * 0.22
+    score += min(100.0, max(0.0, volume_ratio * 50.0)) * 0.12
+    score += min(100.0, rr * 35.0) * 0.08
+    if entry_type in {"pullback", "continuation"} and fibonacci.get("in_pullback_zone_382_618"):
+        score += 5.0
+    if side == "long" and sr_context.get("near_support"):
+        score += 4.0
+    if side == "short" and sr_context.get("near_resistance"):
+        score += 4.0
+    if selected_method == "structure_swing_to_previous_extreme":
+        score += 5.0
+    elif selected_method == "fib_extension_1272":
+        score += 4.0
+    elif selected_method == "atr_volatility_rr":
+        score -= 2.0
+    if entry_action.get("no_chase"):
+        score -= 20.0
+    penalties = {
+        "weak_volume": 12.0,
+        "lower_timeframe_misalignment": 10.0,
+        "fib_pullback_zone_mismatch": 8.0,
+        "rr_below_minimum": 10.0,
+        "risk_reward_too_low": 18.0,
+        "missing_entry_or_side": 50.0,
+        "overextended_risk": 12.0,
+        "no_chase_entry": 16.0,
+    }
+    for warning in warnings:
+        score -= penalties.get(str(warning), 0.0)
+    score = round(_clamp(score), 2)
+    hard_block = any(item in {"missing_entry_or_side", "risk_reward_too_low"} for item in warnings)
+    return {
+        "score": score,
+        "grade": _setup_grade_from_score(score),
+        "entry_score": round(entry_score, 2),
+        "risk_score": round(risk_score, 2),
+        "actual_rr": round(rr, 4),
+        "selected_method": selected_method,
+        "hard_block": hard_block,
+        "components": {
+            "entry_type": entry_type,
+            "entry_score": round(entry_score, 2),
+            "alignment_score": alignment.get("score"),
+            "risk_score": round(risk_score, 2),
+            "volume_ratio": round(volume_ratio, 4),
+            "actual_rr": round(rr, 4),
+            "fibonacci_pullback_zone": bool(fibonacci.get("in_pullback_zone_382_618")),
+            "no_chase": bool(entry_action.get("no_chase")),
+        },
+    }
+
+
 def _entry_action_from_setup_inputs(
     config: dict[str, Any],
     *,
@@ -1063,6 +1149,103 @@ def _entry_action_from_setup_inputs(
     }
 
 
+def _build_entry_candidate(
+    config: dict[str, Any],
+    *,
+    symbol: str,
+    side: str,
+    entry: float,
+    entry_type: str,
+    atr_pct: float,
+    rsi: float,
+    volume_ratio: float,
+    price_vs_ema: float,
+    alignment: dict[str, Any],
+    sr_context: dict[str, Any],
+    overextended: bool,
+    overextended_score: float,
+    pullback_quality: float,
+    breakout_quality: float,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    entry_action = _entry_action_from_setup_inputs(
+        config,
+        side=side,
+        entry_type=entry_type,
+        overextended_score=overextended_score,
+        rsi=rsi,
+        price_vs_ema=price_vs_ema,
+        sr_context=sr_context,
+        volume_ratio=volume_ratio,
+        pullback_quality=pullback_quality,
+        breakout_quality=breakout_quality,
+    )
+    rr = 1.75 if entry_type in {"pullback", "continuation"} else 1.5
+    risk_model = _risk_from_market_structure(
+        config,
+        side=side,
+        entry=entry,
+        entry_type=entry_type,
+        atr_pct=atr_pct,
+        volume_ratio=volume_ratio,
+        sr_context=sr_context,
+        rr=rr,
+    )
+    stop_loss = _float(risk_model.get("stop_loss"))
+    take_profit = _float(risk_model.get("take_profit"))
+    fibonacci = _fibonacci_context(side=side, entry=entry, take_profit=take_profit, sr_context=sr_context)
+    warnings: list[str] = []
+    warnings.extend(str(item) for item in risk_model.get("warnings") or [])
+    if overextended:
+        warnings.append("overextended_risk")
+    if entry_action["no_chase"]:
+        warnings.append("no_chase_entry")
+    if volume_ratio < 0.7:
+        warnings.append("weak_volume")
+    if alignment["opposite_count"] >= 2:
+        warnings.append("lower_timeframe_misalignment")
+    if fibonacci.get("available") and entry_type in {"pullback", "continuation"} and not fibonacci.get("in_pullback_zone_382_618"):
+        warnings.append("fib_pullback_zone_mismatch")
+    if _float(payload.get("risk_reward"), rr) < 1.3:
+        warnings.append("risk_reward_too_low")
+    if entry <= 0 or side not in {"long", "short"}:
+        warnings.append("missing_entry_or_side")
+    quality = _setup_quality_score(
+        entry_type=entry_type,
+        side=side,
+        pullback_quality=pullback_quality,
+        breakout_quality=breakout_quality,
+        volume_ratio=volume_ratio,
+        alignment=alignment,
+        sr_context=sr_context,
+        fibonacci=fibonacci,
+        risk_model=risk_model,
+        entry_action=entry_action,
+        warnings=warnings,
+    )
+    return {
+        "symbol": symbol,
+        "side": side,
+        "entry_type": entry_type,
+        "entry_price": round(entry, 8),
+        "stop_loss": round(stop_loss, 8),
+        "take_profit": round(take_profit, 8),
+        "risk_reward": round(rr, 4),
+        "risk_pct": round(_float(risk_model.get("risk_pct")), 4),
+        "tp_distance_pct": round(_float(risk_model.get("tp_distance_pct")), 4),
+        "invalid_price": round(_float(risk_model.get("invalid_price")), 8),
+        "risk_model": risk_model.get("risk_model"),
+        "fibonacci_context": fibonacci,
+        "entry_action": entry_action["entry_action"],
+        "countertrend_side": entry_action["countertrend_side"],
+        "no_chase": entry_action["no_chase"],
+        "entry_action_reason": entry_action["entry_action_reason"],
+        "entry_action_thresholds": entry_action["thresholds"],
+        "warnings": warnings,
+        "setup_quality": quality,
+    }
+
+
 def build_entry_proposal(config: dict[str, Any], row: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
     payload = _candidate_payload(row)
@@ -1094,70 +1277,69 @@ def build_entry_proposal(config: dict[str, Any], row: dict[str, Any], *, now: da
         + (alignment["score"] - 50.0) * 0.2
         - (20.0 if overextended else 0.0)
     )
-    entry_type = "pullback" if pullback_quality >= breakout_quality else "breakout"
-    if 55 <= pullback_quality < 72 and not overextended:
-        entry_type = "continuation"
-    entry_action = _entry_action_from_setup_inputs(
-        config,
-        side=side,
-        entry_type=entry_type,
-        overextended_score=overextended_score,
-        rsi=rsi,
-        price_vs_ema=price_vs_ema,
-        sr_context=sr_context,
-        volume_ratio=volume_ratio,
-        pullback_quality=pullback_quality,
-        breakout_quality=breakout_quality,
-    )
-    rr = 1.75 if entry_type in {"pullback", "continuation"} else 1.5
-    risk_model = _risk_from_market_structure(
-        config,
-        side=side,
-        entry=entry,
-        entry_type=entry_type,
-        atr_pct=atr_pct,
-        volume_ratio=volume_ratio,
-        sr_context=sr_context,
-        rr=rr,
-    )
-    stop_loss = _float(risk_model.get("stop_loss"))
-    take_profit = _float(risk_model.get("take_profit"))
-    invalid_price = _float(risk_model.get("invalid_price"))
-    risk_pct = _float(risk_model.get("risk_pct"))
-    fibonacci = _fibonacci_context(side=side, entry=entry, take_profit=take_profit, sr_context=sr_context)
-    warnings: list[str] = []
-    warnings.extend(str(item) for item in risk_model.get("warnings") or [])
-    if overextended:
-        warnings.append("overextended_risk")
-    if entry_action["no_chase"]:
-        warnings.append("no_chase_entry")
-    if volume_ratio < 0.7:
-        warnings.append("weak_volume")
-    if alignment["opposite_count"] >= 2:
-        warnings.append("lower_timeframe_misalignment")
-    if fibonacci.get("available") and entry_type in {"pullback", "continuation"} and not fibonacci.get("in_pullback_zone_382_618"):
-        warnings.append("fib_pullback_zone_mismatch")
-    if _float(payload.get("risk_reward"), rr) < 1.3:
-        warnings.append("risk_reward_too_low")
-    if entry <= 0 or side not in {"long", "short"}:
-        warnings.append("missing_entry_or_side")
-    hard_warnings = {"missing_entry_or_side", "risk_reward_too_low"}
-    setup_state = "blocked" if any(item in hard_warnings for item in warnings) else "review_only" if entry_action["no_chase"] else "ready_for_ai_review"
+    candidates = [
+        _build_entry_candidate(
+            config,
+            symbol=symbol,
+            side=side,
+            entry=entry,
+            entry_type=entry_type,
+            atr_pct=atr_pct,
+            rsi=rsi,
+            volume_ratio=volume_ratio,
+            price_vs_ema=price_vs_ema,
+            alignment=alignment,
+            sr_context=sr_context,
+            overextended=overextended,
+            overextended_score=overextended_score,
+            pullback_quality=pullback_quality,
+            breakout_quality=breakout_quality,
+            payload=payload,
+        )
+        for entry_type in ("pullback", "breakout", "continuation")
+    ]
+    selected = max(candidates, key=lambda item: _float((item.get("setup_quality") or {}).get("score")))
+    warnings = list(selected.get("warnings") or [])
+    quality = selected.get("setup_quality") if isinstance(selected.get("setup_quality"), dict) else {}
+    entry_action = {
+        "entry_action": selected.get("entry_action"),
+        "countertrend_side": selected.get("countertrend_side"),
+        "no_chase": bool(selected.get("no_chase")),
+        "entry_action_reason": selected.get("entry_action_reason") or [],
+        "thresholds": selected.get("entry_action_thresholds") or {},
+    }
+    setup_state = "blocked" if quality.get("hard_block") else "review_only" if entry_action["no_chase"] else "ready_for_ai_review"
     return {
         "created_at": now.isoformat(),
         "symbol": symbol,
         "side": side,
         "strategy": "TrendFollowing",
-        "entry_type": entry_type,
-        "entry_price": round(entry, 8),
-        "stop_loss": round(stop_loss, 8),
-        "take_profit": round(take_profit, 8),
-        "risk_reward": round(rr, 4),
-        "risk_pct": round(risk_pct, 4),
-        "tp_distance_pct": round(_float(risk_model.get("tp_distance_pct")), 4),
-        "invalid_price": round(invalid_price, 8),
-        "risk_model": risk_model.get("risk_model"),
-        "fibonacci_context": fibonacci,
+        "entry_type": selected["entry_type"],
+        "entry_price": selected["entry_price"],
+        "stop_loss": selected["stop_loss"],
+        "take_profit": selected["take_profit"],
+        "risk_reward": selected["risk_reward"],
+        "risk_pct": selected["risk_pct"],
+        "tp_distance_pct": selected["tp_distance_pct"],
+        "invalid_price": selected["invalid_price"],
+        "risk_model": selected["risk_model"],
+        "fibonacci_context": selected["fibonacci_context"],
+        "setup_candidates": [
+            {
+                "entry_type": candidate.get("entry_type"),
+                "entry_action": candidate.get("entry_action"),
+                "selected_method": (candidate.get("setup_quality") or {}).get("selected_method"),
+                "quality_score": (candidate.get("setup_quality") or {}).get("score"),
+                "quality_grade": (candidate.get("setup_quality") or {}).get("grade"),
+                "risk_reward": candidate.get("risk_reward"),
+                "warnings": candidate.get("warnings"),
+            }
+            for candidate in candidates
+        ],
+        "selected_setup_method": quality.get("selected_method"),
+        "setup_quality_score": quality.get("score"),
+        "setup_quality_grade": quality.get("grade"),
+        "setup_quality_components": quality.get("components"),
         "overextended": overextended,
         "overextended_score": round(overextended_score, 2),
         "entry_action": entry_action["entry_action"],
@@ -1401,6 +1583,9 @@ def activate_trend_trade_intent(setup: dict[str, Any], ai_review: dict[str, Any]
             "take_profit": setup.get("take_profit"),
             "risk_reward": setup.get("risk_reward"),
             "setup_grade": ai_review.get("setup_grade"),
+            "local_setup_quality_score": setup.get("setup_quality_score"),
+            "local_setup_quality_grade": setup.get("setup_quality_grade"),
+            "selected_setup_method": setup.get("selected_setup_method"),
             "risk_profile": "Reduced" if ai_review.get("setup_grade") in {"C", "D"} or _float(ai_review.get("entry_quality")) < 70 else "Normal",
             "source": "trend_watchlist",
             "status": "canceled" if cancel_checks["cancel"] else status,
@@ -2071,6 +2256,9 @@ def _trend_setup_signature(setup: dict[str, Any], item: dict[str, Any]) -> dict[
         "stop_loss": round(_float(setup.get("stop_loss")), 8),
         "take_profit": round(_float(setup.get("take_profit")), 8),
         "risk_reward": round(_float(setup.get("risk_reward")), 4),
+        "setup_quality_score": round(_float(setup.get("setup_quality_score")), 2),
+        "setup_quality_grade": setup.get("setup_quality_grade"),
+        "selected_setup_method": setup.get("selected_setup_method") or ((setup.get("risk_model") or {}).get("selected_method") if isinstance(setup.get("risk_model"), dict) else None),
         "trend_score": round(_float(item.get("trend_score")), 2),
         "entry_readiness_score": round(_float(item.get("entry_readiness_score")), 2),
         "pullback_quality": round(_float(setup.get("pullback_quality")), 2),
@@ -2269,10 +2457,13 @@ def _trend_setup_changed_enough(config: dict[str, Any], setup: dict[str, Any], i
         price_reasons.append("take_profit_changed")
     trend_score_delta = _float(current.get("trend_score")) - _float(previous.get("trend_score"))
     entry_readiness_delta = _float(current.get("entry_readiness_score")) - _float(previous.get("entry_readiness_score"))
+    setup_quality_delta = _float(current.get("setup_quality_score")) - _float(previous.get("setup_quality_score"))
     if trend_score_delta >= trend_score_delta_threshold:
         reasons.append("trend_score_improved")
     if entry_readiness_delta >= score_delta_threshold:
         reasons.append("entry_readiness_improved")
+    if setup_quality_delta >= score_delta_threshold:
+        reasons.append("setup_quality_improved")
     previous_warnings = set(previous.get("warnings") or [])
     current_warnings = set(current.get("warnings") or [])
     if "no_chase_entry" in previous_warnings and "no_chase_entry" not in current_warnings:

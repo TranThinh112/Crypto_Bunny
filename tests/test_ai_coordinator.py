@@ -1143,8 +1143,8 @@ class AiCoordinatorTest(TestCase):
         self.assertEqual(checks["entry_confirmation"]["supportive_frames"], ["1h", "5m"])
         self.assertEqual(checks["volume"]["status"], "weak")
         self.assertFalse(checks["volume"]["acceptable"])
-        self.assertEqual(checks["risk_reward"]["status"], "borderline")
-        self.assertTrue(checks["risk_reward"]["acceptable"])
+        self.assertEqual(checks["risk_reward"]["status"], "weak")
+        self.assertFalse(checks["risk_reward"]["acceptable"])
         self.assertEqual(checks["spread"]["status"], "ok")
         self.assertTrue(checks["news"]["acceptable"])
 

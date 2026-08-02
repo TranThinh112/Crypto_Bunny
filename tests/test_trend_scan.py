@@ -441,6 +441,68 @@ class TrendScanTest(TestCase):
         self.assertTrue(setup["fibonacci_context"]["available"])
         self.assertGreater(setup["support_resistance"]["support"], 0)
         self.assertGreater(setup["support_resistance"]["resistance"], 0)
+        self.assertGreaterEqual(len(setup["setup_candidates"]), 3)
+        self.assertEqual(setup["selected_setup_method"], "structure_swing_to_previous_extreme")
+        self.assertGreater(setup["setup_quality_score"], 0)
+        self.assertIn(setup["setup_quality_grade"], {"A", "B", "C", "D"})
+
+    def test_setup_quality_improvement_triggers_ai_recheck(self) -> None:
+        setup = {
+            "symbol": "CAP/USDT:USDT",
+            "side": "long",
+            "entry_action": "WAIT_PULLBACK_LONG",
+            "setup_state": "ready_for_ai_review",
+            "entry_type": "pullback",
+            "entry_price": 1.0,
+            "stop_loss": 0.98,
+            "take_profit": 1.05,
+            "risk_reward": 1.75,
+            "trend_score": 63.0,
+            "entry_readiness_score": 35.0,
+            "setup_quality_score": 74.0,
+            "setup_quality_grade": "C",
+            "selected_setup_method": "structure_swing_to_previous_extreme",
+            "pullback_quality": 72.0,
+            "breakout_quality": 60.0,
+            "volume_confirmation": True,
+            "warnings": [],
+        }
+        item = {
+            "symbol": "CAP/USDT:USDT",
+            "side": "long",
+            "trend_score": 63.0,
+            "entry_readiness_score": 35.0,
+            "last_ai_verdict": "REVIEW",
+            "last_ai_review_at": "2026-08-01T08:00:00+00:00",
+            "last_ai_setup_class": "ready_to_review",
+            "last_ai_setup_signature": {
+                "symbol": "CAP/USDT:USDT",
+                "side": "long",
+                "entry_action": "WAIT_PULLBACK_LONG",
+                "setup_state": "ready_for_ai_review",
+                "entry_type": "pullback",
+                "entry_price": 1.0,
+                "stop_loss": 0.98,
+                "take_profit": 1.05,
+                "risk_reward": 1.75,
+                "trend_score": 63.0,
+                "entry_readiness_score": 35.0,
+                "setup_quality_score": 55.0,
+                "setup_quality_grade": "D",
+                "selected_setup_method": "atr_volatility_rr",
+                "pullback_quality": 72.0,
+                "breakout_quality": 60.0,
+                "volume_confirmation": True,
+                "warnings": [],
+                "setup_class": "ready_to_review",
+            },
+        }
+
+        with patch("crypto_trader.trend_scan.get_journal_state", return_value=None):
+            changed = _trend_setup_changed_enough(self._config(), setup, item)
+
+        self.assertTrue(changed["changed"])
+        self.assertIn("setup_quality_improved", changed["reason"])
 
     def test_setup_only_reject_does_not_extend_or_remove_watchlist_first_time(self) -> None:
         now = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)

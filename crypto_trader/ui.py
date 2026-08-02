@@ -241,6 +241,28 @@ def _compact_stat_rows(rows: Any, *, limit: int = 40) -> list[dict[str, Any]]:
         )
     return compact
 
+def _compact_trade_execution_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    keep_keys = (
+        "open_count",
+        "closed_count",
+        "partial_done_count",
+        "waiting_partial_count",
+        "pending_total",
+        "pending_count",
+        "trailing_config",
+        "error",
+    )
+    compact = {key: payload.get(key) for key in keep_keys if payload.get(key) not in (None, [], {})}
+    open_items = payload.get("open_items")
+    if isinstance(open_items, list):
+        compact["open_items"] = open_items[:20]
+    recent_closed = payload.get("recent_closed")
+    if isinstance(recent_closed, list):
+        compact["recent_closed"] = recent_closed[:20]
+    return compact
+
 def _compact_system_module(module: Any, *, keep_detail: bool = False) -> dict[str, Any]:
     if not isinstance(module, dict):
         return {}
@@ -267,6 +289,10 @@ def _compact_system_module(module: Any, *, keep_detail: bool = False) -> dict[st
     }
     compact = {key: module.get(key) for key in keep_keys if module.get(key) not in (None, [], {})}
     compact["stats"] = _compact_stat_rows(module.get("stats"), limit=60)
+    if str(module.get("number") or "").strip() == "15":
+        trade_execution = _compact_trade_execution_payload(module.get("trade_execution"))
+        if trade_execution:
+            compact["trade_execution"] = trade_execution
     return compact
 
 def _compact_checklist_item(item: Any) -> dict[str, Any]:
@@ -331,13 +357,38 @@ def _compact_system_checklist_payload(
 def _compact_trend_setup_review_payload(payload: dict[str, Any]) -> dict[str, Any]:
     setup = payload.get("setup_proposal") if isinstance(payload.get("setup_proposal"), dict) else {}
     review = payload.get("ai_review") if isinstance(payload.get("ai_review"), dict) else {}
+    candidates = setup.get("setup_candidates") if isinstance(setup.get("setup_candidates"), list) else []
     return {
         "created_at": payload.get("created_at"),
         "setup_proposal": {
             key: setup.get(key)
-            for key in ("symbol", "side", "entry_price", "stop_loss", "take_profit", "risk_reward", "setup_grade", "status")
+            for key in (
+                "symbol",
+                "side",
+                "entry_type",
+                "entry_action",
+                "entry_price",
+                "stop_loss",
+                "take_profit",
+                "risk_reward",
+                "selected_setup_method",
+                "setup_quality_score",
+                "setup_quality_grade",
+                "setup_state",
+                "status",
+            )
             if setup.get(key) not in (None, [], {})
         },
+        "setup_quality_components": setup.get("setup_quality_components") if isinstance(setup.get("setup_quality_components"), dict) else {},
+        "setup_candidates": [
+            {
+                key: row.get(key)
+                for key in ("entry_type", "entry_action", "selected_method", "quality_score", "quality_grade", "risk_reward", "warnings")
+                if isinstance(row, dict) and row.get(key) not in (None, [], {})
+            }
+            for row in candidates[:6]
+            if isinstance(row, dict)
+        ],
         "ai_review": {
             key: review.get(key)
             for key in (
