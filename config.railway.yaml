@@ -104,8 +104,23 @@ trading_risk:
   recovery_min_risk_reward: 2.5
 
 bunny_health_monitor:
-  # Tranh khoa he thong vi mot mau thong ke qua nho (vi du chi 1 lenh thua).
+  # Tranh khoa he thong vi mau thong ke qua nho hoac drawdown % bi meo boi peak PnL nho.
+  lookback_trades: 20
   min_trades_for_evaluation: 5
+  min_win_rate: 50.0
+  min_profit_factor: 1.2
+  max_drawdown_percent: 20.0
+  min_drawdown_usdt_for_warning: 2.0
+  risk_reduction_percent: 40.0
+  score_increase_step: 4.0
+  confidence_increase_step: 4.0
+  critical_win_rate: 35.0
+  critical_profit_factor: 0.8
+  critical_drawdown_percent: 35.0
+  min_drawdown_usdt_for_critical: 5.0
+  min_effective_peak_usdt: 10.0
+  critical_requires_multiple_breaches: true
+  critical_pause_hours: 3
 
 pending_orders:
   enabled: true

@@ -2926,11 +2926,18 @@ def refresh_bunny_health_state(config: dict[str, Any]) -> dict[str, Any]:
     equity = 0.0
     peak = 0.0
     max_drawdown = 0.0
+    max_drawdown_usdt = 0.0
+    min_effective_peak = max(0.0, _safe_float(settings.get("min_effective_peak_usdt"), 0.0))
     for pnl in pnl_values:
         equity += pnl
         peak = max(peak, equity)
         if peak > 0:
-            max_drawdown = max(max_drawdown, (peak - equity) / peak * 100)
+            drawdown_usdt = max(0.0, peak - equity)
+            max_drawdown_usdt = max(max_drawdown_usdt, drawdown_usdt)
+            effective_peak = max(peak, min_effective_peak) if min_effective_peak > 0 else peak
+            if effective_peak > 0:
+                max_drawdown = max(max_drawdown, drawdown_usdt / effective_peak * 100)
+    effective_peak_usdt = max(peak, min_effective_peak) if min_effective_peak > 0 and peak > 0 else peak
 
     evaluation_source = [
         {
@@ -2962,16 +2969,29 @@ def refresh_bunny_health_state(config: dict[str, Any]) -> dict[str, Any]:
         reason = f"Not enough trades ({len(rows)}/{minimum_trades})"
         cooldown_completed = False
     else:
-        critical_threshold_breached = (
-            win_rate < _safe_float(settings.get("critical_win_rate"), 35)
-            or profit_factor < _safe_float(settings.get("critical_profit_factor"), 0.8)
-            or max_drawdown > _safe_float(settings.get("critical_drawdown_percent"), 15)
+        min_warning_drawdown_usdt = _safe_float(settings.get("min_drawdown_usdt_for_warning"), 0.0)
+        min_critical_drawdown_usdt = _safe_float(settings.get("min_drawdown_usdt_for_critical"), 0.0)
+        warning_drawdown_breached = max_drawdown > _safe_float(settings.get("max_drawdown_percent"), 10) and (
+            min_warning_drawdown_usdt <= 0 or max_drawdown_usdt >= min_warning_drawdown_usdt
         )
-        warning_threshold_breached = (
-            win_rate < _safe_float(settings.get("min_win_rate"), 50)
-            or profit_factor < _safe_float(settings.get("min_profit_factor"), 1.2)
-            or max_drawdown > _safe_float(settings.get("max_drawdown_percent"), 10)
+        critical_drawdown_breached = max_drawdown > _safe_float(settings.get("critical_drawdown_percent"), 15) and (
+            min_critical_drawdown_usdt <= 0 or max_drawdown_usdt >= min_critical_drawdown_usdt
         )
+        critical_breaches = {
+            "win_rate": win_rate < _safe_float(settings.get("critical_win_rate"), 35),
+            "profit_factor": profit_factor < _safe_float(settings.get("critical_profit_factor"), 0.8),
+            "drawdown": critical_drawdown_breached,
+        }
+        warning_breaches = {
+            "win_rate": win_rate < _safe_float(settings.get("min_win_rate"), 50),
+            "profit_factor": profit_factor < _safe_float(settings.get("min_profit_factor"), 1.2),
+            "drawdown": warning_drawdown_breached,
+        }
+        required_critical_breaches = (
+            2 if bool(settings.get("critical_requires_multiple_breaches", False)) else 1
+        )
+        critical_threshold_breached = sum(1 for breached in critical_breaches.values() if breached) >= required_critical_breaches
+        warning_threshold_breached = any(warning_breaches.values()) or any(critical_breaches.values())
         if critical_threshold_breached and not cooldown_completed:
             previous_pause = _parse_time(previous_payload.get("pausedUntil")) if same_evaluation else None
             if previous_pause and previous_pause <= _utcnow():
@@ -3017,6 +3037,13 @@ def refresh_bunny_health_state(config: dict[str, Any]) -> dict[str, Any]:
         "profitFactor": profit_factor,
         "totalPnl": round(sum(pnl_values), 6),
         "maxDrawdownPercent": round(max_drawdown, 4),
+        "maxDrawdownUsdt": round(max_drawdown_usdt, 6),
+        "peakPnlUsdt": round(peak, 6),
+        "effectivePeakUsdt": round(effective_peak_usdt, 6),
+        "criticalBreaches": [key for key, breached in critical_breaches.items() if breached] if len(rows) >= minimum_trades else [],
+        "warningBreaches": [key for key, breached in warning_breaches.items() if breached] if len(rows) >= minimum_trades else [],
+        "criticalRequiresMultipleBreaches": bool(settings.get("critical_requires_multiple_breaches", False)),
+        "requiredCriticalBreaches": required_critical_breaches if len(rows) >= minimum_trades else 1,
         "riskMultiplier": round(risk_multiplier, 4),
         "scoreAdjustment": round(score_adjustment, 2),
         "confidenceAdjustment": round(confidence_adjustment, 2),

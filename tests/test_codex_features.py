@@ -914,6 +914,47 @@ class CodexFeaturesTest(TestCase):
         self.assertEqual(health["totalPnl"], -3.164076)
         self.assertEqual(health["reason"], "Not enough trades (1/5)")
 
+    def test_health_monitor_drawdown_only_does_not_pause_when_multiple_breaches_required(self) -> None:
+        config = self._config()
+        config["bunny_health_monitor"] = {
+            "lookback_trades": 20,
+            "min_trades_for_evaluation": 5,
+            "min_win_rate": 50,
+            "min_profit_factor": 1.2,
+            "max_drawdown_percent": 20,
+            "min_drawdown_usdt_for_warning": 2,
+            "critical_win_rate": 35,
+            "critical_profit_factor": 0.8,
+            "critical_drawdown_percent": 35,
+            "min_drawdown_usdt_for_critical": 5,
+            "min_effective_peak_usdt": 10,
+            "critical_requires_multiple_breaches": True,
+            "critical_pause_hours": 3,
+        }
+        pnl_oldest_to_newest = [0.35, -6.35, 8.0, 1.0, -0.5]
+        rows = [
+            {
+                "id": index,
+                "status": "WIN" if pnl > 0 else "LOSS",
+                "pnl": pnl,
+                "closed_at": f"2026-07-19T17:0{index}:00+00:00",
+            }
+            for index, pnl in enumerate(reversed(pnl_oldest_to_newest), start=1)
+        ]
+
+        with patch("crypto_trader.codex_features._closed_trade_executions", return_value=rows):
+            health = refresh_bunny_health_state(config)
+
+        self.assertFalse(health["isHealthy"])
+        self.assertTrue(health["isWarning"])
+        self.assertFalse(health["isCritical"])
+        self.assertFalse(health["isPaused"])
+        self.assertEqual(health["criticalBreaches"], ["drawdown"])
+        self.assertIn("drawdown", health["warningBreaches"])
+        self.assertEqual(health["maxDrawdownUsdt"], 6.35)
+        self.assertEqual(health["effectivePeakUsdt"], 10.0)
+        self.assertEqual(health["reason"], "Warning health threshold breached")
+
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_recovery_mode_sends_telegram_when_enabled(self, send_telegram_message) -> None:
         config = self._config()
