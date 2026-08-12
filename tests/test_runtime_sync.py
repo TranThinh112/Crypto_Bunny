@@ -65,6 +65,15 @@ class RuntimeSyncBullTrendExchange(RuntimeSyncExchange):
         return rows
 
 
+class RuntimeSyncRejectingAlgoExchange(RuntimeSyncExchange):
+    def privatePostTradeOrderAlgo(self, request: dict) -> dict:
+        self.algo_orders.append(dict(request))
+        return {
+            "code": "1",
+            "data": [{"sCode": "51278", "sMsg": "SL trigger price cannot be lower than the last price"}],
+            "msg": "",
+        }
+
 class RuntimeSyncTest(TestCase):
     def _config(self) -> dict:
         self.tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
@@ -692,6 +701,119 @@ class RuntimeSyncTest(TestCase):
         self.assertEqual(result["exchange"]["position_targets_submitted"], 1)
         self.assertEqual(exchange.algo_orders[0]["slTriggerPx"], "64407")
         self.assertEqual(exchange.algo_orders[0]["tpTriggerPx"], "65032")
+
+    def test_sync_attaches_targets_with_position_margin_mode(self) -> None:
+        config = self._config()
+        config["exchange"]["position_side_mode"] = "long_short"
+        exchange = RuntimeSyncExchange()
+
+        sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-08-09T13:19:31+00:00",
+                "_exchange": exchange,
+                "positions": [
+                    {
+                        "id": "3776902093758128128",
+                        "symbol": "BOME/USDT:USDT",
+                        "side": "short",
+                        "contracts": 87,
+                        "entry_price": 0.0007223,
+                        "mark_price": 0.0007262,
+                        "info": {
+                            "posId": "3776902093758128128",
+                            "posSide": "short",
+                            "mgnMode": "cross",
+                            "cTime": "1786281076094",
+                            "pos": "87",
+                        },
+                    }
+                ],
+                "open_orders": [],
+            },
+        )
+
+        self.assertEqual(exchange.algo_orders[0]["tdMode"], "cross")
+        self.assertEqual(exchange.algo_orders[0]["posSide"], "short")
+        row = list_trade_execution_rows(config, statuses=["OPEN"])[0]
+        self.assertEqual(row["exchange_position_id"], "3776902093758128128")
+        self.assertEqual(row["exchange_margin_mode"], "cross")
+
+    def test_sync_does_not_mark_rejected_algo_response_as_submitted(self) -> None:
+        config = self._config()
+        exchange = RuntimeSyncRejectingAlgoExchange()
+
+        result = sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-08-09T13:19:31+00:00",
+                "_exchange": exchange,
+                "positions": [
+                    {
+                        "symbol": "LIT/USDT:USDT",
+                        "side": "short",
+                        "contracts": 8,
+                        "entry_price": 2.3,
+                        "mark_price": 2.4,
+                    }
+                ],
+                "open_orders": [],
+            },
+        )
+
+        self.assertEqual(result["exchange"]["position_targets_submitted"], 0)
+        self.assertEqual(result["exchange"]["position_target_errors"], 1)
+        row = list_trade_execution_rows(config, statuses=["OPEN"])[0]
+        payload = json.loads(str(row["payload_json"]))
+        self.assertFalse(payload["target_attach_result"]["submitted"])
+        self.assertIn("51278", payload["target_attach_result"]["error"])
+
+    def test_sync_does_not_match_different_position_lifecycle_by_symbol_side_only(self) -> None:
+        config = self._config()
+        insert_trade_execution_row(
+            config,
+            {
+                "created_at": "2026-08-09T10:00:00+00:00",
+                "updated_at": "2026-08-09T10:00:00+00:00",
+                "symbol": "BOME/USDT:USDT",
+                "side": "SHORT",
+                "status": "OPEN",
+                "entry_price": 0.00052,
+                "quantity": 81.0,
+                "exchange_position_id": "old-pos",
+                "exchange_position_opened_at": "2026-08-09T09:00:00+00:00",
+            },
+        )
+
+        result = sync_runtime_state(
+            config,
+            account_snapshot={
+                "enabled": True,
+                "mode": "demo",
+                "created_at": "2026-08-09T13:19:31+00:00",
+                "positions": [
+                    {
+                        "id": "new-pos",
+                        "symbol": "BOME/USDT:USDT",
+                        "side": "short",
+                        "contracts": 87,
+                        "entry_price": 0.0007223,
+                        "info": {"posId": "new-pos", "posSide": "short", "cTime": "1786281076094"},
+                    }
+                ],
+                "open_orders": [],
+            },
+        )
+
+        open_rows = list_trade_execution_rows(config, statuses=["OPEN"])
+        self.assertEqual(len(open_rows), 1)
+        self.assertEqual(open_rows[0]["exchange_position_id"], "new-pos")
+        self.assertEqual(result["exchange"]["manual_positions_imported"], 1)
+        self.assertEqual(result["exchange"]["executions_closed"], 1)
 
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_sync_closes_open_execution_when_position_disappears(self, send_message) -> None:

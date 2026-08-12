@@ -172,11 +172,59 @@ def _core_trend_symbols(config: dict[str, Any]) -> list[str]:
         result.append(normalized)
     return result
 
+def _adaptive_ai_ready_gate(
+    config: dict[str, Any],
+    *,
+    watch: bool,
+    htf_side: str,
+    htf_score: float,
+    entry_side: str,
+    entry_score: float,
+) -> dict[str, Any]:
+    internal = config.get("ai", {}).get("internal", {}) if isinstance(config.get("ai"), dict) else {}
+    entry_setup_threshold = _float(internal.get("trend_scan_entry_setup_threshold"), 55.0)
+    entry_ai_threshold = _float(internal.get("trend_scan_entry_ai_threshold"), 65.0)
+    strong_htf_threshold = _float(internal.get("trend_scan_adaptive_ai_strong_htf_threshold"), 75.0)
+    strong_entry_threshold = _float(internal.get("trend_scan_adaptive_ai_entry_threshold"), 58.0)
+    enabled = bool(internal.get("trend_scan_adaptive_ai_ready_enabled", True))
+    aligned = watch and htf_side in {"long", "short"} and entry_side == htf_side
+    entry_ready = aligned and entry_score >= entry_setup_threshold
+    if not entry_ready:
+        return {
+            "entry_ready": False,
+            "ai_ready": False,
+            "ai_gate_mode": "blocked",
+            "ai_gate_reason": "entry_not_aligned_or_below_setup_threshold",
+            "effective_entry_ai_threshold": entry_ai_threshold,
+        }
+    if entry_score >= entry_ai_threshold:
+        return {
+            "entry_ready": True,
+            "ai_ready": True,
+            "ai_gate_mode": "standard",
+            "ai_gate_reason": "entry_score_meets_standard_ai_threshold",
+            "effective_entry_ai_threshold": entry_ai_threshold,
+        }
+    if enabled and htf_score >= strong_htf_threshold and entry_score >= strong_entry_threshold:
+        return {
+            "entry_ready": True,
+            "ai_ready": True,
+            "ai_gate_mode": "adaptive_strong_trend",
+            "ai_gate_reason": "strong_htf_trend_allows_mini_review_below_standard_entry_threshold",
+            "effective_entry_ai_threshold": strong_entry_threshold,
+        }
+    return {
+        "entry_ready": True,
+        "ai_ready": False,
+        "ai_gate_mode": "waiting",
+        "ai_gate_reason": "entry_score_below_ai_threshold",
+        "effective_entry_ai_threshold": entry_ai_threshold,
+    }
+
 def _trend_watch_decision(config: dict[str, Any], *, htf: dict[str, Any], entry: dict[str, Any], legacy_side: str, legacy_score: float) -> dict[str, Any]:
     internal = config.get("ai", {}).get("internal", {}) if isinstance(config.get("ai"), dict) else {}
     htf_threshold = _float(internal.get("trend_scan_htf_watch_threshold"), 60.0)
     htf_immediate = _float(internal.get("trend_scan_htf_immediate_threshold"), 75.0)
-    entry_setup_threshold = _float(internal.get("trend_scan_entry_setup_threshold"), 55.0)
     entry_ai_threshold = _float(internal.get("trend_scan_entry_ai_threshold"), 65.0)
     countertrend_entry_threshold = _float(internal.get("trend_scan_countertrend_entry_threshold"), 42.0)
     required_confirmations = max(1, int(internal.get("trend_scan_htf_required_confirmations", 2) or 2))
@@ -185,8 +233,16 @@ def _trend_watch_decision(config: dict[str, Any], *, htf: dict[str, Any], entry:
     entry_side = str(entry.get("side") or "mixed")
     entry_score = _float(entry.get("score"))
     watch = htf_side in {"long", "short"} and htf_score >= htf_threshold
-    entry_ready = watch and entry_side == htf_side and entry_score >= entry_setup_threshold
-    ai_ready = entry_ready and entry_score >= entry_ai_threshold
+    ai_gate = _adaptive_ai_ready_gate(
+        config,
+        watch=watch,
+        htf_side=htf_side,
+        htf_score=htf_score,
+        entry_side=entry_side,
+        entry_score=entry_score,
+    )
+    entry_ready = bool(ai_gate["entry_ready"])
+    ai_ready = bool(ai_gate["ai_ready"])
     opposite_side = "short" if htf_side == "long" else "long" if htf_side == "short" else "mixed"
     countertrend_review = watch and entry_side == opposite_side and entry_score >= countertrend_entry_threshold
     if ai_ready:
@@ -225,10 +281,16 @@ def _trend_watch_decision(config: dict[str, Any], *, htf: dict[str, Any], entry:
         "thresholds": {
             "htf_watch": htf_threshold,
             "htf_immediate": htf_immediate,
-            "entry_setup": entry_setup_threshold,
+            "entry_setup": _float(internal.get("trend_scan_entry_setup_threshold"), 55.0),
             "entry_ai": entry_ai_threshold,
+            "adaptive_ai_ready_enabled": bool(internal.get("trend_scan_adaptive_ai_ready_enabled", True)),
+            "adaptive_ai_strong_htf": _float(internal.get("trend_scan_adaptive_ai_strong_htf_threshold"), 75.0),
+            "adaptive_ai_entry": _float(internal.get("trend_scan_adaptive_ai_entry_threshold"), 58.0),
             "countertrend_entry": countertrend_entry_threshold,
         },
+        "ai_gate_mode": ai_gate["ai_gate_mode"],
+        "ai_gate_reason": ai_gate["ai_gate_reason"],
+        "effective_entry_ai_threshold": ai_gate["effective_entry_ai_threshold"],
     }
 
 def _post_move_watch_decision(
@@ -432,6 +494,9 @@ def build_trend_scan_snapshot(config: dict[str, Any], *, now: datetime | None = 
                 "watchlist_eligible": watch_decision["watch"],
                 "post_move_eligible": bool(post_move_decision.get("watch")),
                 "watchlist_reason": post_move_decision.get("reason") if post_move_decision.get("watch") else watch_decision["reason"],
+                "ai_gate_mode": post_move_decision.get("ai_gate_mode") if post_move_decision.get("watch") else watch_decision.get("ai_gate_mode"),
+                "ai_gate_reason": post_move_decision.get("ai_gate_reason") if post_move_decision.get("watch") else watch_decision.get("ai_gate_reason"),
+                "effective_entry_ai_threshold": post_move_decision.get("effective_entry_ai_threshold") if post_move_decision.get("watch") else watch_decision.get("effective_entry_ai_threshold"),
                 "confirmation_mode": watch_decision["confirmation_mode"],
                 "required_confirmations": watch_decision["required_confirmations"],
                 "trend_thresholds": watch_decision["thresholds"],
@@ -1375,27 +1440,32 @@ def _review_prompt_package(setup: dict[str, Any], source_payload: dict[str, Any]
         "You are Mini Setup Review for a crypto trading bot. "
         "The code has already calculated side, entry, stop loss, take profit and RR. "
         "Do not invent new entry/SL/TP. Review the proposed setup only. "
-        "Return strict JSON with decision APPROVE, REJECT, or REVIEW."
+        "Return strict JSON with review_status APPROVE_NOW, WAIT, or REJECT. "
+        "Also include legacy decision APPROVE, REVIEW, or REJECT for compatibility."
     )
     user = {
         "task": "review_code_based_trend_setup",
+        "allowed_review_statuses": ["APPROVE_NOW", "WAIT", "REJECT"],
         "allowed_decisions": ["APPROVE", "REJECT", "REVIEW"],
         "rules": [
-            "APPROVE only if trend is still valid, entry is not overextended, RR is acceptable, and evidence supports continuation.",
-            "REVIEW if trend is valid but entry should wait for pullback or confirmation.",
+            "Use APPROVE_NOW only if trend is still valid, entry is not overextended, RR is acceptable, and evidence supports continuation now.",
+            "Use WAIT if trend is valid but entry should wait for pullback or confirmation.",
             "REJECT if trend is broken, setup is overextended, volume is too weak, or RR is poor.",
+            "If review_status is WAIT, provide concrete next_approval_conditions that could turn it into APPROVE_NOW.",
             "For REJECT, classify whether only the current setup is bad or the watchlist item should be removed.",
             "Use reject_scope=SETUP_ONLY when the trend can remain on watchlist but this entry is bad.",
             "Use reject_scope=WATCHLIST_REMOVE when trend is invalid, RR cannot be fixed, liquidity/risk is unacceptable, or market context conflicts.",
             "Do not change entry_price, stop_loss, take_profit, or risk_reward.",
         ],
         "expected_json": {
-            "decision": "APPROVE|REJECT|REVIEW",
+            "review_status": "APPROVE_NOW|WAIT|REJECT",
+            "decision": "APPROVE|REJECT|REVIEW; use APPROVE for APPROVE_NOW, REVIEW for WAIT, REJECT for REJECT",
             "setup_grade": "S|A|B|C|D",
             "gpt_confidence": "required number 0-100; AI confidence that this setup is valid now",
             "entry_quality": "number 0-100",
             "continuation_score": "number 0-100",
             "pending_order_allowed": "boolean",
+            "next_approval_conditions": ["required if WAIT; concrete market conditions for approval"],
             "reject_scope": "SETUP_ONLY|WATCHLIST_REMOVE",
             "reject_reason_type": "BAD_ENTRY|TREND_INVALID|RR_BAD|LIQUIDITY_RISK|MARKET_CONFLICT|SYSTEM_RISK|OTHER",
             "allow_recheck_if_setup_changes": "boolean",
@@ -1498,15 +1568,25 @@ def review_setup_with_mini(
     return normalized
 
 def normalize_ai_setup_review(review: dict[str, Any], setup: dict[str, Any]) -> dict[str, Any]:
+    review_status = str(review.get("review_status") or "").upper().strip()
+    if review_status == "APPROVE":
+        review_status = "APPROVE_NOW"
+    if review_status == "REVIEW":
+        review_status = "WAIT"
     decision = str(review.get("decision") or "").upper().strip()
+    if decision not in {"APPROVE", "REJECT", "REVIEW"} and review_status in {"APPROVE_NOW", "WAIT", "REJECT"}:
+        decision = "APPROVE" if review_status == "APPROVE_NOW" else "REVIEW" if review_status == "WAIT" else "REJECT"
     if decision not in {"APPROVE", "REJECT", "REVIEW"}:
         decision = "REVIEW" if setup.get("setup_state") == "ready_for_ai_review" else "REJECT"
+    if review_status not in {"APPROVE_NOW", "WAIT", "REJECT"}:
+        review_status = "APPROVE_NOW" if decision == "APPROVE" else "WAIT" if decision == "REVIEW" else "REJECT"
     grade = str(review.get("setup_grade") or "").upper().strip()
     if grade not in {"S", "A", "B", "C", "D"}:
         entry_quality = _float(review.get("entry_quality"), _float(setup.get("pullback_quality"), 0.0))
         grade = "A" if entry_quality >= 84 else "B" if entry_quality >= 74 else "C" if entry_quality >= 62 else "D"
     warnings = review.get("warnings") if isinstance(review.get("warnings"), list) else []
     evidence = review.get("evidence") if isinstance(review.get("evidence"), list) else []
+    next_conditions = review.get("next_approval_conditions") if isinstance(review.get("next_approval_conditions"), list) else []
     gpt_confidence_raw = review.get("gpt_confidence", review.get("gptConfidence"))
     gpt_confidence = _float(gpt_confidence_raw, float("nan"))
     if gpt_confidence != gpt_confidence or gpt_confidence < 0 or gpt_confidence > 100:
@@ -1515,12 +1595,15 @@ def normalize_ai_setup_review(review: dict[str, Any], setup: dict[str, Any]) -> 
     hard_setup_block = setup.get("setup_state") == "blocked" or bool(set(setup.get("warnings") or []) & {"missing_entry_or_side", "risk_reward_too_low"})
     if hard_setup_block and decision == "APPROVE":
         decision = "REJECT"
+        review_status = "REJECT"
         warnings = [*warnings, "code_hard_block_overrode_ai_approve"]
     if setup.get("overextended") and decision == "APPROVE":
         decision = "REVIEW"
+        review_status = "WAIT"
         warnings = [*warnings, "overextended_requires_review"]
     if setup.get("no_chase") and decision == "APPROVE":
         decision = "REVIEW"
+        review_status = "WAIT"
         warnings = [*warnings, "no_chase_requires_review"]
     pending_allowed = bool(review.get("pending_order_allowed"))
     if decision == "APPROVE":
@@ -1543,6 +1626,7 @@ def normalize_ai_setup_review(review: dict[str, Any], setup: dict[str, Any]) -> 
     return {
         **review,
         "decision": decision,
+        "review_status": review_status,
         "setup_grade": grade,
         "gpt_confidence": None if gpt_confidence is None else round(gpt_confidence, 2),
         "entry_quality": round(_clamp(_float(review.get("entry_quality"), _float(setup.get("pullback_quality"), 0.0))), 2),
@@ -1553,6 +1637,7 @@ def normalize_ai_setup_review(review: dict[str, Any], setup: dict[str, Any]) -> 
         "allow_recheck_if_setup_changes": allow_recheck,
         "reason": str(review.get("reason") or "AI review normalized without explicit reason."),
         "evidence": [str(item) for item in evidence[:8]],
+        "next_approval_conditions": [str(item) for item in next_conditions[:8]],
         "warnings": [str(item) for item in warnings[:8]],
         "normalized": True,
     }

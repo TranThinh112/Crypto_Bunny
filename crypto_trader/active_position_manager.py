@@ -32,6 +32,9 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
 def _settings(config: dict[str, Any]) -> dict[str, Any]:
     raw = config.get("active_position_manager", {}) if isinstance(config.get("active_position_manager"), dict) else {}
+    protected_positions = raw.get("protected_positions")
+    if not isinstance(protected_positions, list):
+        protected_positions = []
     return {
         "enabled": bool(raw.get("enabled", True)),
         "shadow_mode": bool(raw.get("shadow_mode", True)),
@@ -60,6 +63,7 @@ def _settings(config: dict[str, Any]) -> dict[str, Any]:
         "good_exit_fraction": max(0.05, min(1.0, _safe_float(raw.get("good_exit_fraction"), 0.25))),
         "dca_fraction": max(0.05, min(1.0, _safe_float(raw.get("dca_fraction"), 0.25))),
         "scale_in_fraction": max(0.05, min(1.0, _safe_float(raw.get("scale_in_fraction"), 0.25))),
+        "protected_positions": [item for item in protected_positions if isinstance(item, dict)],
     }
 
 
@@ -133,6 +137,41 @@ def _contract_size(row: dict[str, Any]) -> float:
             return number
     return 1.0
 
+def _position_margin_mode(position: dict[str, Any], info: dict[str, Any]) -> str | None:
+    value = position.get("marginMode") or position.get("margin_mode") or info.get("mgnMode") or info.get("tdMode")
+    text = str(value or "").strip().lower()
+    return text if text in {"cross", "isolated"} else None
+
+
+def _position_id(row: dict[str, Any], position: dict[str, Any], info: dict[str, Any]) -> str:
+    return str(row.get("exchange_position_id") or position.get("id") or position.get("posId") or info.get("posId") or "").strip()
+
+def _is_protected_position(row: dict[str, Any], decision: dict[str, Any], settings: dict[str, Any]) -> bool:
+    protected_positions = settings.get("protected_positions")
+    if not isinstance(protected_positions, list):
+        return False
+    position, info = _snapshot_position(row)
+    row_id = str(row.get("id") or "").strip()
+    symbol = str(row.get("symbol") or decision.get("symbol") or "").upper().strip()
+    side = str(row.get("side") or decision.get("side") or "").upper().strip()
+    pos_id = _position_id(row, position, info)
+    for item in protected_positions:
+        if not isinstance(item, dict) or item.get("enabled") is False:
+            continue
+        expected_trade_id = str(item.get("trade_execution_id") or "").strip()
+        expected_symbol = str(item.get("symbol") or "").upper().strip()
+        expected_side = str(item.get("side") or "").upper().strip()
+        expected_pos_id = str(item.get("exchange_position_id") or item.get("pos_id") or "").strip()
+        if expected_trade_id and expected_trade_id != row_id:
+            continue
+        if expected_symbol and expected_symbol != symbol:
+            continue
+        if expected_side and expected_side != side:
+            continue
+        if expected_pos_id and expected_pos_id != pos_id:
+            continue
+        return bool(expected_trade_id or expected_symbol or expected_side or expected_pos_id)
+    return False
 
 def _pnl_at(row: dict[str, Any], price: float | None, quantity: float | None = None) -> float | None:
     position, info = _snapshot_position(row)
@@ -286,6 +325,7 @@ def _decision_for_row(row: dict[str, Any], settings: dict[str, Any]) -> dict[str
         "decision": decision,
         "shadow_mode": bool(settings["shadow_mode"]),
         "auto_execute_enabled": bool(settings["auto_execute_enabled"]),
+        "td_mode": _position_margin_mode(position, info),
         "entry": entry,
         "mark_price": mark,
         "stop_loss": stop_loss,
@@ -420,21 +460,44 @@ def _execute_reduce_only_close(config: dict[str, Any], decision: dict[str, Any])
     exchange.load_markets()
     order_side = "sell" if side == "long" else "buy"
     params: dict[str, Any] = {
-        "tdMode": config.get("exchange", {}).get("td_mode", "isolated"),
+        "tdMode": decision.get("td_mode") or config.get("exchange", {}).get("td_mode", "isolated"),
         "reduceOnly": True,
     }
     if config.get("exchange", {}).get("position_side_mode") == "long_short":
         params["posSide"] = side
-    try:
-        order = exchange.create_order(
-            symbol,
-            "market",
-            order_side,
-            _amount_to_precision(exchange, symbol, amount),
-            None,
-            params,
-        )
-    except Exception as exc:
+    variants: list[dict[str, Any]] = [dict(params)]
+    for td_mode in ("cross", "isolated"):
+        retry = dict(params)
+        retry["tdMode"] = td_mode
+        variants.append(retry)
+        without_pos_side = dict(retry)
+        without_pos_side.pop("posSide", None)
+        variants.append(without_pos_side)
+    seen: set[tuple[tuple[str, str], ...]] = set()
+    last_exc: Exception | None = None
+    used_params: dict[str, Any] | None = None
+    order: dict[str, Any] | None = None
+    for candidate_params in variants:
+        key = tuple(sorted((str(item_key), str(item_value)) for item_key, item_value in candidate_params.items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            order = exchange.create_order(
+                symbol,
+                "market",
+                order_side,
+                _amount_to_precision(exchange, symbol, amount),
+                None,
+                candidate_params,
+            )
+            used_params = candidate_params
+            break
+        except Exception as exc:
+            last_exc = exc
+            continue
+    if order is None:
+        exc = last_exc or RuntimeError("OKX close order was not submitted")
         return {
             "submitted": False,
             "mode": mode,
@@ -443,6 +506,7 @@ def _execute_reduce_only_close(config: dict[str, Any], decision: dict[str, Any])
             "amount": amount,
             "error": str(exc),
             "request": {"type": "market", "side": order_side, "amount": amount, "params": params},
+            "attempted_params": variants,
         }
     return {
         "submitted": True,
@@ -451,7 +515,7 @@ def _execute_reduce_only_close(config: dict[str, Any], decision: dict[str, Any])
         "side": side,
         "amount": amount,
         "order": to_jsonable(order),
-        "request": {"type": "market", "side": order_side, "amount": amount, "params": params},
+        "request": {"type": "market", "side": order_side, "amount": amount, "params": used_params or params},
     }
 
 
@@ -508,16 +572,26 @@ def evaluate_open_positions(
         decision["effective_from"] = settings.get("effective_from")
         action = str(decision.get("action") or "HOLD")
         action_counts[action] = action_counts.get(action, 0) + 1
-        execution_result = (
-            _execute_decision(config, decision, settings)
-            if persist
-            else {
+        protected_position = _is_protected_position(row, decision, settings)
+        decision["protected_position"] = protected_position
+        if not persist:
+            execution_result = {
                 "submitted": False,
                 "reason": "read_only_preview",
                 "shadow_mode": settings["shadow_mode"],
                 "auto_execute_enabled": settings["auto_execute_enabled"],
             }
-        )
+        elif protected_position and action in {"BAD_CUT", "GOOD_EXIT_REVIEW", "BAD_CUT_REMAINDER"}:
+            execution_result = {
+                "submitted": False,
+                "reason": "protected_position",
+                "protected_position": True,
+                "symbol": decision.get("symbol"),
+                "side": decision.get("side"),
+                "trade_execution_id": decision.get("trade_execution_id"),
+            }
+        else:
+            execution_result = _execute_decision(config, decision, settings)
         decision["execution"] = execution_result
         if persist:
             _persist_decision(config, decision)

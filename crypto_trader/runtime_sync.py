@@ -76,6 +76,19 @@ def _execution_key(row: dict[str, Any]) -> tuple[str, str]:
     )
 
 
+def _trade_row_payload(row: dict[str, Any]) -> dict[str, Any]:
+    for key in ("snapshot_json", "payload_json"):
+        raw = row.get(key)
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(str(raw))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
 def _position_opened_at(position: dict[str, Any]) -> datetime | None:
     info = _payload_info(position)
     for key in ("timestamp", "created_at", "createdAt"):
@@ -88,7 +101,44 @@ def _position_opened_at(position: dict[str, Any]) -> datetime | None:
             return parsed
     return None
 
+def _position_identity(position: dict[str, Any]) -> tuple[str, str]:
+    info = _payload_info(position)
+    pos_id = str(position.get("id") or position.get("posId") or info.get("posId") or "").strip()
+    opened_at = _position_opened_at(position)
+    opened_key = opened_at.isoformat() if opened_at is not None else str(info.get("cTime") or position.get("timestamp") or "").strip()
+    return pos_id, opened_key
+
+def _position_margin_mode(position: dict[str, Any]) -> str | None:
+    info = _payload_info(position)
+    value = position.get("marginMode") or position.get("margin_mode") or info.get("mgnMode") or info.get("tdMode")
+    text = str(value or "").strip().lower()
+    return text if text in {"cross", "isolated"} else None
+
+def _row_position_identity(row: dict[str, Any]) -> tuple[str, str]:
+    pos_id = str(row.get("exchange_position_id") or "").strip()
+    opened_key = str(row.get("exchange_position_opened_at") or "").strip()
+    if pos_id and opened_key:
+        return pos_id, opened_key
+    position = _trade_row_payload(row).get("position")
+    if isinstance(position, dict):
+        return _position_identity(position)
+    return pos_id, opened_key
+
+def _position_identity_matches(row: dict[str, Any], position: dict[str, Any]) -> bool | None:
+    row_pos_id, row_opened = _row_position_identity(row)
+    pos_id, opened = _position_identity(position)
+    if not row_pos_id or not pos_id:
+        return None
+    if row_pos_id != pos_id:
+        return False
+    if row_opened and opened:
+        return row_opened == opened
+    return True
+
 def _position_matches_execution(row: dict[str, Any], position: dict[str, Any], entry_price: float | None) -> bool:
+    identity_match = _position_identity_matches(row, position)
+    if identity_match is not None:
+        return identity_match
     opened_at = _position_opened_at(position)
     row_created = _parse_time(row.get("created_at"))
     if opened_at is None or row_created is None:
@@ -1155,6 +1205,26 @@ def _amount_to_precision(exchange: Any, symbol: str, amount: float) -> str:
         return str(method(symbol, amount))
     return f"{amount:.8f}".rstrip("0").rstrip(".")
 
+def _okx_algo_response_error(response: Any) -> str | None:
+    if not isinstance(response, dict):
+        return None
+    code = str(response.get("code") or "0")
+    rows = response.get("data")
+    row_errors: list[str] = []
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            s_code = str(row.get("sCode") or "0")
+            if s_code != "0":
+                message = str(row.get("sMsg") or "").strip()
+                row_errors.append(f"{s_code}: {message}" if message else s_code)
+    if code != "0" or row_errors:
+        message = str(response.get("msg") or "").strip()
+        details = "; ".join(row_errors)
+        return "; ".join(item for item in [f"code={code}" if code != "0" else "", message, details] if item)
+    return None
+
 def _place_missing_position_targets(
     exchange: Any,
     config: dict[str, Any],
@@ -1166,6 +1236,7 @@ def _place_missing_position_targets(
     take_profit: float | None,
     existing_stop_loss: float | None,
     existing_take_profit: float | None,
+    td_mode: str | None = None,
 ) -> dict[str, Any]:
     missing_sl = existing_stop_loss is None and stop_loss is not None
     missing_tp = existing_take_profit is None and take_profit is not None
@@ -1181,7 +1252,7 @@ def _place_missing_position_targets(
     trigger_type = str(config.get("trailing_stop", {}).get("trigger_price_type") or "last")
     payload: dict[str, Any] = {
         "instId": inst_id,
-        "tdMode": str(config.get("exchange", {}).get("td_mode", "isolated")),
+        "tdMode": str(td_mode or config.get("exchange", {}).get("td_mode", "isolated")),
         "side": "sell" if side == "long" else "buy",
         "ordType": "oco" if missing_sl and missing_tp else "conditional",
         "sz": _amount_to_precision(exchange, symbol, contracts),
@@ -1192,11 +1263,34 @@ def _place_missing_position_targets(
         payload.update({"slTriggerPx": _price_to_precision(exchange, symbol, stop_loss), "slOrdPx": "-1", "slTriggerPxType": trigger_type})
     if missing_tp and take_profit is not None:
         payload.update({"tpTriggerPx": _price_to_precision(exchange, symbol, take_profit), "tpOrdPx": "-1", "tpTriggerPxType": trigger_type})
-    try:
-        response = place_algo(payload)
-    except Exception as exc:
-        return {"submitted": False, "request": payload, "error": str(exc)}
-    return {"submitted": True, "request": payload, "response": response}
+    variants = [dict(payload)]
+    for retry_td_mode in ("cross", "isolated"):
+        retry = dict(payload)
+        retry["tdMode"] = retry_td_mode
+        variants.append(retry)
+    seen: set[tuple[tuple[str, str], ...]] = set()
+    last_exc: Exception | None = None
+    for request_payload in variants:
+        key = tuple(sorted((str(item_key), str(item_value)) for item_key, item_value in request_payload.items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            response = place_algo(request_payload)
+        except Exception as exc:
+            last_exc = exc
+            continue
+        response_error = _okx_algo_response_error(response)
+        if response_error:
+            last_exc = RuntimeError(response_error)
+            continue
+        return {"submitted": True, "request": request_payload, "response": response}
+    return {
+        "submitted": False,
+        "request": payload,
+        "attempted_requests": variants,
+        "error": str(last_exc or "OKX order algo was not submitted"),
+    }
 
 def _fetch_positions_history(exchange: Any, limit: int = 100) -> list[dict[str, Any]]:
     history: list[dict[str, Any]] = []
@@ -1475,6 +1569,8 @@ def sync_exchange_runtime_state(
         side = _position_side(position)
         if not symbol or side not in {"long", "short"}:
             continue
+        position_id, position_opened_key = _position_identity(position)
+        position_margin_mode = _position_margin_mode(position)
         position_key = (symbol, side.upper())
         active_position_keys.add(position_key)
         entry_price = _float(position.get("entry_price") or position.get("entryPrice") or info.get("avgPx"))
@@ -1495,7 +1591,8 @@ def sync_exchange_runtime_state(
         okx_stop_loss = stop_loss
         okx_take_profit = take_profit
         matching_rows = executions_by_key.get(position_key, [])
-        matched = matching_rows[0] if matching_rows else None
+        identity_matches = [row for row in matching_rows if _position_identity_matches(row, position) is True]
+        matched = identity_matches[0] if identity_matches else matching_rows[0] if matching_rows else None
         if matched and not _position_matches_execution(matched, position, entry_price):
             reopened_execution_ids.add(int(matched["id"]))
             matched = None
@@ -1543,6 +1640,7 @@ def sync_exchange_runtime_state(
                 take_profit=take_profit,
                 existing_stop_loss=okx_stop_loss,
                 existing_take_profit=okx_take_profit,
+                td_mode=position_margin_mode,
             )
             if target_attach_result.get("submitted"):
                 position_targets_submitted += 1
@@ -1565,6 +1663,9 @@ def sync_exchange_runtime_state(
             "take_profit": take_profit,
             "pnl": unrealized_pnl,
             "snapshot_json": json.dumps(payload, ensure_ascii=False),
+            "exchange_position_id": position_id or None,
+            "exchange_position_opened_at": position_opened_key or None,
+            "exchange_margin_mode": position_margin_mode,
         }
         if matched:
             previous_quantity = _float(matched.get("quantity"))
@@ -1659,6 +1760,9 @@ def sync_exchange_runtime_state(
                     "reject_reason": None,
                     "closed_at": None,
                     "payload_json": json.dumps(payload, ensure_ascii=False),
+                    "exchange_position_id": position_id or None,
+                    "exchange_position_opened_at": position_opened_key or None,
+                    "exchange_margin_mode": position_margin_mode,
                     "market_regime": None,
                     "regime_confidence": None,
                     "strategy_version": str(config.get("selected_strategy_version") or config.get("strategy_versioning", {}).get("default_version", "strategy-v1")),

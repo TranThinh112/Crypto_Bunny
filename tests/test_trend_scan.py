@@ -8,6 +8,7 @@ from unittest.mock import patch
 from crypto_trader.trend_scan import (
     build_entry_proposal,
     _review_prompt_package,
+    _trend_watch_decision,
     _trend_setup_changed_enough,
     _trend_setup_fingerprint,
     _setup_to_candidate,
@@ -72,6 +73,42 @@ class TrendScanTest(TestCase):
         self.assertIn("gpt_confidence", user["expected_json"])
         self.assertIn("required number 0-100", user["expected_json"]["gpt_confidence"])
 
+    def test_trend_review_prompt_requires_wait_conditions(self) -> None:
+        package = _review_prompt_package({"symbol": "CAP/USDT:USDT"}, {"symbol": "CAP/USDT:USDT"})
+
+        user = json.loads(package["messages"][1]["content"])
+
+        self.assertIn("APPROVE_NOW", user["allowed_review_statuses"])
+        self.assertIn("next_approval_conditions", user["expected_json"])
+
+    def test_adaptive_ai_ready_allows_strong_htf_near_miss_entry(self) -> None:
+        decision = _trend_watch_decision(
+            self._config(),
+            htf={"side": "long", "score": 76.0},
+            entry={"side": "long", "score": 60.0},
+            legacy_side="long",
+            legacy_score=76.0,
+        )
+
+        self.assertTrue(decision["entry_ready"])
+        self.assertTrue(decision["ai_ready"])
+        self.assertEqual(decision["ai_gate_mode"], "adaptive_strong_trend")
+        self.assertEqual(decision["entry_action"], "READY_LONG")
+
+    def test_adaptive_ai_ready_still_waits_when_htf_is_not_strong(self) -> None:
+        decision = _trend_watch_decision(
+            self._config(),
+            htf={"side": "long", "score": 68.0},
+            entry={"side": "long", "score": 60.0},
+            legacy_side="long",
+            legacy_score=68.0,
+        )
+
+        self.assertTrue(decision["entry_ready"])
+        self.assertFalse(decision["ai_ready"])
+        self.assertEqual(decision["ai_gate_mode"], "waiting")
+        self.assertEqual(decision["entry_action"], "SETUP_LONG_REVIEW")
+
     def test_ai_review_uses_returned_gpt_confidence_without_calculating(self) -> None:
         setup = {"symbol": "CAP/USDT:USDT", "side": "long", "entry_price": 1, "stop_loss": 0.98, "take_profit": 1.05, "risk_reward": 2.5}
         normalized = normalize_ai_setup_review(
@@ -90,6 +127,21 @@ class TrendScanTest(TestCase):
         self.assertEqual(normalized["gpt_confidence"], 93)
         self.assertIsNotNone(candidate)
         self.assertEqual(candidate.confidence, 93)
+
+    def test_wait_review_status_maps_to_review_decision(self) -> None:
+        normalized = normalize_ai_setup_review(
+            {
+                "review_status": "WAIT",
+                "setup_grade": "B",
+                "gpt_confidence": 71,
+                "next_approval_conditions": ["pullback to EMA20", "volume ratio above 1.2"],
+            },
+            {"setup_state": "ready_for_ai_review"},
+        )
+
+        self.assertEqual(normalized["decision"], "REVIEW")
+        self.assertEqual(normalized["review_status"], "WAIT")
+        self.assertEqual(normalized["next_approval_conditions"], ["pullback to EMA20", "volume ratio above 1.2"])
 
     def test_missing_gpt_confidence_is_not_inferred_from_quality_scores(self) -> None:
         setup = {"symbol": "CAP/USDT:USDT", "side": "long", "entry_price": 1, "stop_loss": 0.98, "take_profit": 1.05, "risk_reward": 2.5}
