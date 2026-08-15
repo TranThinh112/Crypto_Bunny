@@ -21,6 +21,8 @@ from crypto_trader.codex_features import (
     ai_trade_decision_stats,
     call_openai_json,
     detect_market_regime,
+    get_global_loss_streak,
+    get_symbol_loss_streak,
     okx_review_explanation_vi,
     record_ai_call_event,
     refresh_bunny_health_state,
@@ -1583,6 +1585,19 @@ class CodexFeaturesTest(TestCase):
         self.assertEqual(state["globalLossStreak"], 1)
         self.assertEqual(state["recoveryCyclePnlUsdt"], -1.77)
         send_telegram_message.assert_called_once()
+
+    def test_global_loss_streak_respects_cycle_start_reset(self) -> None:
+        config = self._config()
+        config["position_sizing"] = {"cycle_start_at": "2026-08-15T14:50:52+07:00"}
+        rows = [
+            {"id": 3, "symbol": "BTC/USDT:USDT", "status": "LOSS", "closed_at": "2026-08-15T07:49:00+00:00"},
+            {"id": 2, "symbol": "ETH/USDT:USDT", "status": "LOSS", "closed_at": "2026-08-15T07:48:00+00:00"},
+            {"id": 1, "symbol": "BTC/USDT:USDT", "status": "LOSS", "closed_at": "2026-08-15T07:47:00+00:00"},
+        ]
+
+        with patch("crypto_trader.codex_features._closed_trade_executions", return_value=rows):
+            self.assertEqual(get_global_loss_streak(config), 0)
+            self.assertEqual(get_symbol_loss_streak(config, "BTC/USDT:USDT"), 0)
 
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_recovery_mode_does_not_send_telegram_without_transition(self, send_telegram_message) -> None:

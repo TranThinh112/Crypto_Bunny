@@ -2055,6 +2055,17 @@ def _closed_trade_executions(config: dict[str, Any], *, limit: int = 5000) -> li
         order="closed_desc",
     )
 
+def _closed_trade_executions_since_cycle_start(config: dict[str, Any], *, limit: int = 5000) -> list[dict[str, Any]]:
+    rows = _closed_trade_executions(config, limit=limit)
+    start_at = _parse_time((config.get("position_sizing") or {}).get("cycle_start_at"))
+    if start_at is None:
+        return rows
+    return [
+        row
+        for row in rows
+        if (_parse_time(row.get("closed_at")) or datetime.min.replace(tzinfo=timezone.utc)) >= start_at
+    ]
+
 
 def _trade_performance_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
     closed = [row for row in rows if str(row.get("status") or "") in {"WIN", "LOSS", "BREAKEVEN", "CLOSED"}]
@@ -2135,7 +2146,7 @@ def _slot_state(open_rows: list[dict[str, Any]], max_slots: int) -> tuple[int, l
 
 def get_global_loss_streak(config: dict[str, Any]) -> int:
     streak = 0
-    for row in _closed_trade_executions(config):
+    for row in _closed_trade_executions_since_cycle_start(config):
         status = str(row.get("status") or "")
         if status == "LOSS":
             streak += 1
@@ -2147,7 +2158,7 @@ def get_global_loss_streak(config: dict[str, Any]) -> int:
 
 def get_symbol_loss_streak(config: dict[str, Any], symbol: str) -> int:
     streak = 0
-    for row in _closed_trade_executions(config):
+    for row in _closed_trade_executions_since_cycle_start(config):
         if str(row.get("symbol") or "") != symbol:
             continue
         status = str(row.get("status") or "")
