@@ -390,8 +390,8 @@ strategy:
 
 position_sizing:
   enabled: true
-  cycle_start_at: '2026-07-05T00:00:00+07:00'
-  cycle_start_pnl_fallback_usdt: -25.275453
+  cycle_start_at: '2026-08-15T14:50:52+07:00'
+  cycle_start_pnl_fallback_usdt: 0.0
   cycle_pnl_use_trade_executions_fallback: true
   base_margin_usdt: 2.0
   normal_risk_percent: 1.0
