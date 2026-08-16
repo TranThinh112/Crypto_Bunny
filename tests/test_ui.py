@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import json
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -1717,6 +1718,30 @@ class UiTest(TestCase):
         self.assertEqual(payload["counts"]["undecided"], 0)
         self.assertEqual(payload["undecided"], [])
         self.assertIn("read operation timed out", payload["error"])
+
+    def test_lc_pipeline_endpoint_degrades_when_dashboard_payload_hangs(self) -> None:
+        def slow_payload(_config):
+            time.sleep(0.2)
+            return {"enabled": True}
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text(
+                "mode: dry_run\n"
+                "_atlas_test_mode: true\n",
+                encoding="utf-8",
+            )
+            client = TestClient(create_app(config_path))
+
+            with patch("crypto_trader.ui.LC_PIPELINE_ENDPOINT_TIMEOUT_SECONDS", 0.01), patch(
+                "crypto_trader.ui.lc_pipeline_dashboard_payload", side_effect=slow_payload
+            ):
+                response = client.get("/api/lc-pipeline")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["degraded"])
+        self.assertEqual(payload["counts"]["internal_lc"], 0)
 
     def test_market_scan_memory_endpoint_returns_recent_observations(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:

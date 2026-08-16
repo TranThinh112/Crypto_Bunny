@@ -55,7 +55,7 @@ database:
     connect_timeout_ms: 15000
     socket_timeout_ms: 30000
     wait_queue_timeout_ms: 20000
-    operation_retry_attempts: 5
+    operation_retry_attempts: 3
     operation_retry_delay_seconds: 0.5
     journal_state_cache_ttl_seconds: 10
     journal_state_stale_fallback_seconds: 3600

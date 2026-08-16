@@ -7,6 +7,7 @@ import math
 import os
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any
@@ -182,9 +183,39 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 PRICE_CACHE_TTL_SECONDS = 55
 TELEGRAM_VIEW_CACHE_TTL_SECONDS = 4
 SYSTEM_ERROR_NOTIFY_COOLDOWN_SECONDS = 900
+LC_PIPELINE_ENDPOINT_TIMEOUT_SECONDS = 8.0
 STARTUP_TELEGRAM_MESSAGE = "\U0001f7e2 Bot Crypto \u0111\u00e3 kh\u1edfi \u0111\u1ed9ng"
 _SYSTEM_ERROR_NOTIFY_LOCK = threading.Lock()
 _SYSTEM_ERROR_NOTIFICATIONS: dict[str, tuple[str, datetime]] = {}
+def _lc_pipeline_degraded_payload(config: dict[str, Any], exc: Exception) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    return {
+        "enabled": bool(config.get("lc_pipeline", {}).get("enabled", True)),
+        "created_at": now.isoformat(),
+        "degraded": True,
+        "error": str(exc),
+        "day_key": None,
+        "daily_one_hour_counter": 0,
+        "daily_two_hour_counter": 0,
+        "four_hour_counter": 0,
+        "last_hourly_slot": None,
+        "last_two_hour_slot": None,
+        "last_four_hour_slot": None,
+        "last_recheck_at": None,
+        "settings": config.get("lc_pipeline", {}),
+        "counts": {
+            "undecided": 0,
+            "internal_lc": 0,
+            "two_hour_windows": 0,
+            "one_hour_history": 0,
+            "two_hour_history": 0,
+            "four_hour_history": 0,
+        },
+        "undecided": [],
+        "internal_lc": [],
+        "latest_two_hour": None,
+        "latest_four_hour": None,
+    }
 
 
 def _clean_system_error_text(error: Any) -> str:
@@ -3514,38 +3545,20 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
     @app.get("/api/lc-pipeline")
     def lc_pipeline_endpoint() -> dict[str, Any]:
         config = load_config(app.state.config_path)
+        executor: ThreadPoolExecutor | None = None
         try:
-            payload = lc_pipeline_dashboard_payload(config)
+            executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="lc-pipeline-api")
+            future = executor.submit(lc_pipeline_dashboard_payload, config)
+            payload = future.result(timeout=LC_PIPELINE_ENDPOINT_TIMEOUT_SECONDS)
+        except FutureTimeoutError as exc:
+            LOGGER.warning("LC pipeline dashboard degraded after %.1fs timeout", LC_PIPELINE_ENDPOINT_TIMEOUT_SECONDS)
+            payload = _lc_pipeline_degraded_payload(config, exc)
         except Exception as exc:
             LOGGER.warning("LC pipeline dashboard degraded after storage error: %s", exc)
-            now = datetime.now(timezone.utc)
-            payload = {
-                "enabled": bool(config.get("lc_pipeline", {}).get("enabled", True)),
-                "created_at": now.isoformat(),
-                "degraded": True,
-                "error": str(exc),
-                "day_key": None,
-                "daily_one_hour_counter": 0,
-                "daily_two_hour_counter": 0,
-                "four_hour_counter": 0,
-                "last_hourly_slot": None,
-                "last_two_hour_slot": None,
-                "last_four_hour_slot": None,
-                "last_recheck_at": None,
-                "settings": config.get("lc_pipeline", {}),
-                "counts": {
-                    "undecided": 0,
-                    "internal_lc": 0,
-                    "two_hour_windows": 0,
-                    "one_hour_history": 0,
-                    "two_hour_history": 0,
-                    "four_hour_history": 0,
-                },
-                "undecided": [],
-                "internal_lc": [],
-                "latest_two_hour": None,
-                "latest_four_hour": None,
-            }
+            payload = _lc_pipeline_degraded_payload(config, exc)
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=False, cancel_futures=True)
         response = JSONResponse(payload)
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
