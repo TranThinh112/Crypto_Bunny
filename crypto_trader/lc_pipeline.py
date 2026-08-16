@@ -36,6 +36,14 @@ MINI_ICON = "🟣"
 ONE_HOUR_HISTORY_KEEP_DAYS = 3
 TWO_HOUR_HISTORY_KEEP_DAYS = 3
 FOUR_HOUR_HISTORY_KEEP_DAYS = 7
+ONE_HOUR_HISTORY_MAX_EVENTS = 24
+TWO_HOUR_HISTORY_MAX_EVENTS = 12
+FOUR_HOUR_HISTORY_MAX_EVENTS = 12
+LC_PIPELINE_WINDOW_MAX_EVENTS = 2
+LC_PIPELINE_TELEGRAM_MAX_EVENTS = 20
+LC_PIPELINE_INTERNAL_NOTIFICATION_MAX_EVENTS = 30
+LC_PIPELINE_EVENT_APPROVED_MAX_ROWS = 12
+LC_PIPELINE_EVENT_REJECTED_MAX_ROWS = 8
 RECHECK_STABLE_DELTA_PCT = 1.0
 _LC_PIPELINE_UPDATE_LOCK = threading.RLock()
 _SAMPLE_SYMBOL_PATTERN = re.compile(r"\b([A-Z])\1{2,}(?:/USDT:USDT)?\b")
@@ -1958,9 +1966,20 @@ def _compact_event(event: dict[str, Any]) -> dict[str, Any]:
         "recheck": event.get("recheck"),
         "source_windows": event.get("source_windows"),
     }
-    compact["approved"] = [_compact_saved_row(row) for row in event.get("approved") or [] if isinstance(row, dict)]
-    compact["rejected"] = [_compact_saved_row(row) for row in event.get("rejected") or [] if isinstance(row, dict)]
+    compact["approved"] = [
+        _compact_saved_row(row)
+        for row in list(event.get("approved") or [])[:LC_PIPELINE_EVENT_APPROVED_MAX_ROWS]
+        if isinstance(row, dict)
+    ]
+    compact["rejected"] = [
+        _compact_saved_row(row)
+        for row in list(event.get("rejected") or [])[:LC_PIPELINE_EVENT_REJECTED_MAX_ROWS]
+        if isinstance(row, dict)
+    ]
     return compact
+
+def _tail_dicts(values: Any, limit: int) -> list[dict[str, Any]]:
+    return [item for item in list(values or []) if isinstance(item, dict)][-max(0, int(limit)):]
 
 
 def _prune_history(events: list[dict[str, Any]], *, now: datetime, keep_days: int) -> list[dict[str, Any]]:
@@ -2100,13 +2119,13 @@ def _compact_mini_scan(scan: dict[str, Any]) -> dict[str, Any]:
 def _save_state(config: dict[str, Any], state: dict[str, Any]) -> None:
     state["state_version"] = LC_PIPELINE_STATE_VERSION
     state["one_hour_history"] = [
-        _compact_event(event) for event in state.get("one_hour_history") or [] if isinstance(event, dict)
+        _compact_event(event) for event in _tail_dicts(state.get("one_hour_history"), ONE_HOUR_HISTORY_MAX_EVENTS)
     ]
     state["two_hour_history"] = [
-        _compact_event(event) for event in state.get("two_hour_history") or [] if isinstance(event, dict)
+        _compact_event(event) for event in _tail_dicts(state.get("two_hour_history"), TWO_HOUR_HISTORY_MAX_EVENTS)
     ]
     state["four_hour_history"] = [
-        _compact_event(event) for event in state.get("four_hour_history") or [] if isinstance(event, dict)
+        _compact_event(event) for event in _tail_dicts(state.get("four_hour_history"), FOUR_HOUR_HISTORY_MAX_EVENTS)
     ]
     state["internal_lc"] = [_compact_saved_row(row) for row in state.get("internal_lc") or [] if isinstance(row, dict)]
     state["undecided"] = [_compact_saved_row(row) for row in state.get("undecided") or [] if isinstance(row, dict)]
@@ -2115,11 +2134,18 @@ def _save_state(config: dict[str, Any], state: dict[str, Any]) -> None:
             **window,
             "top": [_compact_saved_row(row) for row in window.get("top") or [] if isinstance(row, dict)],
         }
-        for window in state.get("hourly_windows") or []
-        if isinstance(window, dict)
+        for window in _tail_dicts(state.get("hourly_windows"), LC_PIPELINE_WINDOW_MAX_EVENTS)
     ]
-    state["two_hour_windows"] = [_compact_event(event) for event in state.get("two_hour_windows") or [] if isinstance(event, dict)]
-    state["telegram_events"] = [_compact_event(event) for event in state.get("telegram_events") or [] if isinstance(event, dict)]
+    state["two_hour_windows"] = [
+        _compact_event(event) for event in _tail_dicts(state.get("two_hour_windows"), LC_PIPELINE_WINDOW_MAX_EVENTS)
+    ]
+    state["telegram_events"] = [
+        _compact_event(event) for event in _tail_dicts(state.get("telegram_events"), LC_PIPELINE_TELEGRAM_MAX_EVENTS)
+    ]
+    state["internal_notifications"] = _tail_dicts(
+        state.get("internal_notifications"),
+        LC_PIPELINE_INTERNAL_NOTIFICATION_MAX_EVENTS,
+    )
     state["latest_mini_scan"] = _compact_mini_scan(state.get("latest_mini_scan") or {})
     set_journal_state(config, LC_PIPELINE_STATE_KEY, json.dumps(state, ensure_ascii=False))
     _persist_compact_state_views(config, state)

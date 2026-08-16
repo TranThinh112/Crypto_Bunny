@@ -802,6 +802,43 @@ class LcPipelineTest(TestCase):
         state = json.loads(raw_state or "{}")
         self.assertEqual(state.get("last_hourly_slot"), result["hourly_slot"])
 
+    def test_save_state_caps_heavy_history_payloads(self) -> None:
+        config = self._config()
+
+        def event(index: int) -> dict:
+            rows = [_saved_row(f"COIN{row}/USDT:USDT", 70 + row) for row in range(20)]
+            return {
+                "frame": "1h",
+                "slot": f"2026-07-07T{index % 24:02d}:00:00+00:00",
+                "created_at": f"2026-07-07T{index % 24:02d}:00:00+00:00",
+                "daily_index": index,
+                "approved": rows,
+                "rejected": rows,
+            }
+
+        state = {
+            "one_hour_history": [event(index) for index in range(40)],
+            "two_hour_history": [event(index) for index in range(20)],
+            "four_hour_history": [event(index) for index in range(20)],
+            "hourly_windows": [{"top": [_saved_row("BTC/USDT:USDT", 80)], "slot": str(index)} for index in range(5)],
+            "two_hour_windows": [event(index) for index in range(5)],
+            "telegram_events": [event(index) for index in range(25)],
+            "internal_notifications": [{"created_at": str(index), "lines": ["x"]} for index in range(40)],
+        }
+
+        lc_pipeline_module._save_state(config, state)
+        saved = json.loads(get_journal_state(config, "lc_internal_pipeline_state") or "{}")
+
+        self.assertEqual(len(saved["one_hour_history"]), 24)
+        self.assertEqual(len(saved["two_hour_history"]), 12)
+        self.assertEqual(len(saved["four_hour_history"]), 12)
+        self.assertEqual(len(saved["hourly_windows"]), 2)
+        self.assertEqual(len(saved["two_hour_windows"]), 2)
+        self.assertEqual(len(saved["telegram_events"]), 20)
+        self.assertEqual(len(saved["internal_notifications"]), 30)
+        self.assertEqual(len(saved["one_hour_history"][-1]["approved"]), 12)
+        self.assertEqual(len(saved["one_hour_history"][-1]["rejected"]), 8)
+
     @patch("crypto_trader.lc_pipeline._recheck_rows_with_latest_market_data")
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_one_hour_summary_is_not_suppressed_when_two_hour_summary_enabled(self, send_message, recheck_rows) -> None:
