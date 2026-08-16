@@ -1798,7 +1798,10 @@ def _candidate_payload(candidate: TradeCandidate) -> dict[str, Any]:
 
 
 def _load_state(config: dict[str, Any], now: datetime, *, reset_for_new_day: bool = True) -> dict[str, Any]:
-    purge_deprecated_journal_state(config)
+    try:
+        purge_deprecated_journal_state(config)
+    except Exception as exc:
+        LOGGER.warning("Skipping deprecated LC journal_state purge after storage issue: %s", exc)
     raw = get_journal_state(config, LC_PIPELINE_STATE_KEY)
     if raw:
         try:

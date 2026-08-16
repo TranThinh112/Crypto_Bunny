@@ -158,6 +158,7 @@ from .risk import active_trades_summary, evaluate_candidate
 from .storage import (
     clear_dashboard_snapshot_cache,
     get_journal_state,
+    is_retryable_storage_error,
     latest_decision_payload,
     list_journal_state_prefix,
     list_pending_orders,
@@ -1455,14 +1456,17 @@ def _run_lc_pipeline_worker_cycle(app: FastAPI) -> None:
             status["trend_scan_log_error"] = str(log_exc)
             LOGGER.warning("Trend scan log failed: %s", log_exc)
     except Exception as exc:
+        transient_storage_error = is_retryable_storage_error(exc)
         status.update(
             {
                 "last_finished_at": datetime.now(timezone.utc).isoformat(),
-                "last_result": "error",
+                "last_result": "degraded_storage_timeout" if transient_storage_error else "error",
                 "error": str(exc),
             }
         )
-        if _should_suppress_background_error(app, exc):
+        if transient_storage_error:
+            LOGGER.warning("LC Pipeline storage timeout; keeping worker alive for next retry: %s", exc)
+        elif _should_suppress_background_error(app, exc):
             LOGGER.info("Suppressing LC Pipeline error during shutdown: %s", exc)
         else:
             _notify_system_error(config, "LC Pipeline", exc)
@@ -3510,7 +3514,39 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
     @app.get("/api/lc-pipeline")
     def lc_pipeline_endpoint() -> dict[str, Any]:
         config = load_config(app.state.config_path)
-        response = JSONResponse(lc_pipeline_dashboard_payload(config))
+        try:
+            payload = lc_pipeline_dashboard_payload(config)
+        except Exception as exc:
+            LOGGER.warning("LC pipeline dashboard degraded after storage error: %s", exc)
+            now = datetime.now(timezone.utc)
+            payload = {
+                "enabled": bool(config.get("lc_pipeline", {}).get("enabled", True)),
+                "created_at": now.isoformat(),
+                "degraded": True,
+                "error": str(exc),
+                "day_key": None,
+                "daily_one_hour_counter": 0,
+                "daily_two_hour_counter": 0,
+                "four_hour_counter": 0,
+                "last_hourly_slot": None,
+                "last_two_hour_slot": None,
+                "last_four_hour_slot": None,
+                "last_recheck_at": None,
+                "settings": config.get("lc_pipeline", {}),
+                "counts": {
+                    "undecided": 0,
+                    "internal_lc": 0,
+                    "two_hour_windows": 0,
+                    "one_hour_history": 0,
+                    "two_hour_history": 0,
+                    "four_hour_history": 0,
+                },
+                "undecided": [],
+                "internal_lc": [],
+                "latest_two_hour": None,
+                "latest_four_hour": None,
+            }
+        response = JSONResponse(payload)
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"

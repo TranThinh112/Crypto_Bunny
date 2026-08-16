@@ -1696,6 +1696,28 @@ class UiTest(TestCase):
         self.assertEqual(payload["undecided"][0]["symbol"], "LIT/USDT:USDT")
         self.assertIn("age_label", payload["undecided"][0])
 
+    def test_lc_pipeline_endpoint_degrades_instead_of_500_on_storage_timeout(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text(
+                "mode: dry_run\n"
+                "_atlas_test_mode: true\n"
+                "lc_pipeline:\n"
+                "  enabled: true\n",
+                encoding="utf-8",
+            )
+            client = TestClient(create_app(config_path))
+
+            with patch("crypto_trader.ui.lc_pipeline_dashboard_payload", side_effect=TimeoutError("read operation timed out")):
+                response = client.get("/api/lc-pipeline")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["degraded"])
+        self.assertEqual(payload["counts"]["undecided"], 0)
+        self.assertEqual(payload["undecided"], [])
+        self.assertIn("read operation timed out", payload["error"])
+
     def test_market_scan_memory_endpoint_returns_recent_observations(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             config_path = Path(tmpdir) / "config.yaml"

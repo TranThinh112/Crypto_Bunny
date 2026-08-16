@@ -35,6 +35,7 @@ DASHBOARD_SNAPSHOT_PREFIX = "dashboard_snapshot:"
 DASHBOARD_SNAPSHOT_VERSION_KEY = "dashboard_snapshot:version"
 JOURNAL_STATE_COMPRESSION_THRESHOLD_BYTES = 8_192
 DEFAULT_JOURNAL_STATE_CACHE_TTL_SECONDS = 5.0
+DEFAULT_JOURNAL_STATE_STALE_FALLBACK_SECONDS = 3600.0
 DEFAULT_MONGO_OPERATION_RETRY_ATTEMPTS = 3
 DEFAULT_MONGO_OPERATION_RETRY_DELAY_SECONDS = 0.35
 LOCAL_MARKET_SCAN_CACHE_FILENAME = "latest_market_scan_memory.json"
@@ -82,7 +83,15 @@ def _journal_state_cache_ttl_seconds(config: dict[str, Any]) -> float:
         return DEFAULT_JOURNAL_STATE_CACHE_TTL_SECONDS
 
 
-def _journal_state_cache_get(config: dict[str, Any], key: str) -> str | None:
+def _journal_state_stale_fallback_seconds(config: dict[str, Any]) -> float:
+    atlas = config.get("database", {}).get("atlas", {})
+    raw = atlas.get("journal_state_stale_fallback_seconds", DEFAULT_JOURNAL_STATE_STALE_FALLBACK_SECONDS)
+    try:
+        return max(0.0, float(raw or 0.0))
+    except (TypeError, ValueError):
+        return DEFAULT_JOURNAL_STATE_STALE_FALLBACK_SECONDS
+
+def _journal_state_cache_get(config: dict[str, Any], key: str, *, allow_stale: bool = False) -> str | None:
     ttl = _journal_state_cache_ttl_seconds(config)
     if ttl <= 0:
         return None
@@ -94,6 +103,12 @@ def _journal_state_cache_get(config: dict[str, Any], key: str) -> str | None:
             return None
         expires_at, value = entry
         if expires_at <= now:
+            stale_age = now - expires_at
+            stale_window = _journal_state_stale_fallback_seconds(config)
+            if allow_stale and stale_age <= stale_window:
+                return value
+            if stale_age <= stale_window:
+                return None
             _JOURNAL_STATE_CACHE.pop(cache_key, None)
             return None
         return value
@@ -1412,10 +1427,17 @@ def get_journal_state(config: dict[str, Any], key: str) -> str | None:
     cached = _journal_state_cache_get(config, key)
     if cached is not None:
         return cached
-    row = _mongo_collection(config, "journal_state").find_one(
-        {"_id": key},
-        {"_id": 0, "value": 1, "value_compressed": 1, "value_encoding": 1},
-    )
+    try:
+        row = _mongo_collection(config, "journal_state").find_one(
+            {"_id": key},
+            {"_id": 0, "value": 1, "value_compressed": 1, "value_encoding": 1},
+        )
+    except Exception as exc:
+        stale = _journal_state_cache_get(config, key, allow_stale=True)
+        if stale is not None and _mongo_error_is_retryable(exc):
+            LOGGER.warning("Using stale journal_state cache for key '%s' after transient Mongo issue: %s", key, exc)
+            return stale
+        raise
     payload = _decode_journal_state_payload(row)
     if payload is None:
         return None

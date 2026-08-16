@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from unittest import TestCase
 from unittest.mock import patch
@@ -9,6 +10,7 @@ from unittest.mock import patch
 from crypto_trader.atlas_mirror import atlas_database, atlas_database_for_collection
 from crypto_trader.models import Decision, RiskCheck, TradeCandidate
 from crypto_trader.storage import (
+    _journal_state_cache_set,
     append_trade_execution_event,
     claim_journal_state,
     clear_dashboard_snapshot_cache,
@@ -28,10 +30,20 @@ from crypto_trader.storage import (
     save_pending_order,
     storage_stats,
     get_trade_execution,
+    get_journal_state,
     insert_ai_trade_decision_row,
     insert_trade_execution_row,
     prune_ai_trade_decisions,
 )
+
+
+class NetworkTimeout(Exception):
+    pass
+
+
+class _TimeoutCollection:
+    def find_one(self, *args, **kwargs):
+        raise NetworkTimeout("read operation timed out")
 
 
 class StorageTest(TestCase):
@@ -118,6 +130,21 @@ class StorageTest(TestCase):
                 patch("crypto_trader.storage._ensure_mongo_write_allowed"):
                 prune_ai_trade_decisions(config)
             self.assertEqual(prune.call_args.kwargs["keep_days"], 365.0)
+
+    def test_get_journal_state_uses_stale_cache_after_transient_mongo_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._config(tmpdir)
+            config["database"] = {
+                "atlas": {
+                    "journal_state_cache_ttl_seconds": 0.001,
+                    "journal_state_stale_fallback_seconds": 60,
+                }
+            }
+            _journal_state_cache_set(config, "lc_internal_pipeline_state", '{"ok": true}')
+            time.sleep(0.01)
+
+            with patch("crypto_trader.storage._mongo_collection", return_value=_TimeoutCollection()):
+                self.assertEqual(get_journal_state(config, "lc_internal_pipeline_state"), '{"ok": true}')
 
     def _candidate(self) -> TradeCandidate:
         huge_patterns = [{"name": f"pattern-{index}", "raw": "x" * 1000} for index in range(50)]
