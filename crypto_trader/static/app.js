@@ -4665,7 +4665,10 @@ function renderProfitProtectionPositionPanel(item) {
     && Math.abs(Number(liveEntry) - Number(initialEntry)) > 1e-12;
   const currentSlPrice = levels.current_stop_loss ?? rawCurrentSlLevel?.price ?? item?.stop_loss;
   const currentTpPrice = levels.current_take_profit ?? rawCurrentTpLevel?.price ?? item?.take_profit;
+  const liveStopIsProtected = profitProtectionPriceReached(item?.side, currentSlPrice, liveEntry);
+  const useLiveActiveStepOverride = !levels.manual_targets_are_initial && liveStopIsProtected;
   const liveLevelForStep = (level, step, livePrice) => {
+    if (!useLiveActiveStepOverride) return level;
     if (liveReachedStep !== step) return level;
     if (!level || typeof level !== "object") return level;
     return { ...level, price: livePrice };

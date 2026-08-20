@@ -1208,6 +1208,13 @@ def _trade_execution_profit_protection_levels(
     stored_initial_sl = _trade_execution_price(row, "initial_stop_loss")
     live_sl = _trade_execution_effective_stop_loss(row)
     initial_sl = live_sl if _trade_execution_stop_loss_is_valid(side, entry, live_sl) else stored_initial_sl
+    manual_targets_are_initial = bool(
+        partial_done
+        and live_sl is not None
+        and stored_initial_sl is not None
+        and _trade_execution_stop_loss_is_valid(side, entry, live_sl)
+        and abs(float(live_sl) - float(stored_initial_sl)) > max(1e-8, abs(float(stored_initial_sl)) * 1e-4)
+    )
     take_profit = _trade_execution_effective_take_profit(row)
     qty = _trade_execution_quantity(row)
     base_qty = _trade_execution_initial_quantity(row) or qty
@@ -1291,7 +1298,8 @@ def _trade_execution_profit_protection_levels(
         extension_fraction_for_base = partial_fraction
     original_tp = row.get("partial_take_profit_original_tp")
     if (
-        entry is not None
+        not manual_targets_are_initial
+        and entry is not None
         and current_tp is not None
         and current_step == current_step
         and current_step > 0
@@ -1316,6 +1324,8 @@ def _trade_execution_profit_protection_levels(
         ):
             original_tp = reconstructed_tp
     if original_tp is None:
+        original_tp = current_tp
+    if manual_targets_are_initial:
         original_tp = current_tp
     extended_tp = row.get("partial_take_profit_extended_tp")
     if partial_price is None and entry is not None and take_profit is not None:
@@ -1398,6 +1408,7 @@ def _trade_execution_profit_protection_levels(
     return {
         "live_entry_price": entry,
         "initial_entry_price": _trade_execution_price(row, "initial_entry_price"),
+        "manual_targets_are_initial": manual_targets_are_initial,
         "current_stop_loss": current_sl,
         "current_take_profit": current_tp,
         "quantity": qty,
