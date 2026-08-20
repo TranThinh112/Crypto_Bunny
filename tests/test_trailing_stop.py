@@ -499,6 +499,97 @@ class TrailingStopTest(TestCase):
         self.assertEqual(exchange.orders[0]["params"]["tdMode"], "cross")
         self.assertEqual(exchange.orders[0]["params"]["posSide"], "short")
 
+    def test_partial_take_profit_short_closes_when_mark_crosses_trigger(self) -> None:
+        config = self._config()
+        config["trailing_stop"]["partial_take_profit"] = {
+            "enabled": True,
+            "trigger_tp_progress": 0.7,
+            "close_fraction": 0.3,
+            "remaining_sl_buffer_r": 0.1,
+            "tp_extension_fraction": 0.3,
+        }
+        insert_trade_execution_row(
+            config,
+            {
+                "created_at": "2026-08-20T00:00:00+00:00",
+                "updated_at": "2026-08-20T00:00:00+00:00",
+                "symbol": "BTC/USDT:USDT",
+                "side": "SHORT",
+                "status": "OPEN",
+                "entry_price": 0.2014,
+                "stop_loss": 0.21,
+                "take_profit": 0.1893,
+                "quantity": 39.0,
+                "initial_quantity": 39.0,
+                "initial_entry_price": 0.2014,
+                "initial_stop_loss": 0.21,
+            },
+        )
+        exchange = FakeShortTrailingExchange(mark=0.1911, current_sl=0.21, contracts=39.0)
+
+        with patch("crypto_trader.trailing_stop.create_exchange", return_value=exchange):
+            result = run_trailing_stop_cycle(config)
+
+        self.assertEqual(result["partial_closed"], 1)
+        self.assertEqual(exchange.orders[0]["side"], "buy")
+        self.assertEqual(exchange.orders[0]["amount"], "11.7")
+        row = list_trade_execution_rows(config, statuses=["OPEN"])[0]
+        self.assertTrue(row["partial_take_profit_done"])
+        self.assertAlmostEqual(row["partial_take_profit_amount"], 11.7)
+
+    def test_matching_execution_prefers_latest_duplicate_symbol_side(self) -> None:
+        config = self._config()
+        config["trailing_stop"]["partial_take_profit"] = {
+            "enabled": True,
+            "trigger_tp_progress": 0.7,
+            "close_fraction": 0.3,
+            "remaining_sl_buffer_r": 0.1,
+            "tp_extension_fraction": 0.3,
+        }
+        insert_trade_execution_row(
+            config,
+            {
+                "created_at": "2026-08-19T00:00:00+00:00",
+                "updated_at": "2026-08-19T00:00:00+00:00",
+                "symbol": "BTC/USDT:USDT",
+                "side": "SHORT",
+                "status": "OPEN",
+                "entry_price": 100.0,
+                "stop_loss": 110.0,
+                "take_profit": 80.0,
+                "quantity": 1.0,
+                "initial_entry_price": 100.0,
+                "initial_stop_loss": 110.0,
+            },
+        )
+        insert_trade_execution_row(
+            config,
+            {
+                "created_at": "2026-08-20T00:00:00+00:00",
+                "updated_at": "2026-08-20T00:00:00+00:00",
+                "symbol": "BTC/USDT:USDT",
+                "side": "SHORT",
+                "status": "OPEN",
+                "entry_price": 0.2014,
+                "stop_loss": 0.21,
+                "take_profit": 0.1893,
+                "quantity": 39.0,
+                "initial_quantity": 39.0,
+                "initial_entry_price": 0.2014,
+                "initial_stop_loss": 0.21,
+            },
+        )
+        exchange = FakeShortTrailingExchange(mark=0.1911, current_sl=0.21, contracts=39.0)
+
+        with patch("crypto_trader.trailing_stop.create_exchange", return_value=exchange):
+            result = run_trailing_stop_cycle(config)
+
+        self.assertEqual(result["partial_closed"], 1)
+        self.assertEqual(exchange.orders[0]["amount"], "11.7")
+        rows = list_trade_execution_rows(config, statuses=["OPEN"], order="created_asc")
+        self.assertFalse(bool(rows[0].get("partial_take_profit_done")))
+        self.assertTrue(rows[1]["partial_take_profit_done"])
+
     def test_partial_take_profit_closes_even_when_okx_algo_is_missing(self) -> None:
         config = self._config()
         config["trailing_stop"]["partial_take_profit"] = {

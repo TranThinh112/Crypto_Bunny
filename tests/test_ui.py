@@ -1076,8 +1076,9 @@ class UiTest(TestCase):
         notify_error.assert_not_called()
         self.assertEqual(app.state.lc_pipeline_status["last_result"], "error")
 
+    @patch("crypto_trader.ui.run_internal_market_scan_if_due")
     @patch("crypto_trader.ui.update_lc_internal_pipeline")
-    def test_lc_pipeline_slot_cycle_updates_pool_without_calling_mini(self, update_pipeline) -> None:
+    def test_lc_pipeline_slot_cycle_updates_pool_and_calls_mini(self, update_pipeline, run_mini) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             config_path = Path(tmpdir) / "config.yaml"
             config_path.write_text(
@@ -1099,6 +1100,12 @@ class UiTest(TestCase):
                 "two_hour_slot": "2026-07-26T04:00:00+07:00",
                 "four_hour_slot": "2026-07-26T04:00:00+07:00",
             }
+            run_mini.return_value = {
+                "status": "done",
+                "slot_id": "2026-07-26T04:00:00+07:00",
+                "created_at": "2026-07-26T04:00:03+07:00",
+                "selected_symbols": ["LAB/USDT:USDT"],
+            }
             app = SimpleNamespace(
                 state=SimpleNamespace(
                     config_path=config_path,
@@ -1116,8 +1123,10 @@ class UiTest(TestCase):
             _run_lc_pipeline_slot_cycle(app)
 
         update_pipeline.assert_called_once()
+        run_mini.assert_called_once()
         self.assertEqual(app.state.lc_pipeline_status["last_result"], "pool_updated")
-        self.assertEqual(app.state.lc_pipeline_status["mini_scan_status"], "deferred_to_automation")
+        self.assertEqual(app.state.lc_pipeline_status["mini_scan_status"], "done")
+        self.assertEqual(app.state.lc_pipeline_status["mini_scan_selected_symbols"], ["LAB/USDT:USDT"])
 
     def test_healthz_includes_runtime_build_metadata(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:

@@ -369,8 +369,9 @@ class EngineMiniQueueTest(TestCase):
         self.assertIn("Setup khong du chat luong", result["skipped"][0]["reason"])
         self.assertEqual(len(result["system_notifications"]), 1)
         message = send_message.call_args.args[1]
-        self.assertIn("Thông báo hệ thống", message)
+        self.assertIn("Setup Mini bị chặn", message)
         self.assertIn("Mini -> 5.5/LC_OKX", message)
+        self.assertIn("Kết quả: không tạo LC_OKX", message)
         self.assertIn("Setup khong du chat luong", message)
         self.assertEqual(list_pending_orders(config, status="LC_OKX"), [])
 

@@ -103,6 +103,38 @@ class RiskTest(TestCase):
         self.assertIn("Win probability 76.50% is below minimum 80.00%", blocked.reasons)
         self.assertTrue(passed.passed)
 
+    def test_low_volatility_quality_setup_uses_dynamic_win_threshold(self) -> None:
+        config = self._config()
+        config["strategy"]["min_win_probability_pct"] = 72
+        candidate = _candidate()
+        candidate.market_regime = "LOW_VOLATILITY"
+        candidate.confidence = 92
+        candidate.risk_reward = 2.0
+        candidate.win_probability_pct = 67.5
+
+        check = evaluate_candidate(config, candidate, active_summary=(0, set(), []))
+
+        self.assertTrue(check.passed)
+        self.assertEqual(
+            candidate.decision_metadata["risk_win_probability_threshold"]["effective_threshold"],
+            67.0,
+        )
+
+    def test_health_warning_keeps_normal_win_probability_floor(self) -> None:
+        config = self._config()
+        config["strategy"]["min_win_probability_pct"] = 72
+        candidate = _candidate()
+        candidate.market_regime = "LOW_VOLATILITY"
+        candidate.confidence = 95
+        candidate.risk_reward = 2.0
+        candidate.win_probability_pct = 67.5
+        candidate.warnings.append("Bunny Health Monitor dang o trang thai warning")
+
+        check = evaluate_candidate(config, candidate, active_summary=(0, set(), []))
+
+        self.assertFalse(check.passed)
+        self.assertIn("Win probability 67.50% is below minimum 72.00%", check.reasons)
+
     def test_missing_symbol_news_does_not_block_entry(self) -> None:
         config = self._config()
         config["news"]["require_symbol_news"] = True

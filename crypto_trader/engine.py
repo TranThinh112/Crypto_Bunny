@@ -314,9 +314,9 @@ def _mini_system_notification_text(
     selected = [str(symbol) for symbol in (scan or {}).get("selected_symbols") or [] if str(symbol)]
     pool = [str(symbol) for symbol in (scan or {}).get("pool_symbols") or [] if str(symbol)]
     lines = [
-        "⚠️ Thông báo hệ thống",
+        "⛔ Setup Mini bị chặn",
         f"Thời gian: {local_now.strftime('%d/%m/%y %H:%M:%S')}",
-        f"Bị chặn ở bước: {stage}",
+        f"Bước kiểm tra: {stage}",
         f"Slot Mini: {(scan or {}).get('slot_id') or '-'}",
         f"Trạng thái Mini: {(scan or {}).get('status') or '-'}",
     ]
@@ -326,8 +326,9 @@ def _mini_system_notification_text(
         lines.append("Mini đã chọn: " + ", ".join(selected[:3]))
     elif pool:
         lines.append("Pool Mini: " + ", ".join(pool[:3]))
-    lines.append("Lý do chặn: " + (str(reason or "").strip() or "-"))
-    lines.append("Hành động: không tạo LC_OKX/không gọi bước sau cho setup này.")
+    lines.append("Kết quả: không tạo LC_OKX")
+    lines.append("Lý do: " + (str(reason or "").strip() or "-"))
+    lines.append("Hành động: bỏ setup này, bot tiếp tục theo dõi chu kỳ sau.")
     return "\n".join(lines)
 
 
@@ -1667,6 +1668,98 @@ def force_mini_scan_from_latest_four_hour(config: dict[str, Any]) -> dict[str, A
     }
 
 
+def _candidate_has_insufficient_history(candidate: TradeCandidate) -> bool:
+    text = " | ".join([*candidate.warnings, *candidate.reasons])
+    return "does not have enough" in text and "OHLCV rows" in text
+
+
+def _candidate_is_rate_limited(candidate: TradeCandidate) -> bool:
+    text = " | ".join([*candidate.warnings, *candidate.reasons])
+    return "Too Many Requests" in text or '"code":"50011"' in text or '"code": "50011"' in text
+
+
+def _filter_data_quality_candidates(
+    config: dict[str, Any],
+    candidates: list[TradeCandidate],
+) -> tuple[list[TradeCandidate], dict[str, Any]]:
+    settings = config.get("trading_risk", {}).get("data_quality", {})
+    if not isinstance(settings, dict):
+        settings = {}
+    exclude_insufficient = bool(settings.get("exclude_insufficient_history_symbols", True))
+    exclude_rate_limited = bool(settings.get("exclude_rate_limited_symbols", False))
+    output: list[TradeCandidate] = []
+    excluded: list[dict[str, Any]] = []
+    for candidate in candidates:
+        reason = None
+        if exclude_insufficient and _candidate_has_insufficient_history(candidate):
+            reason = "insufficient_history"
+        elif exclude_rate_limited and _candidate_is_rate_limited(candidate):
+            reason = "rate_limited"
+        if reason:
+            excluded.append(
+                {
+                    "symbol": candidate.symbol,
+                    "side": candidate.side,
+                    "reason": reason,
+                    "confidence": candidate.confidence,
+                    "win_probability_pct": candidate.win_probability_pct,
+                }
+            )
+            continue
+        output.append(candidate)
+    return output, {
+        "enabled": True,
+        "exclude_insufficient_history_symbols": exclude_insufficient,
+        "exclude_rate_limited_symbols": exclude_rate_limited,
+        "input_count": len(candidates),
+        "output_count": len(output),
+        "excluded": excluded,
+    }
+
+
+def _decision_stage_payload(
+    selected: TradeCandidate | None,
+    candidates: list[TradeCandidate],
+    risk_check: RiskCheck,
+    execution_result: ExecutionResult | None,
+    scan_comparison: dict[str, Any],
+) -> dict[str, Any]:
+    top = selected or (candidates[0] if candidates else None)
+    ai_okx = scan_comparison.get("ai_okx_approval") if isinstance(scan_comparison.get("ai_okx_approval"), dict) else {}
+    ai_review = {
+        "status": "none",
+        "symbol": top.symbol if top else None,
+        "side": top.side if top else None,
+        "confidence": top.confidence if top else None,
+        "win_probability_pct": top.win_probability_pct if top else None,
+        "threshold": (top.decision_metadata or {}).get("risk_win_probability_threshold") if top else None,
+    }
+    if ai_okx:
+        ai_review.update(
+            {
+                "status": "approved" if ai_okx.get("approved") else "rejected",
+                "decision": ai_okx.get("decision"),
+                "reason": ai_okx.get("reason"),
+                "model": ai_okx.get("model"),
+            }
+        )
+    elif top:
+        ai_review["status"] = "candidate_reviewed_before_risk"
+    return {
+        "ai_review": ai_review,
+        "risk_gate": {
+            "passed": bool(risk_check.passed),
+            "reasons": list(risk_check.reasons),
+            "warnings": list(risk_check.warnings),
+        },
+        "execution": {
+            "submitted": bool(execution_result.submitted) if execution_result else False,
+            "order_id": execution_result.order_id if execution_result else None,
+            "message": execution_result.message if execution_result else None,
+        },
+    }
+
+
 def run_once(
     config: dict[str, Any],
     execute: bool,
@@ -1768,6 +1861,8 @@ def run_once(
         else []
     )
     candidates, scan_comparison = _merge_cycle_candidates(new_top, refreshed_previous, previous_payload)
+    candidates, data_quality_filter = _filter_data_quality_candidates(config, candidates)
+    scan_comparison["data_quality_filter"] = data_quality_filter
     scan_comparison["market_scan_storage"] = market_scan_storage
     scan_comparison["lc_internal_pipeline"] = lc_pipeline_state
     scan_comparison["universe"] = universe_context
@@ -2148,6 +2243,13 @@ def run_once(
     elif active_count is None and active_warnings:
         risk_check.warnings.extend(active_warnings)
 
+    scan_comparison["decision_stages"] = _decision_stage_payload(
+        selected,
+        candidates,
+        risk_check,
+        execution_result,
+        scan_comparison,
+    )
     decision = Decision(
         created_at=datetime.now(timezone.utc),
         mode=config.get("mode", "dry_run"),

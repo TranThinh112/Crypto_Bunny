@@ -230,6 +230,29 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "pause_trading_hours": 24,
         "max_safe_funding_rate_abs": 0.03,
         "max_entry_distance_pct": 0.6,
+        "dynamic_win_probability_thresholds": {
+            "enabled": True,
+            "low_volatility": {
+                "min_win_probability_pct": 67.0,
+                "min_confidence": 90.0,
+                "min_risk_reward": 2.0,
+            },
+            "high_volatility": {
+                "min_win_probability_pct": 74.0,
+            },
+            "health_warning_floor_pct": 72.0,
+        },
+        "probation_entry": {
+            "enabled": False,
+            "min_win_probability_pct": 66.0,
+            "min_confidence": 90.0,
+            "min_risk_reward": 2.0,
+            "margin_usdt": 1.0,
+        },
+        "data_quality": {
+            "exclude_insufficient_history_symbols": True,
+            "exclude_rate_limited_symbols": False,
+        },
     },
     "manual_position_targets": {
         "enabled": True,

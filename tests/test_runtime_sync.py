@@ -843,7 +843,7 @@ class RuntimeSyncTest(TestCase):
         self.assertEqual(result["exchange"]["executions_closed"], 1)
         self.assertEqual(list_trade_execution_rows(config, statuses=["OPEN"]), [])
         losses = list_trade_execution_rows(config, statuses=["LOSS"])
-        self.assertEqual(losses[0]["close_reason"], "manual")
+        self.assertEqual(losses[0]["close_reason"], "stop_loss")
         self.assertIsNone(losses[0]["position_slot"])
         messages = [call.args[1] for call in send_message.call_args_list]
         self.assertTrue(any("SOL/USDT:USDT" in message for message in messages))
@@ -1186,12 +1186,12 @@ class RuntimeSyncTest(TestCase):
 
         self.assertEqual(result["exchange"]["backfilled_close_notifications"], 1)
         losses = list_trade_execution_rows(config, statuses=["LOSS"])
-        self.assertEqual(losses[0]["close_reason"], "manual")
+        self.assertEqual(losses[0]["close_reason"], "stop_loss")
         messages = [call.args[1] for call in send_message.call_args_list]
         self.assertTrue(any("ETC/USDT:USDT" in message for message in messages))
 
     @patch("crypto_trader.notifier.send_telegram_message")
-    def test_manual_profitable_exchange_close_is_not_labeled_take_profit(self, send_message) -> None:
+    def test_profitable_exchange_close_without_target_price_is_labeled_take_profit(self, send_message) -> None:
         config = self._config()
         insert_trade_execution_row(
             config,
@@ -1233,9 +1233,9 @@ class RuntimeSyncTest(TestCase):
 
         self.assertEqual(result["exchange"]["executions_closed"], 1)
         wins = list_trade_execution_rows(config, statuses=["WIN"])
-        self.assertEqual(wins[0]["close_reason"], "manual")
+        self.assertEqual(wins[0]["close_reason"], "take_profit")
         messages = [call.args[1] for call in send_message.call_args_list]
-        self.assertTrue(any("Tự đóng" in message for message in messages))
+        self.assertTrue(any("Chạm TP" in message for message in messages))
 
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_sync_retries_unnotified_exchange_close(self, send_message) -> None:

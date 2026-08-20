@@ -304,7 +304,7 @@ def _close_reason_from_exchange_close(
             if stop_loss is not None and close_price >= stop_loss:
                 return "stop_loss"
     if pnl is not None:
-        return "manual"
+        return _close_reason_from_realized_pnl(pnl)
     return "exchange_position_no_longer_open"
 
 

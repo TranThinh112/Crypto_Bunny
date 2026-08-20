@@ -1137,7 +1137,7 @@ def _trade_execution_loss_guard(row: dict[str, Any], config: dict[str, Any]) -> 
     entry = _trade_execution_live_entry_price(row)
     stored_initial_sl = _trade_execution_price(row, "initial_stop_loss")
     live_sl = _trade_execution_effective_stop_loss(row)
-    initial_sl = stored_initial_sl if _trade_execution_stop_loss_is_valid(side, entry, stored_initial_sl) else live_sl
+    initial_sl = live_sl if _trade_execution_stop_loss_is_valid(side, entry, live_sl) else stored_initial_sl
     take_profit = _trade_execution_effective_take_profit(row)
     qty = _trade_execution_quantity(row)
     if side not in {"long", "short"} or entry is None or initial_sl is None or qty is None:
@@ -1207,7 +1207,7 @@ def _trade_execution_profit_protection_levels(
     partial_done = bool(row.get("partial_take_profit_done"))
     stored_initial_sl = _trade_execution_price(row, "initial_stop_loss")
     live_sl = _trade_execution_effective_stop_loss(row)
-    initial_sl = stored_initial_sl if _trade_execution_stop_loss_is_valid(side, entry, stored_initial_sl) else live_sl
+    initial_sl = live_sl if _trade_execution_stop_loss_is_valid(side, entry, live_sl) else stored_initial_sl
     take_profit = _trade_execution_effective_take_profit(row)
     qty = _trade_execution_quantity(row)
     base_qty = _trade_execution_initial_quantity(row) or qty
@@ -1224,7 +1224,7 @@ def _trade_execution_profit_protection_levels(
     current_amount = qty
     remaining_amount = current_amount
     if not row.get("partial_take_profit_done") and partial_base_qty is not None:
-        remaining_amount = max(0.0, partial_base_qty - (partial_amount if partial_amount == partial_amount else 0.0))
+        remaining_amount = max(0.0, current_amount * (1.0 - partial_fraction)) if current_amount is not None else 0.0
     current_sl = _trade_execution_effective_stop_loss(row)
     current_tp = _trade_execution_effective_take_profit(row)
     partial_price = row.get("partial_take_profit_price")
@@ -1250,7 +1250,7 @@ def _trade_execution_profit_protection_levels(
     if not partial_is_profitable and partial_amount != partial_amount and partial_base_qty is not None:
         partial_amount = partial_base_qty * partial_fraction
     if not partial_is_profitable and partial_base_qty is not None:
-        remaining_amount = max(0.0, partial_base_qty - (partial_amount if partial_amount == partial_amount else 0.0))
+        remaining_amount = max(0.0, current_amount * (1.0 - partial_fraction)) if current_amount is not None else 0.0
     partial_is_loss_close = bool(partial_done and not partial_is_profitable)
     if partial_is_loss_close:
         if (

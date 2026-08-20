@@ -184,7 +184,7 @@ def _matching_execution(rows: list[dict[str, Any]], symbol: str, side: str) -> d
     ]
     if not matches:
         return None
-    return sorted(matches, key=lambda item: (str(item.get("created_at") or ""), int(item.get("id") or 0)))[0]
+    return sorted(matches, key=lambda item: (str(item.get("created_at") or ""), int(item.get("id") or 0)), reverse=True)[0]
 
 
 def _atr_from_ohlcv(ohlcv: list[list[float]], period: int) -> float | None:

@@ -50,7 +50,7 @@ from .config import (
     runtime_config_override_payload,
     runtime_config_overrides_should_attempt,
 )
-from .ai_coordinator import candidate_okx_review, latest_internal_market_scan, next_internal_market_scan_at
+from .ai_coordinator import candidate_okx_review, latest_internal_market_scan, next_internal_market_scan_at, run_internal_market_scan_if_due
 from .codex_features import (
     activate_strategy_version,
     ai_trade_decision_stats,
@@ -1598,6 +1598,13 @@ def _run_lc_pipeline_slot_cycle(app: FastAPI) -> None:
         if _app_is_stopping(app):
             return
         pipeline = update_lc_internal_pipeline(notification_config, candidates, now=now)
+        mini_scan: dict[str, Any] | None = None
+        mini_scan_error: str | None = None
+        try:
+            mini_scan = run_internal_market_scan_if_due(notification_config)
+        except Exception as exc:
+            mini_scan_error = str(exc)
+            LOGGER.warning("Mini scan after LC slot update failed: %s", exc)
         current_status = getattr(app.state, "lc_pipeline_status", {}).copy()
         current_status.update(
             {
@@ -1610,8 +1617,11 @@ def _run_lc_pipeline_slot_cycle(app: FastAPI) -> None:
                 "hourly_slot": pipeline.get("hourly_slot"),
                 "two_hour_slot": pipeline.get("two_hour_slot"),
                 "four_hour_slot": pipeline.get("four_hour_slot"),
-                "mini_scan_status": "deferred_to_automation",
-                "mini_scan_skip_reason": "Mini -> 5.5 is handled only by the main automation pipeline",
+                "mini_scan_status": (mini_scan or {}).get("status") if mini_scan else ("error" if mini_scan_error else "not_due"),
+                "mini_scan_slot_id": (mini_scan or {}).get("slot_id") if mini_scan else None,
+                "mini_scan_created_at": (mini_scan or {}).get("created_at") if mini_scan else None,
+                "mini_scan_selected_symbols": list((mini_scan or {}).get("selected_symbols") or []),
+                "mini_scan_skip_reason": (mini_scan or {}).get("skip_reason") if mini_scan else mini_scan_error,
             }
         )
         app.state.lc_pipeline_status = current_status

@@ -116,6 +116,24 @@ trading_risk:
   recovery_min_gpt_confidence: 92
   recovery_min_win_probability_pct: 80
   recovery_min_risk_reward: 2.5
+  dynamic_win_probability_thresholds:
+    enabled: true
+    low_volatility:
+      min_win_probability_pct: 67
+      min_confidence: 90
+      min_risk_reward: 2.0
+    high_volatility:
+      min_win_probability_pct: 74
+    health_warning_floor_pct: 72
+  probation_entry:
+    enabled: true
+    min_win_probability_pct: 66
+    min_confidence: 90
+    min_risk_reward: 2.0
+    margin_usdt: 1.0
+  data_quality:
+    exclude_insufficient_history_symbols: true
+    exclude_rate_limited_symbols: false
 
 bunny_health_monitor:
   # Tranh khoa he thong vi mau thong ke qua nho hoac drawdown % bi meo boi peak PnL nho.

@@ -37,6 +37,109 @@ def _capital_reserve_check_is_advisory(config: dict[str, Any]) -> bool:
 ActiveSummary = tuple[int | None, set[str], list[str]]
 
 
+def _risk_settings(config: dict[str, Any]) -> dict[str, Any]:
+    return config.get("trading_risk", {}) if isinstance(config.get("trading_risk"), dict) else {}
+
+
+def _market_guard_blocks_entry(candidate: TradeCandidate) -> bool:
+    warnings = " | ".join(str(item) for item in candidate.warnings)
+    return "avoid_new_entry" in warnings or "Bunny Health Monitor dang pause" in warnings
+
+
+def _health_warning_present(candidate: TradeCandidate) -> bool:
+    return any("Bunny Health Monitor dang o trang thai warning" in str(item) for item in candidate.warnings)
+
+
+def _effective_min_win_probability(
+    config: dict[str, Any],
+    candidate: TradeCandidate,
+    base_threshold: float,
+) -> tuple[float, dict[str, Any]]:
+    settings = _risk_settings(config)
+    dynamic = settings.get("dynamic_win_probability_thresholds", {})
+    if not isinstance(dynamic, dict) or not dynamic.get("enabled", True):
+        return base_threshold, {"enabled": False, "base_threshold": base_threshold, "effective_threshold": base_threshold}
+
+    regime = str(candidate.market_regime or "").upper()
+    effective = base_threshold
+    reason = "base"
+    if regime == "LOW_VOLATILITY":
+        low_vol = dynamic.get("low_volatility", {})
+        if isinstance(low_vol, dict):
+            candidate_rr = float(candidate.risk_reward or 0)
+            candidate_confidence = float(candidate.confidence or 0)
+            required_rr = float(low_vol.get("min_risk_reward", 2.0) or 2.0)
+            required_confidence = float(low_vol.get("min_confidence", 90.0) or 90.0)
+            if candidate_rr >= required_rr and candidate_confidence >= required_confidence and not _market_guard_blocks_entry(candidate):
+                effective = min(base_threshold, float(low_vol.get("min_win_probability_pct", 67.0) or 67.0))
+                reason = "low_volatility_quality_setup"
+    elif regime in {"HIGH_VOLATILITY", "VOLATILE"}:
+        high_vol = dynamic.get("high_volatility", {})
+        if isinstance(high_vol, dict):
+            effective = max(base_threshold, float(high_vol.get("min_win_probability_pct", base_threshold) or base_threshold))
+            reason = "high_volatility_protection"
+    if _health_warning_present(candidate):
+        effective = max(effective, float(dynamic.get("health_warning_floor_pct", base_threshold) or base_threshold))
+        reason = "health_warning_floor"
+
+    return effective, {
+        "enabled": True,
+        "base_threshold": base_threshold,
+        "effective_threshold": effective,
+        "reason": reason,
+        "market_regime": candidate.market_regime,
+    }
+
+
+def _apply_probation_entry_if_allowed(
+    config: dict[str, Any],
+    candidate: TradeCandidate,
+    reasons: list[str],
+    threshold_meta: dict[str, Any],
+) -> bool:
+    settings = _risk_settings(config)
+    probation = settings.get("probation_entry", {})
+    if not isinstance(probation, dict) or not probation.get("enabled", False):
+        return False
+    if candidate.win_probability_pct is None:
+        return False
+    if _market_guard_blocks_entry(candidate) or _health_warning_present(candidate):
+        return False
+    min_win = float(probation.get("min_win_probability_pct", 66.0) or 66.0)
+    min_conf = float(probation.get("min_confidence", 90.0) or 90.0)
+    min_rr = float(probation.get("min_risk_reward", 2.0) or 2.0)
+    if candidate.win_probability_pct < min_win or candidate.confidence < min_conf or candidate.risk_reward < min_rr:
+        return False
+    win_reasons = [
+        reason for reason in reasons
+        if reason.startswith("Win probability ") and ("minimum" in reason or " < " in reason)
+    ]
+    if len(win_reasons) != len(reasons):
+        return False
+    max_margin = float(probation.get("margin_usdt", 1.0) or 1.0)
+    leverage = float(config.get("exchange", {}).get("leverage", 1) or 1)
+    max_order_usdt = max_margin * max(leverage, 1.0)
+    if candidate.order_usdt > max_order_usdt:
+        scale = max_order_usdt / max(candidate.order_usdt, 1e-12)
+        candidate.order_usdt = max_order_usdt
+        if candidate.quantity is not None:
+            candidate.quantity = candidate.quantity * scale
+        candidate.margin_usdt = max_margin
+        candidate.decision_metadata["probation_entry_sizing"] = {
+            "enabled": True,
+            "margin_usdt": max_margin,
+            "order_usdt": max_order_usdt,
+            "scale": scale,
+        }
+    candidate.decision_metadata["probation_entry"] = {
+        "enabled": True,
+        "reason": "win_probability_below_normal_but_probation_quality_passed",
+        "threshold": threshold_meta,
+    }
+    reasons.clear()
+    return True
+
+
 def mini_pending_risk_config(config: dict[str, Any]) -> dict[str, Any]:
     """Return the validation profile used by Mini-approved pending setups."""
     pending_config = config.get("pending_orders", {})
@@ -138,7 +241,10 @@ def evaluate_candidate(
         reasons.append(f"Confidence {candidate.confidence:.2f} is below minimum {min_confidence:.2f}")
 
     min_win_probability = float(strategy_config.get("min_win_probability_pct", 0) or 0)
+    threshold_meta: dict[str, Any] = {}
     if min_win_probability > 0:
+        min_win_probability, threshold_meta = _effective_min_win_probability(config, candidate, min_win_probability)
+        candidate.decision_metadata["risk_win_probability_threshold"] = threshold_meta
         if candidate.win_probability_pct is None:
             reasons.append(f"Win probability is unavailable; minimum is {min_win_probability:.2f}%")
         elif candidate.win_probability_pct < min_win_probability:
@@ -231,5 +337,6 @@ def evaluate_candidate(
     system_reasons, system_warnings = apply_system_validation_to_candidate(config, candidate)
     reasons.extend(system_reasons)
     warnings.extend(system_warnings)
+    _apply_probation_entry_if_allowed(config, candidate, reasons, threshold_meta)
 
     return RiskCheck(passed=not reasons, reasons=reasons, warnings=warnings)

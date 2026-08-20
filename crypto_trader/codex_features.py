@@ -263,17 +263,21 @@ def _compact_candidate_storage_payload(candidate: TradeCandidate) -> dict[str, A
 
 
 def _compact_decision_reason_payload(decision: Decision, selected: TradeCandidate | None) -> dict[str, Any]:
+    stages = decision.scan_comparison.get("decision_stages") if isinstance(decision.scan_comparison, dict) else {}
     return {
         "risk_reasons": [str(item) for item in (decision.risk_check.reasons or [])[:3]],
         "risk_warnings": [str(item) for item in (decision.risk_check.warnings or [])[:2]],
         "candidate_reasons": [str(item) for item in ((selected.reasons if selected else []) or [])[:4]],
         "candidate_warnings": [str(item) for item in ((selected.warnings if selected else []) or [])[:3]],
+        "decision_stages": stages if isinstance(stages, dict) else {},
     }
 
 
 def _compact_decision_payload(decision: Decision) -> dict[str, Any]:
     selected = decision.selected
     candidates = decision.candidates or []
+    stages = decision.scan_comparison.get("decision_stages") if isinstance(decision.scan_comparison, dict) else {}
+    data_quality = decision.scan_comparison.get("data_quality_filter") if isinstance(decision.scan_comparison, dict) else {}
     return {
         "created_at": to_jsonable(decision.created_at),
         "mode": decision.mode,
@@ -286,6 +290,8 @@ def _compact_decision_payload(decision: Decision) -> dict[str, Any]:
         "risk_passed": bool(decision.risk_check.passed),
         "execution_submitted": bool(decision.execution.submitted) if decision.execution else False,
         "execution_order_id": decision.execution.order_id if decision.execution else None,
+        "decision_stages": stages if isinstance(stages, dict) else {},
+        "data_quality_filter": data_quality if isinstance(data_quality, dict) else {},
     }
 
 
@@ -3126,6 +3132,7 @@ def validate_entry(config: dict[str, Any], payload: dict[str, Any]) -> dict[str,
     entry_price = _safe_float(payload.get("entryPrice", payload.get("entry_price")), 0.0)
     current_price = _safe_float(payload.get("currentPrice", payload.get("current_price", entry_price)), entry_price)
     distance_pct = _entry_distance_pct(entry_price, current_price)
+    market_regime = str(payload.get("marketRegime", payload.get("market_regime", "")) or "").upper()
     if state["isPaused"]:
         reasons.append(f"He thong dang pause den {state.get('pausedUntil')}")
     if health["isPaused"]:
@@ -3139,9 +3146,35 @@ def validate_entry(config: dict[str, Any], payload: dict[str, Any]) -> dict[str,
     current_conf_threshold = float(state["currentNormalMinGptConfidence"])
     current_win_probability_threshold = _safe_float(settings.get("normal_min_win_probability_pct"), 72.0)
     normal_rr = _safe_float(settings.get("normal_min_risk_reward"), 1.8)
+    dynamic_thresholds = settings.get("dynamic_win_probability_thresholds", {})
+    threshold_reason = "base"
+    if isinstance(dynamic_thresholds, dict) and dynamic_thresholds.get("enabled", True):
+        if market_regime == "LOW_VOLATILITY":
+            low_vol = dynamic_thresholds.get("low_volatility", {})
+            if isinstance(low_vol, dict):
+                low_vol_threshold = _safe_float(low_vol.get("min_win_probability_pct"), 67.0)
+                low_vol_confidence = _safe_float(low_vol.get("min_confidence"), 90.0)
+                low_vol_rr = _safe_float(low_vol.get("min_risk_reward"), 2.0)
+                if gpt_confidence >= low_vol_confidence and risk_reward >= low_vol_rr:
+                    current_win_probability_threshold = min(current_win_probability_threshold, low_vol_threshold)
+                    threshold_reason = "low_volatility_quality_setup"
+        elif market_regime in {"HIGH_VOLATILITY", "VOLATILE"}:
+            high_vol = dynamic_thresholds.get("high_volatility", {})
+            if isinstance(high_vol, dict):
+                current_win_probability_threshold = max(
+                    current_win_probability_threshold,
+                    _safe_float(high_vol.get("min_win_probability_pct"), current_win_probability_threshold),
+                )
+                threshold_reason = "high_volatility_protection"
     if health["isWarning"]:
         current_rule_threshold += _safe_float(health["scoreAdjustment"], 0.0)
         current_conf_threshold += _safe_float(health["confidenceAdjustment"], 0.0)
+        if isinstance(dynamic_thresholds, dict):
+            current_win_probability_threshold = max(
+                current_win_probability_threshold,
+                _safe_float(dynamic_thresholds.get("health_warning_floor_pct"), current_win_probability_threshold),
+            )
+            threshold_reason = "health_warning_floor"
     is_recovery = bool(state["isRecoveryMode"])
     recovery_mode = str(state.get("recoveryMode") or ("HARD_RECOVERY" if is_recovery else "NORMAL")).upper()
     if recovery_mode == "HARD_RECOVERY":
@@ -3222,6 +3255,8 @@ def validate_entry(config: dict[str, Any], payload: dict[str, Any]) -> dict[str,
         "currentRuleThreshold": round(current_rule_threshold, 2),
         "currentConfidenceThreshold": round(current_conf_threshold, 2),
         "currentRiskRewardThreshold": round(normal_rr, 2),
+        "currentWinProbabilityThreshold": round(current_win_probability_threshold, 2),
+        "winProbabilityThresholdReason": threshold_reason,
         "riskRewardIsAdvisory": not rr_hard_block_enabled,
         "riskRewardWarnings": warnings,
         "healthState": health,
@@ -3243,6 +3278,7 @@ def apply_system_validation_to_candidate(config: dict[str, Any], candidate: Trad
             "currentPrice": candidate.entry,
             "volumeConfirmed": _safe_float(candidate.indicator_summary.get("volume_ratio"), 1.0) >= 1.0,
             "fundingRate": candidate.indicator_summary.get("funding_rate"),
+            "marketRegime": candidate.market_regime,
         },
     )
     candidate.rule_score = _candidate_rule_score(candidate)
@@ -3286,6 +3322,7 @@ def record_trade_execution(
             "spread_pct": candidate.spread_pct,
             "volumeConfirmed": _safe_float(candidate.indicator_summary.get("volume_ratio"), 1.0) >= 1.0,
             "fundingRate": candidate.indicator_summary.get("funding_rate"),
+            "marketRegime": candidate.market_regime,
         },
     )
     metadata = candidate.decision_metadata or {}
