@@ -1247,7 +1247,12 @@ def _run_automation_cycle(app: FastAPI) -> None:
     try:
         _set_automation_phase(app, status, "runtime_sync")
         try:
-            sync_runtime_state(config)
+            sync_result = _sync_runtime_state_for_automation(app, config)
+            if sync_result.get("skipped"):
+                status["runtime_sync_skipped"] = sync_result
+            elif sync_result.get("timeout"):
+                status["runtime_sync_timeout"] = sync_result
+                _publish_automation_status(app, status)
         except Exception as sync_exc:
             status["runtime_sync_error"] = str(sync_exc)
             _publish_automation_status(app, status)
@@ -1375,6 +1380,45 @@ def _automation_worker(app: FastAPI) -> None:
         wait_seconds = max(1.0, (next_run_at - datetime.now(timezone.utc)).total_seconds())
         app.state.automation_stop.wait(wait_seconds)
 
+
+def _automation_runtime_sync_timeout(config: dict[str, Any]) -> float:
+    runtime = config.get("runtime_sync", {}) if isinstance(config.get("runtime_sync"), dict) else {}
+    return max(5.0, min(55.0, float(runtime.get("automation_timeout_seconds", 35) or 35)))
+
+def _sync_runtime_state_for_automation(app: FastAPI, config: dict[str, Any]) -> dict[str, Any]:
+    runtime_sync_lock = getattr(app.state, "runtime_sync_lock", None)
+    if runtime_sync_lock is None:
+        runtime_sync_lock = threading.Lock()
+        app.state.runtime_sync_lock = runtime_sync_lock
+    if not runtime_sync_lock.acquire(blocking=False):
+        return {
+            "skipped": True,
+            "reason": "runtime_sync_already_running",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="automation-runtime-sync")
+
+    def _run() -> dict[str, Any]:
+        try:
+            result = sync_runtime_state(config)
+            return result if isinstance(result, dict) else {"ok": True, "result": result}
+        finally:
+            runtime_sync_lock.release()
+
+    future = executor.submit(_run)
+    future.add_done_callback(lambda _future: executor.shutdown(wait=False, cancel_futures=True))
+    timeout_seconds = _automation_runtime_sync_timeout(config)
+    try:
+        return future.result(timeout=timeout_seconds)
+    except FutureTimeoutError:
+        executor.shutdown(wait=False, cancel_futures=True)
+        return {
+            "timeout": True,
+            "timeout_seconds": timeout_seconds,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "reason": "runtime_sync exceeded automation timeout; trailing stop will continue",
+        }
 
 def _manual_target_fast_sync_worker(app: FastAPI) -> None:
     interval = 10
@@ -3299,6 +3343,7 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
     app.state.lc_pipeline_lock = threading.Lock()
     app.state.lc_pipeline_slot_lock = threading.Lock()
     app.state.manual_target_fast_sync_lock = threading.Lock()
+    app.state.runtime_sync_lock = threading.Lock()
     app.state.storage_maintenance_lock = threading.Lock()
     app.state.storage_maintenance_started_at = None
     app.state.storage_maintenance_finished_at = None

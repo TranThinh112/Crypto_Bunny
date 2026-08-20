@@ -35,6 +35,7 @@ from crypto_trader.ui import (
     _run_automation_cycle,
     _run_lc_pipeline_slot_cycle,
     _run_lc_pipeline_worker_cycle,
+    _sync_runtime_state_for_automation,
     _telegram_action_response,
     create_app,
 )
@@ -125,6 +126,40 @@ class UiTest(TestCase):
         self.assertFalse(lock.locked())
         self.assertEqual(app.state.manual_target_fast_sync_status["status"], "skipped_busy")
         self.assertEqual(app.state.manual_target_fast_sync_status["reason"], "fast_sync_already_running")
+
+    def test_automation_runtime_sync_times_out(self) -> None:
+        app = SimpleNamespace(state=SimpleNamespace(runtime_sync_lock=threading.Lock()))
+        done = threading.Event()
+
+        def slow_sync(_config: dict) -> dict:
+            time.sleep(0.2)
+            done.set()
+            return {"ok": True}
+
+        with patch("crypto_trader.ui.sync_runtime_state", side_effect=slow_sync), patch(
+            "crypto_trader.ui._automation_runtime_sync_timeout", return_value=0.01
+        ):
+            result = _sync_runtime_state_for_automation(
+                app,
+                {"runtime_sync": {"automation_timeout_seconds": 0.01}},
+            )
+
+        self.assertTrue(result["timeout"])
+        self.assertEqual(result["timeout_seconds"], 0.01)
+        self.assertTrue(done.wait(1.0))
+        self.assertFalse(app.state.runtime_sync_lock.locked())
+
+    def test_automation_runtime_sync_skips_when_previous_sync_is_running(self) -> None:
+        runtime_sync_lock = threading.Lock()
+        runtime_sync_lock.acquire()
+        app = SimpleNamespace(state=SimpleNamespace(runtime_sync_lock=runtime_sync_lock))
+        try:
+            result = _sync_runtime_state_for_automation(app, {"runtime_sync": {}})
+        finally:
+            runtime_sync_lock.release()
+
+        self.assertTrue(result["skipped"])
+        self.assertEqual(result["reason"], "runtime_sync_already_running")
 
     def test_dashboard_compact_payload_keeps_selected_module_detail_only(self) -> None:
         payload = {
