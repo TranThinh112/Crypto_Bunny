@@ -721,6 +721,7 @@ class SystemChecklistPayloadTests(unittest.TestCase):
             "stop_loss": 0.02847,
             "take_profit": 0.03435,
             "partial_take_profit_done": True,
+            "partial_take_profit_original_tp": 0.02984,
             "profit_extension_step": 3,
             "quantity": 1379,
             "contract_size": 1,

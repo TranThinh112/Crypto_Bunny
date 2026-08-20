@@ -1291,15 +1291,30 @@ def _trade_execution_profit_protection_levels(
         extension_fraction_for_base = partial_fraction
     original_tp = row.get("partial_take_profit_original_tp")
     if (
-        original_tp is None
-        and entry is not None
+        entry is not None
         and current_tp is not None
         and current_step == current_step
         and current_step > 0
         and extension_fraction_for_base > 0
     ):
         multiplier = extension_fraction_for_base * current_step
-        original_tp = (current_tp + multiplier * entry) / (1.0 + multiplier)
+        reconstructed_tp = (current_tp + multiplier * entry) / (1.0 + multiplier)
+        original_tp_number = _safe_float(original_tp, float("nan"))
+        expected_current_tp = None
+        if original_tp_number == original_tp_number:
+            reward = original_tp_number - entry if side == "long" else entry - original_tp_number
+            if reward > 0:
+                expected_current_tp = (
+                    original_tp_number + reward * multiplier
+                    if side == "long"
+                    else original_tp_number - reward * multiplier
+                )
+        if (
+            original_tp is None
+            or expected_current_tp is None
+            or abs(float(expected_current_tp) - float(current_tp)) > max(1e-8, abs(float(current_tp)) * 1e-4)
+        ):
+            original_tp = reconstructed_tp
     if original_tp is None:
         original_tp = current_tp
     extended_tp = row.get("partial_take_profit_extended_tp")
