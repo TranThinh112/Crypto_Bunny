@@ -11,6 +11,8 @@ runtime_sync:
   manual_target_fast_sync_interval_seconds: 5
 
 active_position_manager:
+  bad_cut_once_per_position: true
+  bad_cut_reset_on_scale_in: true
   protected_positions:
     - enabled: true
       symbol: XRP/USDT:USDT

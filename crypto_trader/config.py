@@ -289,6 +289,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "effective_from": "2026-07-29T21:58:22+00:00",
         "apply_to_existing_positions": False,
         "execute_bad_cut": True,
+        "bad_cut_once_per_position": True,
+        "bad_cut_reset_on_scale_in": True,
         "execute_good_exit": True,
         "execute_remainder_cut": True,
         "execute_dca": False,

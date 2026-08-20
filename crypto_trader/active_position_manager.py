@@ -8,7 +8,7 @@ from typing import Any
 from .config import project_path
 from .market import create_exchange
 from .models import to_jsonable
-from .storage import append_trade_execution_event, get_journal_state, list_journal_state_prefix, list_trade_execution_rows, set_journal_state
+from .storage import append_trade_execution_event, get_journal_state, list_journal_state_prefix, list_trade_execution_rows, set_journal_state, update_trade_execution
 
 LOGGER = logging.getLogger(__name__)
 
@@ -42,6 +42,8 @@ def _settings(config: dict[str, Any]) -> dict[str, Any]:
         "effective_from": str(raw.get("effective_from") or ""),
         "apply_to_existing_positions": bool(raw.get("apply_to_existing_positions", False)),
         "execute_bad_cut": bool(raw.get("execute_bad_cut", False)),
+        "bad_cut_once_per_position": bool(raw.get("bad_cut_once_per_position", True)),
+        "bad_cut_reset_on_scale_in": bool(raw.get("bad_cut_reset_on_scale_in", True)),
         "execute_good_exit": bool(raw.get("execute_good_exit", False)),
         "execute_remainder_cut": bool(raw.get("execute_remainder_cut", False)),
         "execute_dca": bool(raw.get("execute_dca", False)),
@@ -227,6 +229,38 @@ def _count_events(row: dict[str, Any], event_type: str) -> int:
     return sum(1 for event in _event_history(row) if str(event.get("type") or "") == event_type)
 
 
+def _event_time(event: dict[str, Any]) -> datetime | None:
+    return _parse_time(event.get("created_at") or event.get("at") or event.get("closed_at"))
+
+
+def _bad_cut_done(row: dict[str, Any], settings: dict[str, Any]) -> bool:
+    if not settings.get("bad_cut_once_per_position", True):
+        return False
+    if not bool(row.get("bad_cut_done")) and _count_events(row, "active_position_bad_cut") <= 0:
+        return False
+    if not settings.get("bad_cut_reset_on_scale_in", True):
+        return True
+    history = _event_history(row)
+    bad_cut_times = [
+        parsed
+        for parsed in (_event_time(event) for event in history if str(event.get("type") or "") == "active_position_bad_cut")
+        if parsed is not None
+    ]
+    bad_cut_at = _parse_time(row.get("bad_cut_at"))
+    if bad_cut_at is not None:
+        bad_cut_times.append(bad_cut_at)
+    if not bad_cut_times:
+        return bool(row.get("bad_cut_done"))
+    latest_bad_cut_at = max(bad_cut_times)
+    for event in history:
+        if str(event.get("type") or "") not in {"active_position_scale_in", "open", "position_reopened"}:
+            continue
+        event_at = _event_time(event)
+        if event_at is not None and event_at > latest_bad_cut_at:
+            return False
+    return True
+
+
 def _decision_for_row(row: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
     side = str(row.get("side") or "").lower()
     symbol = str(row.get("symbol") or "-")
@@ -249,6 +283,7 @@ def _decision_for_row(row: dict[str, Any], settings: dict[str, Any]) -> dict[str
 
     partial_profit_done = bool(row.get("partial_take_profit_done"))
     loss_guard_done = bool(row.get("loss_guard_partial_done"))
+    bad_cut_done = _bad_cut_done(row, settings)
     dca_count = _count_events(row, "active_position_dca")
     scale_count = _count_events(row, "active_position_scale_in")
 
@@ -265,6 +300,11 @@ def _decision_for_row(row: dict[str, Any], settings: dict[str, Any]) -> dict[str
         decision = "Giữ phần còn lại sau chốt lời 30%"
         reasons.append("Vị thế đã chốt lời 30%; ưu tiên module Chốt lời & Bảo vệ tiếp tục dời SL/TP theo nấc.")
         reasons.append("Module chủ động không chốt thêm nếu chưa có dấu hiệu đảo chiều rõ.")
+    elif bad_cut_done and r_value <= settings["bad_cut_r"]:
+        action = "HOLD_AFTER_BAD_CUT"
+        decision = "Giữ phần còn lại sau khi đã cắt lỗ chủ động"
+        reasons.append("BAD_CUT skipped: already executed for this position.")
+        reasons.append("Phần còn lại để OKX SL hoặc tín hiệu vị thế mới xử lý; bot không cắt lặp.")
     elif loss_guard_done and r_value <= settings["bad_cut_r"]:
         action = "BAD_CUT_REMAINDER"
         decision = "Xem xét đóng phần còn lại sau chốt lỗ 25%"
@@ -340,6 +380,7 @@ def _decision_for_row(row: dict[str, Any], settings: dict[str, Any]) -> dict[str
         "expected_pnl": expected_pnl,
         "reasons": reasons,
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "bad_cut_done": bad_cut_done,
     }
 
 
@@ -596,6 +637,39 @@ def evaluate_open_positions(
         if persist:
             _persist_decision(config, decision)
         trade_id = decision.get("trade_execution_id")
+        if persist and trade_id is not None and action == "BAD_CUT" and execution_result.get("submitted"):
+            bad_cut_at = datetime.now(timezone.utc).isoformat()
+            try:
+                update_trade_execution(
+                    config,
+                    int(trade_id),
+                    {
+                        "bad_cut_done": True,
+                        "bad_cut_at": bad_cut_at,
+                        "bad_cut_amount": decision.get("amount"),
+                        "bad_cut_trigger_r": settings.get("bad_cut_r"),
+                        "bad_cut_price": decision.get("mark_price"),
+                    },
+                )
+            except Exception as exc:
+                LOGGER.warning("Skipping active position bad cut marker update: %s", exc)
+            try:
+                append_trade_execution_event(
+                    config,
+                    int(trade_id),
+                    {
+                        "type": "active_position_bad_cut",
+                        "created_at": bad_cut_at,
+                        "action": action,
+                        "amount": decision.get("amount"),
+                        "trigger_r": settings.get("bad_cut_r"),
+                        "r_multiple": decision.get("r_multiple"),
+                        "price": decision.get("mark_price"),
+                        "execution": decision.get("execution"),
+                    },
+                )
+            except Exception as exc:
+                LOGGER.warning("Skipping active position bad cut event append: %s", exc)
         if persist and trade_id is not None and action not in {"HOLD", "HOLD_AFTER_PARTIAL", "HOLD_AFTER_LOSS_CUT"}:
             try:
                 append_trade_execution_event(
