@@ -1391,13 +1391,27 @@ def _manual_target_fast_sync_worker(app: FastAPI) -> None:
                 }
                 app.state.automation_stop.wait(interval)
                 continue
-            if not app.state.lock.acquire(blocking=False):
+            if app.state.lock.locked():
                 app.state.manual_target_fast_sync_status = {
                     "enabled": True,
                     "interval_seconds": interval,
                     "status": "skipped_busy",
                     "last_checked_at": datetime.now(timezone.utc).isoformat(),
                     "reason": "automation_lock_held",
+                }
+                app.state.automation_stop.wait(interval)
+                continue
+            fast_sync_lock = getattr(app.state, "manual_target_fast_sync_lock", None)
+            if fast_sync_lock is None:
+                fast_sync_lock = threading.Lock()
+                app.state.manual_target_fast_sync_lock = fast_sync_lock
+            if not fast_sync_lock.acquire(blocking=False):
+                app.state.manual_target_fast_sync_status = {
+                    "enabled": True,
+                    "interval_seconds": interval,
+                    "status": "skipped_busy",
+                    "last_checked_at": datetime.now(timezone.utc).isoformat(),
+                    "reason": "fast_sync_already_running",
                 }
                 app.state.automation_stop.wait(interval)
                 continue
@@ -1420,7 +1434,7 @@ def _manual_target_fast_sync_worker(app: FastAPI) -> None:
                     }
                 )
             finally:
-                app.state.lock.release()
+                fast_sync_lock.release()
         except Exception as exc:
             try:
                 app.state.manual_target_fast_sync_status = {
@@ -3284,6 +3298,7 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
     app.state.shutdown_started = False
     app.state.lc_pipeline_lock = threading.Lock()
     app.state.lc_pipeline_slot_lock = threading.Lock()
+    app.state.manual_target_fast_sync_lock = threading.Lock()
     app.state.storage_maintenance_lock = threading.Lock()
     app.state.storage_maintenance_started_at = None
     app.state.storage_maintenance_finished_at = None

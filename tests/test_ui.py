@@ -65,11 +65,13 @@ class UiTest(TestCase):
     def test_manual_target_fast_sync_reports_skipped_busy_when_lock_is_held(self) -> None:
         lock = threading.Lock()
         lock.acquire()
+        fast_sync_lock = threading.Lock()
         app = SimpleNamespace(
             state=SimpleNamespace(
                 config_path="config.test.yaml",
                 automation_stop=StopAfterWait(),
                 lock=lock,
+                manual_target_fast_sync_lock=fast_sync_lock,
                 manual_target_fast_sync_status={},
             )
         )
@@ -91,6 +93,38 @@ class UiTest(TestCase):
         self.assertEqual(app.state.manual_target_fast_sync_status["status"], "skipped_busy")
         self.assertEqual(app.state.manual_target_fast_sync_status["reason"], "automation_lock_held")
         self.assertEqual(app.state.manual_target_fast_sync_status["interval_seconds"], 5)
+
+    def test_manual_target_fast_sync_does_not_hold_automation_lock(self) -> None:
+        lock = threading.Lock()
+        fast_sync_lock = threading.Lock()
+        fast_sync_lock.acquire()
+        app = SimpleNamespace(
+            state=SimpleNamespace(
+                config_path="config.test.yaml",
+                automation_stop=StopAfterWait(),
+                lock=lock,
+                manual_target_fast_sync_lock=fast_sync_lock,
+                manual_target_fast_sync_status={},
+            )
+        )
+        config = {
+            "runtime_sync": {
+                "manual_target_fast_sync_enabled": True,
+                "manual_target_fast_sync_interval_seconds": 5,
+            },
+            "manual_position_targets": {"enabled": True},
+        }
+        try:
+            with patch("crypto_trader.ui.load_config", return_value=config), patch(
+                "crypto_trader.ui._automation_enabled", return_value=True
+            ):
+                _manual_target_fast_sync_worker(app)
+        finally:
+            fast_sync_lock.release()
+
+        self.assertFalse(lock.locked())
+        self.assertEqual(app.state.manual_target_fast_sync_status["status"], "skipped_busy")
+        self.assertEqual(app.state.manual_target_fast_sync_status["reason"], "fast_sync_already_running")
 
     def test_dashboard_compact_payload_keeps_selected_module_detail_only(self) -> None:
         payload = {
