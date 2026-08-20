@@ -4652,6 +4652,8 @@ function renderProfitProtectionPositionPanel(item) {
   const levelByStep = (rows, step) => rows.find((level) => Number(level?.step) === step) || null;
   const currentPnlLevel = { price: item?.mark_price, pnl: item?.pnl };
   const partialDone = Boolean(levels.partial_30?.executed);
+  const extensionStep = Number(item?.profit_extension_step);
+  const liveReachedStep = partialDone && Number.isFinite(extensionStep) ? Math.max(0, Math.min(3, extensionStep)) + 1 : null;
   const lossGuard = levels.loss_guard && typeof levels.loss_guard === "object" ? levels.loss_guard : null;
   const contractSize = nullableNumber(levels.contract_size ?? item?.contract_size) ?? 1;
   const rawCurrentSlLevel = levels.current_sl || levelByStep(slSteps, 1);
@@ -4663,6 +4665,11 @@ function renderProfitProtectionPositionPanel(item) {
     && Math.abs(Number(liveEntry) - Number(initialEntry)) > 1e-12;
   const currentSlPrice = levels.current_stop_loss ?? rawCurrentSlLevel?.price ?? item?.stop_loss;
   const currentTpPrice = levels.current_take_profit ?? rawCurrentTpLevel?.price ?? item?.take_profit;
+  const liveLevelForStep = (level, step, livePrice) => {
+    if (liveReachedStep !== step) return level;
+    if (!level || typeof level !== "object") return level;
+    return { ...level, price: livePrice };
+  };
   const slStepReached = (level) => partialDone && profitProtectionStepReached(item, level, currentSlPrice);
   const tpStepReached = (level) => partialDone && profitProtectionStepReached(item, level, currentTpPrice);
   const partialPrice = levels.partial_30?.price ?? item?.partial_take_profit_price;
@@ -4719,12 +4726,12 @@ function renderProfitProtectionPositionPanel(item) {
         ${renderProfitProtectionLevel("PnL hi\u1ec7n t\u1ea1i", currentPnlLevel, "current", { extraRows: currentExtraRows })}
         ${renderProfitProtectionLevel("Ch\u1ed1t l\u1eddi 30%", partialLevel, "partial", { achieved: partialDone, extraRows: partialExtraRows, showTrigger: false })}
         ${renderLossGuardLevelActual(lossGuard, levels)}
-        ${(() => { const level = runtimeLevel(levelByStep(slSteps, 2) || levels.sl2); return renderProfitProtectionLevel("SL2", level, "step2", { achieved: slStepReached(level) }); })()}
-        ${(() => { const level = runtimeLevel(levelByStep(tpSteps, 2) || levels.tp2); return renderProfitProtectionLevel("TP2", level, "step2", { showTrigger: false, achieved: tpStepReached(level) }); })()}
-        ${(() => { const level = runtimeLevel(levelByStep(slSteps, 3) || levels.sl3); return renderProfitProtectionLevel("SL3", level, "step3", { achieved: slStepReached(level) }); })()}
-        ${(() => { const level = runtimeLevel(levelByStep(tpSteps, 3)); return renderProfitProtectionLevel("TP3", level, "step3", { showTrigger: false, achieved: tpStepReached(level) }); })()}
-        ${(() => { const level = runtimeLevel(levelByStep(slSteps, 4)); return renderProfitProtectionLevel("SL4", level, "step4", { achieved: slStepReached(level) }); })()}
-        ${(() => { const level = runtimeLevel(levelByStep(tpSteps, 4)); return renderProfitProtectionLevel("TP4", level, "step4", { showTrigger: false, achieved: tpStepReached(level) }); })()}
+        ${(() => { const level = runtimeLevel(liveLevelForStep(levelByStep(slSteps, 2) || levels.sl2, 2, currentSlPrice)); return renderProfitProtectionLevel("SL2", level, "step2", { achieved: slStepReached(level) }); })()}
+        ${(() => { const level = runtimeLevel(liveLevelForStep(levelByStep(tpSteps, 2) || levels.tp2, 2, currentTpPrice)); return renderProfitProtectionLevel("TP2", level, "step2", { showTrigger: false, achieved: tpStepReached(level) }); })()}
+        ${(() => { const level = runtimeLevel(liveLevelForStep(levelByStep(slSteps, 3) || levels.sl3, 3, currentSlPrice)); return renderProfitProtectionLevel("SL3", level, "step3", { achieved: slStepReached(level) }); })()}
+        ${(() => { const level = runtimeLevel(liveLevelForStep(levelByStep(tpSteps, 3), 3, currentTpPrice)); return renderProfitProtectionLevel("TP3", level, "step3", { showTrigger: false, achieved: tpStepReached(level) }); })()}
+        ${(() => { const level = runtimeLevel(liveLevelForStep(levelByStep(slSteps, 4), 4, currentSlPrice)); return renderProfitProtectionLevel("SL4", level, "step4", { achieved: slStepReached(level) }); })()}
+        ${(() => { const level = runtimeLevel(liveLevelForStep(levelByStep(tpSteps, 4), 4, currentTpPrice)); return renderProfitProtectionLevel("TP4", level, "step4", { showTrigger: false, achieved: tpStepReached(level) }); })()}
       </div>
     </article>
   `;
