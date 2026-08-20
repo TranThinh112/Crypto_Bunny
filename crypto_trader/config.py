@@ -532,7 +532,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "runtime_sync": {
         "position_close_grace_seconds": 120,
         "manual_target_fast_sync_enabled": True,
-        "manual_target_fast_sync_interval_seconds": 10,
+        "manual_target_fast_sync_interval_seconds": 5,
     },
     "market_regime": {
         "enabled": True,

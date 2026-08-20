@@ -8,7 +8,7 @@ runtime:
 runtime_sync:
   position_close_grace_seconds: 120
   manual_target_fast_sync_enabled: true
-  manual_target_fast_sync_interval_seconds: 10
+  manual_target_fast_sync_interval_seconds: 5
 
 active_position_manager:
   protected_positions:

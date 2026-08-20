@@ -1013,7 +1013,7 @@ def _manual_target_fast_sync_enabled(config: dict[str, Any]) -> bool:
 
 def _manual_target_fast_sync_interval(config: dict[str, Any]) -> int:
     runtime_sync = config.get("runtime_sync", {}) if isinstance(config.get("runtime_sync"), dict) else {}
-    return max(5, min(60, int(runtime_sync.get("manual_target_fast_sync_interval_seconds", 10) or 10)))
+    return max(5, min(60, int(runtime_sync.get("manual_target_fast_sync_interval_seconds", 5) or 5)))
 
 def _next_automation_cycle_at(now: datetime, interval_seconds: int) -> datetime:
     interval = max(60, int(interval_seconds or 60))
@@ -1383,9 +1383,22 @@ def _manual_target_fast_sync_worker(app: FastAPI) -> None:
             config = load_config(app.state.config_path)
             interval = _manual_target_fast_sync_interval(config)
             if not _automation_enabled(config) or not _manual_target_fast_sync_enabled(config):
+                app.state.manual_target_fast_sync_status = {
+                    "enabled": False,
+                    "interval_seconds": interval,
+                    "status": "disabled",
+                    "last_checked_at": datetime.now(timezone.utc).isoformat(),
+                }
                 app.state.automation_stop.wait(interval)
                 continue
             if not app.state.lock.acquire(blocking=False):
+                app.state.manual_target_fast_sync_status = {
+                    "enabled": True,
+                    "interval_seconds": interval,
+                    "status": "skipped_busy",
+                    "last_checked_at": datetime.now(timezone.utc).isoformat(),
+                    "reason": "automation_lock_held",
+                }
                 app.state.automation_stop.wait(interval)
                 continue
             try:
