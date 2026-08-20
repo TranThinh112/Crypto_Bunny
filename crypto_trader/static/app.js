@@ -4568,6 +4568,19 @@ function renderProfitProtectionLevel(label, level, tone = "", options = {}) {
   `;
 }
 
+function profitProtectionPriceReached(side, livePrice, targetPrice, tolerance = 1e-8) {
+  const live = nullableNumber(livePrice);
+  const target = nullableNumber(targetPrice);
+  if (live === null || target === null) return false;
+  const direction = normalizedPositionSide(side) === "short" ? -1 : 1;
+  return direction > 0 ? live + tolerance >= target : live - tolerance <= target;
+}
+
+function profitProtectionStepReached(item, level, livePrice) {
+  if (!level || typeof level !== "object") return false;
+  return profitProtectionPriceReached(item?.side, livePrice, level.price);
+}
+
 function renderLossGuardLevel(lossGuard) {
   if (!lossGuard || typeof lossGuard !== "object") return "";
   const closePct = Math.round((Number(lossGuard.partial_close_fraction) || 0) * 100);
@@ -4639,9 +4652,6 @@ function renderProfitProtectionPositionPanel(item) {
   const levelByStep = (rows, step) => rows.find((level) => Number(level?.step) === step) || null;
   const currentPnlLevel = { price: item?.mark_price, pnl: item?.pnl };
   const partialDone = Boolean(levels.partial_30?.executed);
-  const extensionStep = Number(item?.profit_extension_step);
-  const achievedStep = partialDone && Number.isFinite(extensionStep) ? Math.max(0, Math.min(3, extensionStep)) : 0;
-  const stepAchieved = (step) => achievedStep >= step;
   const lossGuard = levels.loss_guard && typeof levels.loss_guard === "object" ? levels.loss_guard : null;
   const contractSize = nullableNumber(levels.contract_size ?? item?.contract_size) ?? 1;
   const rawCurrentSlLevel = levels.current_sl || levelByStep(slSteps, 1);
@@ -4653,6 +4663,8 @@ function renderProfitProtectionPositionPanel(item) {
     && Math.abs(Number(liveEntry) - Number(initialEntry)) > 1e-12;
   const currentSlPrice = levels.current_stop_loss ?? rawCurrentSlLevel?.price ?? item?.stop_loss;
   const currentTpPrice = levels.current_take_profit ?? rawCurrentTpLevel?.price ?? item?.take_profit;
+  const slStepReached = (level) => partialDone && profitProtectionStepReached(item, level, currentSlPrice);
+  const tpStepReached = (level) => partialDone && profitProtectionStepReached(item, level, currentTpPrice);
   const partialPrice = levels.partial_30?.price ?? item?.partial_take_profit_price;
   const currentAmountForRuntime = nullableNumber(levels.current_amount ?? item?.quantity);
   const runtimeLevel = (level) => profitProtectionLevelWithRuntimePnl(level, item, currentAmountForRuntime, contractSize);
@@ -4707,12 +4719,12 @@ function renderProfitProtectionPositionPanel(item) {
         ${renderProfitProtectionLevel("PnL hi\u1ec7n t\u1ea1i", currentPnlLevel, "current", { extraRows: currentExtraRows })}
         ${renderProfitProtectionLevel("Ch\u1ed1t l\u1eddi 30%", partialLevel, "partial", { achieved: partialDone, extraRows: partialExtraRows, showTrigger: false })}
         ${renderLossGuardLevelActual(lossGuard, levels)}
-        ${renderProfitProtectionLevel("SL2", runtimeLevel(levelByStep(slSteps, 2) || levels.sl2), "step2", { achieved: stepAchieved(1) })}
-        ${renderProfitProtectionLevel("TP2", runtimeLevel(levelByStep(tpSteps, 2) || levels.tp2), "step2", { showTrigger: false, achieved: stepAchieved(1) })}
-        ${renderProfitProtectionLevel("SL3", runtimeLevel(levelByStep(slSteps, 3) || levels.sl3), "step3", { achieved: stepAchieved(2) })}
-        ${renderProfitProtectionLevel("TP3", runtimeLevel(levelByStep(tpSteps, 3)), "step3", { showTrigger: false, achieved: stepAchieved(2) })}
-        ${renderProfitProtectionLevel("SL4", runtimeLevel(levelByStep(slSteps, 4)), "step4", { achieved: stepAchieved(3) })}
-        ${renderProfitProtectionLevel("TP4", runtimeLevel(levelByStep(tpSteps, 4)), "step4", { showTrigger: false, achieved: stepAchieved(3) })}
+        ${(() => { const level = runtimeLevel(levelByStep(slSteps, 2) || levels.sl2); return renderProfitProtectionLevel("SL2", level, "step2", { achieved: slStepReached(level) }); })()}
+        ${(() => { const level = runtimeLevel(levelByStep(tpSteps, 2) || levels.tp2); return renderProfitProtectionLevel("TP2", level, "step2", { showTrigger: false, achieved: tpStepReached(level) }); })()}
+        ${(() => { const level = runtimeLevel(levelByStep(slSteps, 3) || levels.sl3); return renderProfitProtectionLevel("SL3", level, "step3", { achieved: slStepReached(level) }); })()}
+        ${(() => { const level = runtimeLevel(levelByStep(tpSteps, 3)); return renderProfitProtectionLevel("TP3", level, "step3", { showTrigger: false, achieved: tpStepReached(level) }); })()}
+        ${(() => { const level = runtimeLevel(levelByStep(slSteps, 4)); return renderProfitProtectionLevel("SL4", level, "step4", { achieved: slStepReached(level) }); })()}
+        ${(() => { const level = runtimeLevel(levelByStep(tpSteps, 4)); return renderProfitProtectionLevel("TP4", level, "step4", { showTrigger: false, achieved: tpStepReached(level) }); })()}
       </div>
     </article>
   `;

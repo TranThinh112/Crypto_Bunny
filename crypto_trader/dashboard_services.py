@@ -1285,7 +1285,23 @@ def _trade_execution_profit_protection_levels(
                 "source": "partial_close_loss_reclassified",
             }
         )
-    original_tp = row.get("partial_take_profit_original_tp") or current_tp
+    current_step = _safe_float(row.get("profit_extension_step"), float("nan"))
+    extension_fraction_for_base = _safe_float(partial_config.get("tp_extension_fraction"), float("nan"))
+    if extension_fraction_for_base != extension_fraction_for_base:
+        extension_fraction_for_base = partial_fraction
+    original_tp = row.get("partial_take_profit_original_tp")
+    if (
+        original_tp is None
+        and entry is not None
+        and current_tp is not None
+        and current_step == current_step
+        and current_step > 0
+        and extension_fraction_for_base > 0
+    ):
+        multiplier = extension_fraction_for_base * current_step
+        original_tp = (current_tp + multiplier * entry) / (1.0 + multiplier)
+    if original_tp is None:
+        original_tp = current_tp
     extended_tp = row.get("partial_take_profit_extended_tp")
     if partial_price is None and entry is not None and take_profit is not None:
         progress = _safe_float(partial_config.get("trigger_tp_progress"), float("nan"))

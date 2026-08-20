@@ -713,6 +713,43 @@ class SystemChecklistPayloadTests(unittest.TestCase):
         self.assertAlmostEqual(levels["current_sl"]["price"], 0.0286)
         self.assertAlmostEqual(levels["current_tp"]["price"], 0.03319)
 
+    def test_profit_protection_reconstructs_original_tp_from_live_extended_tp(self) -> None:
+        row = {
+            "side": "long",
+            "entry_price": 0.0261549568308788,
+            "initial_stop_loss": 0.0220899136617576,
+            "stop_loss": 0.02847,
+            "take_profit": 0.03435,
+            "partial_take_profit_done": True,
+            "profit_extension_step": 3,
+            "quantity": 1379,
+            "contract_size": 1,
+            "payload_json": json.dumps(
+                {
+                    "position": {
+                        "entryPrice": 0.0261549568308788,
+                        "info": {
+                            "avgPx": "0.0261549568308788",
+                            "closeOrderAlgo": [
+                                {"slTriggerPx": "0.02847", "tpTriggerPx": "0.03435"}
+                            ],
+                        },
+                    }
+                }
+            ),
+        }
+        partial_config = {
+            "trigger_tp_progress": 0.7,
+            "close_fraction": 0.3,
+            "tp_extension_fraction": 0.3,
+            "sl_buffer_r_by_step": [0.1, 0.5, 1.0],
+        }
+
+        levels = _trade_execution_profit_protection_levels(row, partial_config)
+
+        self.assertAlmostEqual(levels["current_take_profit"], 0.03435)
+        self.assertAlmostEqual(levels["tp_steps"][3]["price"], 0.03435)
+
     def test_profit_protection_uses_live_remaining_quantity_after_partial(self) -> None:
         row = {
             "side": "short",
