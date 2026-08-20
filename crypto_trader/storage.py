@@ -169,6 +169,11 @@ def _mongo_error_is_retryable(exc: Exception) -> bool:
     return any(
         token in message
         for token in (
+            "no replica set members match selector",
+            "replicasetnoprimary",
+            "topology_type: replicasetnoprimary",
+            "server_type: rssecondary",
+            "primary()",
             "read operation timed out",
             "timed out",
             "wait queue timeout",

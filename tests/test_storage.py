@@ -33,6 +33,7 @@ from crypto_trader.storage import (
     get_journal_state,
     insert_ai_trade_decision_row,
     insert_trade_execution_row,
+    is_retryable_storage_error,
     prune_ai_trade_decisions,
 )
 
@@ -145,6 +146,15 @@ class StorageTest(TestCase):
 
             with patch("crypto_trader.storage._mongo_collection", return_value=_TimeoutCollection()):
                 self.assertEqual(get_journal_state(config, "lc_internal_pipeline_state"), '{"ok": true}')
+
+    def test_replica_set_no_primary_error_is_retryable(self) -> None:
+        exc = RuntimeError(
+            'No replica set members match selector "Primary()", Timeout: 20.0s, '
+            "Topology Description: <TopologyDescription topology_type: ReplicaSetNoPrimary, "
+            "servers: [<ServerDescription server_type: RSSecondary>]>"
+        )
+
+        self.assertTrue(is_retryable_storage_error(exc))
 
     def _candidate(self) -> TradeCandidate:
         huge_patterns = [{"name": f"pattern-{index}", "raw": "x" * 1000} for index in range(50)]
