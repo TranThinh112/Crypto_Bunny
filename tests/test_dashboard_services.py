@@ -679,6 +679,40 @@ class SystemChecklistPayloadTests(unittest.TestCase):
         self.assertEqual(levels["tp_steps"][0]["price"], 1.28)
         self.assertEqual(levels["current_tp"]["price"], 1.28)
 
+    def test_profit_protection_exposes_live_entry_separately_from_initial_entry(self) -> None:
+        row = {
+            "side": "long",
+            "entry_price": 0.0261549568308788,
+            "initial_entry_price": 0.02698,
+            "initial_stop_loss": 0.02374,
+            "stop_loss": 0.0286,
+            "take_profit": 0.03319,
+            "quantity": 1379,
+            "contract_size": 1,
+            "payload_json": json.dumps(
+                {
+                    "position": {
+                        "entryPrice": 0.0261549568308788,
+                        "info": {
+                            "avgPx": "0.0261549568308788",
+                            "closeOrderAlgo": [
+                                {"slTriggerPx": "0.0286", "tpTriggerPx": "0.03319"}
+                            ],
+                        },
+                    }
+                }
+            ),
+        }
+
+        levels = _trade_execution_profit_protection_levels(row)
+
+        self.assertAlmostEqual(levels["live_entry_price"], 0.0261549568308788)
+        self.assertAlmostEqual(levels["initial_entry_price"], 0.02698)
+        self.assertAlmostEqual(levels["current_stop_loss"], 0.0286)
+        self.assertAlmostEqual(levels["current_take_profit"], 0.03319)
+        self.assertAlmostEqual(levels["current_sl"]["price"], 0.0286)
+        self.assertAlmostEqual(levels["current_tp"]["price"], 0.03319)
+
     def test_profit_protection_uses_live_remaining_quantity_after_partial(self) -> None:
         row = {
             "side": "short",

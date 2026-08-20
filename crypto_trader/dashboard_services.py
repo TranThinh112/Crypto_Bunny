@@ -1365,6 +1365,10 @@ def _trade_execution_profit_protection_levels(
         planned_partial_price = _trade_execution_trigger_price(side, entry, take_profit, progress)
     displayed_partial_price = partial_price if partial_is_profitable else planned_partial_price
     return {
+        "live_entry_price": entry,
+        "initial_entry_price": _trade_execution_price(row, "initial_entry_price"),
+        "current_stop_loss": current_sl,
+        "current_take_profit": current_tp,
         "quantity": qty,
         "contract_size": _trade_execution_contract_size(row),
         "current_amount": current_amount,
@@ -1502,6 +1506,7 @@ def _trade_execution_summary(config: dict[str, Any]) -> dict[str, Any]:
                 "created_at": row.get("created_at"),
                 "updated_at": row.get("updated_at"),
                 "entry_price": row.get("entry_price"),
+                "live_entry_price": _trade_execution_live_entry_price(row_with_events),
                 "initial_entry_price": row.get("initial_entry_price"),
                 "initial_stop_loss": row.get("initial_stop_loss"),
                 "stop_loss": _trade_execution_effective_stop_loss(row_with_events),

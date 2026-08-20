@@ -611,12 +611,16 @@ function tradeItemWithLiveOkxPosition(item) {
     ...item,
     quantity: contracts ?? item?.quantity,
     entry_price: entryPrice ?? item?.entry_price,
+    live_entry_price: entryPrice ?? item?.live_entry_price ?? item?.entry_price,
     mark_price: markPrice ?? item?.mark_price,
     pnl: unrealizedPnl ?? item?.pnl,
     stop_loss: stopLoss ?? item?.stop_loss,
     take_profit: takeProfit ?? item?.take_profit,
     profit_protection_levels: {
       ...levels,
+      live_entry_price: entryPrice ?? levels.live_entry_price ?? item?.live_entry_price ?? item?.entry_price,
+      current_stop_loss: stopLoss ?? levels.current_stop_loss ?? item?.stop_loss,
+      current_take_profit: takeProfit ?? levels.current_take_profit ?? item?.take_profit,
       quantity: contracts ?? levels.quantity,
       current_amount: contracts ?? levels.current_amount,
       current_sl: {
@@ -629,6 +633,10 @@ function tradeItemWithLiveOkxPosition(item) {
       },
     },
   };
+}
+
+function tradeExecutionLiveEntry(item) {
+  return item?.live_entry_price ?? item?.entry_price ?? item?.initial_entry_price;
 }
 
 function positionAsCandidate(position, fallback = null) {
@@ -4387,7 +4395,7 @@ function renderTradeExecutionPositionCard(item) {
   const symbol = item.symbol || "-";
   const side = String(item.side || "-").toUpperCase();
   const badge = tradeExecutionPartialBadge(item);
-  const entry = item?.initial_entry_price ?? item?.entry_price;
+  const entry = tradeExecutionLiveEntry(item);
   return `
     <article class="trade-execution-position">
       <header>
@@ -4450,15 +4458,18 @@ function tradeExecutionCloseBadges(item) {
 
 function tradeExecutionChartRowsForItem(item) {
   const progress = Math.max(0, Math.min(100, Number(item?.tp_progress_pct) || 0));
+  const levels = item?.profit_protection_levels && typeof item.profit_protection_levels === "object"
+    ? item.profit_protection_levels
+    : {};
   return {
     progressRows: [
       { label: item?.symbol || "Vi the", shortLabel: "TP", value: progress, unit: "%", color: item?.partial_take_profit_done ? MODULE_CHART_COLORS[2] : MODULE_CHART_COLORS[0] },
       { label: "Moc partial", shortLabel: "70%", value: 70, unit: "%", color: MODULE_CHART_COLORS[4] },
     ],
     targetRows: [
-      { label: "Entry", shortLabel: "Entry", value: item?.initial_entry_price ?? item?.entry_price, unit: "gia", color: MODULE_CHART_COLORS[0] },
-      { label: "SL", shortLabel: "SL", value: item?.stop_loss, unit: "gia", color: MODULE_CHART_COLORS[3] },
-      { label: "TP", shortLabel: "TP", value: item?.take_profit, unit: "gia", color: MODULE_CHART_COLORS[2] },
+      { label: "Entry live", shortLabel: "Entry", value: tradeExecutionLiveEntry(item), unit: "gia", color: MODULE_CHART_COLORS[0] },
+      { label: "SL live", shortLabel: "SL", value: levels.current_stop_loss ?? item?.stop_loss, unit: "gia", color: MODULE_CHART_COLORS[3] },
+      { label: "TP live", shortLabel: "TP", value: levels.current_take_profit ?? item?.take_profit, unit: "gia", color: MODULE_CHART_COLORS[2] },
       { label: "Mark", shortLabel: "Mark", value: item?.current_price ?? item?.mark_price, unit: "gia", color: MODULE_CHART_COLORS[1] },
     ],
   };
@@ -4521,7 +4532,7 @@ function profitProtectionLevelWithRuntimePnl(level, item, amount, contractSize) 
   if (!level || typeof level !== "object") return level;
   const runtimePnl = calculateRuntimePositionPnl(
     item?.side,
-    item?.entry_price ?? item?.initial_entry_price,
+    tradeExecutionLiveEntry(item),
     level.price,
     amount,
     contractSize
@@ -4635,12 +4646,18 @@ function renderProfitProtectionPositionPanel(item) {
   const contractSize = nullableNumber(levels.contract_size ?? item?.contract_size) ?? 1;
   const rawCurrentSlLevel = levels.current_sl || levelByStep(slSteps, 1);
   const rawCurrentTpLevel = levels.current_tp || levelByStep(tpSteps, 1);
-  const currentSlPrice = rawCurrentSlLevel?.price ?? item?.stop_loss;
+  const liveEntry = tradeExecutionLiveEntry(item);
+  const initialEntry = nullableNumber(item?.initial_entry_price);
+  const showInitialEntry = nullableNumber(liveEntry) !== null
+    && initialEntry !== null
+    && Math.abs(Number(liveEntry) - Number(initialEntry)) > 1e-12;
+  const currentSlPrice = levels.current_stop_loss ?? rawCurrentSlLevel?.price ?? item?.stop_loss;
+  const currentTpPrice = levels.current_take_profit ?? rawCurrentTpLevel?.price ?? item?.take_profit;
   const partialPrice = levels.partial_30?.price ?? item?.partial_take_profit_price;
   const currentAmountForRuntime = nullableNumber(levels.current_amount ?? item?.quantity);
   const runtimeLevel = (level) => profitProtectionLevelWithRuntimePnl(level, item, currentAmountForRuntime, contractSize);
-  const currentSlLevel = runtimeLevel(rawCurrentSlLevel);
-  const currentTpLevel = runtimeLevel(rawCurrentTpLevel);
+  const currentSlLevel = runtimeLevel({ ...(rawCurrentSlLevel || {}), price: currentSlPrice });
+  const currentTpLevel = runtimeLevel({ ...(rawCurrentTpLevel || {}), price: currentTpPrice });
   const initialExtraRows = profitProtectionExtraRows([
     { label: "Khối lượng ban đầu", value: formatPositionQuantityUsdt(levels.current_sl?.initial_amount ?? item?.initial_quantity, currentSlPrice, contractSize) },
   ]);
@@ -4679,13 +4696,14 @@ function renderProfitProtectionPositionPanel(item) {
         <div>
           <span>${escapeHtml(String(item?.side || "-").toUpperCase())}</span>
           <strong>${escapeHtml(item?.symbol || "-")}</strong>
-          <small>Entry: ${escapeHtml(formatMarketRegimeNumber(item?.initial_entry_price ?? item?.entry_price))}</small>
+          <small>Entry live: ${escapeHtml(formatMarketRegimeNumber(liveEntry))}</small>
+          ${showInitialEntry ? `<small>Entry ban đầu: ${escapeHtml(formatMarketRegimeNumber(initialEntry))}</small>` : ""}
         </div>
         <span class="market-regime-badge ${badge.tone}">${escapeHtml(badge.label)}</span>
       </header>
       <div class="profit-protection-level-grid">
-        ${renderProfitProtectionLevel("SL1 ban đầu", currentSlLevel, "base", { extraRows: initialExtraRows, showInitialAmount: false })}
-        ${renderProfitProtectionLevel("TP1 ban đầu", currentTpLevel, "base")}
+        ${renderProfitProtectionLevel("SL live", currentSlLevel, "base", { extraRows: initialExtraRows, showInitialAmount: false })}
+        ${renderProfitProtectionLevel("TP live", currentTpLevel, "base")}
         ${renderProfitProtectionLevel("PnL hi\u1ec7n t\u1ea1i", currentPnlLevel, "current", { extraRows: currentExtraRows })}
         ${renderProfitProtectionLevel("Ch\u1ed1t l\u1eddi 30%", partialLevel, "partial", { achieved: partialDone, extraRows: partialExtraRows, showTrigger: false })}
         ${renderLossGuardLevelActual(lossGuard, levels)}
@@ -5038,15 +5056,18 @@ function bindTradeExecutionClosedPagination() {
 
 function tradeExecutionChartRowsForItem(item) {
   const progress = Math.max(0, Math.min(100, Number(item?.tp_progress_pct) || 0));
+  const levels = item?.profit_protection_levels && typeof item.profit_protection_levels === "object"
+    ? item.profit_protection_levels
+    : {};
   return {
     progressRows: [
       { label: item?.symbol || "Vị thế", shortLabel: "TP", value: progress, unit: "%", color: item?.partial_take_profit_done ? MODULE_CHART_COLORS[2] : MODULE_CHART_COLORS[0] },
       { label: "Mốc partial", shortLabel: "70%", value: 70, unit: "%", color: MODULE_CHART_COLORS[4] },
     ],
     targetRows: [
-      { label: "Entry", shortLabel: "Entry", value: item?.initial_entry_price ?? item?.entry_price, unit: "giá", color: MODULE_CHART_COLORS[0] },
-      { label: "SL", shortLabel: "SL", value: item?.stop_loss, unit: "giá", color: MODULE_CHART_COLORS[3] },
-      { label: "TP", shortLabel: "TP", value: item?.take_profit, unit: "giá", color: MODULE_CHART_COLORS[2] },
+      { label: "Entry live", shortLabel: "Entry", value: tradeExecutionLiveEntry(item), unit: "giá", color: MODULE_CHART_COLORS[0] },
+      { label: "SL live", shortLabel: "SL", value: levels.current_stop_loss ?? item?.stop_loss, unit: "giá", color: MODULE_CHART_COLORS[3] },
+      { label: "TP live", shortLabel: "TP", value: levels.current_take_profit ?? item?.take_profit, unit: "giá", color: MODULE_CHART_COLORS[2] },
       { label: "Mark", shortLabel: "Mark", value: item?.current_price ?? item?.mark_price, unit: "giá", color: MODULE_CHART_COLORS[1] },
     ],
   };
