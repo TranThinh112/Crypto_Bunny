@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import uuid
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -70,6 +71,48 @@ MINI_SYSTEM_NOTIFICATION_HISTORY_KEY = "mini_system_notification_history_v1"
 MINI_SETUP_STATE_PREFIX = "mini_setup:"
 MINI_PROCESSING_LEASE_KEY = "mini_processing_lease_v1"
 
+
+def _candidate_evaluation_timeout_seconds(config: dict[str, Any]) -> float:
+    runtime = config.get("runtime", {}) if isinstance(config.get("runtime"), dict) else {}
+    raw = runtime.get("candidate_evaluation_timeout_seconds", 20)
+    try:
+        return max(3.0, min(60.0, float(raw or 20)))
+    except (TypeError, ValueError):
+        return 20.0
+
+def _evaluate_candidate_with_timeout(
+    config: dict[str, Any],
+    candidate: TradeCandidate,
+    *,
+    active_summary: tuple[int | None, set[str], list[str]] | None = None,
+    enforce_active_limit: bool = True,
+    check_active_trades: bool = True,
+    check_order_limits: bool = True,
+    extra_active_symbols: set[str] | None = None,
+    timeout_seconds: float | None = None,
+) -> RiskCheck:
+    timeout = timeout_seconds or _candidate_evaluation_timeout_seconds(config)
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="candidate-risk-eval")
+    future = executor.submit(
+        evaluate_candidate,
+        config,
+        candidate,
+        active_summary=active_summary,
+        enforce_active_limit=enforce_active_limit,
+        check_active_trades=check_active_trades,
+        check_order_limits=check_order_limits,
+        extra_active_symbols=extra_active_symbols,
+    )
+    try:
+        return future.result(timeout=timeout)
+    except FutureTimeoutError:
+        return RiskCheck(
+            False,
+            [f"Candidate evaluation timed out after {timeout:.0f}s for {candidate.symbol}"],
+            [],
+        )
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 def _report_progress(
     progress_callback: Callable[[str, dict[str, Any] | None], None] | None,
@@ -1240,7 +1283,7 @@ def _create_pending_from_internal_scan(
                 )
                 continue
             pending_risk_config = _mini_pending_risk_config(config)
-            check = evaluate_candidate(
+            check = _evaluate_candidate_with_timeout(
                 pending_risk_config,
                 candidate,
                 enforce_active_limit=False,
@@ -1987,7 +2030,7 @@ def run_once(
     else:
         _report_progress(progress_callback, "evaluate_candidates")
         for candidate in candidates:
-            current_check = evaluate_candidate(
+            current_check = _evaluate_candidate_with_timeout(
                 config,
                 candidate,
                 active_summary=active_summary,
@@ -2108,7 +2151,7 @@ def run_once(
                 label="Pending order memory",
                 warnings=storage_warnings,
             )
-            pre_entry_check = evaluate_candidate(
+            pre_entry_check = _evaluate_candidate_with_timeout(
                 config,
                 selected,
                 active_summary=active_trades_summary(config),
@@ -2142,7 +2185,7 @@ def run_once(
                         label="Pending order memory",
                         warnings=storage_warnings,
                     )
-                    final_validator = evaluate_candidate(
+                    final_validator = _evaluate_candidate_with_timeout(
                         config,
                         selected,
                         active_summary=active_trades_summary(config),
@@ -2208,7 +2251,7 @@ def run_once(
         and active_count >= max_active
     ):
         for candidate in candidates:
-            current_check = evaluate_candidate(
+            current_check = _evaluate_candidate_with_timeout(
                 config,
                 candidate,
                 active_summary=active_summary,
