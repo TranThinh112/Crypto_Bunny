@@ -186,6 +186,9 @@ def _adaptive_ai_ready_gate(
     entry_ai_threshold = _float(internal.get("trend_scan_entry_ai_threshold"), 65.0)
     strong_htf_threshold = _float(internal.get("trend_scan_adaptive_ai_strong_htf_threshold"), 75.0)
     strong_entry_threshold = _float(internal.get("trend_scan_adaptive_ai_entry_threshold"), 58.0)
+    fast_entry_enabled = bool(internal.get("trend_scan_fast_entry_enabled", True))
+    fast_htf_threshold = _float(internal.get("trend_scan_fast_entry_htf_threshold"), 68.0)
+    fast_entry_threshold = _float(internal.get("trend_scan_fast_entry_score_threshold"), 52.0)
     enabled = bool(internal.get("trend_scan_adaptive_ai_ready_enabled", True))
     aligned = watch and htf_side in {"long", "short"} and entry_side == htf_side
     entry_ready = aligned and entry_score >= entry_setup_threshold
@@ -212,6 +215,14 @@ def _adaptive_ai_ready_gate(
             "ai_gate_mode": "adaptive_strong_trend",
             "ai_gate_reason": "strong_htf_trend_allows_mini_review_below_standard_entry_threshold",
             "effective_entry_ai_threshold": strong_entry_threshold,
+        }
+    if fast_entry_enabled and htf_score >= fast_htf_threshold and entry_score >= fast_entry_threshold:
+        return {
+            "entry_ready": True,
+            "ai_ready": True,
+            "ai_gate_mode": "fast_entry",
+            "ai_gate_reason": "fast_entry_lane_for_aligned_near_ready_setup",
+            "effective_entry_ai_threshold": fast_entry_threshold,
         }
     return {
         "entry_ready": True,
@@ -286,6 +297,9 @@ def _trend_watch_decision(config: dict[str, Any], *, htf: dict[str, Any], entry:
             "adaptive_ai_ready_enabled": bool(internal.get("trend_scan_adaptive_ai_ready_enabled", True)),
             "adaptive_ai_strong_htf": _float(internal.get("trend_scan_adaptive_ai_strong_htf_threshold"), 75.0),
             "adaptive_ai_entry": _float(internal.get("trend_scan_adaptive_ai_entry_threshold"), 58.0),
+            "fast_entry_enabled": bool(internal.get("trend_scan_fast_entry_enabled", True)),
+            "fast_entry_htf": _float(internal.get("trend_scan_fast_entry_htf_threshold"), 68.0),
+            "fast_entry_score": _float(internal.get("trend_scan_fast_entry_score_threshold"), 52.0),
             "countertrend_entry": countertrend_entry_threshold,
         },
         "ai_gate_mode": ai_gate["ai_gate_mode"],

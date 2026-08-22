@@ -2440,6 +2440,7 @@ def system_modules_payload(
                 _module_row("dca_review_count", (active_position.get("action_counts") or {}).get("DCA_REVIEW", 0), "Số vị thế đang được xem xét DCA.", attention=bool((active_position.get("action_counts") or {}).get("DCA_REVIEW"))),
                 _module_row("scale_in_review_count", (active_position.get("action_counts") or {}).get("SCALE_IN_REVIEW", 0), "Số vị thế đang được xem xét thêm khối lượng.", attention=bool((active_position.get("action_counts") or {}).get("SCALE_IN_REVIEW"))),
                 _module_row("good_exit_review_count", (active_position.get("action_counts") or {}).get("GOOD_EXIT_REVIEW", 0), "Số vị thế đang được xem xét chốt lời ngắn.", attention=bool((active_position.get("action_counts") or {}).get("GOOD_EXIT_REVIEW"))),
+                _module_row("profit_reversal_guard_count", (active_position.get("action_counts") or {}).get("PROFIT_REVERSAL_GUARD", 0), "Số vị thế lãi quay đầu nhanh đang được chốt bảo vệ.", attention=bool((active_position.get("action_counts") or {}).get("PROFIT_REVERSAL_GUARD"))),
                 _module_row("protect_profit_count", (active_position.get("action_counts") or {}).get("PROTECT_PROFIT", 0), "Số vị thế cần ưu tiên bảo vệ lợi nhuận.", attention=bool((active_position.get("action_counts") or {}).get("PROTECT_PROFIT"))),
                 _module_row("notified", active_position.get("notified"), "Số thông báo Telegram đã gửi trong lần review này."),
                 _module_row("updated_at", active_position.get("created_at"), "Thời điểm review mới nhất."),

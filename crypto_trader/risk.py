@@ -50,6 +50,45 @@ def _health_warning_present(candidate: TradeCandidate) -> bool:
     return any("Bunny Health Monitor dang o trang thai warning" in str(item) for item in candidate.warnings)
 
 
+def _candidate_news_score(candidate: TradeCandidate) -> float:
+    try:
+        return float(candidate.news_score or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+def _coerce_candidate_quality(config: dict[str, Any], candidate: TradeCandidate) -> None:
+    settings = _risk_settings(config)
+    fallback = settings.get("confidence_fallback", {})
+    if not isinstance(fallback, dict) or not fallback.get("enabled", True):
+        return
+    if float(candidate.confidence or 0.0) > 0:
+        return
+    values: list[float] = []
+    for value in (
+        candidate.win_probability_pct,
+        candidate.rule_score,
+        getattr(candidate, "score", None),
+        (candidate.decision_metadata or {}).get("entry_quality"),
+        (candidate.decision_metadata or {}).get("setup_score"),
+    ):
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            values.append(parsed)
+    if not values:
+        return
+    floor = float(fallback.get("floor", 55.0) or 55.0)
+    ceiling = float(fallback.get("ceiling", 82.0) or 82.0)
+    candidate.confidence = round(max(floor, min(max(values), ceiling)), 2)
+    candidate.decision_metadata["confidence_fallback"] = {
+        "applied": True,
+        "source_values": [round(item, 2) for item in values[:5]],
+        "confidence": candidate.confidence,
+    }
+
+
 def _effective_min_win_probability(
     config: dict[str, Any],
     candidate: TradeCandidate,
@@ -110,27 +149,31 @@ def _apply_probation_entry_if_allowed(
     min_rr = float(probation.get("min_risk_reward", 2.0) or 2.0)
     if candidate.win_probability_pct < min_win or candidate.confidence < min_conf or candidate.risk_reward < min_rr:
         return False
-    win_reasons = [
-        reason for reason in reasons
-        if reason.startswith("Win probability ") and ("minimum" in reason or " < " in reason)
-    ]
-    if len(win_reasons) != len(reasons):
+    allowed_prefixes = (
+        "Win probability ",
+        "Confidence ",
+        "Order size is not positive",
+    )
+    if any(not str(reason).startswith(allowed_prefixes) for reason in reasons):
         return False
     max_margin = float(probation.get("margin_usdt", 1.0) or 1.0)
     leverage = float(config.get("exchange", {}).get("leverage", 1) or 1)
     max_order_usdt = max_margin * max(leverage, 1.0)
-    if candidate.order_usdt > max_order_usdt:
-        scale = max_order_usdt / max(candidate.order_usdt, 1e-12)
+    current_order = float(candidate.order_usdt or 0.0)
+    scale = 1.0
+    if current_order <= 0 or current_order > max_order_usdt:
+        scale = max_order_usdt / max(current_order, max_order_usdt, 1e-12)
         candidate.order_usdt = max_order_usdt
-        if candidate.quantity is not None:
+        if candidate.quantity is not None and current_order > 0:
             candidate.quantity = candidate.quantity * scale
         candidate.margin_usdt = max_margin
-        candidate.decision_metadata["probation_entry_sizing"] = {
-            "enabled": True,
-            "margin_usdt": max_margin,
-            "order_usdt": max_order_usdt,
-            "scale": scale,
-        }
+    candidate.decision_metadata["probation_entry_sizing"] = {
+        "enabled": True,
+        "margin_usdt": max_margin,
+        "order_usdt": max_order_usdt,
+        "scale": scale,
+        "reason": "small_size_probation_entry",
+    }
     candidate.decision_metadata["probation_entry"] = {
         "enabled": True,
         "reason": "win_probability_below_normal_but_probation_quality_passed",
@@ -207,6 +250,7 @@ def evaluate_candidate(
     if candidate is None:
         return RiskCheck(False, ["No candidate was produced"])
 
+    _coerce_candidate_quality(config, candidate)
     risk_config = config["risk"]
     strategy_config = config["strategy"]
     execution_config = config["execution"]
@@ -276,10 +320,11 @@ def evaluate_candidate(
         reasons.append(f"Stop distance {stop_distance_pct:.2f}% exceeds maximum {max_stop:.2f}%")
 
     conflict_threshold = float(risk_config.get("news_conflict_threshold", 2.0))
-    if candidate.side == "long" and candidate.news_score <= -conflict_threshold:
-        warnings.append(f"News sentiment conflicts with LONG setup ({candidate.news_score:+.2f})")
-    if candidate.side == "short" and candidate.news_score >= conflict_threshold:
-        warnings.append(f"News sentiment conflicts with SHORT setup ({candidate.news_score:+.2f})")
+    news_score = _candidate_news_score(candidate)
+    if candidate.side == "long" and news_score <= -conflict_threshold:
+        warnings.append(f"News sentiment conflicts with LONG setup ({news_score:+.2f})")
+    if candidate.side == "short" and news_score >= conflict_threshold:
+        warnings.append(f"News sentiment conflicts with SHORT setup ({news_score:+.2f})")
 
     mode = config.get("mode", "dry_run")
     if mode == "live":

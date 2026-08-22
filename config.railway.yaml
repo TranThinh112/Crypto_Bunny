@@ -109,8 +109,8 @@ trading_risk:
   soft_recovery_min_gpt_confidence: 87
   soft_recovery_min_win_probability_pct: 75
   soft_recovery_min_risk_reward: 2.2
-  normal_min_gpt_confidence: 82
-  normal_min_win_probability_pct: 72
+  normal_min_gpt_confidence: 78
+  normal_min_win_probability_pct: 68
   normal_min_risk_reward: 2.0
   rr_hard_block_enabled: false
   rr_absolute_hard_block_enabled: false
@@ -130,9 +130,13 @@ trading_risk:
   probation_entry:
     enabled: true
     min_win_probability_pct: 66
-    min_confidence: 90
-    min_risk_reward: 2.0
+    min_confidence: 78
+    min_risk_reward: 1.5
     margin_usdt: 1.0
+  confidence_fallback:
+    enabled: true
+    floor: 55
+    ceiling: 82
   data_quality:
     exclude_insufficient_history_symbols: true
     exclude_rate_limited_symbols: false
@@ -191,7 +195,7 @@ ai:
     market_scan_source_symbols: 50
     market_scan_max_symbols: 3
     market_scan_min_approved_symbols: 1
-    market_scan_min_win_probability_pct: 80
+    market_scan_min_win_probability_pct: 70
     # gọi AI
     market_scan_use_ai: true 
     market_scan_use_shortlist: true
@@ -227,8 +231,12 @@ ai:
     trend_scan_htf_watch_threshold: 60.0
     trend_scan_htf_immediate_threshold: 75.0
     trend_scan_htf_required_confirmations: 2
-    trend_scan_entry_setup_threshold: 55.0
-    trend_scan_entry_ai_threshold: 65.0
+    trend_scan_entry_setup_threshold: 50.0
+    trend_scan_entry_ai_threshold: 60.0
+    trend_scan_fast_entry_enabled: true
+    trend_scan_fast_entry_htf_threshold: 68.0
+    trend_scan_fast_entry_score_threshold: 52.0
+    trend_scan_fast_entry_volume_ratio: 1.2
     trend_scan_adaptive_ai_ready_enabled: true
     trend_scan_adaptive_ai_strong_htf_threshold: 75.0
     trend_scan_adaptive_ai_entry_threshold: 58.0
@@ -242,7 +250,7 @@ ai:
     post_move_watch_entry_max_score: 35.0
     post_move_watch_default_ttl_minutes: 60
     post_move_watch_max_ttl_minutes: 120
-    post_move_watch_retest_entry_score: 45.0
+    post_move_watch_retest_entry_score: 42.0
     trend_watchlist_ttl_minutes: 120
     trend_watchlist_min_keep_score: 50.0
     trend_watchlist_ai_review_extend_minutes: 30
@@ -359,8 +367,8 @@ market_pattern_engine:
 strategy:
   timeframe: 1m
   ohlcv_limit: 180
-  min_confidence: 75
-  min_win_probability_pct: 72
+  min_confidence: 72
+  min_win_probability_pct: 68
   min_risk_reward: 2.0
   target:
     mode: risk_reward

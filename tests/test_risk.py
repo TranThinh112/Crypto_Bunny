@@ -91,6 +91,7 @@ class RiskTest(TestCase):
     def test_blocks_candidate_below_min_win_probability(self) -> None:
         config = self._config()
         config["strategy"]["min_win_probability_pct"] = 80
+        config["trading_risk"]["probation_entry"]["enabled"] = False
         candidate = _candidate()
         candidate.win_probability_pct = 76.5
 
@@ -157,6 +158,50 @@ class RiskTest(TestCase):
         self.assertTrue(check.passed)
         self.assertEqual(check.reasons, [])
         self.assertIn("News sentiment conflicts with LONG setup (-3.00)", check.warnings)
+
+    def test_missing_news_score_is_treated_as_neutral(self) -> None:
+        config = self._config()
+        candidate = _candidate(side="long")
+        candidate.news_score = None  # type: ignore[assignment]
+
+        check = evaluate_candidate(config, candidate, active_summary=(0, set(), []))
+
+        self.assertTrue(check.passed)
+        self.assertEqual(check.reasons, [])
+        self.assertNotIn("News sentiment conflicts", " | ".join(check.warnings))
+
+    def test_confidence_fallback_uses_available_quality_scores(self) -> None:
+        config = self._config()
+        candidate = _candidate()
+        candidate.confidence = 0.0
+        candidate.win_probability_pct = 71.0
+        candidate.rule_score = 79.0
+
+        check = evaluate_candidate(config, candidate, active_summary=(0, set(), []))
+
+        self.assertTrue(check.passed)
+        self.assertEqual(candidate.confidence, 79.0)
+        self.assertTrue(candidate.decision_metadata["confidence_fallback"]["applied"])
+
+    def test_probation_entry_allows_small_size_for_near_quality_setup(self) -> None:
+        config = self._config()
+        config["strategy"]["min_confidence"] = 82
+        config["strategy"]["min_win_probability_pct"] = 72
+        config["trading_risk"]["probation_entry"]["enabled"] = True
+        config["trading_risk"]["probation_entry"]["min_confidence"] = 78
+        config["trading_risk"]["probation_entry"]["min_risk_reward"] = 1.5
+        config["exchange"]["leverage"] = 25
+        candidate = _candidate()
+        candidate.confidence = 79.0
+        candidate.win_probability_pct = 67.0
+        candidate.order_usdt = 0.0
+
+        check = evaluate_candidate(config, candidate, active_summary=(0, set(), []))
+
+        self.assertTrue(check.passed)
+        self.assertEqual(candidate.order_usdt, 25.0)
+        self.assertEqual(candidate.margin_usdt, 1.0)
+        self.assertTrue(candidate.decision_metadata["probation_entry"]["enabled"])
 
     def test_trading_system_prefers_risk_max_active_when_trading_risk_not_overridden(self) -> None:
         state = get_trading_system_state(self._config())

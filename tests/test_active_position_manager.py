@@ -156,6 +156,163 @@ class ActivePositionManagerTest(TestCase):
         self.assertAlmostEqual(row["bad_cut_trigger_r"], -0.9)
         self.assertAlmostEqual(row["bad_cut_price"], 0.1346)
 
+    def test_after_partial_profit_tracks_unless_reversal_is_severe(self) -> None:
+        config = self._config()
+        config["active_position_manager"]["execute_good_exit"] = True
+        exchange = ActivePositionFakeExchange()
+        row = {
+            "id": 77,
+            "created_at": "2026-08-21T12:18:40+00:00",
+            "updated_at": "2026-08-21T16:22:45+00:00",
+            "symbol": "LAB/USDT:USDT",
+            "side": "LONG",
+            "status": "OPEN",
+            "entry_price": 0.08175,
+            "initial_entry_price": 0.08175,
+            "initial_stop_loss": 0.07124,
+            "stop_loss": 0.08393,
+            "take_profit": 0.09576,
+            "quantity": 55.7,
+            "partial_take_profit_done": True,
+            "snapshot_json": json.dumps(
+                {
+                    "position": {
+                        "symbol": "LAB/USDT:USDT",
+                        "side": "long",
+                        "contracts": 55.7,
+                        "contractSize": 10.0,
+                        "info": {
+                            "posSide": "long",
+                            "mgnMode": "cross",
+                            "avgPx": "0.08175",
+                            "markPx": "0.09207",
+                            "pos": "55.7",
+                        },
+                    }
+                }
+            ),
+        }
+
+        with patch("crypto_trader.active_position_manager.create_exchange", return_value=exchange):
+            result = evaluate_open_positions(config, rows=[row], notify=False)
+
+        item = result["items"][0]
+        self.assertEqual(item["action"], "HOLD_AFTER_PARTIAL")
+        self.assertFalse(item["execution"]["submitted"])
+        self.assertEqual(exchange.orders, [])
+
+    def test_after_partial_profit_good_exit_requires_severe_reversal(self) -> None:
+        config = self._config()
+        config["active_position_manager"]["execute_good_exit"] = True
+        exchange = ActivePositionFakeExchange()
+        row = {
+            "id": 78,
+            "created_at": "2026-08-21T12:18:40+00:00",
+            "updated_at": "2026-08-21T16:22:45+00:00",
+            "symbol": "LAB/USDT:USDT",
+            "side": "LONG",
+            "status": "OPEN",
+            "entry_price": 0.08175,
+            "initial_entry_price": 0.08175,
+            "initial_stop_loss": 0.07124,
+            "stop_loss": 0.08393,
+            "take_profit": 0.09576,
+            "quantity": 55.7,
+            "partial_take_profit_done": True,
+            "snapshot_json": json.dumps(
+                {
+                    "position": {
+                        "symbol": "LAB/USDT:USDT",
+                        "side": "long",
+                        "contracts": 55.7,
+                        "contractSize": 10.0,
+                        "info": {
+                            "posSide": "long",
+                            "mgnMode": "cross",
+                            "avgPx": "0.08175",
+                            "markPx": "0.0805",
+                            "pos": "55.7",
+                        },
+                    }
+                }
+            ),
+        }
+
+        with patch("crypto_trader.active_position_manager.create_exchange", return_value=exchange):
+            result = evaluate_open_positions(config, rows=[row], notify=False)
+
+        item = result["items"][0]
+        self.assertEqual(item["action"], "GOOD_EXIT_REVIEW")
+        self.assertTrue(item["execution"]["submitted"])
+        self.assertEqual(exchange.orders[0]["side"], "sell")
+
+    def test_profit_reversal_guard_closes_fraction_after_peak_drop(self) -> None:
+        config = self._config()
+        config["active_position_manager"].update(
+            {
+                "profit_reversal_guard_enabled": True,
+                "execute_profit_reversal_guard": True,
+                "profit_reversal_arm_r": 0.5,
+                "profit_reversal_arm_tp_progress_pct": 35.0,
+                "profit_reversal_drop_r": 0.35,
+                "profit_reversal_drop_progress_pct": 25.0,
+                "profit_reversal_close_fraction": 0.3,
+            }
+        )
+        exchange = ActivePositionFakeExchange()
+        row = {
+            "id": 80,
+            "created_at": "2026-08-22T04:29:58+00:00",
+            "updated_at": "2026-08-22T05:10:01+00:00",
+            "symbol": "BICO/USDT:USDT",
+            "side": "LONG",
+            "status": "OPEN",
+            "entry_price": 0.02047,
+            "initial_entry_price": 0.02047,
+            "initial_stop_loss": 0.0198559,
+            "stop_loss": 0.01855,
+            "take_profit": 0.02277,
+            "quantity": 1252.0,
+            "trade_event_history_json": json.dumps(
+                [
+                    {
+                        "type": "active_position_review",
+                        "created_at": "2026-08-22T05:03:03+00:00",
+                        "action": "SCALE_IN_REVIEW",
+                        "r_multiple": 1.56,
+                        "tp_progress_pct": 89.72,
+                    }
+                ]
+            ),
+            "snapshot_json": json.dumps(
+                {
+                    "position": {
+                        "symbol": "BICO/USDT:USDT",
+                        "side": "long",
+                        "contracts": 1252.0,
+                        "contractSize": 1.0,
+                        "info": {
+                            "posSide": "long",
+                            "mgnMode": "cross",
+                            "avgPx": "0.02047",
+                            "markPx": "0.02116",
+                            "pos": "1252",
+                        },
+                    }
+                }
+            ),
+        }
+
+        with patch("crypto_trader.active_position_manager.create_exchange", return_value=exchange):
+            result = evaluate_open_positions(config, rows=[row], notify=False)
+
+        item = result["items"][0]
+        self.assertEqual(item["action"], "PROFIT_REVERSAL_GUARD")
+        self.assertAlmostEqual(item["amount"], 375.6)
+        self.assertTrue(item["execution"]["submitted"])
+        self.assertEqual(exchange.orders[0]["side"], "sell")
+        self.assertEqual(exchange.orders[0]["amount"], "375.6")
+
     def test_protected_current_position_does_not_execute_close(self) -> None:
         config = self._config()
         config["active_position_manager"]["execute_remainder_cut"] = True

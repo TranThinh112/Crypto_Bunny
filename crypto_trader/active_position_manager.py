@@ -45,10 +45,11 @@ def _settings(config: dict[str, Any]) -> dict[str, Any]:
         "bad_cut_once_per_position": bool(raw.get("bad_cut_once_per_position", True)),
         "bad_cut_reset_on_scale_in": bool(raw.get("bad_cut_reset_on_scale_in", True)),
         "execute_good_exit": bool(raw.get("execute_good_exit", False)),
+        "execute_profit_reversal_guard": bool(raw.get("execute_profit_reversal_guard", raw.get("execute_good_exit", False))),
         "execute_remainder_cut": bool(raw.get("execute_remainder_cut", False)),
         "execute_dca": bool(raw.get("execute_dca", False)),
         "execute_scale_in": bool(raw.get("execute_scale_in", False)),
-        "review_interval_seconds": max(60, int(raw.get("review_interval_seconds", 300) or 300)),
+        "review_interval_seconds": max(5, int(raw.get("review_interval_seconds", 300) or 300)),
         "notify_telegram": bool(raw.get("notify_telegram", True)),
         "notify_cooldown_seconds": max(60, int(raw.get("notify_cooldown_seconds", 900) or 900)),
         "max_dca_count": max(0, int(raw.get("max_dca_count", 1) or 1)),
@@ -57,10 +58,22 @@ def _settings(config: dict[str, Any]) -> dict[str, Any]:
         "dca_r_max": _safe_float(raw.get("dca_r_max"), -0.25),
         "bad_cut_r": _safe_float(raw.get("bad_cut_r"), -0.9),
         "good_exit_r": _safe_float(raw.get("good_exit_r"), 0.7),
+        "post_partial_good_exit_r": _safe_float(raw.get("post_partial_good_exit_r"), -0.1),
         "scale_in_r": _safe_float(raw.get("scale_in_r"), 0.9),
         "protect_profit_r": _safe_float(raw.get("protect_profit_r"), 0.5),
         "trend_break_progress_limit_pct": _safe_float(raw.get("trend_break_progress_limit_pct"), -25.0),
         "trend_exhaustion_progress_pct": _safe_float(raw.get("trend_exhaustion_progress_pct"), 80.0),
+        "post_partial_severe_reversal_progress_pct": _safe_float(raw.get("post_partial_severe_reversal_progress_pct"), 25.0),
+        "profit_reversal_guard_enabled": bool(raw.get("profit_reversal_guard_enabled", False)),
+        "profit_reversal_arm_r": _safe_float(raw.get("profit_reversal_arm_r"), 0.5),
+        "profit_reversal_arm_tp_progress_pct": _safe_float(raw.get("profit_reversal_arm_tp_progress_pct"), 35.0),
+        "profit_reversal_drop_r": _safe_float(raw.get("profit_reversal_drop_r"), 0.35),
+        "profit_reversal_drop_progress_pct": _safe_float(raw.get("profit_reversal_drop_progress_pct"), 25.0),
+        "profit_reversal_panic_1m_drop_pct": _safe_float(raw.get("profit_reversal_panic_1m_drop_pct"), 3.5),
+        "profit_reversal_panic_5m_drop_pct": _safe_float(raw.get("profit_reversal_panic_5m_drop_pct"), 6.0),
+        "profit_reversal_panic_volume_ratio": _safe_float(raw.get("profit_reversal_panic_volume_ratio"), 2.0),
+        "profit_reversal_close_fraction": max(0.05, min(1.0, _safe_float(raw.get("profit_reversal_close_fraction"), 0.3))),
+        "move_sl_to_breakeven_when_profit_r": _safe_float(raw.get("move_sl_to_breakeven_when_profit_r"), 0.5),
         "partial_cut_fraction": max(0.05, min(1.0, _safe_float(raw.get("partial_cut_fraction"), 0.25))),
         "good_exit_fraction": max(0.05, min(1.0, _safe_float(raw.get("good_exit_fraction"), 0.25))),
         "dca_fraction": max(0.05, min(1.0, _safe_float(raw.get("dca_fraction"), 0.25))),
@@ -229,6 +242,70 @@ def _count_events(row: dict[str, Any], event_type: str) -> int:
     return sum(1 for event in _event_history(row) if str(event.get("type") or "") == event_type)
 
 
+def _peak_profit_state(row: dict[str, Any], r_value: float | None, progress: float | None) -> dict[str, float | None]:
+    peak_r = r_value
+    peak_progress = progress
+    for event in _event_history(row):
+        event_r = _float(event.get("r_multiple"))
+        event_progress = _float(event.get("tp_progress_pct"))
+        if event_r is not None and (peak_r is None or event_r > peak_r):
+            peak_r = event_r
+        if event_progress is not None and (peak_progress is None or event_progress > peak_progress):
+            peak_progress = event_progress
+    return {"peak_r": peak_r, "peak_tp_progress_pct": peak_progress}
+
+
+def _profit_reversal_guard_triggered(
+    row: dict[str, Any],
+    settings: dict[str, Any],
+    r_value: float | None,
+    progress: float | None,
+    peak: dict[str, float | None],
+) -> tuple[bool, list[str]]:
+    if not settings.get("profit_reversal_guard_enabled"):
+        return False, []
+    peak_r = peak.get("peak_r")
+    peak_progress = peak.get("peak_tp_progress_pct")
+    armed_by_r = peak_r is not None and peak_r >= settings["profit_reversal_arm_r"]
+    armed_by_progress = peak_progress is not None and peak_progress >= settings["profit_reversal_arm_tp_progress_pct"]
+    if not armed_by_r and not armed_by_progress:
+        return False, []
+    reasons: list[str] = []
+    r_drop_hit = peak_r is not None and r_value is not None and peak_r - r_value >= settings["profit_reversal_drop_r"]
+    progress_drop_hit = (
+        peak_progress is not None
+        and progress is not None
+        and peak_progress - progress >= settings["profit_reversal_drop_progress_pct"]
+    )
+    if r_drop_hit:
+        reasons.append(
+            f"Lợi nhuận tụt từ peak {peak_r:.2f}R xuống {r_value:.2f}R, vượt ngưỡng tụt {settings['profit_reversal_drop_r']:.2f}R."
+        )
+    if progress_drop_hit:
+        reasons.append(
+            f"Tiến độ tới TP tụt từ {peak_progress:.2f}% xuống {progress:.2f}%, vượt ngưỡng tụt {settings['profit_reversal_drop_progress_pct']:.2f}%."
+        )
+    payload = _parse_json(row.get("snapshot_json")) or _parse_json(row.get("payload_json"))
+    market = payload.get("market") if isinstance(payload.get("market"), dict) else {}
+    indicator = payload.get("indicator_summary") if isinstance(payload.get("indicator_summary"), dict) else {}
+    move_1m = _first_number(row.get("move_1m_pct"), market.get("move_1m_pct"), indicator.get("move_1m_pct"))
+    move_5m = _first_number(row.get("move_5m_pct"), market.get("move_5m_pct"), indicator.get("move_5m_pct"))
+    volume_ratio = _first_number(row.get("volume_ratio"), market.get("volume_ratio"), indicator.get("volume_ratio"))
+    side = str(row.get("side") or "").lower()
+    adverse_1m = (-move_1m if side == "long" else move_1m) if move_1m is not None else None
+    adverse_5m = (-move_5m if side == "long" else move_5m) if move_5m is not None else None
+    panic_volume = volume_ratio is not None and volume_ratio >= settings["profit_reversal_panic_volume_ratio"]
+    if adverse_1m is not None and adverse_1m >= settings["profit_reversal_panic_1m_drop_pct"] and panic_volume:
+        reasons.append(
+            f"Nến 1m đảo chiều {adverse_1m:.2f}% với volume {volume_ratio:.2f}x, vượt ngưỡng panic."
+        )
+    if adverse_5m is not None and adverse_5m >= settings["profit_reversal_panic_5m_drop_pct"] and panic_volume:
+        reasons.append(
+            f"Nến 5m đảo chiều {adverse_5m:.2f}% với volume {volume_ratio:.2f}x, vượt ngưỡng panic."
+        )
+    return bool(reasons), reasons
+
+
 def _event_time(event: dict[str, Any]) -> datetime | None:
     return _parse_time(event.get("created_at") or event.get("at") or event.get("closed_at"))
 
@@ -274,6 +351,8 @@ def _decision_for_row(row: dict[str, Any], settings: dict[str, Any]) -> dict[str
     pnl = _float(row.get("pnl"))
     r_value = _r_multiple(row)
     progress = _tp_progress_pct(row)
+    peak = _peak_profit_state(row, r_value, progress)
+    reversal_guard_triggered, reversal_guard_reasons = _profit_reversal_guard_triggered(row, settings, r_value, progress, peak)
     reasons: list[str] = []
     action = "HOLD"
     decision = "Giữ vị thế"
@@ -289,17 +368,21 @@ def _decision_for_row(row: dict[str, Any], settings: dict[str, Any]) -> dict[str
 
     if r_value is None:
         reasons.append("Chưa đủ entry/SL/mark để tính R.")
-    elif partial_profit_done and r_value < settings["protect_profit_r"]:
+    elif (
+        partial_profit_done
+        and r_value <= settings["post_partial_good_exit_r"]
+        and (progress is None or progress <= settings["post_partial_severe_reversal_progress_pct"])
+    ):
         action = "GOOD_EXIT_REVIEW"
         decision = "Xem xét đóng phần còn lại để bảo toàn lãi"
         fraction = 1.0
         reasons.append("Vị thế đã chốt lời 30%; không chốt thêm partial lần hai.")
-        reasons.append("Giá đã suy yếu sau partial profit, chỉ xem xét đóng phần còn lại để bảo toàn lãi.")
+        reasons.append("Giá đảo chiều nghiêm trọng sau partial profit, xem xét đóng phần còn lại để bảo toàn lãi.")
     elif partial_profit_done:
         action = "HOLD_AFTER_PARTIAL"
         decision = "Giữ phần còn lại sau chốt lời 30%"
         reasons.append("Vị thế đã chốt lời 30%; ưu tiên module Chốt lời & Bảo vệ tiếp tục dời SL/TP theo nấc.")
-        reasons.append("Module chủ động không chốt thêm nếu chưa có dấu hiệu đảo chiều rõ.")
+        reasons.append("Module chủ động chỉ chốt thêm nếu có dấu hiệu đảo chiều nghiêm trọng sau partial.")
     elif bad_cut_done and r_value <= settings["bad_cut_r"]:
         action = "HOLD_AFTER_BAD_CUT"
         decision = "Giữ phần còn lại sau khi đã cắt lỗ chủ động"
@@ -315,6 +398,12 @@ def _decision_for_row(row: dict[str, Any], settings: dict[str, Any]) -> dict[str
         action = "HOLD_AFTER_LOSS_CUT"
         decision = "Giữ phần còn lại sau chốt lỗ 25%"
         reasons.append("Vị thế đã chốt lỗ 25%; tiếp tục theo dõi hồi phục hoặc hỏng setup.")
+    elif reversal_guard_triggered:
+        action = "PROFIT_REVERSAL_GUARD"
+        decision = "Chốt bảo vệ khi lãi quay đầu nhanh"
+        fraction = settings["profit_reversal_close_fraction"]
+        reasons.extend(reversal_guard_reasons)
+        reasons.append("Lệnh từng có lãi đủ ngưỡng nhưng đang đảo chiều nhanh; chốt bảo vệ 30% thay vì chờ SL.")
     elif r_value <= settings["bad_cut_r"]:
         action = "BAD_CUT"
         decision = "Cắt lỗ chủ động"
@@ -352,7 +441,7 @@ def _decision_for_row(row: dict[str, Any], settings: dict[str, Any]) -> dict[str
 
     if fraction is not None and quantity is not None:
         amount = round(quantity * float(fraction), 8)
-    if action in {"BAD_CUT", "BAD_CUT_REMAINDER", "GOOD_EXIT_REVIEW"} and mark is not None and amount is not None:
+    if action in {"BAD_CUT", "BAD_CUT_REMAINDER", "GOOD_EXIT_REVIEW", "PROFIT_REVERSAL_GUARD"} and mark is not None and amount is not None:
         expected_pnl = _pnl_at(row, mark, amount)
     elif action in {"DCA_REVIEW", "SCALE_IN_REVIEW"} and mark is not None and amount is not None:
         expected_pnl = None
@@ -375,6 +464,8 @@ def _decision_for_row(row: dict[str, Any], settings: dict[str, Any]) -> dict[str
         "pnl": pnl,
         "r_multiple": r_value,
         "tp_progress_pct": progress,
+        "peak_r": peak.get("peak_r"),
+        "peak_tp_progress_pct": peak.get("peak_tp_progress_pct"),
         "fraction": fraction,
         "amount": amount,
         "expected_pnl": expected_pnl,
@@ -471,6 +562,8 @@ def _execution_allowed(action: str, settings: dict[str, Any], decision: dict[str
         return bool(settings["execute_bad_cut"])
     if action == "GOOD_EXIT_REVIEW":
         return bool(settings["execute_good_exit"])
+    if action == "PROFIT_REVERSAL_GUARD":
+        return bool(settings["execute_profit_reversal_guard"])
     if action == "BAD_CUT_REMAINDER":
         return bool(settings["execute_remainder_cut"])
     if action == "DCA_REVIEW":
@@ -487,7 +580,7 @@ def _execute_reduce_only_close(config: dict[str, Any], decision: dict[str, Any])
     side = str(decision.get("side") or "").lower()
     amount = _float(decision.get("amount"))
     quantity = _float(decision.get("quantity"))
-    if action not in {"BAD_CUT", "GOOD_EXIT_REVIEW", "BAD_CUT_REMAINDER"}:
+    if action not in {"BAD_CUT", "GOOD_EXIT_REVIEW", "BAD_CUT_REMAINDER", "PROFIT_REVERSAL_GUARD"}:
         return {"submitted": False, "reason": "action_not_reduce_only_close"}
     if not symbol or side not in {"long", "short"}:
         return {"submitted": False, "reason": "invalid_symbol_or_side"}
@@ -571,7 +664,7 @@ def _execute_decision(config: dict[str, Any], decision: dict[str, Any], settings
             "effective_from": settings.get("effective_from"),
             "apply_to_existing_positions": settings.get("apply_to_existing_positions"),
         }
-    if action in {"BAD_CUT", "GOOD_EXIT_REVIEW", "BAD_CUT_REMAINDER"}:
+    if action in {"BAD_CUT", "GOOD_EXIT_REVIEW", "BAD_CUT_REMAINDER", "PROFIT_REVERSAL_GUARD"}:
         return _execute_reduce_only_close(config, decision)
     return {"submitted": False, "reason": "execution_not_implemented_for_action"}
     try:
@@ -622,7 +715,7 @@ def evaluate_open_positions(
                 "shadow_mode": settings["shadow_mode"],
                 "auto_execute_enabled": settings["auto_execute_enabled"],
             }
-        elif protected_position and action in {"BAD_CUT", "GOOD_EXIT_REVIEW", "BAD_CUT_REMAINDER"}:
+        elif protected_position and action in {"BAD_CUT", "GOOD_EXIT_REVIEW", "BAD_CUT_REMAINDER", "PROFIT_REVERSAL_GUARD"}:
             execution_result = {
                 "submitted": False,
                 "reason": "protected_position",
@@ -684,6 +777,8 @@ def evaluate_open_positions(
                         "auto_execute_enabled": decision.get("auto_execute_enabled"),
                         "r_multiple": decision.get("r_multiple"),
                         "tp_progress_pct": decision.get("tp_progress_pct"),
+                        "peak_r": decision.get("peak_r"),
+                        "peak_tp_progress_pct": decision.get("peak_tp_progress_pct"),
                         "amount": decision.get("amount"),
                         "expected_pnl": decision.get("expected_pnl"),
                         "reasons": decision.get("reasons"),

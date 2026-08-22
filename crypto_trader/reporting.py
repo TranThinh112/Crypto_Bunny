@@ -677,6 +677,7 @@ def format_active_position_decision_message(config: dict[str, Any], event: dict[
         "DCA_REVIEW": "Xem xét DCA",
         "SCALE_IN_REVIEW": "Xem xét thêm khối lượng",
         "GOOD_EXIT_REVIEW": "Xem xét chốt lời ngắn",
+        "PROFIT_REVERSAL_GUARD": "Chốt bảo vệ khi lãi quay đầu nhanh",
         "BAD_CUT_REMAINDER": "Xem xét đóng phần còn lại",
         "HOLD_AFTER_PARTIAL": "Giữ phần còn lại sau chốt lời 30%",
         "HOLD_AFTER_LOSS_CUT": "Giữ phần còn lại sau chốt lỗ 25%",

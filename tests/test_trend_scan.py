@@ -95,9 +95,25 @@ class TrendScanTest(TestCase):
         self.assertEqual(decision["ai_gate_mode"], "adaptive_strong_trend")
         self.assertEqual(decision["entry_action"], "READY_LONG")
 
-    def test_adaptive_ai_ready_still_waits_when_htf_is_not_strong(self) -> None:
+    def test_fast_entry_allows_aligned_near_ready_setup(self) -> None:
         decision = _trend_watch_decision(
             self._config(),
+            htf={"side": "long", "score": 68.0},
+            entry={"side": "long", "score": 60.0},
+            legacy_side="long",
+            legacy_score=68.0,
+        )
+
+        self.assertTrue(decision["entry_ready"])
+        self.assertTrue(decision["ai_ready"])
+        self.assertEqual(decision["ai_gate_mode"], "fast_entry")
+        self.assertEqual(decision["entry_action"], "READY_LONG")
+
+    def test_fast_entry_can_be_disabled_for_original_waiting_behavior(self) -> None:
+        config = self._config()
+        config["ai"]["internal"]["trend_scan_fast_entry_enabled"] = False
+        decision = _trend_watch_decision(
+            config,
             htf={"side": "long", "score": 68.0},
             entry={"side": "long", "score": 60.0},
             legacy_side="long",
