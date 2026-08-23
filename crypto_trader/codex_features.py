@@ -3108,20 +3108,87 @@ def get_bunny_health_state(config: dict[str, Any]) -> dict[str, Any]:
     return refresh_bunny_health_state(config)
 
 
+def _default_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
+    settings = _trading_risk_settings(config)
+    return {
+        "isPaused": False,
+        "pausedUntil": None,
+        "isRecoveryMode": False,
+        "recoveryMode": "NORMAL",
+        "currentNormalMinRuleScore": _safe_float(settings.get("normal_min_rule_score"), 78),
+        "currentNormalMinGptConfidence": _safe_float(settings.get("normal_min_gpt_confidence"), 82),
+    }
+
+
+def _default_bunny_health_state() -> dict[str, Any]:
+    return {
+        "isHealthy": True,
+        "isWarning": False,
+        "isCritical": False,
+        "isPaused": False,
+        "pausedUntil": None,
+        "riskMultiplier": 1.0,
+        "scoreAdjustment": 0.0,
+        "confidenceAdjustment": 0.0,
+        "reason": "validation_context_default",
+    }
+
+
+def build_entry_validation_context(config: dict[str, Any]) -> dict[str, Any]:
+    timings: dict[str, float] = {}
+    warnings: list[str] = []
+
+    def timed(label: str, callback: Any, default: Any) -> Any:
+        started = time.perf_counter()
+        try:
+            return callback()
+        except Exception as exc:
+            warnings.append(f"{label} unavailable during entry validation: {exc}")
+            return default
+        finally:
+            timings[f"{label}_ms"] = round((time.perf_counter() - started) * 1000, 2)
+
+    state = timed("system_state", lambda: get_trading_system_state(config), _default_trading_system_state(config))
+    health = timed("health_state", lambda: get_bunny_health_state(config), _default_bunny_health_state())
+    open_rows = timed("open_trade_rows", lambda: _open_trade_executions(config), [])
+    return {
+        "state": state,
+        "health": health,
+        "open_rows": open_rows,
+        "warnings": warnings,
+        "timings": timings,
+        "created_at": _iso_now(),
+    }
+
+
 def _entry_distance_pct(entry_price: float, current_price: float) -> float:
     if entry_price <= 0 or current_price <= 0:
         return 0.0
     return abs(entry_price - current_price) / current_price * 100.0
 
 
-def validate_entry(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-    state = get_trading_system_state(config)
-    health = get_bunny_health_state(config)
+def validate_entry(
+    config: dict[str, Any],
+    payload: dict[str, Any],
+    *,
+    validation_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    context = validation_context if isinstance(validation_context, dict) else None
+    if context is not None:
+        state = context.get("state") or _default_trading_system_state(config)
+        health = context.get("health") or _default_bunny_health_state()
+    else:
+        state = get_trading_system_state(config)
+        health = get_bunny_health_state(config)
     settings = _trading_risk_settings(config)
-    open_rows = _open_trade_executions(config)
+    open_rows = (context or {}).get("open_rows")
+    if open_rows is None and context is None:
+        open_rows = _open_trade_executions(config)
+    elif open_rows is None:
+        open_rows = []
     open_count, free_slots = _slot_state(open_rows, _safe_int(settings.get("max_concurrent_positions"), 3))
     reasons: list[str] = []
-    warnings: list[str] = []
+    warnings: list[str] = [str(item) for item in (context or {}).get("warnings") or []]
     rule_score = _safe_float(payload.get("ruleScore", payload.get("rule_score", payload.get("confidence"))))
     gpt_confidence = _safe_float(payload.get("gptConfidence", payload.get("gpt_confidence", payload.get("confidence"))))
     win_probability = _safe_float(payload.get("winProbability", payload.get("win_probability_pct")), None)
@@ -3260,10 +3327,16 @@ def validate_entry(config: dict[str, Any], payload: dict[str, Any]) -> dict[str,
         "riskRewardIsAdvisory": not rr_hard_block_enabled,
         "riskRewardWarnings": warnings,
         "healthState": health,
+        "validationTimings": (context or {}).get("timings") or {},
     }
 
 
-def apply_system_validation_to_candidate(config: dict[str, Any], candidate: TradeCandidate) -> tuple[list[str], list[str]]:
+def apply_system_validation_to_candidate(
+    config: dict[str, Any],
+    candidate: TradeCandidate,
+    *,
+    validation_context: dict[str, Any] | None = None,
+) -> tuple[list[str], list[str]]:
     response = validate_entry(
         config,
         {
@@ -3280,6 +3353,7 @@ def apply_system_validation_to_candidate(config: dict[str, Any], candidate: Trad
             "fundingRate": candidate.indicator_summary.get("funding_rate"),
             "marketRegime": candidate.market_regime,
         },
+        validation_context=validation_context,
     )
     candidate.rule_score = _candidate_rule_score(candidate)
     candidate.position_slot = response.get("assignedPositionSlot")

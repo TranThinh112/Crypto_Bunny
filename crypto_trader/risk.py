@@ -242,6 +242,7 @@ def evaluate_candidate(
     candidate: TradeCandidate | None,
     *,
     active_summary: ActiveSummary | None = None,
+    validation_context: dict[str, Any] | None = None,
     enforce_active_limit: bool = True,
     check_active_trades: bool = True,
     check_order_limits: bool = True,
@@ -379,7 +380,11 @@ def evaluate_candidate(
         if mode in {"demo", "live"} and active_count is None:
             reasons.append("Cannot verify active OKX positions/orders")
 
-    system_reasons, system_warnings = apply_system_validation_to_candidate(config, candidate)
+    system_reasons, system_warnings = apply_system_validation_to_candidate(
+        config,
+        candidate,
+        validation_context=validation_context,
+    )
     reasons.extend(system_reasons)
     warnings.extend(system_warnings)
     _apply_probation_entry_if_allowed(config, candidate, reasons, threshold_meta)

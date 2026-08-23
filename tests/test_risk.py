@@ -5,7 +5,7 @@ from copy import deepcopy
 from unittest import TestCase
 from unittest.mock import patch
 
-from crypto_trader.codex_features import get_trading_system_state
+from crypto_trader.codex_features import get_trading_system_state, validate_entry
 from crypto_trader.config import DEFAULT_CONFIG
 from crypto_trader.models import TradeCandidate
 from crypto_trader.risk import evaluate_candidate
@@ -211,3 +211,34 @@ class RiskTest(TestCase):
         self.assertEqual(state["normalRiskPercent"], 1.0)
         self.assertEqual(state["recoveryModeRiskPercent"], 0.5)
         self.assertEqual(state["recoveryMinRiskReward"], 2.5)
+
+    def test_validate_entry_context_timeout_uses_lightweight_fallback(self) -> None:
+        config = self._config()
+        payload = {
+            "symbol": "ETH/USDT:USDT",
+            "side": "long",
+            "ruleScore": 90,
+            "gptConfidence": 90,
+            "winProbability": 80,
+            "riskReward": 2.0,
+            "entryPrice": 100,
+            "currentPrice": 100,
+        }
+
+        with patch("crypto_trader.codex_features.get_trading_system_state") as system_state, patch(
+            "crypto_trader.codex_features.get_bunny_health_state"
+        ) as health_state, patch("crypto_trader.codex_features._open_trade_executions") as open_rows:
+            result = validate_entry(
+                config,
+                payload,
+                validation_context={
+                    "timeout": True,
+                    "warnings": ["Entry validation context timed out after 8s; using lightweight fallback"],
+                },
+            )
+
+        self.assertTrue(result["allowed"])
+        self.assertIn("Entry validation context timed out", " | ".join(result["riskRewardWarnings"]))
+        system_state.assert_not_called()
+        health_state.assert_not_called()
+        open_rows.assert_not_called()

@@ -46,6 +46,7 @@ from .storage import (
     count_pending_orders,
     dashboard_snapshot_cache_version,
     get_journal_state,
+    is_retryable_storage_error,
     list_journal_state_prefix,
     list_market_guard_observations,
     list_paper_trades,
@@ -541,6 +542,23 @@ def _persist_cached_payload(config: dict[str, Any], key: str, payload: dict[str,
     set_journal_state(config, key, json.dumps(to_jsonable(payload), ensure_ascii=False))
 
 
+def _dashboard_degraded_payload(name: str, error: Exception, snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = dict(snapshot or {})
+    payload.update(
+        {
+            "ok": False,
+            "degraded": True,
+            "stale": snapshot is not None,
+            "error": str(error),
+            "error_group": "MongoDB Atlas timeout" if is_retryable_storage_error(error) else "Dashboard error",
+            "generated_at": payload.get("generated_at") or datetime.now(timezone.utc).isoformat(),
+            "degraded_at": datetime.now(timezone.utc).isoformat(),
+            "dashboard": name,
+        }
+    )
+    return payload
+
+
 def _get_or_build_cached_payload(
     config: dict[str, Any],
     *,
@@ -549,14 +567,39 @@ def _get_or_build_cached_payload(
     force_refresh: bool = False,
     max_age_seconds: int | None = DASHBOARD_DEFAULT_TTL_SECONDS,
 ) -> dict[str, Any]:
-    if not force_refresh:
+    snapshot: dict[str, Any] | None = None
+    snapshot_error: Exception | None = None
+    dashboard_name = key.split(":", 2)[1] if ":" in key else key
+    try:
         snapshot = _cached_payload(config, key)
+    except Exception as exc:
+        snapshot_error = exc
+        if not is_retryable_storage_error(exc):
+            raise
+        LOGGER.warning("Dashboard snapshot read degraded for %s: %s", dashboard_name, exc)
+    if not force_refresh:
         if snapshot is not None:
             age_seconds = _snapshot_age_seconds(snapshot)
             if max_age_seconds is None or age_seconds is None or age_seconds <= max(0, int(max_age_seconds)):
                 return snapshot
-    payload = builder()
-    _persist_cached_payload(config, key, payload)
+    try:
+        payload = builder()
+    except Exception as exc:
+        if not is_retryable_storage_error(exc):
+            raise
+        LOGGER.warning("Dashboard builder degraded for %s: %s", dashboard_name, exc)
+        return _dashboard_degraded_payload(dashboard_name, exc, snapshot=snapshot)
+    try:
+        _persist_cached_payload(config, key, payload)
+    except Exception as exc:
+        if not is_retryable_storage_error(exc):
+            raise
+        LOGGER.warning("Dashboard snapshot persist skipped for %s: %s", dashboard_name, exc)
+        payload = dict(payload)
+        payload["cache_warning"] = str(exc)
+    if snapshot_error is not None:
+        payload = dict(payload)
+        payload["cache_read_warning"] = str(snapshot_error)
     return payload
 
 

@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from crypto_trader.dashboard_services import (
     _build_system_checklist_payload,
+    _get_or_build_cached_payload,
     _persist_cached_payload,
     _persist_system_checklist_snapshot,
     _slim_market_regime_snapshot,
@@ -66,6 +67,22 @@ class SystemChecklistPayloadTests(unittest.TestCase):
 
         self.assertEqual(enriched["date"], "2026-07-22")
         self.assertIsNone(enriched["previous_snapshot"])
+
+    def test_dashboard_cache_degrades_when_builder_storage_times_out(self) -> None:
+        with patch("crypto_trader.dashboard_services.get_journal_state", return_value=None), patch(
+            "crypto_trader.dashboard_services.set_journal_state"
+        ) as set_state:
+            payload = _get_or_build_cached_payload(
+                {},
+                key="dashboard_snapshot:analytics:v=1",
+                builder=lambda: (_ for _ in ()).throw(TimeoutError("read operation timed out")),
+                force_refresh=True,
+            )
+
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["degraded"])
+        self.assertEqual(payload["error_group"], "MongoDB Atlas timeout")
+        set_state.assert_not_called()
 
     def test_bunny_minimize_refresh_keeps_chart_stats(self) -> None:
         snapshot = {

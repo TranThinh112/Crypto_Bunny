@@ -25,6 +25,7 @@ from .ai_coordinator import (
 )
 from .config import project_path
 from .codex_features import (
+    build_entry_validation_context,
     candidate_from_payload,
     candidate_to_payload,
     detect_market_regime,
@@ -80,11 +81,41 @@ def _candidate_evaluation_timeout_seconds(config: dict[str, Any]) -> float:
     except (TypeError, ValueError):
         return 20.0
 
+def _validation_context_timeout_seconds(config: dict[str, Any]) -> float:
+    runtime = config.get("runtime", {}) if isinstance(config.get("runtime"), dict) else {}
+    raw = runtime.get("entry_validation_context_timeout_seconds", 8)
+    try:
+        return max(2.0, min(30.0, float(raw or 8)))
+    except (TypeError, ValueError):
+        return 8.0
+
+def _build_entry_validation_context_with_timeout(config: dict[str, Any]) -> dict[str, Any]:
+    timeout = _validation_context_timeout_seconds(config)
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="entry-validation-context")
+    future = executor.submit(build_entry_validation_context, config)
+    try:
+        context = future.result(timeout=timeout)
+        if isinstance(context, dict):
+            context.setdefault("warnings", [])
+            context.setdefault("timings", {})
+            context["timeout"] = False
+            return context
+    except FutureTimeoutError:
+        pass
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+    return {
+        "warnings": [f"Entry validation context timed out after {timeout:.0f}s; using lightweight fallback"],
+        "timings": {"context_timeout_seconds": timeout},
+        "timeout": True,
+    }
+
 def _evaluate_candidate_with_timeout(
     config: dict[str, Any],
     candidate: TradeCandidate,
     *,
     active_summary: tuple[int | None, set[str], list[str]] | None = None,
+    validation_context: dict[str, Any] | None = None,
     enforce_active_limit: bool = True,
     check_active_trades: bool = True,
     check_order_limits: bool = True,
@@ -98,6 +129,7 @@ def _evaluate_candidate_with_timeout(
         config,
         candidate,
         active_summary=active_summary,
+        validation_context=validation_context,
         enforce_active_limit=enforce_active_limit,
         check_active_trades=check_active_trades,
         check_order_limits=check_order_limits,
@@ -2029,11 +2061,21 @@ def run_once(
         )
     else:
         _report_progress(progress_callback, "evaluate_candidates")
+        validation_context = _build_entry_validation_context_with_timeout(config)
+        validation_warnings = [str(item) for item in validation_context.get("warnings") or []]
+        validation_timings = validation_context.get("timings") if isinstance(validation_context.get("timings"), dict) else {}
+        if validation_warnings:
+            scan_comparison["entry_validation_context"] = {
+                "warnings": validation_warnings,
+                "timings": validation_timings,
+                "timeout": bool(validation_context.get("timeout")),
+            }
         for candidate in candidates:
             current_check = _evaluate_candidate_with_timeout(
                 config,
                 candidate,
                 active_summary=active_summary,
+                validation_context=validation_context,
                 extra_active_symbols=pending_symbols,
             )
             if current_check.passed:
