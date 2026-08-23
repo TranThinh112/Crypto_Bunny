@@ -184,9 +184,47 @@ PRICE_CACHE_TTL_SECONDS = 55
 TELEGRAM_VIEW_CACHE_TTL_SECONDS = 4
 SYSTEM_ERROR_NOTIFY_COOLDOWN_SECONDS = 900
 LC_PIPELINE_ENDPOINT_TIMEOUT_SECONDS = 8.0
+DASHBOARD_ENDPOINT_TIMEOUT_SECONDS = 8.0
 STARTUP_TELEGRAM_MESSAGE = "\U0001f7e2 Bot Crypto \u0111\u00e3 kh\u1edfi \u0111\u1ed9ng"
 _SYSTEM_ERROR_NOTIFY_LOCK = threading.Lock()
 _SYSTEM_ERROR_NOTIFICATIONS: dict[str, tuple[str, datetime]] = {}
+
+
+def _dashboard_endpoint_degraded_payload(name: str, exc: Exception) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    return {
+        "ok": False,
+        "dashboard": name,
+        "degraded": True,
+        "stale": False,
+        "error": str(exc),
+        "error_group": "Dashboard timeout" if isinstance(exc, FutureTimeoutError) else "Dashboard error",
+        "generated_at": now.isoformat(),
+        "degraded_at": now.isoformat(),
+    }
+
+
+def _bounded_dashboard_payload(name: str, builder: Callable[[], dict[str, Any]]) -> JSONResponse:
+    executor: ThreadPoolExecutor | None = None
+    try:
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"dashboard-{name}")
+        payload = executor.submit(builder).result(timeout=DASHBOARD_ENDPOINT_TIMEOUT_SECONDS)
+    except FutureTimeoutError as exc:
+        LOGGER.warning("Dashboard %s degraded after %.1fs timeout", name, DASHBOARD_ENDPOINT_TIMEOUT_SECONDS)
+        payload = _dashboard_endpoint_degraded_payload(name, exc)
+    except Exception as exc:
+        LOGGER.warning("Dashboard %s degraded after error: %s", name, exc)
+        payload = _dashboard_endpoint_degraded_payload(name, exc)
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+    response = JSONResponse(payload)
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
+
+
 def _lc_pipeline_degraded_payload(config: dict[str, Any], exc: Exception) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     return {
@@ -3911,33 +3949,45 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
         }
 
     @app.get("/api/dashboard/timeframes")
-    def dashboard_timeframes_endpoint(lookback_hours: int = 24) -> dict[str, Any]:
+    def dashboard_timeframes_endpoint(lookback_hours: int = 24) -> JSONResponse:
         config = load_config(app.state.config_path)
-        return timeframe_state_dashboard(config, lookback_hours=lookback_hours)
+        return _bounded_dashboard_payload(
+            "timeframes",
+            lambda: timeframe_state_dashboard(config, lookback_hours=lookback_hours),
+        )
 
     @app.get("/api/dashboard/scan-memory")
-    def dashboard_scan_memory_endpoint(lookback_hours: int = 24, per_symbol_timeframe_limit: int = 5) -> dict[str, Any]:
+    def dashboard_scan_memory_endpoint(lookback_hours: int = 24, per_symbol_timeframe_limit: int = 5) -> JSONResponse:
         config = load_config(app.state.config_path)
-        return scan_memory_dashboard(
-            config,
-            lookback_hours=lookback_hours,
-            per_symbol_timeframe_limit=per_symbol_timeframe_limit,
+        return _bounded_dashboard_payload(
+            "scan_memory",
+            lambda: scan_memory_dashboard(
+                config,
+                lookback_hours=lookback_hours,
+                per_symbol_timeframe_limit=per_symbol_timeframe_limit,
+            ),
         )
 
     @app.get("/api/dashboard/analytics")
-    def dashboard_analytics_endpoint(lookback_hours: int = 24) -> dict[str, Any]:
+    def dashboard_analytics_endpoint(lookback_hours: int = 24) -> JSONResponse:
         config = load_config(app.state.config_path)
-        return analytics_dashboard(config, lookback_hours=lookback_hours)
+        return _bounded_dashboard_payload(
+            "analytics",
+            lambda: analytics_dashboard(config, lookback_hours=lookback_hours),
+        )
 
     @app.get("/api/dashboard/replay")
-    def dashboard_replay_endpoint(limit: int = 50) -> dict[str, Any]:
+    def dashboard_replay_endpoint(limit: int = 50) -> JSONResponse:
         config = load_config(app.state.config_path)
-        return replay_dashboard_payload(config, limit=limit)
+        return _bounded_dashboard_payload("replay", lambda: replay_dashboard_payload(config, limit=limit))
 
     @app.get("/api/dashboard/system-health")
-    def dashboard_system_health_endpoint(history_limit: int = 30) -> dict[str, Any]:
+    def dashboard_system_health_endpoint(history_limit: int = 30) -> JSONResponse:
         config = load_config(app.state.config_path)
-        return system_health_dashboard(config, history_limit=history_limit)
+        return _bounded_dashboard_payload(
+            "system_health",
+            lambda: system_health_dashboard(config, history_limit=history_limit),
+        )
 
     @app.get("/api/okx-positions")
     def okx_positions() -> dict[str, Any]:
