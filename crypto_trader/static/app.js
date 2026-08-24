@@ -6534,12 +6534,42 @@ function lcTelegramSection(rows, emptyText = "Chưa có LC nội bộ.") {
   `).join("") : `<div class="lc-pipeline-empty">${escapeHtml(emptyText)}</div>`;
 }
 
+function lcAiWatchSection(rows) {
+  return `
+    <div class="lc-pipeline-section">
+      <div class="lc-pipeline-title">AI review / NO_TRADE <span>${fmt(rows.length, 0)}</span></div>
+      ${rows.length ? `
+        <div class="lc-pipeline-scroll">
+          ${rows.map((row, index) => {
+            const result = String(row.result || "-").toUpperCase();
+            const flow = String(row.flow || "-").toUpperCase();
+            const side = row.side ? String(row.side).toUpperCase() : "-";
+            const metrics = [
+              row.win_probability_pct === null || row.win_probability_pct === undefined ? null : `Win ${lcWinText(row.win_probability_pct)}`,
+              row.confidence === null || row.confidence === undefined ? null : `Conf ${fmt(row.confidence, 2)}`,
+            ].filter(Boolean).join(" | ");
+            return `
+              <div class="lc-pipeline-row">
+                <strong>${index + 1}. ${escapeHtml(row.symbol || "-")}</strong>
+                <span class="side ${sideBadgeClass(row.side)}">${escapeHtml(side)}</span>
+                <span>${escapeHtml(result)} · ${escapeHtml(flow)}</span>
+                <small>${timeLabel(row.created_at)}${metrics ? ` | ${escapeHtml(metrics)}` : ""} | ${escapeHtml(row.reason || "-")}</small>
+              </div>
+            `;
+          }).join("")}
+        </div>
+      ` : `<div class="lc-pipeline-empty">Chưa có cặp AI review hoặc NO_TRADE.</div>`}
+    </div>
+  `;
+}
+
 function renderLcPipelineEnhanced(payload) {
   const data = payload || {};
   const counts = data.counts || {};
   const settings = data.settings || {};
   const undecided = (Array.isArray(data.undecided) ? data.undecided : []).slice(0, Math.max(1, Number(settings.undecided_max || 6)));
   const internalLc = Array.isArray(data.internal_lc) ? data.internal_lc : [];
+  const aiWatch = Array.isArray(data.ai_watch) ? data.ai_watch : [];
 
   if (refs.lcPipelineSummary) {
     refs.lcPipelineSummary.innerHTML = `
@@ -6553,7 +6583,7 @@ function renderLcPipelineEnhanced(payload) {
   }
 
   if (refs.lcPipelineRows) {
-    refs.lcPipelineRows.innerHTML = lcCompactSection("Chưa Duyệt", undecided, "Chưa có cặp Chưa Duyệt.");
+    refs.lcPipelineRows.innerHTML = lcCompactSection("Chưa Duyệt", undecided, "Chưa có cặp Chưa Duyệt.") + lcAiWatchSection(aiWatch);
     normalizeVietnameseUi(refs.lcPipelineRows);
   }
 
@@ -6614,6 +6644,7 @@ function renderLcPipelineEnhanced(payload) {
   const settings = data.settings || {};
   const undecided = (Array.isArray(data.undecided) ? data.undecided : []).slice(0, Math.max(1, Number(settings.undecided_max || 6)));
   const internalLc = Array.isArray(data.internal_lc) ? data.internal_lc : [];
+  const aiWatch = Array.isArray(data.ai_watch) ? data.ai_watch : [];
 
   if (refs.lcPipelineSummary) {
     refs.lcPipelineSummary.innerHTML = `
@@ -6627,7 +6658,7 @@ function renderLcPipelineEnhanced(payload) {
   }
 
   if (refs.lcPipelineRows) {
-    refs.lcPipelineRows.innerHTML = lcCompactSection("Chưa Duyệt", undecided, "Chưa có cặp Chưa Duyệt.");
+    refs.lcPipelineRows.innerHTML = lcCompactSection("Chưa Duyệt", undecided, "Chưa có cặp Chưa Duyệt.") + lcAiWatchSection(aiWatch);
     normalizeVietnameseUi(refs.lcPipelineRows);
   }
 

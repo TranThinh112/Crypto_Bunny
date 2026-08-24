@@ -2159,8 +2159,20 @@ def _format_trend_watchlist_view(config: dict[str, Any]) -> str:
         state = json.loads(raw or "{}")
     except json.JSONDecodeError:
         state = {}
-    items = state.get("items") if isinstance(state.get("items"), dict) else {}
-    pending = state.get("pending_confirmations") if isinstance(state.get("pending_confirmations"), dict) else {}
+    raw_items = state.get("items") if isinstance(state.get("items"), dict) else {}
+    raw_pending = state.get("pending_confirmations") if isinstance(state.get("pending_confirmations"), dict) else {}
+    items = {
+        key: item
+        for key, item in raw_items.items()
+        if isinstance(item, dict)
+        and str(item.get("source") or "trend_scan") == "trend_scan"
+        and str(item.get("watch_type") or "trend") == "trend"
+    }
+    pending = {
+        key: item
+        for key, item in raw_pending.items()
+        if isinstance(item, dict) and str(item.get("source") or "trend_scan") == "trend_scan"
+    }
     lines = [
         "📈 Trend Scan Watchlist",
         f"Cập nhật: {_telegram_vn_time(config, state.get('updated_at'))}",
@@ -2179,7 +2191,7 @@ def _format_trend_watchlist_view(config: dict[str, Any]) -> str:
             side = _telegram_side_label(item.get("side"))
             status = str(item.get("status") or "-")
             source = str(item.get("source") or item.get("watch_type") or "trend_scan")
-            branch = "Post Move Watch" if source == "post_move_watch" or str(item.get("watch_type") or "") == "post_move" else "Trend Scan"
+            branch = "Trend Scan"
             ttl_minutes = item.get("ttl_minutes")
             ttl_label = f"{_telegram_number(ttl_minutes)}p" if ttl_minutes is not None else "-"
             trend_score = _telegram_number(item.get("trend_score"))

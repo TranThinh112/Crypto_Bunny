@@ -18,13 +18,17 @@ def _round_price(value: float) -> float:
 def _estimate_win_probability(
     side: str,
     confidence: float,
-    _risk_reward: float,
+    risk_reward: float,
     news_score: float,
     news_count: int,
     warnings: list[str],
+    indicator_summary: dict[str, Any] | None = None,
+    higher_timeframes: dict[str, Any] | None = None,
+    candlestick_patterns: dict[str, Any] | None = None,
 ) -> float:
-    setup_base_probability = 40.0
-    confidence_edge = (confidence - 60) * 0.65
+    setup_base_probability = 44.0
+    confidence_edge = (confidence - 60) * 0.72
+    rr_edge = min(6.0, max(0.0, risk_reward - 1.5) * 3.0)
     news_aligned = (side == "long" and news_score > 0) or (side == "short" and news_score < 0)
     if news_count <= 0:
         news_edge = -1.0
@@ -32,9 +36,50 @@ def _estimate_win_probability(
         news_edge = min(abs(news_score), 5.0) * 0.7
     else:
         news_edge = -min(abs(news_score), 5.0) * 0.7
+
+    indicator_summary = indicator_summary or {}
+    higher_timeframes = higher_timeframes or {}
+    candlestick_patterns = candlestick_patterns or {}
+    volume_ratio = float(indicator_summary.get("volume_ratio") or 0.0)
+    volume_edge = min(4.0, max(0.0, volume_ratio - 1.0) * 3.0)
+
+    htf_aligned = 0
+    htf_mixed = 0
+    for frame in higher_timeframes.values():
+        if not isinstance(frame, dict):
+            continue
+        trend = str(frame.get("trend") or "mixed")
+        if (side == "long" and trend == "up") or (side == "short" and trend == "down"):
+            htf_aligned += 1
+        elif trend == "mixed":
+            htf_mixed += 1
+    htf_edge = min(8.5, htf_aligned * 3.2) - min(2.0, htf_mixed * 0.5)
+
+    candle_edge = 0.0
+    for frame in candlestick_patterns.values():
+        if not isinstance(frame, dict):
+            continue
+        bullish = float(frame.get("bullish_score") or 0.0)
+        bearish = float(frame.get("bearish_score") or 0.0)
+        delta = bullish - bearish if side == "long" else bearish - bullish
+        if delta > 0:
+            candle_edge += min(3.0, delta * 1.2)
+        elif delta < 0:
+            candle_edge -= min(2.0, abs(delta) * 0.8)
+    candle_edge = max(-2.0, min(5.0, candle_edge))
+
     warning_penalty = min(5.0, len(warnings) * 1.5)
-    estimate = setup_base_probability + confidence_edge + news_edge - warning_penalty
-    return round(max(25.0, min(80.0, estimate)), 2)
+    estimate = (
+        setup_base_probability
+        + confidence_edge
+        + rr_edge
+        + news_edge
+        + volume_edge
+        + htf_edge
+        + candle_edge
+        - warning_penalty
+    )
+    return round(max(25.0, min(84.0, estimate)), 2)
 
 
 def _clamp(value: float, lower: float, upper: float) -> float:
@@ -394,6 +439,9 @@ def _candidate_for_side(
         news_score,
         news_count,
         warnings,
+        _indicator_summary(snapshot),
+        snapshot.higher_timeframes,
+        snapshot.candlestick_patterns,
     )
     return TradeCandidate(
         symbol=snapshot.symbol,

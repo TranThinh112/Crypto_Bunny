@@ -16,6 +16,7 @@ from .storage import (
     clear_dashboard_snapshot_cache,
     get_journal_state,
     get_trading_system_state_row,
+    latest_decision_payload,
     open_pending_symbols,
     purge_deprecated_journal_state,
     set_journal_state,
@@ -2943,6 +2944,21 @@ def _mini_reason_notification_lines(scan: dict[str, Any]) -> list[str]:
     return ["Lý do: " + str(scan.get("decision_reason_vi") or _mini_reason_vi(scan))]
 
 
+def _mini_ai_watch_notification_lines(scan: dict[str, Any], *, limit: int = 3) -> list[str]:
+    ai_review = scan.get("ai_review") if isinstance(scan.get("ai_review"), dict) else {}
+    result = _ai_watch_result_from_text(scan.get("status"), scan.get("skip_reason"), ai_review.get("decision"))
+    if not result:
+        return []
+    symbols = _symbol_list(scan.get("pool_symbols"), limit=limit) or _symbol_list(scan.get("current_pool_symbols"), limit=limit)
+    if not symbols:
+        symbols = _symbol_list(scan.get("selected_original_symbols"), limit=limit)
+    if not symbols:
+        symbols = _symbol_list(scan.get("selected_symbols"), limit=limit)
+    reason = str(scan.get("skip_reason") or ai_review.get("reason") or ai_review.get("decision") or "").strip()
+    suffix = f" | {reason}" if reason else ""
+    return [f"AI WATCH: {symbol} | MINI | {result.upper()}{suffix}" for symbol in symbols]
+
+
 def _build_internal_lc_rows(
     rows: list[dict[str, Any]],
     *,
@@ -3089,6 +3105,7 @@ def _mini_notification_text(
     else:
         lines.append("Mini chưa chọn được cặp nào.")
     lines.extend(_mini_reason_notification_lines(scan))
+    lines.extend(_mini_ai_watch_notification_lines(scan))
     if scan.get("slot_id"):
         lines.append(f"Slot: {scan.get('slot_id')}")
     return "\n".join(lines)
@@ -3477,6 +3494,84 @@ def _row_age_payload(row: dict[str, Any], now: datetime) -> dict[str, Any]:
     }
 
 
+def _ai_watch_result_from_text(*values: Any) -> str | None:
+    text = " | ".join(str(value or "") for value in values).lower()
+    if "no_trade" in text or "no trade" in text:
+        return "no_trade"
+    if "review" in text or "candidate_reviewed" in text:
+        return "review"
+    if "reject" in text:
+        return None
+    return None
+
+def _ai_watch_rows(config: dict[str, Any], *, now: datetime) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    try:
+        report = latest_decision_payload(config) or {}
+    except Exception:
+        report = {}
+    decision = report.get("decision") if isinstance(report.get("decision"), dict) else report
+    if isinstance(decision, dict):
+        selected = decision.get("selected") if isinstance(decision.get("selected"), dict) else {}
+        stages = decision.get("decision_stages") if isinstance(decision.get("decision_stages"), dict) else {}
+        ai_review = stages.get("ai_review") if isinstance(stages.get("ai_review"), dict) else {}
+        risk_gate = stages.get("risk_gate") if isinstance(stages.get("risk_gate"), dict) else {}
+        execution = stages.get("execution") if isinstance(stages.get("execution"), dict) else {}
+        reasons = risk_gate.get("reasons") if isinstance(risk_gate.get("reasons"), list) else []
+        result = _ai_watch_result_from_text(
+            ai_review.get("status"),
+            ai_review.get("decision"),
+            selected.get("setup_quality"),
+            " | ".join(str(item) for item in reasons),
+            execution.get("message"),
+        )
+        if result and selected.get("symbol"):
+            rows.append(
+                {
+                    "symbol": selected.get("symbol"),
+                    "side": selected.get("side"),
+                    "flow": "automation",
+                    "result": result,
+                    "created_at": decision.get("created_at"),
+                    "confidence": selected.get("confidence") or ai_review.get("confidence"),
+                    "win_probability_pct": selected.get("win_probability_pct") or ai_review.get("win_probability_pct"),
+                    "reason": next((str(item) for item in reasons if item), execution.get("message") or ai_review.get("status")),
+                }
+            )
+
+    scan = latest_lc_pipeline_mini_scan(config) or {}
+    ai_review = scan.get("ai_review") if isinstance(scan.get("ai_review"), dict) else {}
+    result = _ai_watch_result_from_text(scan.get("status"), scan.get("skip_reason"), ai_review.get("decision"))
+    if result:
+        symbols = _symbol_list(scan.get("pool_symbols"), limit=10) or _symbol_list(scan.get("current_pool_symbols"), limit=10)
+        if not symbols:
+            symbols = _symbol_list(scan.get("selected_original_symbols"), limit=10)
+        for symbol in symbols:
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "side": None,
+                    "flow": "mini",
+                    "result": result,
+                    "created_at": scan.get("created_at") or scan.get("slot_id"),
+                    "confidence": None,
+                    "win_probability_pct": None,
+                    "reason": scan.get("skip_reason") or ai_review.get("reason") or ai_review.get("decision"),
+                }
+            )
+
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for row in rows:
+        key = (str(row.get("symbol") or ""), str(row.get("flow") or ""), str(row.get("result") or ""))
+        if not key[0] or key in seen:
+            continue
+        seen.add(key)
+        created_at = _parse_time(row.get("created_at"))
+        row["created_at"] = created_at.isoformat() if created_at else row.get("created_at") or now.isoformat()
+        deduped.append(row)
+    return deduped[:10]
+
 def lc_pipeline_dashboard_payload(config: dict[str, Any]) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     state = _load_state(config, now, reset_for_new_day=False)
@@ -3519,6 +3614,7 @@ def lc_pipeline_dashboard_payload(config: dict[str, Any]) -> dict[str, Any]:
         },
         "undecided": undecided,
         "internal_lc": internal_lc,
+        "ai_watch": _ai_watch_rows(config, now=now),
         "latest_two_hour": latest_two_hour,
         "latest_four_hour": latest_four_hour,
     }

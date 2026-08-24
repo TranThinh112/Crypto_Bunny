@@ -203,6 +203,24 @@ class RiskTest(TestCase):
         self.assertEqual(candidate.margin_usdt, 1.0)
         self.assertTrue(candidate.decision_metadata["probation_entry"]["enabled"])
 
+    def test_probation_entry_default_requires_strong_near_quality_setup(self) -> None:
+        config = self._config()
+        config["strategy"]["min_confidence"] = 82
+        config["strategy"]["min_win_probability_pct"] = 68
+        config["trading_risk"]["probation_entry"]["enabled"] = True
+        candidate = _candidate()
+        candidate.confidence = 79.0
+        candidate.win_probability_pct = 67.0
+        candidate.risk_reward = 2.0
+        candidate.order_usdt = 0.0
+
+        check = evaluate_candidate(config, candidate, active_summary=(0, set(), []))
+
+        self.assertFalse(check.passed)
+        self.assertIn("Order size is not positive", check.reasons)
+        self.assertIn("Win probability 67.00% is below minimum 68.00%", check.reasons)
+        self.assertNotIn("probation_entry", candidate.decision_metadata)
+
     def test_trading_system_prefers_risk_max_active_when_trading_risk_not_overridden(self) -> None:
         state = get_trading_system_state(self._config())
 

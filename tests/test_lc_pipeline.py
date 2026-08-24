@@ -2446,6 +2446,7 @@ class LcPipelineTest(TestCase):
             [],
             scan={
                 "mini_index": 1,
+                "status": "NO_TRADE",
                 "pool_symbols": ["CRV/USDT:USDT"],
                 "selected_symbols": [],
                 "decision_reason_vi": (
@@ -2460,6 +2461,30 @@ class LcPipelineTest(TestCase):
         self.assertIn("Mini chọn: 0/3 cặp", message)
         self.assertIn("Mini loại CRV", message)
         self.assertIn("CRV 34/100", message)
+        self.assertIn("AI WATCH: CRV/USDT:USDT | MINI | NO_TRADE", message)
+
+    @patch("crypto_trader.notifier.send_telegram_message")
+    def test_mini_pool_summary_hides_rejected_ai_watch(self, send_message) -> None:
+        config = self._config()
+        config["ai"]["internal"]["lc_pipeline_notify_mini_pool_summary"] = True
+
+        notify_mini_pool_summary(
+            config,
+            [],
+            scan={
+                "mini_index": 1,
+                "status": "ai_rejected",
+                "pool_symbols": ["CRV/USDT:USDT"],
+                "selected_symbols": [],
+                "ai_review": {"decision": "REJECT"},
+                "decision_reason_vi": "Mini reject vì setup yếu.",
+            },
+            slot_id="slot-1",
+        )
+
+        message = send_message.call_args.args[1]
+        self.assertIn("Mini reject vì setup yếu.", message)
+        self.assertNotIn("AI WATCH:", message)
 
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_mini_pool_summary_skips_sample_symbols_when_filter_enabled(self, send_message) -> None:

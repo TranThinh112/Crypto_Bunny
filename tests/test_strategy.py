@@ -8,7 +8,7 @@ from crypto_trader.strategy import build_candidates
 
 
 class StrategyTest(TestCase):
-    def test_target_mode_changes_tp_sl_without_changing_win_probability(self) -> None:
+    def test_target_mode_changes_tp_sl_and_rewards_better_rr_probability(self) -> None:
         base_config = {
             "exchange": {"leverage": 25},
             "risk": {"order_usdt": 20},
@@ -68,7 +68,7 @@ class StrategyTest(TestCase):
         self.assertEqual(rr_candidate.stop_loss, 98.0)
         self.assertEqual(rr_candidate.take_profit, 104.0)
         self.assertEqual(rr_candidate.risk_reward, 2.0)
-        self.assertEqual(roi_candidate.win_probability_pct, rr_candidate.win_probability_pct)
+        self.assertGreater(rr_candidate.win_probability_pct or 0, roi_candidate.win_probability_pct or 0)
 
     def test_risk_reward_target_derives_take_profit_from_stop_distance(self) -> None:
         config = {
@@ -248,6 +248,7 @@ class StrategyTest(TestCase):
 
         self.assertEqual(with_frames[0].side, "long")
         self.assertGreater(with_frames[0].confidence, baseline[0].confidence)
+        self.assertGreaterEqual(with_frames[0].win_probability_pct or 0, 68.0)
         self.assertTrue(any("4H trend confirms long" in reason for reason in with_frames[0].reasons))
 
     def test_candlestick_patterns_boost_aligned_side(self) -> None:
@@ -312,6 +313,7 @@ class StrategyTest(TestCase):
 
         self.assertEqual(with_patterns[0].side, "long")
         self.assertGreater(with_patterns[0].confidence, baseline[0].confidence)
+        self.assertGreater(with_patterns[0].win_probability_pct or 0, baseline[0].win_probability_pct or 0)
         self.assertTrue(any("candlestick supports LONG" in reason for reason in with_patterns[0].reasons))
 
     def test_15m_reversal_patterns_help_broader_frame_analysis(self) -> None:

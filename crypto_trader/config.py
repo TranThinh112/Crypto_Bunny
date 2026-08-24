@@ -244,9 +244,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
         "probation_entry": {
             "enabled": True,
-            "min_win_probability_pct": 66.0,
-            "min_confidence": 78.0,
-            "min_risk_reward": 1.5,
+            "min_win_probability_pct": 65.0,
+            "min_confidence": 85.0,
+            "min_risk_reward": 2.0,
             "margin_usdt": 1.0,
         },
         "confidence_fallback": {

@@ -17,6 +17,7 @@ from crypto_trader.codex_features import close_trade_execution, record_trade_can
 from crypto_trader.models import RiskCheck, TradeCandidate
 from crypto_trader.notifier import telegram_command_list
 from crypto_trader.storage import get_journal_state, list_trade_execution_rows, save_market_scan_observations, set_journal_state
+from crypto_trader.trend_scan import TREND_WATCHLIST_STATE_KEY
 from crypto_trader.ui import (
     SCAN_TELEGRAM_SLOT_KEY,
     STARTUP_TELEGRAM_MESSAGE,
@@ -965,6 +966,67 @@ class UiTest(TestCase):
                 {"text": "🟡 Wait Slot", "callback_data": "view_wait_slot_notifications"},
             ],
         )
+
+    def test_trend_view_only_shows_trend_scan_watchlist(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text("mode: dry_run\n", encoding="utf-8")
+            config = load_config(config_path)
+            set_journal_state(
+                config,
+                TREND_WATCHLIST_STATE_KEY,
+                json.dumps(
+                    {
+                        "updated_at": "2026-08-25T02:00:00+07:00",
+                        "items": {
+                            "INJ/USDT:USDT|long": {
+                                "symbol": "INJ/USDT:USDT",
+                                "side": "long",
+                                "status": "watching",
+                                "source": "trend_scan",
+                                "watch_type": "trend",
+                                "trend_score": 68,
+                                "htf_trend_score": 70,
+                                "entry_readiness_score": 62,
+                            },
+                            "ONDO/USDT:USDT|long": {
+                                "symbol": "ONDO/USDT:USDT",
+                                "side": "long",
+                                "status": "watching",
+                                "source": "post_move_watch",
+                                "watch_type": "post_move",
+                                "trend_score": 80,
+                            },
+                        },
+                        "pending_confirmations": {
+                            "SUI/USDT:USDT|long": {
+                                "symbol": "SUI/USDT:USDT",
+                                "side": "long",
+                                "source": "trend_scan",
+                                "confirmation_count": 1,
+                                "required_confirmations": 2,
+                                "htf_trend_score": 64,
+                            },
+                            "GRASS/USDT:USDT|long": {
+                                "symbol": "GRASS/USDT:USDT",
+                                "side": "long",
+                                "source": "post_move_watch",
+                                "confirmation_count": 1,
+                                "required_confirmations": 2,
+                            },
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+
+            _, message, _ = _telegram_action_response(config, "view_trend_watchlist", config_path)
+
+        self.assertIn("Đang theo dõi: 1 cặp | Chờ xác nhận: 1", message)
+        self.assertIn("INJ/USDT:USDT", message)
+        self.assertIn("SUI/USDT:USDT", message)
+        self.assertNotIn("ONDO/USDT:USDT", message)
+        self.assertNotIn("GRASS/USDT:USDT", message)
 
     def test_telegram_setup_menu_has_three_setup_actions(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
