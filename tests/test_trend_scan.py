@@ -661,6 +661,7 @@ class TrendScanTest(TestCase):
 
         item = state["items"]["CAP/USDT:USDT|long"]
         self.assertEqual(item["status"], "approved_hold")
+        self.assertEqual(item["source_flow"], "trend_scan")
         self.assertEqual(item["block_type"], "temporary_block")
         self.assertEqual(item["priority_rewatch_ttl_minutes"], 30)
         send_message.assert_called_once()

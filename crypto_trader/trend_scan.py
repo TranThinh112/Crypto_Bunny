@@ -1671,6 +1671,7 @@ def activate_trend_trade_intent(setup: dict[str, Any], ai_review: dict[str, Any]
     return {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "enabled_for_execution": False,
+        "source_flow": "trend_scan",
         "status": "canceled" if cancel_checks["cancel"] else status,
         "trade_intent": {
             "symbol": setup.get("symbol"),
@@ -1687,10 +1688,12 @@ def activate_trend_trade_intent(setup: dict[str, Any], ai_review: dict[str, Any]
             "selected_setup_method": setup.get("selected_setup_method"),
             "risk_profile": "Reduced" if ai_review.get("setup_grade") in {"C", "D"} or _float(ai_review.get("entry_quality")) < 70 else "Normal",
             "source": "trend_watchlist",
+            "source_flow": "trend_scan",
             "status": "canceled" if cancel_checks["cancel"] else status,
         },
         "pending_plan": {
             "allowed": pending_allowed and not cancel_checks["cancel"],
+            "source_flow": "trend_scan",
             "ttl_minutes": ttl_minutes if pending_allowed else 0,
             "expires_at": expires_at,
             "cancel_now": cancel_checks["cancel"],
@@ -2052,6 +2055,7 @@ def upsert_trend_approved_hold_queue(
         "symbol": symbol,
         "side": side,
         "status": "approved_hold",
+        "source_flow": "trend_scan",
         "block_type": block_type,
         "block_reasons": reasons[:10],
         "block_resolved_reasons": resolved_reasons,
@@ -3053,6 +3057,7 @@ def upsert_trend_pending_plan(config: dict[str, Any], activation: dict[str, Any]
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "symbol": symbol,
             "side": side,
+            "source_flow": "trend_scan",
             "status": activation.get("status"),
             "enabled_for_execution": bool(activation.get("enabled_for_execution")),
             "trade_intent": intent,

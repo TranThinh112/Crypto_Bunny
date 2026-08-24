@@ -2161,12 +2161,18 @@ def _format_trend_watchlist_view(config: dict[str, Any]) -> str:
         state = {}
     raw_items = state.get("items") if isinstance(state.get("items"), dict) else {}
     raw_pending = state.get("pending_confirmations") if isinstance(state.get("pending_confirmations"), dict) else {}
-    items = {
+    trend_items = {
         key: item
         for key, item in raw_items.items()
         if isinstance(item, dict)
         and str(item.get("source") or "trend_scan") == "trend_scan"
         and str(item.get("watch_type") or "trend") == "trend"
+    }
+    post_move_items = {
+        key: item
+        for key, item in raw_items.items()
+        if isinstance(item, dict)
+        and (str(item.get("source") or "") == "post_move_watch" or str(item.get("watch_type") or "") == "post_move")
     }
     pending = {
         key: item
@@ -2174,24 +2180,21 @@ def _format_trend_watchlist_view(config: dict[str, Any]) -> str:
         if isinstance(item, dict) and str(item.get("source") or "trend_scan") == "trend_scan"
     }
     lines = [
-        "📈 Trend Scan Watchlist",
+        "📈 Trend Scan",
         f"Cập nhật: {_telegram_vn_time(config, state.get('updated_at'))}",
-        f"Đang theo dõi: {len(items)} cặp | Chờ xác nhận: {len(pending)}",
+        f"Trend: {len(trend_items)} | Sau sóng: {len(post_move_items)} | Chờ xác nhận: {len(pending)}",
     ]
-    if not items:
-        lines.append("Chưa có cặp nào trong watchlist trend scan.")
-    else:
-        sorted_items = sorted(
-            items.values(),
-            key=lambda item: float(item.get("trend_score") or item.get("htf_trend_score") or 0),
-            reverse=True,
-        )
-        for index, item in enumerate(sorted_items[:20], start=1):
+    def _append_watch_rows(title: str, rows: list[dict[str, Any]], *, branch: str) -> None:
+        lines.append("")
+        lines.append(title)
+        if not rows:
+            lines.append("Chưa có cặp nào.")
+            return
+        for index, item in enumerate(rows[:20], start=1):
             symbol = str(item.get("symbol") or "-")
             side = _telegram_side_label(item.get("side"))
             status = str(item.get("status") or "-")
             source = str(item.get("source") or item.get("watch_type") or "trend_scan")
-            branch = "Trend Scan"
             ttl_minutes = item.get("ttl_minutes")
             ttl_label = f"{_telegram_number(ttl_minutes)}p" if ttl_minutes is not None else "-"
             trend_score = _telegram_number(item.get("trend_score"))
@@ -2210,9 +2213,25 @@ def _format_trend_watchlist_view(config: dict[str, Any]) -> str:
                     f"Nguồn: {source} | Hết hạn: {expires_at}",
                 ]
             )
+
+    sorted_trend_items = sorted(
+        trend_items.values(),
+        key=lambda item: float(item.get("trend_score") or item.get("htf_trend_score") or 0),
+        reverse=True,
+    )
+    sorted_post_move_items = sorted(
+        post_move_items.values(),
+        key=lambda item: float(item.get("trend_score") or item.get("htf_trend_score") or 0),
+        reverse=True,
+    )
+    if not sorted_trend_items and not sorted_post_move_items:
+        lines.append("Chưa có cặp nào trong watchlist trend scan.")
+    else:
+        _append_watch_rows("Trend:", sorted_trend_items, branch="Trend")
+        _append_watch_rows("Sau sóng:", sorted_post_move_items, branch="Sau sóng")
     if pending:
         lines.append("")
-        lines.append("⏳ Chờ xác nhận scan kế tiếp:")
+        lines.append("⏳ Chờ xác nhận:")
         for index, item in enumerate(list(pending.values())[:10], start=1):
             lines.append(
                 f"{index}. {item.get('symbol') or '-'} | {_telegram_side_label(item.get('side'))} | "

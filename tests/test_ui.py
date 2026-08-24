@@ -967,7 +967,7 @@ class UiTest(TestCase):
             ],
         )
 
-    def test_trend_view_only_shows_trend_scan_watchlist(self) -> None:
+    def test_trend_view_splits_trend_and_post_move_watchlists(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             config_path = Path(tmpdir) / "config.yaml"
             config_path.write_text("mode: dry_run\n", encoding="utf-8")
@@ -1022,10 +1022,12 @@ class UiTest(TestCase):
 
             _, message, _ = _telegram_action_response(config, "view_trend_watchlist", config_path)
 
-        self.assertIn("Đang theo dõi: 1 cặp | Chờ xác nhận: 1", message)
+        self.assertIn("Trend: 1 | Sau sóng: 1 | Chờ xác nhận: 1", message)
+        self.assertIn("Trend:", message)
+        self.assertIn("Sau sóng:", message)
         self.assertIn("INJ/USDT:USDT", message)
+        self.assertIn("ONDO/USDT:USDT", message)
         self.assertIn("SUI/USDT:USDT", message)
-        self.assertNotIn("ONDO/USDT:USDT", message)
         self.assertNotIn("GRASS/USDT:USDT", message)
 
     def test_telegram_setup_menu_has_three_setup_actions(self) -> None:
