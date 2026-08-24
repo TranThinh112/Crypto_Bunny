@@ -859,11 +859,18 @@ def _spread_setup_check(config: dict[str, Any], candidate: TradeCandidate) -> di
 def _news_setup_check(config: dict[str, Any], candidate: TradeCandidate) -> dict[str, Any]:
     threshold = float(config.get("risk", {}).get("news_conflict_threshold", 2.0) or 2.0)
     score = _round_optional(candidate.news_score, 2)
-    severity = abs(float(candidate.news_score or 0.0))
+    try:
+        severity = abs(float(candidate.news_score or 0.0))
+    except (TypeError, ValueError):
+        severity = 0.0
+    try:
+        news_count = max(0, int(candidate.news_count or 0))
+    except (TypeError, ValueError):
+        news_count = 0
     if severity >= threshold:
         status = "conflict"
         acceptable = False
-    elif candidate.news_count > 0:
+    elif news_count > 0:
         status = "monitored"
         acceptable = True
     else:
@@ -873,7 +880,7 @@ def _news_setup_check(config: dict[str, Any], candidate: TradeCandidate) -> dict
         "status": status,
         "acceptable": acceptable,
         "news_score": score,
-        "news_count": int(candidate.news_count or 0),
+        "news_count": news_count,
         "conflict_threshold": round(threshold, 2),
     }
 

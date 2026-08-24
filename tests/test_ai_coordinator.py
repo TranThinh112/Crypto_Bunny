@@ -118,6 +118,18 @@ class AiCoordinatorTest(TestCase):
         self.assertEqual(compact["same_symbol_pending"]["LIT/USDT:USDT"]["sides"], ["long", "short"])
         self.assertEqual(compact["same_symbol_pending"]["LIT/USDT:USDT"]["statuses"], ["LC_OKX", "WAIT_SLOT"])
 
+    def test_candidate_summary_treats_missing_news_count_as_clean(self) -> None:
+        config = self._config()
+        candidate = _candidate("ETC/USDT:USDT", side="short")
+        candidate.news_count = None  # type: ignore[assignment]
+        candidate.news_score = None  # type: ignore[assignment]
+
+        summary = _candidate_summary(candidate, config=config)
+
+        news_check = summary["setup_checks"]["news"]
+        self.assertEqual(news_check["status"], "clean")
+        self.assertEqual(news_check["news_count"], 0)
+
     def test_okx_ai_defers_new_vt_when_internal_lc_exists(self) -> None:
         config = self._config()
         save_pending_order(config, _candidate("BTC/USDT:USDT"), "limit-1", journal_id=12)
