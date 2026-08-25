@@ -180,6 +180,7 @@ def _adaptive_ai_ready_gate(
     htf_score: float,
     entry_side: str,
     entry_score: float,
+    entry_volume_ratio: float = 0.0,
 ) -> dict[str, Any]:
     internal = config.get("ai", {}).get("internal", {}) if isinstance(config.get("ai"), dict) else {}
     entry_setup_threshold = _float(internal.get("trend_scan_entry_setup_threshold"), 55.0)
@@ -189,16 +190,35 @@ def _adaptive_ai_ready_gate(
     fast_entry_enabled = bool(internal.get("trend_scan_fast_entry_enabled", True))
     fast_htf_threshold = _float(internal.get("trend_scan_fast_entry_htf_threshold"), 68.0)
     fast_entry_threshold = _float(internal.get("trend_scan_fast_entry_score_threshold"), 52.0)
+    strong_continuation_enabled = bool(internal.get("trend_scan_strong_continuation_enabled", True))
+    strong_continuation_htf = _float(internal.get("trend_scan_strong_continuation_htf_threshold"), 78.0)
+    strong_continuation_entry = _float(internal.get("trend_scan_strong_continuation_entry_score"), 35.0)
+    strong_continuation_volume = _float(internal.get("trend_scan_strong_continuation_volume_ratio"), 1.2)
     enabled = bool(internal.get("trend_scan_adaptive_ai_ready_enabled", True))
     aligned = watch and htf_side in {"long", "short"} and entry_side == htf_side
+    strong_continuation_ready = (
+        strong_continuation_enabled
+        and aligned
+        and htf_score >= strong_continuation_htf
+        and entry_score >= strong_continuation_entry
+        and entry_volume_ratio >= strong_continuation_volume
+    )
     entry_ready = aligned and entry_score >= entry_setup_threshold
-    if not entry_ready:
+    if not entry_ready and not strong_continuation_ready:
         return {
             "entry_ready": False,
             "ai_ready": False,
             "ai_gate_mode": "blocked",
             "ai_gate_reason": "entry_not_aligned_or_below_setup_threshold",
             "effective_entry_ai_threshold": entry_ai_threshold,
+        }
+    if strong_continuation_ready and entry_score < entry_setup_threshold:
+        return {
+            "entry_ready": True,
+            "ai_ready": True,
+            "ai_gate_mode": "strong_continuation",
+            "ai_gate_reason": "strong_htf_volume_continuation_lane_allows_small_size_review",
+            "effective_entry_ai_threshold": strong_continuation_entry,
         }
     if entry_score >= entry_ai_threshold:
         return {
@@ -243,6 +263,7 @@ def _trend_watch_decision(config: dict[str, Any], *, htf: dict[str, Any], entry:
     htf_score = _float(htf.get("score"))
     entry_side = str(entry.get("side") or "mixed")
     entry_score = _float(entry.get("score"))
+    entry_volume_ratio = max((_float(frame.get("volume_ratio")) for frame in entry.get("frames", []) if isinstance(frame, dict)), default=0.0)
     watch = htf_side in {"long", "short"} and htf_score >= htf_threshold
     ai_gate = _adaptive_ai_ready_gate(
         config,
@@ -251,6 +272,7 @@ def _trend_watch_decision(config: dict[str, Any], *, htf: dict[str, Any], entry:
         htf_score=htf_score,
         entry_side=entry_side,
         entry_score=entry_score,
+        entry_volume_ratio=entry_volume_ratio,
     )
     entry_ready = bool(ai_gate["entry_ready"])
     ai_ready = bool(ai_gate["ai_ready"])
@@ -300,6 +322,10 @@ def _trend_watch_decision(config: dict[str, Any], *, htf: dict[str, Any], entry:
             "fast_entry_enabled": bool(internal.get("trend_scan_fast_entry_enabled", True)),
             "fast_entry_htf": _float(internal.get("trend_scan_fast_entry_htf_threshold"), 68.0),
             "fast_entry_score": _float(internal.get("trend_scan_fast_entry_score_threshold"), 52.0),
+            "strong_continuation_enabled": bool(internal.get("trend_scan_strong_continuation_enabled", True)),
+            "strong_continuation_htf": _float(internal.get("trend_scan_strong_continuation_htf_threshold"), 78.0),
+            "strong_continuation_entry": _float(internal.get("trend_scan_strong_continuation_entry_score"), 35.0),
+            "strong_continuation_volume": _float(internal.get("trend_scan_strong_continuation_volume_ratio"), 1.2),
             "countertrend_entry": countertrend_entry_threshold,
         },
         "ai_gate_mode": ai_gate["ai_gate_mode"],
@@ -1175,6 +1201,9 @@ def _entry_action_from_setup_inputs(
     overextended_threshold = _float(internal.get("trend_setup_overextended_score_threshold"), 58.0)
     hot_rsi_threshold = _float(internal.get("trend_setup_hot_rsi_threshold"), 72.0)
     ema_overextended_pct = _float(internal.get("trend_setup_price_vs_ema_overextended_pct"), 3.0)
+    strong_continuation_enabled = bool(internal.get("trend_scan_strong_continuation_enabled", True))
+    strong_continuation_volume = _float(internal.get("trend_scan_strong_continuation_volume_ratio"), 1.2)
+    strong_continuation_quality = _float(internal.get("trend_scan_strong_continuation_entry_score"), 35.0) + 25.0
     reasons: list[str] = []
     countertrend_side = None
     no_chase = False
@@ -1188,7 +1217,17 @@ def _entry_action_from_setup_inputs(
         if sr_context.get("near_resistance"):
             reasons.append("near_resistance")
         no_chase = bool(reasons)
-        if no_chase and volume_ratio >= 0.9 and (breakout_quality >= 55 or pullback_quality < 58):
+        if (
+            no_chase
+            and entry_type == "continuation"
+            and strong_continuation_enabled
+            and volume_ratio >= strong_continuation_volume
+            and breakout_quality >= strong_continuation_quality
+        ):
+            action = "READY_LONG_CONTINUATION"
+            reasons.append("strong_continuation_volume_confirmed")
+            no_chase = False
+        elif no_chase and volume_ratio >= 0.9 and (breakout_quality >= 55 or pullback_quality < 58):
             countertrend_side = "short"
             action = "REVIEW_COUNTERTREND_SHORT"
         elif no_chase:
@@ -1205,7 +1244,17 @@ def _entry_action_from_setup_inputs(
         if sr_context.get("near_support"):
             reasons.append("near_support")
         no_chase = bool(reasons)
-        if no_chase and volume_ratio >= 0.9 and (breakout_quality >= 55 or pullback_quality < 58):
+        if (
+            no_chase
+            and entry_type == "continuation"
+            and strong_continuation_enabled
+            and volume_ratio >= strong_continuation_volume
+            and breakout_quality >= strong_continuation_quality
+        ):
+            action = "READY_SHORT_CONTINUATION"
+            reasons.append("strong_continuation_volume_confirmed")
+            no_chase = False
+        elif no_chase and volume_ratio >= 0.9 and (breakout_quality >= 55 or pullback_quality < 58):
             countertrend_side = "long"
             action = "REVIEW_COUNTERTREND_LONG"
         elif no_chase:
@@ -1731,6 +1780,11 @@ def _setup_to_candidate(config: dict[str, Any], setup: dict[str, Any], ai_review
     margin_usdt = _float(config.get("position_sizing", {}).get("base_margin_usdt"), 0.0)
     if margin_usdt <= 0:
         margin_usdt = _float(config.get("risk", {}).get("order_usdt"), 0.0) / leverage
+    internal = config.get("ai", {}).get("internal", {}) if isinstance(config.get("ai"), dict) else {}
+    entry_action = str(setup.get("entry_action") or "")
+    if setup.get("entry_type") == "continuation" and entry_action.endswith("_CONTINUATION"):
+        multiplier = _clamp(_float(internal.get("trend_scan_strong_continuation_size_multiplier"), 0.4), 0.1, 1.0)
+        margin_usdt *= multiplier
     order_usdt = max(0.0, margin_usdt * leverage)
     entry_quality = _float(ai_review.get("entry_quality"), _float(setup.get("pullback_quality"), 0.0))
     continuation = _float(ai_review.get("continuation_score"), _float(setup.get("breakout_quality"), 0.0))

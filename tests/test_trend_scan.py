@@ -125,6 +125,58 @@ class TrendScanTest(TestCase):
         self.assertEqual(decision["ai_gate_mode"], "waiting")
         self.assertEqual(decision["entry_action"], "SETUP_LONG_REVIEW")
 
+    def test_strong_continuation_allows_small_size_ai_review_before_pullback(self) -> None:
+        decision = _trend_watch_decision(
+            self._config(),
+            htf={"side": "long", "score": 81.0},
+            entry={"side": "long", "score": 36.0, "frames": [{"volume_ratio": 1.35}]},
+            legacy_side="long",
+            legacy_score=81.0,
+        )
+
+        self.assertTrue(decision["entry_ready"])
+        self.assertTrue(decision["ai_ready"])
+        self.assertEqual(decision["ai_gate_mode"], "strong_continuation")
+        self.assertEqual(decision["entry_action"], "READY_LONG")
+
+    def test_strong_continuation_still_waits_without_volume_confirmation(self) -> None:
+        decision = _trend_watch_decision(
+            self._config(),
+            htf={"side": "long", "score": 81.0},
+            entry={"side": "long", "score": 36.0, "frames": [{"volume_ratio": 0.9}]},
+            legacy_side="long",
+            legacy_score=81.0,
+        )
+
+        self.assertFalse(decision["entry_ready"])
+        self.assertFalse(decision["ai_ready"])
+        self.assertEqual(decision["ai_gate_mode"], "blocked")
+        self.assertEqual(decision["entry_action"], "WAIT_PULLBACK_LONG")
+
+    def test_continuation_candidate_uses_reduced_size_multiplier(self) -> None:
+        config = self._config()
+        config["exchange"] = {"leverage": 10}
+        config["position_sizing"] = {"base_margin_usdt": 10}
+        config["ai"]["internal"]["trend_scan_strong_continuation_size_multiplier"] = 0.4
+        candidate = _setup_to_candidate(
+            config,
+            {
+                "symbol": "CAP/USDT:USDT",
+                "side": "long",
+                "entry_type": "continuation",
+                "entry_action": "READY_LONG_CONTINUATION",
+                "entry_price": 1.0,
+                "stop_loss": 0.98,
+                "take_profit": 1.04,
+                "risk_reward": 2.0,
+            },
+            {"gpt_confidence": 75, "entry_quality": 65, "continuation_score": 72},
+        )
+
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate.margin_usdt, 4)
+        self.assertEqual(candidate.order_usdt, 40)
+
     def test_ai_review_uses_returned_gpt_confidence_without_calculating(self) -> None:
         setup = {"symbol": "CAP/USDT:USDT", "side": "long", "entry_price": 1, "stop_loss": 0.98, "take_profit": 1.05, "risk_reward": 2.5}
         normalized = normalize_ai_setup_review(
