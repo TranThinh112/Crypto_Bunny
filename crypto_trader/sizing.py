@@ -6,7 +6,7 @@ from typing import Any
 
 from .market import create_exchange
 from .models import TradeCandidate
-from .storage import get_journal_state, set_journal_state, storage_stats
+from .storage import get_journal_state, get_trading_system_state_row, set_journal_state, storage_stats
 
 
 STATE_KEY = "position_sizing:recovery_cycle"
@@ -468,6 +468,51 @@ def _clear_hard_recovery_state(state: dict[str, Any]) -> None:
     state["soft_return_pnl_usdt"] = None
     state["hard_soft_recovered_at"] = None
 
+def _canonical_risk_payload(config: dict[str, Any]) -> dict[str, Any]:
+    try:
+        row = get_trading_system_state_row(config)
+    except Exception:
+        return {}
+    if not isinstance(row, dict):
+        return {}
+    try:
+        payload = json.loads(str(row.get("payload_json") or "{}"))
+    except (TypeError, json.JSONDecodeError):
+        payload = {}
+    return payload if isinstance(payload, dict) else {}
+
+def _reconcile_state_with_canonical_risk(
+    config: dict[str, Any],
+    state: dict[str, Any],
+    settings: dict[str, Any],
+) -> list[str]:
+    payload = _canonical_risk_payload(config)
+    mode = str(payload.get("recoveryMode") or "").strip().upper()
+    if mode != "NORMAL":
+        return []
+    cycle_pnl = _float(payload.get("recoveryCyclePnlUsdt"))
+    target_profit = float(settings["target_profit_usdt"])
+    if cycle_pnl is None or cycle_pnl + 1e-9 < target_profit:
+        return []
+    if (
+        str(state.get("recovery_band") or "").lower() == "hard"
+        or bool(state.get("blocked"))
+        or state.get("hard_peak_loss_usdt") is not None
+        or state.get("soft_return_pnl_usdt") is not None
+    ):
+        state["cycle_pnl_usdt"] = 0.0
+        state["recovery_step"] = 0
+        state["next_margin_usdt"] = round(float(settings["base_margin_usdt"]), 4)
+        state["blocked"] = False
+        state["block_reason"] = None
+        _clear_hard_recovery_state(state)
+        state["last_loss_symbol"] = None
+        state["last_loss_side"] = None
+        state["last_loss_key"] = None
+        state["loss_streak"] = 0
+        return ["Recovered sizing state was synced to canonical NORMAL risk mode"]
+    return []
+
 
 def _set_loss_streak_fields(state: dict[str, Any], pnl: float, symbol: str, side: str, key: str) -> None:
     if pnl < 0:
@@ -620,6 +665,9 @@ def _update_cycle_state(config: dict[str, Any], settings: dict[str, Any]) -> tup
         closed = _closed_positions(config, settings)
     except Exception as exc:
         notes.append(f"Recovery history unavailable: {exc}")
+        notes.extend(_reconcile_state_with_canonical_risk(config, state, settings))
+        if notes and notes[-1].startswith("Recovered sizing state"):
+            _save_state(config, state)
         return state, notes
 
     bootstrap_configured_history = bool(state.get("_bootstrap_configured_history"))
@@ -630,12 +678,14 @@ def _update_cycle_state(config: dict[str, Any], settings: dict[str, Any]) -> tup
     ):
         state["processed_keys"] = [str(row["key"]) for row in closed]
         notes.append("Recovery cycle initialized; existing closed positions marked as processed")
+        notes.extend(_reconcile_state_with_canonical_risk(config, state, settings))
         _save_state(config, state)
         return state, notes
 
     if config.get("position_sizing", {}).get("cycle_start_at"):
         state = _refresh_state_from_closed_positions(state, settings, closed)
         notes.append("Recovery cycle refreshed from OKX history window")
+        notes.extend(_reconcile_state_with_canonical_risk(config, state, settings))
         _save_state(config, state)
         return state, notes
 
@@ -658,6 +708,7 @@ def _update_cycle_state(config: dict[str, Any], settings: dict[str, Any]) -> tup
         state["last_processed_key"] = key
         processed.add(key)
 
+    notes.extend(_reconcile_state_with_canonical_risk(config, state, settings))
     _save_state(config, state)
     return state, notes
 

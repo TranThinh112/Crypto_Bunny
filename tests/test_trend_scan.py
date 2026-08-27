@@ -6,6 +6,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from crypto_trader.trend_scan import (
+    activate_trend_trade_intent,
     build_entry_proposal,
     _review_prompt_package,
     _trend_watch_decision,
@@ -25,6 +26,8 @@ from crypto_trader.trend_scan import (
 class TrendScanTest(TestCase):
     def _config(self) -> dict:
         return {
+            "exchange": {"leverage": 10},
+            "position_sizing": {"base_margin_usdt": 2.0, "flexible_small_risk_percent": 0.35},
             "ai": {
                 "enabled": True,
                 "allow_api_calls": True,
@@ -32,9 +35,87 @@ class TrendScanTest(TestCase):
                     "trend_setup_review_ai_enabled": True,
                     "trend_setup_review_ai_cooldown_seconds": 900,
                     "model": "gpt-5.4-mini",
+                    "trend_scan_flexible_entry_enabled": True,
+                    "trend_scan_flexible_entry_htf_threshold": 60.0,
+                    "trend_scan_flexible_entry_score_threshold": 40.0,
+                    "trend_scan_flexible_entry_min_rr": 1.5,
+                    "trend_scan_flexible_entry_min_confidence": 70.0,
+                    "trend_scan_flexible_entry_min_entry_quality": 55.0,
+                    "trend_scan_flexible_entry_min_continuation": 55.0,
+                    "trend_scan_flexible_entry_size_multiplier": 0.35,
+                    "trend_scan_flexible_entry_ttl_minutes": 45,
                 },
             }
         }
+
+    def test_ai_review_can_be_promoted_to_flexible_small_pending(self) -> None:
+        setup = {
+            "symbol": "ENA/USDT:USDT",
+            "side": "long",
+            "strategy": "TrendFollowing",
+            "entry_type": "pullback",
+            "entry_price": 0.5,
+            "stop_loss": 0.49,
+            "take_profit": 0.53,
+            "risk_reward": 1.8,
+            "setup_state": "ready_for_ai_review",
+            "trend_score": 61.0,
+            "htf_trend_score": 61.0,
+            "entry_readiness_score": 42.0,
+            "setup_quality_score": 58.0,
+            "warnings": [],
+            "overextended": False,
+            "no_chase": False,
+        }
+        review = {
+            "decision": "REVIEW",
+            "setup_grade": "D",
+            "gpt_confidence": 74,
+            "entry_quality": 58,
+            "continuation_score": 61,
+            "pending_order_allowed": False,
+        }
+
+        activation = activate_trend_trade_intent(setup, review, self._config())
+
+        self.assertEqual(activation["status"], "pending_review_small")
+        self.assertEqual(activation["trade_intent"]["approval_tier"], "APPROVE_SMALL")
+        self.assertEqual(activation["trade_intent"]["risk_profile"], "FlexibleSmall")
+        self.assertTrue(activation["pending_plan"]["allowed"])
+        self.assertEqual(activation["pending_plan"]["ttl_minutes"], 45)
+
+    def test_flexible_small_does_not_chase_near_resistance(self) -> None:
+        setup = {
+            "symbol": "CHIP/USDT:USDT",
+            "side": "long",
+            "entry_type": "pullback",
+            "entry_price": 0.04,
+            "stop_loss": 0.039,
+            "take_profit": 0.043,
+            "risk_reward": 1.8,
+            "setup_state": "review_only",
+            "trend_score": 66.0,
+            "htf_trend_score": 66.0,
+            "entry_readiness_score": 55.0,
+            "warnings": ["no_chase_entry"],
+            "overextended": False,
+            "no_chase": True,
+            "entry_action_reason": ["near_resistance"],
+        }
+        review = {
+            "decision": "REVIEW",
+            "setup_grade": "C",
+            "gpt_confidence": 82,
+            "entry_quality": 70,
+            "continuation_score": 70,
+            "pending_order_allowed": False,
+        }
+
+        activation = activate_trend_trade_intent(setup, review, self._config())
+
+        self.assertEqual(activation["status"], "pending_review")
+        self.assertFalse(activation["pending_plan"]["allowed"])
+        self.assertIn("near_resistance_no_chase", activation["pending_plan"]["flexible_blockers"])
 
     def test_trend_setup_review_records_only_enriched_notification(self) -> None:
         setup = {

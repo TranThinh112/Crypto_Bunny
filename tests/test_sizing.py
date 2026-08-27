@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -522,6 +523,56 @@ class SizingTest(TestCase):
         self.assertEqual(result["margin_usdt"], 0.0)
         self.assertEqual(candidates[0].order_usdt, 0.0)
         self.assertIn("cycle loss limit", result["block_reason"])
+
+    def test_apply_position_sizing_clears_stale_hard_when_canonical_risk_is_normal(self) -> None:
+        config = self._config()
+        stale_state = {
+            "cycle_start_at": None,
+            "cycle_pnl_usdt": -20.0,
+            "recovery_step": 4,
+            "recovery_band": "hard",
+            "next_margin_usdt": 0.0,
+            "processed_keys": [],
+            "processed_pnl_by_key": {},
+            "blocked": True,
+            "block_reason": "Hard recovery remains active until 50% of the hard loss is recovered",
+            "hard_started_at": datetime.now(timezone.utc).isoformat(),
+            "hard_start_pnl_usdt": -20.0,
+            "hard_peak_loss_usdt": -20.0,
+            "soft_return_pnl_usdt": -10.0,
+            "hard_soft_recovered_at": None,
+            "last_processed_key": "old-loss",
+            "last_realized_net_pnl": -20.0,
+            "last_loss_symbol": "BTC/USDT:USDT",
+            "last_loss_side": "long",
+            "last_loss_key": "old-loss",
+            "loss_streak": 2,
+        }
+        set_journal_state(config, "position_sizing:recovery_cycle", json.dumps(stale_state))
+        canonical_row = {
+            "payload_json": json.dumps(
+                {
+                    "recoveryMode": "NORMAL",
+                    "recoveryCyclePnlUsdt": 0.98,
+                }
+            )
+        }
+        candidates = [_candidate()]
+
+        with patch("crypto_trader.sizing.create_exchange", return_value=FakeExchange([])), patch(
+            "crypto_trader.sizing.get_trading_system_state_row",
+            return_value=canonical_row,
+        ):
+            result = apply_position_sizing(config, candidates)
+
+        self.assertFalse(result["blocked"])
+        self.assertEqual(result["recovery_band"], "normal")
+        self.assertEqual(result["cycle_pnl_usdt"], 0.0)
+        self.assertGreater(candidates[0].order_usdt, 0.0)
+        self.assertFalse(any("Hard recovery remains active" in warning for warning in candidates[0].warnings))
+        state = json.loads(get_journal_state(config, "position_sizing:recovery_cycle") or "{}")
+        self.assertEqual(state["recovery_band"], "normal")
+        self.assertFalse(state["blocked"])
 
     def test_recovery_cycle_blocks_when_required_margin_exceeds_cap(self) -> None:
         config = self._config()

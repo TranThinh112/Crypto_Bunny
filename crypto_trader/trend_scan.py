@@ -1706,12 +1706,89 @@ def normalize_ai_setup_review(review: dict[str, Any], setup: dict[str, Any]) -> 
     }
 
 
-def activate_trend_trade_intent(setup: dict[str, Any], ai_review: dict[str, Any]) -> dict[str, Any]:
+def _flexible_entry_settings(config: dict[str, Any] | None) -> dict[str, Any]:
+    internal = ((config or {}).get("ai", {}) or {}).get("internal", {}) if isinstance((config or {}).get("ai"), dict) else {}
+    return {
+        "enabled": bool(internal.get("trend_scan_flexible_entry_enabled", True)),
+        "htf_threshold": _float(internal.get("trend_scan_flexible_entry_htf_threshold"), 60.0),
+        "entry_threshold": _float(internal.get("trend_scan_flexible_entry_score_threshold"), 40.0),
+        "min_rr": _float(internal.get("trend_scan_flexible_entry_min_rr"), 1.5),
+        "min_confidence": _float(internal.get("trend_scan_flexible_entry_min_confidence"), 70.0),
+        "min_entry_quality": _float(internal.get("trend_scan_flexible_entry_min_entry_quality"), 55.0),
+        "min_continuation": _float(internal.get("trend_scan_flexible_entry_min_continuation"), 55.0),
+        "ttl_minutes": max(5, int(internal.get("trend_scan_flexible_entry_ttl_minutes", 45) or 45)),
+        "size_multiplier": _clamp(_float(internal.get("trend_scan_flexible_entry_size_multiplier"), 0.35), 0.1, 1.0),
+    }
+
+def _flexible_review_small_plan(
+    config: dict[str, Any] | None,
+    setup: dict[str, Any],
+    ai_review: dict[str, Any],
+) -> dict[str, Any]:
+    settings = _flexible_entry_settings(config)
+    blockers: list[str] = []
+    if not settings["enabled"]:
+        blockers.append("flexible_entry_disabled")
+    if str(ai_review.get("decision") or "").upper() != "REVIEW":
+        blockers.append("ai_decision_not_review")
+    if setup.get("setup_state") == "blocked":
+        blockers.append("setup_blocked")
+    warnings = {str(item) for item in setup.get("warnings") or []}
+    if warnings & {"missing_entry_or_side", "risk_reward_too_low"}:
+        blockers.append("hard_setup_warning")
+    rr = _float(setup.get("risk_reward"))
+    if rr < settings["min_rr"]:
+        blockers.append("rr_below_flexible_min")
+    trend_score = _float(setup.get("htf_trend_score"), _float(setup.get("trend_score")))
+    if trend_score < settings["htf_threshold"]:
+        blockers.append("trend_below_flexible_min")
+    entry_score = _float(setup.get("entry_readiness_score"), _float(setup.get("setup_quality_score")))
+    if entry_score < settings["entry_threshold"]:
+        blockers.append("entry_below_flexible_min")
+    confidence = _float(ai_review.get("gpt_confidence"), 0.0)
+    if confidence < settings["min_confidence"]:
+        blockers.append("confidence_below_flexible_min")
+    entry_quality = _float(ai_review.get("entry_quality"), _float(setup.get("pullback_quality")))
+    if entry_quality < settings["min_entry_quality"]:
+        blockers.append("entry_quality_below_flexible_min")
+    continuation = _float(ai_review.get("continuation_score"), _float(setup.get("breakout_quality")))
+    if continuation < settings["min_continuation"]:
+        blockers.append("continuation_below_flexible_min")
+    if bool(setup.get("overextended")) and _float(setup.get("overextended_score")) >= 85.0:
+        blockers.append("severely_overextended")
+    reason_text = " ".join(str(item) for item in setup.get("entry_action_reason") or []).lower()
+    if bool(setup.get("no_chase")) and "near_resistance" in reason_text:
+        blockers.append("near_resistance_no_chase")
+    reasons = []
+    if not blockers:
+        reasons = [
+            f"trend {trend_score:.2f} >= {settings['htf_threshold']:.2f}",
+            f"entry {entry_score:.2f} >= {settings['entry_threshold']:.2f}",
+            f"RR {rr:.2f} >= {settings['min_rr']:.2f}",
+            f"AI REVIEW confidence {confidence:.2f} >= {settings['min_confidence']:.2f}",
+        ]
+    return {
+        **settings,
+        "eligible": not blockers,
+        "blockers": blockers,
+        "reasons": reasons,
+        "approval_tier": "APPROVE_SMALL" if not blockers else "REVIEW_WAIT",
+    }
+
+def activate_trend_trade_intent(
+    setup: dict[str, Any],
+    ai_review: dict[str, Any],
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     decision = str(ai_review.get("decision") or "").upper()
-    status = "approved_for_risk" if decision == "APPROVE" else "pending_review" if decision == "REVIEW" else "rejected"
-    pending_allowed = decision == "REVIEW" and bool(ai_review.get("pending_order_allowed"))
+    flexible_plan = _flexible_review_small_plan(config, setup, ai_review)
+    flexible_small = bool(flexible_plan.get("eligible"))
+    status = "approved_for_risk" if decision == "APPROVE" else "pending_review_small" if flexible_small else "pending_review" if decision == "REVIEW" else "rejected"
+    pending_allowed = decision == "REVIEW" and (bool(ai_review.get("pending_order_allowed")) or flexible_small)
     ttl_minutes = 60
-    if pending_allowed and setup.get("entry_type") == "breakout":
+    if flexible_small:
+        ttl_minutes = int(flexible_plan["ttl_minutes"])
+    elif pending_allowed and setup.get("entry_type") == "breakout":
         ttl_minutes = 30
     elif pending_allowed:
         ttl_minutes = 90
@@ -1735,7 +1812,9 @@ def activate_trend_trade_intent(setup: dict[str, Any], ai_review: dict[str, Any]
             "local_setup_quality_score": setup.get("setup_quality_score"),
             "local_setup_quality_grade": setup.get("setup_quality_grade"),
             "selected_setup_method": setup.get("selected_setup_method"),
-            "risk_profile": "Reduced" if ai_review.get("setup_grade") in {"C", "D"} or _float(ai_review.get("entry_quality")) < 70 else "Normal",
+            "risk_profile": "FlexibleSmall" if flexible_small else "Reduced" if ai_review.get("setup_grade") in {"C", "D"} or _float(ai_review.get("entry_quality")) < 70 else "Normal",
+            "approval_tier": "APPROVE_FULL" if decision == "APPROVE" else flexible_plan["approval_tier"] if decision == "REVIEW" else "NO_TRADE",
+            "size_multiplier": flexible_plan["size_multiplier"] if flexible_small else 1.0,
             "source": "trend_watchlist",
             "source_flow": "trend_scan",
             "status": "canceled" if cancel_checks["cancel"] else status,
@@ -1743,6 +1822,10 @@ def activate_trend_trade_intent(setup: dict[str, Any], ai_review: dict[str, Any]
         "pending_plan": {
             "allowed": pending_allowed and not cancel_checks["cancel"],
             "source_flow": "trend_scan",
+            "approval_tier": "APPROVE_FULL" if decision == "APPROVE" else flexible_plan["approval_tier"] if decision == "REVIEW" else "NO_TRADE",
+            "flexible_small": flexible_small,
+            "flexible_reasons": flexible_plan["reasons"],
+            "flexible_blockers": flexible_plan["blockers"],
             "ttl_minutes": ttl_minutes if pending_allowed else 0,
             "expires_at": expires_at,
             "cancel_now": cancel_checks["cancel"],
@@ -1782,6 +1865,10 @@ def _setup_to_candidate(config: dict[str, Any], setup: dict[str, Any], ai_review
         margin_usdt = _float(config.get("risk", {}).get("order_usdt"), 0.0) / leverage
     internal = config.get("ai", {}).get("internal", {}) if isinstance(config.get("ai"), dict) else {}
     entry_action = str(setup.get("entry_action") or "")
+    approval_tier = str(ai_review.get("approval_tier") or setup.get("approval_tier") or "").upper()
+    if approval_tier == "APPROVE_SMALL":
+        multiplier = _clamp(_float(internal.get("trend_scan_flexible_entry_size_multiplier"), 0.35), 0.1, 1.0)
+        margin_usdt *= multiplier
     if setup.get("entry_type") == "continuation" and entry_action.endswith("_CONTINUATION"):
         multiplier = _clamp(_float(internal.get("trend_scan_strong_continuation_size_multiplier"), 0.4), 0.1, 1.0)
         margin_usdt *= multiplier
@@ -2943,15 +3030,21 @@ def run_trend_auto_shadow_reviews(config: dict[str, Any], watchlist: dict[str, A
             )
             continue
         try:
+            review_row = dict(row)
+            for key in ("trend_score", "htf_trend_score", "entry_readiness_score"):
+                if item.get(key) is not None:
+                    review_row[key] = item.get(key)
             result = build_trend_setup_review_flow(
                 config,
-                row,
+                review_row,
                 call_ai=call_ai,
                 notify_telegram=call_ai,
                 notification_context=_watchlist_review_notification_context(config, item),
             )
             setup = result.get("setup_proposal") if isinstance(result.get("setup_proposal"), dict) else {}
             ai_review = result.get("ai_review") if isinstance(result.get("ai_review"), dict) else {}
+            activation = result.get("activation") if isinstance(result.get("activation"), dict) else {}
+            pending_plan = activation.get("pending_plan") if isinstance(activation.get("pending_plan"), dict) else {}
             if call_ai:
                 _save_watchlist_ai_review_state(
                     config,
@@ -2972,6 +3065,9 @@ def run_trend_auto_shadow_reviews(config: dict[str, Any], watchlist: dict[str, A
                     "entry_price": setup.get("entry_price"),
                     "entry_action": setup.get("entry_action"),
                     "setup_state": setup.get("setup_state"),
+                    "approval_tier": pending_plan.get("approval_tier"),
+                    "flexible_small": pending_plan.get("flexible_small"),
+                    "flexible_blockers": pending_plan.get("flexible_blockers"),
                     "risk_approved": ((result.get("risk_capital_shadow") or {}).get("risk") or {}).get("approved"),
                     "position_review": (result.get("position_review_shadow") or {}).get("decision"),
                 }
@@ -2990,6 +3086,9 @@ def build_trend_setup_review_flow(
 ) -> dict[str, Any]:
     payload = _candidate_payload(row)
     setup = build_entry_proposal(config, row)
+    for key in ("trend_score", "htf_trend_score", "entry_readiness_score"):
+        if row.get(key) is not None and setup.get(key) is None:
+            setup[key] = row.get(key)
     shadow_intent = None
     try:
         candidate = _mapping_to_candidate(row)
@@ -3015,7 +3114,10 @@ def build_trend_setup_review_flow(
             "evidence": [],
             "warnings": setup.get("warnings") or [],
         }, setup)
-    activation = activate_trend_trade_intent(setup, ai_review)
+    activation = activate_trend_trade_intent(setup, ai_review, config)
+    intent = activation.get("trade_intent") if isinstance(activation.get("trade_intent"), dict) else {}
+    if intent.get("approval_tier"):
+        ai_review = {**ai_review, "approval_tier": intent.get("approval_tier")}
     risk_capital = evaluate_trade_intent_risk_capital_shadow(config, setup, ai_review, activation)
     capital_plan = risk_capital.get("capital") if isinstance(risk_capital.get("capital"), dict) else {}
     intent = activation.get("trade_intent") if isinstance(activation.get("trade_intent"), dict) else {}

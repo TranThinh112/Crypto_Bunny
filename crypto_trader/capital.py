@@ -92,7 +92,9 @@ def _position_sizing_options(config: dict[str, Any]) -> dict[str, Any]:
         "warning_risk_percent": _float(raw.get("warning_risk_percent"), 0.7),
         "recovery_risk_percent": _float(raw.get("recovery_risk_percent"), 0.5),
         "critical_risk_percent": _float(raw.get("critical_risk_percent"), 0.0),
+        "flexible_small_risk_percent": _float(raw.get("flexible_small_risk_percent"), 0.35),
         "min_order_size": _float(raw.get("min_order_size"), 1.0),
+        "allow_min_order_floor_for_flexible_small": bool(raw.get("allow_min_order_floor_for_flexible_small", True)),
         "max_order_size_percent_of_trading_capital": _float(
             raw.get("max_order_size_percent_of_trading_capital"),
             20.0,
@@ -456,6 +458,17 @@ def calculate_position_size(config: dict[str, Any], request: dict[str, Any]) -> 
     if requested in (None, "") and max_margin > 0 and required_margin > max_margin:
         order_size = max_margin * leverage
         required_margin = max_margin
+    approval_tier = str(request.get("approval_tier") or "").strip().upper()
+    if (
+        order_size < options["min_order_size"]
+        and approval_tier == "APPROVE_SMALL"
+        and bool(options.get("allow_min_order_floor_for_flexible_small"))
+        and requested in (None, "")
+        and available * leverage >= options["min_order_size"]
+    ):
+        order_size = options["min_order_size"]
+        required_margin = order_size / max(leverage, 1e-12)
+        reason = "OK_MIN_ORDER_FLOOR_FOR_APPROVE_SMALL"
     if order_size < options["min_order_size"]:
         allowed = False
         reason = "Suggested order size is below minimum"
@@ -504,6 +517,8 @@ def _trade_intent_mode(intent: dict[str, Any], ai_review: dict[str, Any]) -> str
     risk_profile = str(intent.get("risk_profile") or "").strip().upper()
     if risk_profile == "RECOVERY":
         return "RECOVERY"
+    if risk_profile == "FLEXIBLESMALL":
+        return "WARNING"
     if risk_profile == "REDUCED":
         return "WARNING"
     if str(ai_review.get("setup_grade") or intent.get("setup_grade") or "").upper() in {"C", "D"}:
@@ -514,6 +529,9 @@ def _intent_risk_percent(config: dict[str, Any], intent: dict[str, Any], ai_revi
     options = _position_sizing_options(config)
     grade = str(ai_review.get("setup_grade") or intent.get("setup_grade") or "").upper()
     risk_profile = str(intent.get("risk_profile") or "").strip().upper()
+    approval_tier = str(ai_review.get("approval_tier") or intent.get("approval_tier") or "").strip().upper()
+    if risk_profile == "FLEXIBLESMALL" or approval_tier == "APPROVE_SMALL":
+        return _round(max(0.0, min(options["warning_risk_percent"], options["flexible_small_risk_percent"])), 4)
     base = options["normal_risk_percent"]
     if risk_profile == "RECOVERY":
         base = options["recovery_risk_percent"]
@@ -571,6 +589,7 @@ def calculate_trade_intent_position_size(
         "risk_percent": risk_percent,
         "setup_grade": ai_review.get("setup_grade") or intent.get("setup_grade"),
         "risk_reward": ai_review.get("risk_reward") or intent.get("risk_reward") or setup.get("risk_reward"),
+        "approval_tier": ai_review.get("approval_tier") or intent.get("approval_tier"),
     }
     result = calculate_position_size(config, request)
     quantity = _round(_float(result.get("suggested_order_size")) / entry, 6) if entry > 0 else 0.0

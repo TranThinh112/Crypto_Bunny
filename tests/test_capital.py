@@ -48,6 +48,38 @@ class CapitalTest(TestCase):
         self.assertEqual(calculate_realized_capital(125.5, 7.25), 118.25)
         self.assertEqual(calculate_realized_capital(125.5, -4.5), 130.0)
 
+    def test_flexible_small_trade_intent_can_floor_to_min_order(self) -> None:
+        config = self._config()
+        config["position_sizing"]["flexible_small_risk_percent"] = 0.01
+        state = {
+            "ok": True,
+            "mode": "WARNING",
+            "trading_capital": 80,
+            "available_trading_capital": 20,
+            "reserve_amount": 20,
+            "realized_capital": 100,
+        }
+        intent = {
+            "symbol": "ENA/USDT:USDT",
+            "side": "long",
+            "entry_price": 0.5,
+            "stop_loss": 0.49,
+            "take_profit": 0.53,
+            "risk_reward": 1.8,
+            "risk_profile": "FlexibleSmall",
+            "approval_tier": "APPROVE_SMALL",
+            "setup_grade": "D",
+        }
+        setup = dict(intent, risk_pct=2.0)
+
+        with patch("crypto_trader.capital.calculate_capital_reserve_state", return_value=state):
+            result = calculate_trade_intent_position_size(config, intent, setup, {"approval_tier": "APPROVE_SMALL"})
+
+        self.assertTrue(result["allowed"])
+        self.assertEqual(result["reason"], "OK_MIN_ORDER_FLOOR_FOR_APPROVE_SMALL")
+        self.assertEqual(result["notional_usdt"], 1)
+        self.assertGreater(result["quantity_estimate"], 0)
+
     def test_reserve_state_uses_mode_specific_reserve_and_used_capital(self) -> None:
         state = calculate_capital_reserve_state(
             self._config(),
