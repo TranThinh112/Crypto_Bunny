@@ -4528,7 +4528,45 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
     @app.get("/api/trading-risk/state")
     def trading_risk_state() -> dict[str, Any]:
         config = load_config(app.state.config_path)
-        return get_trading_system_state(config)
+        timeout = _safe_float(
+            config.get("database", {}).get("atlas", {}).get("api_read_timeout_seconds"),
+            6.0,
+        )
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(get_trading_system_state, config)
+        try:
+            state = future.result(timeout=max(1.0, timeout))
+            app.state.trading_risk_state_cache = dict(state)
+            return state
+        except FutureTimeoutError:
+            cached = getattr(app.state, "trading_risk_state_cache", None)
+            if isinstance(cached, dict) and cached:
+                degraded = dict(cached)
+                degraded["degraded"] = True
+                degraded["degradedReason"] = "trading_risk_state_timeout"
+                degraded["degradedAt"] = datetime.now(timezone.utc).isoformat()
+                return degraded
+            return {
+                "degraded": True,
+                "degradedReason": "trading_risk_state_timeout",
+                "isPaused": False,
+                "pausedUntil": None,
+                "recoveryMode": "UNKNOWN",
+                "globalLossStreak": None,
+                "recoveryCyclePnlUsdt": None,
+                "updatedAt": datetime.now(timezone.utc).isoformat(),
+            }
+        except Exception as exc:
+            cached = getattr(app.state, "trading_risk_state_cache", None)
+            if isinstance(cached, dict) and cached:
+                degraded = dict(cached)
+                degraded["degraded"] = True
+                degraded["degradedReason"] = f"trading_risk_state_error:{exc.__class__.__name__}"
+                degraded["degradedAt"] = datetime.now(timezone.utc).isoformat()
+                return degraded
+            raise
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     @app.post("/api/trading-risk/validate-entry")
     def trading_risk_validate(payload: dict[str, Any]) -> dict[str, Any]:
