@@ -2763,8 +2763,11 @@ def refresh_trading_system_state(config: dict[str, Any]) -> dict[str, Any]:
     cycle_pnl_for_mode = _safe_float(cycle_pnl, 0.0)
     if paused_until and paused_until <= _utcnow():
         paused_until = None
-    if global_loss_streak >= _safe_int(settings.get("pause_trading_loss_streak"), 4):
+    pause_loss_streak = _safe_int(settings.get("pause_trading_loss_streak"), 4)
+    if global_loss_streak >= pause_loss_streak:
         paused_until = _utcnow() + timedelta(hours=_safe_int(settings.get("pause_trading_hours"), 24))
+    else:
+        paused_until = None
     hard_threshold = _safe_int(settings.get("global_loss_streak_threshold"), 2)
     target_profit = _safe_float(config.get("position_sizing", {}).get("target_profit_usdt"), 0.30)
     now_iso = _iso_now()

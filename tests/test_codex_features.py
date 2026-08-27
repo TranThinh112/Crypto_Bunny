@@ -1599,6 +1599,25 @@ class CodexFeaturesTest(TestCase):
             self.assertEqual(get_global_loss_streak(config), 0)
             self.assertEqual(get_symbol_loss_streak(config, "BTC/USDT:USDT"), 0)
 
+    def test_trading_system_pause_clears_after_cycle_start_reset(self) -> None:
+        config = self._config()
+        config["trading_risk"] = {"pause_trading_loss_streak": 4, "pause_trading_hours": 24}
+        existing = {
+            "paused_until": "2026-08-29T01:30:00+00:00",
+            "payload_json": json.dumps({"recoveryMode": "NORMAL"}),
+        }
+
+        with patch("crypto_trader.codex_features.get_global_loss_streak", return_value=0), patch(
+            "crypto_trader.codex_features._recovery_cycle_pnl",
+            return_value=0.0,
+        ), patch("crypto_trader.codex_features.get_trading_system_state_row", return_value=existing), patch(
+            "crypto_trader.codex_features.upsert_trading_system_state_row"
+        ):
+            state = refresh_trading_system_state(config)
+
+        self.assertFalse(state["isPaused"])
+        self.assertIsNone(state["pausedUntil"])
+
     @patch("crypto_trader.notifier.send_telegram_message")
     def test_recovery_mode_does_not_send_telegram_without_transition(self, send_telegram_message) -> None:
         config = self._config()
