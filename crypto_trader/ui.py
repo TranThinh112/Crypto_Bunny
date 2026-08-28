@@ -1335,15 +1335,27 @@ def _run_automation_cycle(app: FastAPI) -> None:
             }
         )
     except Exception as exc:
-        status.update(
-            {
-                "last_finished_at": datetime.now(timezone.utc).isoformat(),
-                "last_result": "error",
-                "automation_phase": "error",
-                "error": str(exc),
-            }
-        )
-        _notify_system_error(config, "Automation", exc)
+        if is_retryable_storage_error(exc):
+            status.update(
+                {
+                    "last_finished_at": datetime.now(timezone.utc).isoformat(),
+                    "last_result": "storage_degraded",
+                    "automation_phase": "storage_degraded",
+                    "storage_degraded": True,
+                    "storage_error": str(exc),
+                }
+            )
+            LOGGER.warning("Automation cycle storage degraded; will retry next cycle: %s", exc)
+        else:
+            status.update(
+                {
+                    "last_finished_at": datetime.now(timezone.utc).isoformat(),
+                    "last_result": "error",
+                    "automation_phase": "error",
+                    "error": str(exc),
+                }
+            )
+            _notify_system_error(config, "Automation", exc)
     finally:
         _publish_automation_status(app, status)
         app.state.lock.release()
