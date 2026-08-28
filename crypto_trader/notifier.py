@@ -12,7 +12,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from .storage import get_journal_state, set_journal_state
+from .storage import get_journal_state, is_retryable_storage_error, set_journal_state
 
 TELEGRAM_COMMANDS_SYNC_KEY = "telegram_commands_last_sync_at"
 _TELEGRAM_STARTUP_QUIET_LOCK = threading.Lock()
@@ -104,7 +104,12 @@ def sync_telegram_commands(config: dict[str, Any], *, force: bool = False, max_a
     if not telegram_enabled(config):
         return False
     if not force:
-        last_synced = _parse_time(get_journal_state(config, TELEGRAM_COMMANDS_SYNC_KEY))
+        try:
+            last_synced = _parse_time(get_journal_state(config, TELEGRAM_COMMANDS_SYNC_KEY))
+        except Exception as exc:
+            if not is_retryable_storage_error(exc):
+                raise
+            last_synced = None
         if last_synced is not None:
             age_seconds = (datetime.now(timezone.utc) - last_synced).total_seconds()
             if age_seconds < max(300, int(max_age_seconds or 21_600)):
@@ -121,7 +126,11 @@ def sync_telegram_commands(config: dict[str, Any], *, force: bool = False, max_a
         "setChatMenuButton",
         {"menu_button": json.dumps({"type": "commands"}, ensure_ascii=False)},
     )
-    set_journal_state(config, TELEGRAM_COMMANDS_SYNC_KEY, datetime.now(timezone.utc).isoformat())
+    try:
+        set_journal_state(config, TELEGRAM_COMMANDS_SYNC_KEY, datetime.now(timezone.utc).isoformat())
+    except Exception as exc:
+        if not is_retryable_storage_error(exc):
+            raise
     return True
 
 
