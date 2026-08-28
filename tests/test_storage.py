@@ -10,6 +10,8 @@ from unittest.mock import patch
 from crypto_trader.atlas_mirror import atlas_database, atlas_database_for_collection
 from crypto_trader.models import Decision, RiskCheck, TradeCandidate
 from crypto_trader.storage import (
+    _MONGO_CIRCUIT_OPEN_UNTIL,
+    _mongo_call_with_retry,
     _journal_state_cache_set,
     append_trade_execution_event,
     claim_journal_state,
@@ -155,6 +157,31 @@ class StorageTest(TestCase):
         )
 
         self.assertTrue(is_retryable_storage_error(exc))
+
+    def test_mongo_timeout_opens_short_circuit_breaker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._config(tmpdir)
+            config["database"] = {
+                "atlas": {
+                    "operation_retry_attempts": 1,
+                    "circuit_breaker_seconds": 30,
+                }
+            }
+            _MONGO_CIRCUIT_OPEN_UNTIL.clear()
+
+            with self.assertRaises(NetworkTimeout):
+                _mongo_call_with_retry(config, lambda: (_ for _ in ()).throw(NetworkTimeout("read operation timed out")))
+
+            calls = {"count": 0}
+            started = time.monotonic()
+            with self.assertRaises(TimeoutError) as raised:
+                _mongo_call_with_retry(config, lambda: calls.__setitem__("count", calls["count"] + 1))
+
+            self.assertEqual(calls["count"], 0)
+            self.assertLess(time.monotonic() - started, 0.1)
+            self.assertTrue(is_retryable_storage_error(raised.exception))
+
+            self.assertEqual(_mongo_call_with_retry(config, lambda: "write-ok", respect_circuit=False), "write-ok")
 
     def _candidate(self) -> TradeCandidate:
         huge_patterns = [{"name": f"pattern-{index}", "raw": "x" * 1000} for index in range(50)]

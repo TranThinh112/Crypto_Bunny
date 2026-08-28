@@ -38,14 +38,25 @@ DEFAULT_JOURNAL_STATE_CACHE_TTL_SECONDS = 5.0
 DEFAULT_JOURNAL_STATE_STALE_FALLBACK_SECONDS = 3600.0
 DEFAULT_MONGO_OPERATION_RETRY_ATTEMPTS = 3
 DEFAULT_MONGO_OPERATION_RETRY_DELAY_SECONDS = 0.35
+DEFAULT_MONGO_CIRCUIT_BREAKER_SECONDS = 20.0
 LOCAL_MARKET_SCAN_CACHE_FILENAME = "latest_market_scan_memory.json"
 
 _JOURNAL_STATE_CACHE_LOCK = threading.Lock()
 _JOURNAL_STATE_CACHE: dict[str, tuple[float, str]] = {}
+_MONGO_CIRCUIT_LOCK = threading.Lock()
+_MONGO_CIRCUIT_OPEN_UNTIL: dict[str, tuple[float, str]] = {}
 LOGGER = logging.getLogger(__name__)
 
 
 class _RetryingCollectionProxy:
+    _READ_METHODS = {
+        "aggregate",
+        "count_documents",
+        "distinct",
+        "estimated_document_count",
+        "find_one",
+    }
+
     def __init__(self, config: dict[str, Any], collection: Any) -> None:
         self._config = config
         self._collection = collection
@@ -56,7 +67,11 @@ class _RetryingCollectionProxy:
             return attr
 
         def _wrapped(*args: Any, **kwargs: Any) -> Any:
-            return _mongo_call_with_retry(self._config, lambda: attr(*args, **kwargs))
+            return _mongo_call_with_retry(
+                self._config,
+                lambda: attr(*args, **kwargs),
+                respect_circuit=name in self._READ_METHODS,
+            )
 
         return _wrapped
 
@@ -155,6 +170,50 @@ def _mongo_operation_retry_delay_seconds(config: dict[str, Any]) -> float:
         return DEFAULT_MONGO_OPERATION_RETRY_DELAY_SECONDS
 
 
+def _mongo_circuit_breaker_seconds(config: dict[str, Any]) -> float:
+    atlas = config.get("database", {}).get("atlas", {})
+    raw = atlas.get("circuit_breaker_seconds", DEFAULT_MONGO_CIRCUIT_BREAKER_SECONDS)
+    try:
+        return max(0.0, float(raw or 0.0))
+    except (TypeError, ValueError):
+        return DEFAULT_MONGO_CIRCUIT_BREAKER_SECONDS
+
+
+def _mongo_circuit_key(config: dict[str, Any]) -> str:
+    atlas = config.get("database", {}).get("atlas", {})
+    return str(
+        config.get("_config_path")
+        or config.get("_config_dir")
+        or config.get("_atlas_test_database")
+        or atlas.get("database")
+        or atlas.get("database_env")
+        or "default"
+    )
+
+
+def _mongo_circuit_open_reason(config: dict[str, Any]) -> str | None:
+    key = _mongo_circuit_key(config)
+    now = time.monotonic()
+    with _MONGO_CIRCUIT_LOCK:
+        entry = _MONGO_CIRCUIT_OPEN_UNTIL.get(key)
+        if not entry:
+            return None
+        open_until, reason = entry
+        if open_until <= now:
+            _MONGO_CIRCUIT_OPEN_UNTIL.pop(key, None)
+            return None
+        return reason
+
+
+def _mongo_circuit_note_failure(config: dict[str, Any], exc: Exception) -> None:
+    seconds = _mongo_circuit_breaker_seconds(config)
+    if seconds <= 0:
+        return
+    key = _mongo_circuit_key(config)
+    with _MONGO_CIRCUIT_LOCK:
+        _MONGO_CIRCUIT_OPEN_UNTIL[key] = (time.monotonic() + seconds, str(exc)[:240])
+
+
 def _mongo_error_is_retryable(exc: Exception) -> bool:
     if exc.__class__.__name__ in {
         "AutoReconnect",
@@ -188,14 +247,21 @@ def is_retryable_storage_error(exc: Exception) -> bool:
     return _mongo_error_is_retryable(exc)
 
 
-def _mongo_call_with_retry(config: dict[str, Any], operation: Any) -> Any:
+def _mongo_call_with_retry(config: dict[str, Any], operation: Any, *, respect_circuit: bool = True) -> Any:
+    if respect_circuit:
+        open_reason = _mongo_circuit_open_reason(config)
+        if open_reason:
+            raise TimeoutError(f"Atlas circuit breaker open after recent timeout: {open_reason}")
     attempts = _mongo_operation_retry_attempts(config)
     delay = _mongo_operation_retry_delay_seconds(config)
     for attempt in range(1, attempts + 1):
         try:
             return operation()
         except Exception as exc:
-            if attempt >= attempts or not _mongo_error_is_retryable(exc):
+            retryable = _mongo_error_is_retryable(exc)
+            if retryable:
+                _mongo_circuit_note_failure(config, exc)
+            if attempt >= attempts or not retryable:
                 raise
             time.sleep(delay * attempt)
 
