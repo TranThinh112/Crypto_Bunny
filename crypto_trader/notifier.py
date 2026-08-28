@@ -359,10 +359,19 @@ def _remember_sent_message(
         return True
 
     key = _message_state_key(chat_id, thread_id)
-    old_message_id = get_journal_state(config, key)
+    try:
+        old_message_id = get_journal_state(config, key)
+    except Exception as exc:
+        if not is_retryable_storage_error(exc):
+            raise
+        old_message_id = None
     if replace_previous and old_message_id and str(old_message_id) != str(message_id):
         delete_telegram_message(config, chat_id, old_message_id)
-    set_journal_state(config, key, str(message_id))
+    try:
+        set_journal_state(config, key, str(message_id))
+    except Exception as exc:
+        if not is_retryable_storage_error(exc):
+            raise
     return True
 
 
