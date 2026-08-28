@@ -232,15 +232,24 @@ ai:
     trend_scan_htf_watch_threshold: 60.0
     trend_scan_htf_immediate_threshold: 75.0
     trend_scan_htf_required_confirmations: 2
-    trend_scan_entry_setup_threshold: 50.0
-    trend_scan_entry_ai_threshold: 60.0
+    trend_scan_entry_setup_threshold: 42.0
+    trend_scan_entry_ai_threshold: 50.0
     trend_scan_fast_entry_enabled: true
     trend_scan_fast_entry_htf_threshold: 68.0
-    trend_scan_fast_entry_score_threshold: 52.0
+    trend_scan_fast_entry_score_threshold: 42.0
     trend_scan_fast_entry_volume_ratio: 1.2
     trend_scan_adaptive_ai_ready_enabled: true
-    trend_scan_adaptive_ai_strong_htf_threshold: 75.0
-    trend_scan_adaptive_ai_entry_threshold: 58.0
+    trend_scan_adaptive_ai_strong_htf_threshold: 78.0
+    trend_scan_adaptive_ai_entry_threshold: 40.0
+    trend_scan_flexible_entry_enabled: true
+    trend_scan_flexible_entry_htf_threshold: 82.0
+    trend_scan_flexible_entry_score_threshold: 42.0
+    trend_scan_flexible_entry_min_rr: 1.5
+    trend_scan_flexible_entry_min_confidence: 70.0
+    trend_scan_flexible_entry_min_entry_quality: 35.0
+    trend_scan_flexible_entry_min_continuation: 35.0
+    trend_scan_flexible_entry_size_multiplier: 0.35
+    trend_scan_flexible_entry_ttl_minutes: 45
     trend_scan_countertrend_entry_threshold: 42.0
     trend_setup_overextended_score_threshold: 58.0
     trend_setup_hot_rsi_threshold: 72.0
@@ -251,7 +260,7 @@ ai:
     post_move_watch_entry_max_score: 35.0
     post_move_watch_default_ttl_minutes: 60
     post_move_watch_max_ttl_minutes: 120
-    post_move_watch_retest_entry_score: 42.0
+    post_move_watch_retest_entry_score: 36.0
     trend_watchlist_ttl_minutes: 120
     trend_watchlist_min_keep_score: 50.0
     trend_watchlist_ai_review_extend_minutes: 30
