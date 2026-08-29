@@ -27,6 +27,7 @@ from crypto_trader.storage import (
     prune_trade_executions,
     prune_market_scan_observations,
     recent_market_scan_memory,
+    run_storage_maintenance,
     save_decision,
     save_market_scan_observations,
     save_pending_order,
@@ -605,6 +606,20 @@ class StorageTest(TestCase):
         self.assertTrue(stats["degraded"])
         self.assertEqual(stats["backend"], "atlas")
         self.assertEqual(stats["row_counts"], {})
+
+    def test_storage_maintenance_returns_degraded_result_on_retryable_prune_timeout(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config = self._config(tmpdir)
+            with patch("crypto_trader.storage.prune_market_scan_observations", side_effect=RuntimeError("read operation timed out")), patch(
+                "crypto_trader.storage.prune_decision_history", return_value={"deleted_old": 0, "deleted_over_limit": 0}
+            ), patch(
+                "crypto_trader.storage.safe_storage_stats", return_value={"backend": "atlas", "lightweight": True}
+            ):
+                result = run_storage_maintenance(config)
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("market_scan_prune" in item for item in result["errors"]))
+        self.assertEqual(result["prune"], {"deleted_old": 0, "deleted_over_limit": 0})
 
     def test_save_pending_order_keeps_insert_when_prune_times_out(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:

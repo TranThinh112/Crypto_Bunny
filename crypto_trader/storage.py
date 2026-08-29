@@ -2300,26 +2300,50 @@ def run_storage_maintenance(
 ) -> dict[str, Any]:
     memory_config = config.get("market_scan_memory", {})
     decision_config = config.get("decision_history", {})
+    errors: list[str] = []
     if emergency:
-        prune_result = prune_market_scan_observations(
-            config,
-            keep_hours=int(memory_config.get("emergency_keep_hours", 24) or 24),
-            max_rows_per_symbol_timeframe=int(memory_config.get("emergency_max_rows_per_symbol_timeframe", 50) or 50),
-        )
-        decision_prune_result = prune_decision_history(
-            config,
-            keep_hours=int(decision_config.get("emergency_keep_hours", 6) or 6),
-            max_rows=int(decision_config.get("emergency_max_rows", 30) or 30),
-        )
+        try:
+            prune_result = prune_market_scan_observations(
+                config,
+                keep_hours=int(memory_config.get("emergency_keep_hours", 24) or 24),
+                max_rows_per_symbol_timeframe=int(memory_config.get("emergency_max_rows_per_symbol_timeframe", 50) or 50),
+            )
+        except Exception as exc:
+            if not _mongo_error_is_retryable(exc):
+                raise
+            prune_result = {"deleted_old": 0, "deleted_over_limit": 0}
+            errors.append(f"market_scan_prune: {exc}")
+        try:
+            decision_prune_result = prune_decision_history(
+                config,
+                keep_hours=int(decision_config.get("emergency_keep_hours", 6) or 6),
+                max_rows=int(decision_config.get("emergency_max_rows", 30) or 30),
+            )
+        except Exception as exc:
+            if not _mongo_error_is_retryable(exc):
+                raise
+            decision_prune_result = {"deleted_old": 0, "deleted_over_limit": 0}
+            errors.append(f"decision_prune: {exc}")
     else:
-        prune_result = prune_market_scan_observations(config)
-        decision_prune_result = prune_decision_history(config)
+        try:
+            prune_result = prune_market_scan_observations(config)
+        except Exception as exc:
+            if not _mongo_error_is_retryable(exc):
+                raise
+            prune_result = {"deleted_old": 0, "deleted_over_limit": 0}
+            errors.append(f"market_scan_prune: {exc}")
+        try:
+            decision_prune_result = prune_decision_history(config)
+        except Exception as exc:
+            if not _mongo_error_is_retryable(exc):
+                raise
+            decision_prune_result = {"deleted_old": 0, "deleted_over_limit": 0}
+            errors.append(f"decision_prune: {exc}")
     extra_prune: dict[str, Any] = {}
     compact_result = {"checked": 0, "compacted": 0}
     checkpoint: list[Any] = []
     optimized = False
     vacuumed = False
-    errors: list[str] = []
     _ensure_mongo_write_allowed(config)
     try:
         extra_prune = {
@@ -2357,7 +2381,7 @@ def run_storage_maintenance(
         "optimized": True,
         "vacuumed": False,
         "errors": errors,
-        "stats": storage_stats(config) if include_stats else None,
+        "stats": safe_storage_stats(config) if include_stats else None,
     }
 def recent_market_scan_memory(
     config: dict[str, Any],
