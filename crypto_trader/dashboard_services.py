@@ -54,8 +54,8 @@ from .storage import (
     list_trade_execution_rows,
     list_trade_memory,
     recent_market_scan_memory,
+    safe_storage_stats,
     set_journal_state,
-    storage_stats,
 )
 from .trade_intent import build_shadow_trade_intents_from_rows
 from market_pattern_engine.infrastructure.config_loader import load_engine_config
@@ -2546,7 +2546,7 @@ def _build_system_checklist_payload(
     automation = automation or _default_automation_status(config)
     ai_range_key = _normalize_ai_decision_range(ai_range)
 
-    stats = storage_stats(config)
+    stats = safe_storage_stats(config)
     row_counts = stats.get("row_counts", {})
     payload_bytes = stats.get("payload_bytes", {})
     disk = stats.get("disk", {})

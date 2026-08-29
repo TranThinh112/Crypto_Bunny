@@ -15,6 +15,7 @@ from .atlas_mirror import (
     atlas_database,
     atlas_database_for_collection,
     atlas_collection_database_name,
+    atlas_database_name,
     atlas_runtime_is_primary,
 )
 from .config import project_path
@@ -1469,7 +1470,9 @@ def delete_journal_state_prefix(config: dict[str, Any], prefix: str, *, preserve
     return deleted
 def clear_dashboard_snapshot_cache(config: dict[str, Any]) -> None:
     _ensure_mongo_write_allowed(config)
-    delete_journal_state_prefix(config, DASHBOARD_SNAPSHOT_PREFIX, preserve_keys={DASHBOARD_SNAPSHOT_VERSION_KEY})
+    atlas = config.get("database", {}).get("atlas", {}) if isinstance(config.get("database"), dict) else {}
+    if bool(atlas.get("delete_dashboard_snapshots_on_clear", True)):
+        delete_journal_state_prefix(config, DASHBOARD_SNAPSHOT_PREFIX, preserve_keys={DASHBOARD_SNAPSHOT_VERSION_KEY})
     set_journal_state(config, DASHBOARD_SNAPSHOT_VERSION_KEY, datetime.now(timezone.utc).isoformat())
 
 
@@ -2251,6 +2254,43 @@ def storage_stats(config: dict[str, Any]) -> dict[str, Any]:
             "storage_retention": _storage_retention(config),
         },
     }
+
+def storage_stats_lightweight(config: dict[str, Any], *, error: Exception | None = None) -> dict[str, Any]:
+    """Return cheap storage metadata without collection-wide scans."""
+    runtime_database = atlas_database_name(config, role="runtime")
+    ai_database = atlas_collection_database_name(config, "ai_trade_decisions")
+    return {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "db_path": f"atlas:{runtime_database}",
+        "db_paths": {
+            "runtime": f"atlas:{runtime_database}",
+            "ai": f"atlas:{ai_database}",
+        },
+        "backend": "atlas",
+        "lightweight": True,
+        "degraded": error is not None,
+        "error": str(error) if error is not None else None,
+        "row_counts": {},
+        "payload_bytes": {},
+        "market_scan_by_timeframe": [],
+        "retention": {
+            "market_scan_memory": config.get("market_scan_memory", {}),
+            "decision_history": config.get("decision_history", {}),
+            "market_guard": {"memory_keep_hours": config.get("market_guard", {}).get("memory_keep_hours", 6)},
+            "pending_orders": config.get("pending_orders", {}),
+            "journal_state_retention": _journal_state_retention(config),
+            "storage_retention": _storage_retention(config),
+        },
+    }
+
+def safe_storage_stats(config: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return storage_stats(config)
+    except Exception as exc:
+        if not _mongo_error_is_retryable(exc):
+            raise
+        LOGGER.warning("Storage stats degraded; returning lightweight stats after Mongo timeout: %s", exc)
+        return storage_stats_lightweight(config, error=exc)
 def run_storage_maintenance(
     config: dict[str, Any],
     *,

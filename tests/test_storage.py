@@ -30,6 +30,7 @@ from crypto_trader.storage import (
     save_decision,
     save_market_scan_observations,
     save_pending_order,
+    safe_storage_stats,
     storage_stats,
     get_trade_execution,
     get_journal_state,
@@ -571,6 +572,39 @@ class StorageTest(TestCase):
         self.assertIn("dashboard_snapshot:version", remaining)
         self.assertNotEqual(remaining["dashboard_snapshot:version"], "old")
         self.assertIn("system_checklist_current", remaining)
+
+    def test_clear_dashboard_snapshot_cache_can_only_bump_version(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config = self._config(tmpdir)
+            config.setdefault("database", {}).setdefault("atlas", {})["delete_dashboard_snapshots_on_clear"] = False
+            collection = atlas_database(config)["journal_state"]
+            collection.replace_one(
+                {"_id": "dashboard_snapshot:analytics:v=old"},
+                {
+                    "_id": "dashboard_snapshot:analytics:v=old",
+                    "key": "dashboard_snapshot:analytics:v=old",
+                    "value": "old",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                },
+                upsert=True,
+            )
+
+            clear_dashboard_snapshot_cache(config)
+            remaining = {row["key"]: row["value"] for row in collection.find({}, {"_id": 0, "key": 1, "value": 1})}
+
+        self.assertIn("dashboard_snapshot:analytics:v=old", remaining)
+        self.assertIn("dashboard_snapshot:version", remaining)
+
+    def test_safe_storage_stats_degrades_to_lightweight_payload_on_timeout(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            config = self._config(tmpdir)
+            with patch("crypto_trader.storage.storage_stats", side_effect=RuntimeError("read operation timed out")):
+                stats = safe_storage_stats(config)
+
+        self.assertTrue(stats["lightweight"])
+        self.assertTrue(stats["degraded"])
+        self.assertEqual(stats["backend"], "atlas")
+        self.assertEqual(stats["row_counts"], {})
 
     def test_save_pending_order_keeps_insert_when_prune_times_out(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:

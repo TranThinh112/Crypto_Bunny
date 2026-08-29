@@ -8,7 +8,10 @@ runtime:
 runtime_sync:
   position_close_grace_seconds: 120
   manual_target_fast_sync_enabled: true
-  manual_target_fast_sync_interval_seconds: 5
+  manual_target_fast_sync_interval_seconds: 20
+
+dashboard:
+  post_cycle_force_refresh_enabled: false
 
 active_position_manager:
   bad_cut_once_per_position: true
@@ -57,12 +60,13 @@ database:
     connect_timeout_ms: 5000
     socket_timeout_ms: 8000
     wait_queue_timeout_ms: 5000
-    operation_retry_attempts: 1
+    operation_retry_attempts: 2
     operation_retry_delay_seconds: 0.25
-    circuit_breaker_seconds: 25
+    circuit_breaker_seconds: 30
     api_read_timeout_seconds: 6
-    journal_state_cache_ttl_seconds: 10
+    journal_state_cache_ttl_seconds: 20
     journal_state_stale_fallback_seconds: 3600
+    delete_dashboard_snapshots_on_clear: false
 
 exchange:
   simulated_trading: false

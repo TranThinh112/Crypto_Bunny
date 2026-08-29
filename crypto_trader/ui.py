@@ -170,8 +170,8 @@ from .storage import (
     recent_market_scan_memory,
     refresh_pending_order,
     run_storage_maintenance,
+    safe_storage_stats,
     set_journal_state,
-    storage_stats,
 )
 from .sizing import STATE_KEY as SIZING_STATE_KEY
 from .trailing_stop import run_trailing_stop_cycle
@@ -1388,14 +1388,15 @@ def _run_automation_cycle(app: FastAPI) -> None:
             _notify_system_error(config, "Kiểm tra 8 module", f"Module đang FAIL: {labels}")
     except Exception as exc:
         _notify_system_error(config, "Cập nhật System Checklist", exc)
-    try:
-        timeframe_state_dashboard(config, force_refresh=True)
-        scan_memory_dashboard(config, force_refresh=True)
-        analytics_dashboard(config, force_refresh=True)
-        replay_dashboard_payload(config, force_refresh=True)
-        system_health_dashboard(config, force_refresh=True)
-    except Exception as exc:
-        _notify_system_error(config, "Dashboard", exc)
+    if _post_cycle_dashboard_refresh_enabled(config):
+        try:
+            timeframe_state_dashboard(config, force_refresh=True)
+            scan_memory_dashboard(config, force_refresh=True)
+            analytics_dashboard(config, force_refresh=True)
+            replay_dashboard_payload(config, force_refresh=True)
+            system_health_dashboard(config, force_refresh=True)
+        except Exception as exc:
+            _notify_system_error(config, "Dashboard", exc)
 
     messages: list[str] = []
     startup_quiet = _telegram_startup_quiet_active(app, now)
@@ -1448,6 +1449,10 @@ def _automation_worker(app: FastAPI) -> None:
 def _automation_runtime_sync_timeout(config: dict[str, Any]) -> float:
     runtime = config.get("runtime_sync", {}) if isinstance(config.get("runtime_sync"), dict) else {}
     return max(5.0, min(55.0, float(runtime.get("automation_timeout_seconds", 35) or 35)))
+
+def _post_cycle_dashboard_refresh_enabled(config: dict[str, Any]) -> bool:
+    dashboard = config.get("dashboard", {}) if isinstance(config.get("dashboard"), dict) else {}
+    return bool(dashboard.get("post_cycle_force_refresh_enabled", False))
 
 def _sync_runtime_state_for_automation(app: FastAPI, config: dict[str, Any]) -> dict[str, Any]:
     runtime_sync_lock = getattr(app.state, "runtime_sync_lock", None)
@@ -3756,7 +3761,7 @@ def create_app(config_path: str = "config.example.yaml") -> FastAPI:
     @app.get("/api/storage/stats")
     def storage_stats_endpoint() -> dict[str, Any]:
         config = load_config(app.state.config_path)
-        return storage_stats(config)
+        return safe_storage_stats(config)
 
     @app.get("/capital/snapshot/latest")
     def capital_snapshot_latest_endpoint() -> dict[str, Any]:

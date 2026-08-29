@@ -86,6 +86,11 @@ _ATLAS_COLLECTION_INDEX_SPECS: dict[str, list[Any]] = {
         [("status", 1), ("updated_at", -1), ("created_at", -1), ("id", -1)],
         {"fields": [("expires_at", 1)], "kwargs": {"expireAfterSeconds": 0}},
     ],
+    "journal_state": [
+        [("key", 1)],
+        [("key", 1), ("updated_at", -1)],
+        [("updated_at", -1)],
+    ],
     "capital_snapshots": [
         [("created_at", -1), ("id", -1)],
     ],
