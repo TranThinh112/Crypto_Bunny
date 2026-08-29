@@ -522,6 +522,9 @@ def _notify_system_error(config: dict[str, Any], component: str, error: Any) -> 
     if "cannot schedule new futures after interpreter shutdown" in raw_error_text.lower():
         LOGGER.info("Suppressing background shutdown error from %s: %s", component, raw_error_text)
         return False
+    if is_retryable_storage_error(error if isinstance(error, Exception) else RuntimeError(raw_error_text)):
+        LOGGER.warning("Suppressing Telegram system error for transient storage issue from %s: %s", component, raw_error_text)
+        return False
     message_text = raw_error_text
     error_group = _system_error_group(component, message_text)
     fingerprint_source = f"{error_group}|{message_text[:300]}"

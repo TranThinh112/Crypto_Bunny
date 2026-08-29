@@ -296,6 +296,20 @@ class UiTest(TestCase):
         self.assertIn(component, message)
         self.assertIn("Mongo timeout", message)
 
+    @patch("crypto_trader.ui._is_railway_runtime", return_value=True)
+    @patch("crypto_trader.ui.send_telegram_message", return_value=True)
+    def test_system_error_notification_suppresses_atlas_timeouts(self, send_message, _railway_runtime) -> None:
+        config = {"timezone": "Asia/Ho_Chi_Minh"}
+
+        sent = _notify_system_error(
+            config,
+            "Manual TP/SL fast sync",
+            RuntimeError("Atlas circuit breaker open after recent timeout: read operation timed out"),
+        )
+
+        self.assertFalse(sent)
+        send_message.assert_not_called()
+
     def test_telegram_command_list_includes_internal_notification_commands(self) -> None:
         commands = {item["command"] for item in telegram_command_list()}
         self.assertIn("thongbao", commands)
