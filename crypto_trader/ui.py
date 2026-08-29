@@ -1171,11 +1171,22 @@ def _periodic_scan_notification_due(config: dict[str, Any], now: datetime) -> bo
     if local_now.minute % 15 != 0:
         return False
     slot_id = _scan_notification_slot_id(config, now)
-    return get_journal_state(config, SCAN_TELEGRAM_SLOT_KEY) != slot_id
+    try:
+        return get_journal_state(config, SCAN_TELEGRAM_SLOT_KEY) != slot_id
+    except Exception as exc:
+        if not is_retryable_storage_error(exc):
+            raise
+        LOGGER.warning("Skipping periodic scan notification check after storage timeout/error: %s", exc)
+        return False
 
 
 def _remember_periodic_scan_notification(config: dict[str, Any], now: datetime) -> None:
-    set_journal_state(config, SCAN_TELEGRAM_SLOT_KEY, _scan_notification_slot_id(config, now))
+    try:
+        set_journal_state(config, SCAN_TELEGRAM_SLOT_KEY, _scan_notification_slot_id(config, now))
+    except Exception as exc:
+        if not is_retryable_storage_error(exc):
+            raise
+        LOGGER.warning("Skipping periodic scan notification marker after storage timeout/error: %s", exc)
 
 
 def _publish_automation_status(app: FastAPI, status: dict[str, Any], **fields: Any) -> None:
