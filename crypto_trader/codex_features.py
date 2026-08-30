@@ -3736,8 +3736,11 @@ def replay_batch(config: dict[str, Any], limit: int) -> dict[str, Any]:
     }
 
 
-def replay_stats(config: dict[str, Any]) -> dict[str, Any]:
-    payloads = list_replay_history_rows(config, include_trade_execution=True)
+def replay_stats(config: dict[str, Any], *, limit: int | None = None) -> dict[str, Any]:
+    replay_config = config.get("replay_engine", {}) if isinstance(config.get("replay_engine"), dict) else {}
+    configured_limit = replay_config.get("stats_limit", 200)
+    safe_limit = max(1, min(int(limit if limit is not None else configured_limit or 200), 1000))
+    payloads = list_replay_history_rows(config, limit=safe_limit, include_trade_execution=True)
     total = len(payloads)
     changed = sum(1 for row in payloads if _safe_int(row.get("decision_changed")) == 1)
     confidence_changed = sum(1 for row in payloads if _safe_int(row.get("confidence_changed")) == 1)
@@ -3756,6 +3759,7 @@ def replay_stats(config: dict[str, Any]) -> dict[str, Any]:
     performance = _trade_performance_stats(replayed_trades)
     return {
         "replayCount": total,
+        "sampleLimit": safe_limit,
         "decisionChangedPercent": round(changed / total * 100, 2) if total else 0.0,
         "confidenceChangedPercent": round(confidence_changed / total * 100, 2) if total else 0.0,
         "averageLatency": round(_avg(_safe_float(row.get("latency")) for row in payloads), 2) if payloads else 0.0,

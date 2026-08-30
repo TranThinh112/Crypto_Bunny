@@ -2574,9 +2574,16 @@ def _build_system_checklist_payload(
     try:
         replay = replay_stats(config)
         replay_ok = True
+        replay_warning = False
     except Exception as exc:
-        replay = {"error": str(exc)}
-        replay_ok = False
+        replay_storage_degraded = is_retryable_storage_error(exc)
+        replay = {
+            "error": str(exc),
+            "degraded": replay_storage_degraded,
+            "error_group": "MongoDB Atlas timeout" if replay_storage_degraded else "Replay Engine error",
+        }
+        replay_ok = replay_storage_degraded
+        replay_warning = replay_storage_degraded
 
     try:
         strategy = current_strategy_state(config)
@@ -2657,13 +2664,16 @@ def _build_system_checklist_payload(
         _check_item(
             "Replay Engine hoat dong",
             replay_ok,
-            f"records={replay.get('replayCount', '-')}",
+            f"records={replay.get('replayCount', '-')}, sample_limit={replay.get('sampleLimit', '-')}",
+            warning=replay_warning,
             evidence=[
                 _evidence_line("Ngay kiem tra", checked_date),
                 _evidence_line("Nguon", "/api/replay/stats"),
                 _evidence_line("So ban replay", replay.get("replayCount", "-")),
+                _evidence_line("Gioi han mau thong ke", replay.get("sampleLimit", "-")),
                 _evidence_line("Ti le doi quyet dinh", replay.get("decisionChangedPercent", "-")),
                 _evidence_line("Replay win rate", replay.get("replayWinRate", "-")),
+                _evidence_line("Trang thai degrade", replay.get("error_group") or "khong"),
                 _evidence_line("Loi", replay.get("error") or "khong co"),
             ],
         ),
@@ -3406,7 +3416,7 @@ def analytics_dashboard(
 
 def _build_replay_dashboard_payload(config: dict[str, Any], *, limit: int = 50) -> dict[str, Any]:
     limit = max(1, min(limit, 500))
-    stats = replay_stats(config)
+    stats = replay_stats(config, limit=max(limit, 50))
     payloads = list_replay_history_rows(config, limit=limit, include_trade_execution=True)
     decision_counts = Counter(str(row.get("new_decision") or "-") for row in payloads)
     strategy_counts = Counter(str(row.get("strategy_version") or "-") for row in payloads)

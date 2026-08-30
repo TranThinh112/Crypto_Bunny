@@ -652,6 +652,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "replay_engine": {
         "enabled": True,
         "default_batch_limit": 100,
+        "stats_limit": 200,
     },
     "notifications": {
         "telegram": {
